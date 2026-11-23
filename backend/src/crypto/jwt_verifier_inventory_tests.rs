@@ -593,12 +593,12 @@ const ALLOWLIST: &[Verifier] = &[
     // Refresh and token exchange.
     v(
         "services/token_service.rs",
-        "refresh_tokens",
+        "refresh_tokens_for_client",
         "verify_token",
         1,
         "refresh JWT at /auth/refresh and /oauth/token refresh_token grant",
         "token_type refresh; stored row by jti (revoked/expired, reuse detection); live \
-         session; active OAuth client (deactivated -> revoke); live consent grant and \
+         session or authenticated issuing OAuth client; live consent grant and \
          protected consent reference; service allowlist narrowed to current consent",
     ),
     v(

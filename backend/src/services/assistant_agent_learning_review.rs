@@ -1215,7 +1215,7 @@ async fn push_pinned_event(
             super::assistant_nyxagent::identifier(&publication.version),
             super::assistant_nyxagent::identifier(&agent.name),
             super::assistant_nyxagent::identifier(&row.agent_id),
-            acks::DECISION_NARRATION,
+            acks::decision_narration(true),
         ),
         Some(&row.agent_id),
     );

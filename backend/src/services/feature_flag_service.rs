@@ -384,11 +384,30 @@ pub async fn mobile_mfa_required(db: &mongodb::Database, person: &str) -> AppRes
         .any(|key| key == MOBILE_MFA_FLAG_KEY))
 }
 
+const OAUTH_REFRESH_CLIENT_AUTH_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+    description: "Authenticate confidential OAuth refreshes and require the issuing client ID (global only).",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
     description: "Require an invitation code for new account registration (global only).",
     default_enabled: true,
+};
+
+const OAUTH_EXACT_REDIRECTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: OAUTH_EXACT_REDIRECTS_FLAG_KEY,
+    description: "Require registered public OAuth callbacks and an exact reviewed callback for silent consent (global only).",
+    default_enabled: false,
+};
+
+pub const APP_TOKEN_MANAGEMENT_FLAG_KEY: &str = "auth:app-token-management-v1";
+const APP_TOKEN_MANAGEMENT_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: APP_TOKEN_MANAGEMENT_FLAG_KEY,
+    description: "Require administrator designation for OAuth clients using account management routes (global only).",
+    default_enabled: false,
 };
 
 /// Mobile builds that embed both production domain sets read this global flag
@@ -404,10 +423,26 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
 
 /// Flags resolved without a user or organization; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
+    OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
     INVITATION_CODE_FLAG_KEY,
+    OAUTH_EXACT_REDIRECTS_FLAG_KEY,
+    APP_TOKEN_MANAGEMENT_FLAG_KEY,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
 ];
+
+pub const OAUTH_EXACT_REDIRECTS_FLAG_KEY: &str = "auth:oauth-exact-redirects-v1";
+pub const OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY: &str = "auth:oauth-refresh-client-auth-v1";
+
+pub(crate) fn requires_oauth_policy_admin(key: &str) -> bool {
+    is_global_only(key)
+        && matches!(
+            key,
+            APP_TOKEN_MANAGEMENT_FLAG_KEY
+                | OAUTH_EXACT_REDIRECTS_FLAG_KEY
+                | OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY
+        )
+}
 
 pub(crate) fn is_global_only(flag_key: &str) -> bool {
     GLOBAL_ONLY_FLAG_KEYS.contains(&flag_key)
@@ -479,7 +514,10 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    OAUTH_REFRESH_CLIENT_AUTH_FLAG,
     INVITATION_CODE_FLAG,
+    OAUTH_EXACT_REDIRECTS_FLAG,
+    APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
@@ -544,7 +582,10 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    OAUTH_REFRESH_CLIENT_AUTH_FLAG,
     INVITATION_CODE_FLAG,
+    OAUTH_EXACT_REDIRECTS_FLAG,
+    APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
@@ -1141,6 +1182,10 @@ pub(crate) async fn resolve_crash_reporting(
     Ok((enabled, killed))
 }
 
+pub async fn oauth_refresh_client_auth_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &OAUTH_REFRESH_CLIENT_AUTH_FLAG).await
+}
+
 /// Signup has no user or organization yet, so only the global override applies.
 pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &INVITATION_CODE_FLAG).await
@@ -1154,6 +1199,14 @@ pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<boo
 /// Resolve live for each retry pass; turning off shared Lago writes needs no redeploy.
 pub async fn cma_sandbox_rate_sync_enabled(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &CMA_SANDBOX_RATE_SYNC_FLAG).await
+}
+
+pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &APP_TOKEN_MANAGEMENT_FLAG).await
+}
+
+pub async fn oauth_exact_redirects_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &OAUTH_EXACT_REDIRECTS_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
@@ -3383,7 +3436,10 @@ mod tests {
         assert_eq!(
             shipped,
             vec![
+                "auth:oauth-refresh-client-auth-v1",
                 "auth:invitation-code",
+                "auth:oauth-exact-redirects-v1",
+                "auth:app-token-management-v1",
                 "mobile:new-domains",
                 "auth:mobile-mfa",
                 "assistant:nyxagent-engine",

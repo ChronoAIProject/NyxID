@@ -238,6 +238,10 @@ impl Fixture {
             .fallback(any(mock_request))
             .with_state(mock.clone());
         let server = tokio::spawn(async move {
+            let _origin = crate::services::resource_adapter::register_test_origin(&format!(
+                "http://{}",
+                listener.local_addr().unwrap()
+            ));
             axum::serve(listener, app).await.unwrap();
         });
         let adapter = AurinkoAdapter {
@@ -317,7 +321,6 @@ impl Fixture {
             config: &self.state.config,
             jwt_keys: &self.state.jwt_keys,
             encryption_keys: &self.state.encryption_keys,
-            http: &self.state.http_client,
             rate_limiter: &self.state.per_channel_event_limiter,
         }
     }

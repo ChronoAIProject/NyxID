@@ -53,9 +53,10 @@ class CutReleaseTests(unittest.TestCase):
         self.reply(["gh", "api", f"{self.api}/git/ref/heads/main", "--jq", ".object.sha"], MAIN)
         self.comparison = ["gh", "api", "--paginate", "--slurp",
                            f"{self.api}/compare/{MAIN}...{SHA}?per_page=100"]
-        first = {"sha": "1" * 40, "parents": [{"sha": MAIN}],
+        released = "a" * 40
+        first = {"sha": "1" * 40, "parents": [{"sha": released}],
                  "commit": {"message": "fix: first change (#5)"}}
-        side = {"sha": "2" * 40, "parents": [{"sha": MAIN}],
+        side = {"sha": "2" * 40, "parents": [{"sha": released}],
                 "commit": {"message": "side branch commit"}}
         snapshot = {"sha": SHA, "parents": [{"sha": first["sha"]}, {"sha": side["sha"]}],
                     "commit": {"message": "Merge pull request #6 from o/topic\n\nFeature title"}}
@@ -63,6 +64,17 @@ class CutReleaseTests(unittest.TestCase):
             {"status": "diverged", "total_commits": 3, "commits": [first, side]},
             {"status": "diverged", "total_commits": 3, "commits": [snapshot]},
         ]))
+        self.reverse = ["gh", "api", "--paginate", "--slurp",
+                        f"{self.api}/compare/{SHA}...{MAIN}?per_page=100"]
+        self.reply(self.reverse, json.dumps([{"status": "diverged", "total_commits": 1, "commits": [
+            {"sha": MAIN, "parents": [{"sha": "9" * 40}, {"sha": released}]},
+        ]}]))
+        self.main_pulls = ["gh", "api", "--paginate", "--slurp",
+                           f"{self.api}/commits/{MAIN}/pulls?per_page=100"]
+        self.main_pr = {"base": {"ref": "main", "repo": {"id": 1}},
+                        "head": {"ref": "release/2026-11-18", "repo": {"id": 1}},
+                        "merged_at": "2026-11-18", "merge_commit_sha": MAIN}
+        self.reply(self.main_pulls, json.dumps([[self.main_pr]]))
         self.refs = ["gh", "api", "--paginate", f"{self.api}/git/matching-refs/heads/{self.branch}",
                      "--jq", ".[].ref"]
         self.reply(self.refs, "")
@@ -102,6 +114,41 @@ class CutReleaseTests(unittest.TestCase):
         self.assertIn(f"release: {self.day} ({SHA[:7]})", output)
         self.assertIn("- fix: first change (#5) (1111111)\n- Feature title (#6) (abc1234)", output)
         self.assertNotIn("side branch commit", output)
+
+    def test_cut_after_main_sync_lists_dev_first_parents_in_order(self):
+        common, feature, sync = "1" * 40, "2" * 40, "3" * 40
+        # main contains the production hotfix. The sync brings that entire
+        # history in on parent two, between two unreleased dev changes.
+        rows = [
+            {"sha": feature, "parents": [{"sha": common}], "commit": {"message": "Feature (#10)"}},
+            {"sha": sync, "parents": [{"sha": feature}, {"sha": MAIN}],
+             "commit": {"message": "Merge pull request #11 from o/main\n\nSync production hotfix"}},
+            {"sha": SHA, "parents": [{"sha": sync}], "commit": {"message": "Follow-up (#12)"}},
+        ]
+        self.reply(self.comparison, json.dumps([{"status": "ahead", "total_commits": 3, "commits": rows}]))
+        output = self.cut("--dry-run")
+        self.assertEqual([line for line in output.splitlines() if line.startswith("- ")], [
+            "- Feature (#10) (2222222)", "- Sync production hotfix (#11) (3333333)",
+            "- Follow-up (#12) (abc1234)",
+        ])
+
+    def test_cut_refuses_unsynced_hotfix_before_writes(self):
+        hotfix = "4" * 40
+        self.reply(self.reverse, json.dumps([
+            {"status": "diverged", "total_commits": 2, "commits": [
+                {"sha": hotfix, "parents": [{"sha": "a" * 40}]},
+            ]},
+            {"status": "diverged", "total_commits": 2, "commits": [
+                {"sha": MAIN, "parents": [{"sha": "a" * 40}, {"sha": hotfix}]},
+            ]},
+        ]))
+        self.assertIn("Merge main into dev first", self.cut(success=False))
+        self.assertEqual(self.calls[-1], self.reverse)
+
+    def test_hotfix_branch_already_on_dev_still_requires_its_main_merge(self):
+        pr = dict(self.main_pr, head={"ref": "hotfix/fix", "repo": {"id": 1}})
+        self.reply(self.main_pulls, json.dumps([[pr]]))
+        self.assertIn("Merge main into dev first", self.cut("--dry-run", success=False))
 
     def test_staging_disagreement_identifies_both_services(self):
         self.staging("frontend", "d" * 12)

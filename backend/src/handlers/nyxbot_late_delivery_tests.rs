@@ -97,6 +97,8 @@ async fn fixture(name: &str) -> Fixture {
             .unwrap(),
     );
     event.delivery = Some(ChannelTurnDelivery {
+        restart_owner_verified: false,
+        notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: false,
         sender_kind: None,
@@ -1077,13 +1079,13 @@ async fn channel_typing_refreshes_without_messages_and_stops_with_turn() {
     assert_eq!(status(&f).await, "waiting");
 }
 
-#[tokio::test]
-async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
+async fn pending_recovery(
+    f: &mut Fixture,
+) -> crate::models::nyxbot_gateway_response::GatewayResponse {
     use crate::{
         models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
         services::nyxbot_response_recovery as recovery,
     };
-    let mut f = fixture("relay_recovery_delivery_race").await;
     f.channel.binding_id = Some("recovery-binding".into());
     f.state
         .db
@@ -1103,6 +1105,7 @@ async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
         request_hash: "test".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: false,
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
@@ -1114,6 +1117,72 @@ async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
         .insert_one(&stored)
         .await
         .unwrap();
+    stored
+}
+
+#[tokio::test]
+async fn relay_recovery_explains_guest_refusal_and_uncertain_writes() {
+    for (code, count, partial, expected) in [
+        ("guest_model_route_required", Some(0_i64), "", "No tool ran"),
+        (
+            "assistant_start_unavailable",
+            Some(0),
+            "",
+            "Nothing was done",
+        ),
+        ("guest_model_route_required", None, "", "Check its result"),
+        (
+            "guest_model_route_required",
+            Some(1),
+            "",
+            "Check its result",
+        ),
+        ("outcome_unknown", Some(0), "", "Check its result"),
+        (
+            "idle_timeout",
+            Some(1),
+            "Receipt FG-test",
+            "Check its result",
+        ),
+    ] {
+        let mut f = fixture("basket_failure_recovery").await;
+        let stored = pending_recovery(&mut f).await;
+        patch(&f, doc! {"relay_message_id":"test-inbound"}).await;
+        settled(&f, true).await;
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"turn_id": &f.event.turn_id},
+                doc! {"$set":{"error_code":code, "text":partial, "activity_count":count}},
+            )
+            .await
+            .unwrap();
+        let response = Box::pin(native_responses::snapshot(
+            State(f.state.clone()),
+            Path(stored.response_id.clone()),
+            bearer(&f.key),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(snapshot["status"], "completed", "{code}");
+        let output = snapshot["output"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(output.contains(expected), "{code}: {output}");
+        assert!(output.starts_with(partial));
+        late_delivery::process(&f.state, &f.event.id).await;
+        assert!(sends(&f).await.is_empty());
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
+    use crate::services::nyxbot_response_recovery as recovery;
+    let mut f = fixture("relay_recovery_delivery_race").await;
+    let stored = pending_recovery(&mut f).await;
     for _ in 0..8 {
         patch(
             &f,
@@ -1140,7 +1209,9 @@ async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
         .await
         .unwrap();
     assert_eq!(status(&f).await, "unknown");
-    let mut body = payload;
+    let mut body = recovery::payload(&f.state.encryption_keys, &stored)
+        .await
+        .unwrap();
     body.finish(Some("already possibly delivered"), false);
     relay_responses::suppress_output(&mut body);
     assert_eq!(body.snapshot["output"], json!([]));
@@ -1793,3 +1864,6 @@ mod gateway_reply_tests;
 
 #[path = "nyxbot_response_read_delivery_tests.rs"]
 mod response_read_delivery_tests;
+
+#[path = "nyxbot_channel_capacity_tests.rs"]
+mod channel_capacity_tests;

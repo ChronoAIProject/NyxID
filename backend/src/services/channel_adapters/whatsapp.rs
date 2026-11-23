@@ -99,7 +99,10 @@ fn message_text(message: &Value, kind: &str) -> Option<String> {
     }
 }
 
-fn parse_message(message: &Value, contacts: &Value) -> Option<InboundMessage> {
+pub(in crate::services) fn parse_message(
+    message: &Value,
+    contacts: &Value,
+) -> Option<InboundMessage> {
     // Group IDs and participant IDs are different destinations. The relay has
     // no group-send contract: never reinterpret a group message as a private DM,
     // including during native gateway rollback. Receipt parsing stays separate.

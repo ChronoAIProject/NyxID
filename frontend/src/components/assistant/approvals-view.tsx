@@ -149,6 +149,9 @@ function HistorySection({
                         ? decision.charAt(0).toUpperCase() + decision.slice(1)
                         : translateUi("Pending")}
                     </span>
+                    {decision === "expired" && entry.block.approval_mode === "per_request" && (
+                      <span> · {translateUi("Nothing was sent.")}</span>
+                    )}
                     {[
                       channelLabel(entry.block.decision_channel),
                       at === null

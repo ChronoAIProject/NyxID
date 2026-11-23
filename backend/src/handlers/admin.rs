@@ -1881,6 +1881,7 @@ pub struct CreateOAuthClientRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateOAuthClientRequest {
+    pub first_party_management: Option<bool>,
     pub broker_capability_enabled: Option<bool>,
     pub is_active: Option<bool>,
     pub redirect_uris: Option<Vec<String>>,
@@ -1927,6 +1928,7 @@ impl OAuthClientListQuery {
 
 #[derive(Serialize)]
 pub struct OAuthClientResponse {
+    pub first_party_management: bool,
     pub id: String,
     pub client_name: String,
     pub client_type: String,
@@ -2084,6 +2086,7 @@ fn oauth_client_response(
         redirect_uris: client.redirect_uris,
         allowed_scopes: client.allowed_scopes,
         delegation_scopes: client.delegation_scopes,
+        first_party_management: client.first_party_management,
         broker_capability_enabled: client.broker_capability_enabled,
         broker_capability_effective,
         broker_capability_source,
@@ -2452,10 +2455,28 @@ pub async fn update_oauth_client(
         .transpose()?;
 
     let changed_fields = oauth_client_update_changed_fields(&body);
+    let management_designation = if let Some(enabled) = body.first_party_management {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        let actor = audit_service::AuditActor::from_auth_user(&auth_user);
+        let intent = audit_service::required::intent(
+            Some(&actor),
+            "admin_oauth_client_updated",
+            Some(serde_json::json!({
+                "actor_user_id": actor.user_id,
+                "client_id": client_id,
+                "first_party_management": enabled,
+                "changed_fields": changed_fields,
+            })),
+        )?;
+        Some((enabled, intent))
+    } else {
+        None
+    };
     let updated = oauth_client_service::admin_update_client(
         &state.db,
         &client_id,
         oauth_client_service::AdminUpdateClient {
+            management_designation,
             client_name,
             redirect_uris: redirect_uris.as_deref(),
             allowed_scopes: allowed_scopes.as_deref(),
@@ -2465,7 +2486,7 @@ pub async fn update_oauth_client(
     )
     .await?;
 
-    if !changed_fields.is_empty() {
+    if body.first_party_management.is_none() && !changed_fields.is_empty() {
         audit_service::log_for_user(
             state.db.clone(),
             &auth_user,
@@ -2487,6 +2508,9 @@ pub async fn update_oauth_client(
 
 fn oauth_client_update_changed_fields(body: &UpdateOAuthClientRequest) -> Vec<&'static str> {
     let mut changed = Vec::new();
+    if body.first_party_management.is_some() {
+        changed.push("first_party_management");
+    }
     if body.broker_capability_enabled.is_some() {
         changed.push("broker_capability_enabled");
     }
@@ -3938,6 +3962,7 @@ mod operator_route_tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -4130,6 +4155,7 @@ mod operator_route_tests {
             test_auth_user(&admin_id),
             Path(client_id.to_string()),
             Json(UpdateOAuthClientRequest {
+                first_party_management: None,
                 broker_capability_enabled: Some(true),
                 is_active: Some(false),
                 redirect_uris: Some(vec![
@@ -4196,6 +4222,7 @@ mod operator_route_tests {
                 test_auth_user(&actor_id),
                 Path(client_id.to_string()),
                 Json(UpdateOAuthClientRequest {
+                    first_party_management: None,
                     broker_capability_enabled: Some(true),
                     is_active: None,
                     redirect_uris: None,
@@ -4231,6 +4258,7 @@ mod operator_route_tests {
             test_auth_user(&admin_id),
             Path(client_id.to_string()),
             Json(UpdateOAuthClientRequest {
+                first_party_management: None,
                 broker_capability_enabled: None,
                 is_active: None,
                 redirect_uris: None,
@@ -4247,6 +4275,7 @@ mod operator_route_tests {
             test_auth_user(&admin_id),
             Path(client_id.to_string()),
             Json(UpdateOAuthClientRequest {
+                first_party_management: None,
                 broker_capability_enabled: None,
                 is_active: None,
                 redirect_uris: Some(vec!["javascript:alert(1)".to_string()]),

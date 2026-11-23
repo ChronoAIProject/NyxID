@@ -379,7 +379,7 @@ pub(crate) async fn owner_denial_decided(
             format!(
                 "The owner denied: {}. Do not execute or retry this action. Explain plainly what you skipped. {}",
                 engine::excerpt(&row.summary, 2000),
-                acks::DECISION_NARRATION
+                acks::decision_narration(false)
             ),
             None,
         ),
@@ -514,34 +514,26 @@ pub(crate) async fn after_turn(
             .as_ref()
             .is_some_and(|w| matches!(w.role.as_str(), "direct" | "group"))
         && !row.guest_turn
-        && let Some((target, published_assignment)) =
-            match settled_report_target(state, row, turn).await {
-                Ok(target) => target,
-                Err(_) => return,
-            }
+        && let Some(report) = match settled_report_target(state, row, turn).await {
+            Ok(target) => target,
+            Err(_) => return,
+        }
     {
+        let target = report.target;
         let agent = match team::agent_for_conversation(&state.db, row).await {
             Ok(agent) => agent,
             Err(_) => return,
         };
-        let status = match error.map(|error| error.code) {
-            None => "replied".to_owned(),
-            Some("cancelled") => "was stopped".to_owned(),
-            Some(code) => format!("failed ({code})"),
-        };
-        let note = format!(
-            "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent (agent ID {}).",
-            identifier(&agent.name),
-            excerpt(text, 1200).replace('"', "'"),
-            agent.id
-        );
-        let mut completion_event = team::event("subagent_settled", note, Some(&agent.id))
-            .for_invocation(turn.invocation_id.as_deref());
-        completion_event.execution_task = turn.execution_task.clone();
-        let queued = if published_assignment {
+        let queued = if report.published {
             // The exact assignment result was queued in the settlement transaction.
             Ok(None)
         } else {
+            let (text, code, created_at) = report.reply.as_ref().map_or_else(
+                || (text, error.map(|error| error.code), chrono::Utc::now()),
+                |(text, code, created_at)| (text.as_str(), code.as_deref(), *created_at),
+            );
+            let completion_event =
+                team::specialist_settled_event(&agent, turn, text, code, created_at);
             engine::push_events(&state.db, owner, &target, vec![completion_event]).await
         };
         if queued.is_err() {
@@ -565,9 +557,15 @@ pub(crate) async fn after_turn(
     }
     // Chats that asked the same question while it was being answered get the
     // answer too (taken once, whatever the outcome).
-    let also = engine::take_deliveries(&state.db, owner, &row.id)
-        .await
-        .unwrap_or_default();
+    let managed_delivery =
+        crate::services::channel_supplemental_delivery::managed_source(turn).is_some();
+    let also = if !managed_delivery {
+        engine::take_deliveries(&state.db, owner, &row.id)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if turn
         .execution_task
         .as_ref()
@@ -578,6 +576,17 @@ pub(crate) async fn after_turn(
         // it through a mutable home-thread target or the original stream claim.
         if crate::services::execution_permission_channel::deliveries::owns_result(row, turn) {
             super::nyxbot::execution_delivery::for_turn(state, &turn.turn_id).await;
+        }
+        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+        return;
+    }
+    if managed_delivery {
+        if let Some(admission) = &turn.restart_admission
+            && super::nyxbot::handoff_delivery::deliver(state, &admission.reply_id)
+                .await
+                .is_err()
+        {
+            tracing::warn!(turn_id = %turn.turn_id, "Saved channel reply delivery deferred");
         }
         let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
@@ -637,13 +646,19 @@ pub(crate) async fn after_turn(
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }
 
+struct SpecialistReport {
+    target: String,
+    published: bool,
+    reply: Option<(String, Option<String>, chrono::DateTime<chrono::Utc>)>,
+}
+
 /// Falls back to the turn when no reply row exists (a lost turn swept
 /// before it replied).
 async fn settled_report_target(
     state: &AppState,
     row: &AssistantConversation,
     turn: &crate::models::assistant_conversation::ActiveTurn,
-) -> AppResult<Option<(String, bool)>> {
+) -> AppResult<Option<SpecialistReport>> {
     let settled = state
         .db
         .collection::<crate::models::assistant_message::AssistantMessage>(
@@ -655,14 +670,18 @@ async fn settled_report_target(
         })
         .await?;
     Ok(match settled {
-        Some(message) => message.report_to.map(|target| {
-            (
-                target,
-                message.delegated_images.assignment.is_some()
-                    && message.delegated_images.publication_refusal.is_none(),
-            )
+        Some(message) => message.report_to.map(|target| SpecialistReport {
+            target,
+            published: (message.delegated_images.assignment.is_some()
+                || message.delegated_images.text_report_in_settlement)
+                && message.delegated_images.publication_refusal.is_none(),
+            reply: Some((message.text, message.error_code, message.created_at)),
         }),
-        None => turn.report_to.clone().map(|target| (target, false)),
+        None => turn.report_to.clone().map(|target| SpecialistReport {
+            target,
+            published: false,
+            reply: None,
+        }),
     })
 }
 
@@ -777,7 +796,7 @@ pub(crate) async fn permission_decided(
         }
     );
     note.push(' ');
-    note.push_str(acks::DECISION_NARRATION);
+    note.push_str(&acks::decision_narration(allowed));
     if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
         let mut event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
@@ -945,7 +964,7 @@ fn skill_request_allowed_note(
         agent.id,
         request.id,
         excerpt(&request.summary, 2000),
-        acks::DECISION_NARRATION,
+        acks::decision_narration(true),
     )
 }
 
@@ -2131,9 +2150,27 @@ async fn dispatch_operation_scopes(
         "set_agent_operations" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let service = text_arg(args, "service_id");
+            let mut payload = args["selection"].clone();
+            let read_only = payload
+                .as_object_mut()
+                .and_then(|fields| fields.remove("read_only"))
+                .is_some();
+            if read_only
+                && ["all_operations", "endpoint_ids", "rules", "inputs"]
+                    .iter()
+                    .any(|field| payload.get(*field).is_some())
+            {
+                return Err(AppError::ValidationError(
+                    "Use read_only with expected_revision and no explicit selection.".into(),
+                ));
+            }
             let selection: crate::models::agent_operation_scope::OperationSelection =
-                serde_json::from_value(args["selection"].clone())
+                serde_json::from_value(payload)
                     .map_err(|_| AppError::ValidationError("Invalid operation selection".into()))?;
+            let edit = crate::services::agent_operation_scope_service::SpecialistSelection {
+                input: &selection,
+                read_only,
+            };
             let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
                 // A widening card binds the compiled contract the owner saw.
                 if selection.contract_digest.is_none() {
@@ -2165,7 +2202,7 @@ async fn dispatch_operation_scopes(
             if webhook_gate.ask().is_some() {
                 let digest = Box::pin(
                     crate::services::agent_operation_scope_service::preview_digest(
-                        db, owner, &agent.id, service, &selection,
+                        db, owner, &agent.id, service, edit,
                     ),
                 )
                 .await?;
@@ -2176,7 +2213,7 @@ async fn dispatch_operation_scopes(
                         owner,
                         &agent.id,
                         service,
-                        &selection,
+                        edit,
                     ),
                 )
                 .await?;
@@ -2202,7 +2239,7 @@ async fn dispatch_operation_scopes(
                 owner,
                 &agent.id,
                 service,
-                &selection,
+                edit,
                 confirmed || webhook_gate.auto_allowed().is_some(),
             ))
             .await
@@ -2216,7 +2253,7 @@ async fn dispatch_operation_scopes(
                                 owner,
                                 &agent.id,
                                 service,
-                                &selection,
+                                edit,
                             ),
                         )
                         .await?;
@@ -2242,7 +2279,7 @@ async fn dispatch_operation_scopes(
                 {
                     let digest = Box::pin(
                         crate::services::agent_operation_scope_service::preview_digest(
-                            db, owner, &agent.id, service, &selection,
+                            db, owner, &agent.id, service, edit,
                         ),
                     )
                     .await?;
@@ -2253,7 +2290,7 @@ async fn dispatch_operation_scopes(
                             owner,
                             &agent.id,
                             service,
-                            &selection,
+                            edit,
                         ),
                     )
                     .await?;
@@ -2273,7 +2310,7 @@ async fn dispatch_operation_scopes(
                     if let Some(auto) = gate.auto_allowed() {
                         let updated =
                             Box::pin(crate::services::agent_operation_scope_service::set(
-                                db, owner, &agent.id, service, &selection, true,
+                                db, owner, &agent.id, service, edit, true,
                             ))
                             .await?;
                         acks::record_auto_allowed(
@@ -2774,8 +2811,8 @@ async fn dispatch_groups(
                 let id = target_agent(state, owner, Some(&name)).await?.id;
                 ids.retain(|member| member != &id);
             }
-            let group = crate::services::assistant_group_service::update_from_snapshot(
-                db,
+            let group = super::assistant_group::update_personal(
+                state,
                 owner,
                 &group,
                 args["name"].as_str(),
@@ -2793,8 +2830,11 @@ async fn dispatch_groups(
                     .await?;
             let access =
                 crate::services::org_group_service::get(db, owner, &group.id, None).await?;
-            super::assistant_group::stop_group_threads(state, &access).await?;
-            crate::services::assistant_group_service::delete(db, owner, &group.id).await?;
+            let attempts = super::assistant_group::stop_group_threads(state, &access).await?;
+            crate::services::assistant_group_service::delete_prepared(
+                db, owner, &group.id, attempts,
+            )
+            .await?;
             (json!({"deleted": group.name}), false)
         }
         _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
@@ -3125,6 +3165,7 @@ async fn dispatch_channels(
                 None => None,
             };
             let settings = super::nyxbot::chats::ChatSettings {
+                notice_language: args["notice_language"].as_str().map(str::to_owned),
                 threads: args["threads"].as_str().map(str::to_owned),
                 reply_mode: args["reply_mode"].as_str().map(str::to_owned),
                 members: args["members"].as_str().map(str::to_owned),
@@ -4176,11 +4217,52 @@ pub async fn put_profile_routes(
 /// How often NyxID resolves watches and retries deferred wake-ups.
 const SWEEP_SECS: u64 = 15;
 
+// Orphan recovery has its own cadence so a slow channel delivery or guest
+// migration in the maintenance loop cannot starve it.
+fn spawn_orphan_turn_sweep(state: AppState) {
+    state.shutdown.clone().spawn_worker(async move {
+        let job = &state.jobs.turn_sweep;
+        let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while let Some(_work) = job.tick(&state.shutdown, &mut interval).await {
+            if let Err(error) = job.observe(sweep_orphan_turns(&state)).await {
+                tracing::debug!(%error, "Assistant orphan sweep deferred");
+            }
+        }
+    });
+}
+
+async fn sweep_orphan_turns(state: &AppState) -> AppResult<()> {
+    for row in crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await? {
+        let stopped = row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.stop_requested);
+        if stopped {
+            super::assistant_nyxagent::survivor::cancel(state, &row).await;
+        }
+        after_turn_boxed(
+            state.clone(),
+            row,
+            String::new(),
+            Some(if stopped {
+                TurnError::internal("cancelled", "stop")
+            } else {
+                TurnError::internal("turn_lost", "sweep")
+            }),
+        )
+        .await;
+        crate::services::job_health::checkpoint(true);
+    }
+    Ok(())
+}
+
 /// Background task: resolve watches (bots created from setup links, finished
 /// connect links) and retry wake-ups whose pool was full (or whose replica
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    spawn_orphan_turn_sweep(state.clone());
     super::assistant_nyxagent::survivor::spawn(state.clone());
     crate::services::assistant_cma_reservation_recovery::spawn_worker(state.clone());
     crate::services::assistant_notification_service::spawn_worker(state.clone());
@@ -4287,34 +4369,6 @@ pub fn spawn_sweeps(state: AppState) {
             }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
-            }
-            if state.shutdown.is_draining() {
-                break;
-            }
-            match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
-                Ok(rows) => {
-                    for row in rows {
-                        let stopped = row
-                            .active_turn
-                            .as_ref()
-                            .is_some_and(|turn| turn.stop_requested);
-                        if stopped {
-                            super::assistant_nyxagent::survivor::cancel(&state, &row).await;
-                        }
-                        super::assistant_team::after_turn_boxed(
-                            state.clone(),
-                            row,
-                            String::new(),
-                            Some(if stopped {
-                                TurnError::internal("cancelled", "stop")
-                            } else {
-                                TurnError::internal("turn_lost", "sweep")
-                            }),
-                        )
-                        .await;
-                    }
-                }
-                Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
             if state.shutdown.is_draining() {
                 break;

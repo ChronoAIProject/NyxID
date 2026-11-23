@@ -111,7 +111,10 @@ describe("feature flag catalog", () => {
   // failing. Pinning the literals makes a rename a deliberate two-sided edit.
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
+      OAUTH_REFRESH_CLIENT_AUTH: "auth:oauth-refresh-client-auth-v1",
       INVITATION_CODE: "auth:invitation-code",
+      OAUTH_EXACT_REDIRECTS: "auth:oauth-exact-redirects-v1",
+      APP_TOKEN_MANAGEMENT: "auth:app-token-management-v1",
       MOBILE_NEW_DOMAINS: "mobile:new-domains",
       MOBILE_MFA: "auth:mobile-mfa",
       AI_ASSISTANT: "experimental:ai-assistant",

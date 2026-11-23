@@ -91,6 +91,9 @@ pub struct ConnectedServiceResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConnectLinkStatusResponse {
+    /// Present on hosted decline responses when this request's transition is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled_here: Option<bool>,
     pub id: String,
     pub status: String,
     pub service_name: String,
@@ -429,7 +432,7 @@ pub async fn cancel_hosted_connect_link(
     {
         return Err(AppError::ConnectLinkRateLimited);
     }
-    let view = match connect_link_service::cancel_by_token(
+    let (view, cancelled_here) = match connect_link_service::cancel_by_token(
         &state.db,
         &auth_user.user_id.to_string(),
         &body.token,
@@ -468,7 +471,9 @@ pub async fn cancel_hosted_connect_link(
         &view.link.id,
     )
     .await;
-    Ok(Json(status_response(view)?))
+    let mut response = status_response(view)?;
+    response.cancelled_here = Some(cancelled_here);
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -711,6 +716,7 @@ fn status_response(view: connect_link_service::LinkView) -> AppResult<ConnectLin
         _ => None,
     };
     Ok(ConnectLinkStatusResponse {
+        cancelled_here: None,
         id: view.link.id,
         status: status_name(view.link.status).to_string(),
         service_name: view.service.service_name,
@@ -1021,6 +1027,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -1137,6 +1144,19 @@ mod tests {
         let state = test_app_state(db);
 
         let Json(cancelled) = cancel_hosted_connect_link(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            ConnectInfo("127.0.0.1:43127".parse().unwrap()),
+            HeaderMap::new(),
+            Json(CancelHostedConnectLinkRequest {
+                token: created.raw_token.clone(),
+            }),
+        )
+        .await
+        .expect("cancel hosted link");
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.cancelled_here, Some(true));
+        let Json(replayed) = cancel_hosted_connect_link(
             State(state),
             test_auth_user(&actor_id),
             ConnectInfo("127.0.0.1:43127".parse().unwrap()),
@@ -1146,8 +1166,9 @@ mod tests {
             }),
         )
         .await
-        .expect("cancel hosted link");
-        assert_eq!(cancelled.status, "cancelled");
+        .expect("read the previous decline");
+        assert_eq!(replayed.cancelled_here, Some(false));
+        assert_eq!(replayed.callback_url, cancelled.callback_url);
         let callback = url::Url::parse(cancelled.callback_url.as_deref().expect("callback"))
             .expect("parse callback");
         assert_eq!(

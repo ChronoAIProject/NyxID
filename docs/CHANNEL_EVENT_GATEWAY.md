@@ -229,7 +229,7 @@ New file. Single endpoint: `POST /api/v1/channel-events/{conversation_id}`.
 Responsibilities:
 
 - Auth gate: reject `auth_user.auth_method != AuthMethod::ApiKey` with 401. Relay tokens, session cookies, and service-account tokens are all turned away at the handler boundary.
-- Envelope validation: `event_id` must be a UUID, `source` is `1..=128` ASCII in `[a-zA-Z0-9_\-./]`, `event_type` is `1..=128` ASCII in `[a-zA-Z0-9_\-.:]`, `timestamp` is RFC 3339. **No payload size limit** per ADR-013 — the router disables `DefaultBodyLimit` for this path.
+- Envelope validation: `event_id` must be a UUID, `source` is `1..=128` ASCII in `[a-zA-Z0-9_\-./]`, `event_type` is `1..=128` ASCII in `[a-zA-Z0-9_\-.:]`, `timestamp` is RFC 3339. The API-key check precedes JSON extraction. The streaming body limit is `PROXY_MAX_BODY_SIZE` (100 MiB by default).
 - Delegation: hands the validated envelope to `channel_event_service::forward_event()`.
 - Response shape: `{ "status": "accepted" | "duplicate", "event_id": "..." }`.
 
@@ -306,10 +306,10 @@ let channel_event_routes = Router::new()
         "/{conversation_id}",
         post(handlers::channel_events::post_event),
     )
-    .layer(DefaultBodyLimit::disable());
+    .layer(DefaultBodyLimit::max(config.proxy_max_body_size));
 ```
 
-Nested under `api_v1_delegated` so the existing API-key auth middleware is applied. `DefaultBodyLimit::disable()` opts this router out of the app-wide 1 MiB body cap — per ADR-013 the gateway does not enforce an application-level payload size limit on device events.
+Nested under `api_v1_delegated` so the existing API-key auth middleware is applied. A body exceeding the configured limit returns HTTP 413.
 
 ## AppState Integration
 
@@ -1586,8 +1586,9 @@ the existing `response_recovery_providers: ["nyxbot"]` advertisement enable
 `sequence_number: 0`, status `queued`, object `response`, empty output, stable
 `conversation.id` and original metadata. The resolved `thread_reply` choice is
 frozen before acceptance and retained on both original and replayed created
-frames. The live stream still carries its answer and completion. A replica
-consumer drops after acceptance; NyxID's existing late sender delivers turn
+frames. A mapped turn snapshot carries that same marker while running and after
+settlement, including when its completed output is empty. The live stream still
+carries its answer and completion. A replica consumer drops after acceptance; NyxID's existing late sender delivers turn
 answers to the original thread target. Requests without this negotiated prefix
 retain legacy prefix bytes; their mapping echoes only bounded original strings
 from the four allowed metadata keys.
@@ -1685,6 +1686,17 @@ read timeout or reset after possible dispatch is ambiguous and is not retried.
 Exhausted proven refusals settle as `assistant_start_unavailable` and say that
 nothing was done; gateway presentation uses a human text reply instead of a
 generic failed-response fallback.
+
+For a settled relay turn, durable recovery returns its saved receipt or a
+deliverable text notice. A proven start refusal can say that nothing was done.
+A guest model-route refusal can report zero tool calls when the settled turn
+has complete zero-activity evidence. An uncertain outcome asks the caller to
+check the result, retaining any available partial reply within the original
+audience. The assistant transcript and dispatch lookup retain the execution
+outcome. A recovery read or repeated POST using the original command identity
+cannot execute tools. A newly typed Telegram command has its own identity.
+Deduplicating a business write across such messages requires a booking intent
+that the booking system can recognize.
 
 Typing uses the retained event's advertised `capabilities.typing` and
 `POST /events/{event_ref}/typing`. Current CMA documents relay typing as

@@ -172,7 +172,7 @@ pub struct GenericOAuthCallbackQuery {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct DeviceCodeInitiateResponse {
     pub user_code: String,
     pub verification_uri: String,
@@ -181,10 +181,12 @@ pub struct DeviceCodeInitiateResponse {
     pub interval: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct DeviceCodePollRequest {
     pub state: String,
 }
+
+crate::errors::redacted_debug!(DeviceCodeInitiateResponse, DeviceCodePollRequest,);
 
 #[derive(Debug, Serialize)]
 pub struct DeviceCodePollResponse {
@@ -940,6 +942,10 @@ async fn generic_oauth_callback_impl(
                             &view.link.id,
                         )
                         .await;
+                        // Correlate the hosted tab with the OAuth attempt that completed the link.
+                        let receipt = crate::crypto::token::hash_token(state_param);
+                        let path = format!("/connect/return/{connect_link_id}#flow={receipt}");
+                        return redirect_to_path(frontend_url, &path, "success", None);
                     }
                     Err(error) => {
                         crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(

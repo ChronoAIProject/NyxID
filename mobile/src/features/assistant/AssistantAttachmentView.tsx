@@ -17,6 +17,7 @@ import {
   Platform,
   StyleSheet,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { Directory, File, Paths } from "expo-file-system";
@@ -82,6 +83,8 @@ export function AssistantAttachmentView({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const compact = width / Math.max(1, fontScale) < 340;
   const { isAuthenticated } = useAuthSession();
   const focused = useIsFocused();
   const epoch = getAuthEpoch();
@@ -394,6 +397,7 @@ export function AssistantAttachmentView({
           image
             ? [
                 styles.file,
+                compact && styles.compactFile,
                 {
                   backgroundColor: colors.card,
                   borderColor: colors.border,
@@ -402,6 +406,7 @@ export function AssistantAttachmentView({
               ]
             : ({ pressed }) => [
                 styles.file,
+                compact && styles.compactFile,
                 {
                   backgroundColor: colors.card,
                   borderColor: colors.border,
@@ -419,8 +424,8 @@ export function AssistantAttachmentView({
         ) : (
           <FileText size={18} color={colors.textSecondary} accessible={false} />
         )}
-        <View style={styles.metadata}>
-          <Label numberOfLines={1}>{label}</Label>
+        <View style={[styles.metadata, compact && styles.compactMetadata]}>
+          <Label numberOfLines={compact ? undefined : 1}>{label}</Label>
           {!unavailable && (
             <Label muted numberOfLines={1} style={styles.detail}>
               {(attachment.size < 1024
@@ -445,11 +450,12 @@ export function AssistantAttachmentView({
               image
                 ? ({ pressed }) => [
                     styles.action,
+                    compact && styles.compactAction,
                     {
                       opacity: unavailable ? 0.5 : pressed ? 0.8 : 1,
                     },
                   ]
-                : styles.action
+                : [styles.action, compact && styles.compactAction]
             }
           >
             <Label>
@@ -538,7 +544,7 @@ export function AssistantAttachmentView({
 }
 
 const styles = StyleSheet.create({
-  container: { gap: 4, width: "100%" },
+  container: { gap: 4, width: "100%", maxWidth: "100%", minWidth: 0 },
   file: {
     minWidth: TOUCH_TARGET,
     flexDirection: "row",
@@ -550,6 +556,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     minHeight: TOUCH_TARGET,
   },
+  compactFile: { flexDirection: "column", alignItems: "stretch" },
+  compactMetadata: { flexGrow: 0 },
+  compactAction: { alignSelf: "flex-end", flexShrink: 0, maxWidth: "100%" },
   metadata: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   action: {
     minHeight: 44,

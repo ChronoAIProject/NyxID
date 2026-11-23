@@ -22,6 +22,7 @@ import { buildStudioBreadcrumbs } from "@/lib/studio-breadcrumbs";
 import { StudioBreadcrumbTrail } from "./studio-breadcrumb-trail";
 export { useBreadcrumbLabel } from "./breadcrumb-context";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
+import { useDocumentTitle } from "@/hooks/use-document-title";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -79,9 +80,7 @@ export function DashboardLayout() {
   // rules-of-hooks.
   useApplyTheme();
 
-  useEffect(() => {
-    document.title = `nyxid - ${sectionTitleFor(pathname)}`;
-  }, [pathname]);
+  useDocumentTitle(`nyxid - ${sectionTitleFor(pathname)}`);
 
   useEffect(() => {
     const screenKey = normalizeScreenKey(pathname);
@@ -165,14 +164,20 @@ const SECTION_TITLES: Record<string, string> = {
   dashboard: "dashboard",
   billing: "billing & usage",
   keys: "ai services",
+  models: "platform models",
+  services: "services",
+  providers: "providers",
   tools: "tools",
   orgs: "org",
   nodes: "nodes",
+  devices: "device onboard",
+  onboarding: "bot setups",
   "channel-bots": "channel bots",
   settings: "settings",
   guide: "guide",
   approvals: "approvals",
   developer: "developer apps",
+  triggers: "triggers",
   "ai-setup": "ai setup",
   "integration-guide": "integration guide",
   admin: "admin",

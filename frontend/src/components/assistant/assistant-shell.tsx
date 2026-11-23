@@ -16,6 +16,7 @@ import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { AssistantDrawerDismissContext } from "@/components/assistant/assistant-drawer-context";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { useThemeStore } from "@/stores/theme-store";
+import { useDocumentTitle } from "@/hooks/use-document-title";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
 import { useScrollFades } from "@/hooks/use-scroll-fades";
 import { ChatContentLayout } from "./chat-content-layout";
@@ -110,9 +111,7 @@ function AssistantShellLayout({
   );
   useApplyTheme("assistant");
 
-  useEffect(() => {
-    document.title = `nyxid - ${title}`;
-  }, [title]);
+  useDocumentTitle(`nyxid - ${title}`);
 
   useEffect(() => {
     if (!mobileSidebarOpen) return;

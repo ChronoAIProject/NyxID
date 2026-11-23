@@ -78,7 +78,6 @@ struct PreparedDeviceEvent {
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_event(
     db: &mongodb::Database,
-    http_client: &reqwest::Client,
     config: &AppConfig,
     keys: &crate::crypto::jwt::JwtKeys,
     rate_limiter: &PerChannelEventLimiter,
@@ -258,10 +257,16 @@ pub async fn forward_event(
     // 8. Forward and measure latency.
     let started = std::time::Instant::now();
     let delivery = channel_relay_service::forward_to_agent(
-        http_client,
+        channel_relay_service::callback_request(
+            db,
+            config,
+            conversation.channel_bot_id.as_deref(),
+            &api_key.id,
+            &callback_url,
+        )
+        .await,
         config,
         keys,
-        &callback_url,
         payload,
         &api_key.id,
         &api_key.key_hash,
@@ -353,9 +358,13 @@ pub async fn forward_event(
             release_event_claim(db, &dedup_claim, conversation_id, &envelope.event_id).await;
             // Flip the ChannelMessage row from "pending" → "failed" so
             // retries don't accumulate phantom in-flight entries.
-            if let Err(update_err) =
-                channel_relay_service::update_callback_status(db, &stored_message.id, "failed")
-                    .await
+            if let Err(update_err) = super::channel_activity_service::record_callback_failure(
+                db,
+                &stored_message,
+                upstream_status,
+                &err,
+            )
+            .await
             {
                 tracing::warn!(
                     conversation_id = %conversation_id,
@@ -451,7 +460,6 @@ async fn release_event_claim(
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_trigger_event(
     db: &mongodb::Database,
-    http_client: &reqwest::Client,
     config: &AppConfig,
     keys: &crate::crypto::jwt::JwtKeys,
     rate_limiter: &PerChannelEventLimiter,
@@ -507,7 +515,6 @@ pub async fn forward_trigger_event(
     };
     forward_event(
         db,
-        http_client,
         config,
         keys,
         rate_limiter,

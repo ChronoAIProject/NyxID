@@ -330,6 +330,7 @@ mod tests {
         let mut consent = Consent {
             revision: None,
             write_version: None,
+            reviewed_redirect_hash: None,
             issuance_fence: None,
             id: "consent-1".to_string(),
             user_id: "user-1".to_string(),

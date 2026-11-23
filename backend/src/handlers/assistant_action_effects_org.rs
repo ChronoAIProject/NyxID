@@ -4094,7 +4094,7 @@ mod wave4_effect_tests {
             .expect("insert actor");
         let body = AssistantOpenClawConnectRequest {
             action_request_id: "openclaw-reserved".to_string(),
-            gateway_url: "https://openclaw.example.test".to_string(),
+            gateway_url: "https://127.0.0.1".to_string(),
             credential: "bearer-token".to_string(),
             label: Some("Reserved OpenClaw".to_string()),
         };

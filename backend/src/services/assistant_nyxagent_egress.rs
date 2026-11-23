@@ -154,6 +154,45 @@ fn valid_handle(handle: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+#[derive(Clone)]
+struct ManagerRequestFence {
+    attempt: Option<crate::models::assistant_conversation::ExecutionAttempt>,
+    window: Option<(String, String, Option<String>)>,
+    close: bool,
+    foreground_post: bool,
+}
+
+fn control_response(method: &Method, path: &str) -> Option<Option<String>> {
+    if matches!(
+        (method, path),
+        (&Method::GET, "v1/responses/lookup") | (&Method::POST, "v1/responses/cancel")
+    ) {
+        return Some(None);
+    }
+    let (id, suffix) = path.strip_prefix("v1/responses/")?.split_once('/')?;
+    let (session, response) = id.strip_prefix("resp_")?.split_once('_')?;
+    if ![session, response]
+        .into_iter()
+        .all(|segment| engine::prefixed_hex(segment, ""))
+    {
+        return None;
+    }
+    match *method {
+        Method::GET
+            if suffix == "events"
+                || suffix.strip_prefix("events?after=").is_some_and(|cursor| {
+                    !cursor.is_empty()
+                        && cursor.bytes().all(|byte| byte.is_ascii_digit())
+                        && cursor.parse::<u64>().is_ok()
+                }) =>
+        {
+            Some(Some(id.to_owned()))
+        }
+        Method::POST if suffix == "cancel" => Some(Some(id.to_owned())),
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl NyxAgentEgress for Egress {
     async fn preload_skills(
@@ -185,7 +224,7 @@ impl NyxAgentEgress for Egress {
             return Err(AppError::AssistantTurnRequired);
         }
         // Public authority never enters owner resolution or ordinary approvals.
-        let (user_id, turn, platform_origin) = match authority {
+        let (user_id, turn, platform_origin, attempt) = match authority {
             NyxAgentExecutionContext::Public(context) => {
                 return super::platform_public_proxy_service::dispatch_nyxagent(
                     &self.state,
@@ -199,7 +238,8 @@ impl NyxAgentEgress for Egress {
                 user_id,
                 turn,
                 platform_origin,
-            } => (user_id, turn, platform_origin),
+                attempt,
+            } => (user_id, turn, platform_origin, attempt),
         };
         let mut request = request;
         if (self.channel.is_some() || self.model_setup) && request.idempotency_key.is_empty() {
@@ -208,7 +248,16 @@ impl NyxAgentEgress for Egress {
         if self.channel.is_none() && !self.model_setup && platform_origin.is_none() {
             return Err(AppError::AssistantTurnRequired);
         }
-        validate_operation(&request)?;
+        let control = control_response(&request.method, &request.relative_path);
+        let background = request.relative_path == "v1/responses" && request.body.as_ref().is_some_and(|body| body["background"] == true);
+        let window = if control.is_some() || background {
+            if platform_origin.is_none() || (control.is_none() && attempt.is_none()) || (control.is_some() && request.body.is_some()) { return Err(AppError::AssistantTurnRequired); }
+            let destination = request.destination.as_ref().ok_or(AppError::AssistantTurnRequired)?;
+            Some((request.idempotency_key.clone(), destination.0.clone(), control.clone().flatten()))
+        } else { None };
+        let close = control == Some(None);
+        let proof = ManagerRequestFence { attempt: attempt.clone(), window, close, foreground_post: request.method == Method::POST && request.relative_path == "v1/responses" && !background };
+        if control.is_none() && !(platform_origin.is_some() && request.method == Method::GET && request.relative_path == "v1/models?include_capabilities=true" && request.body.is_none()) { validate_operation(&request)?; }
         let permit = route_inventory::enforce_billing_egress_classification(
             request.billing_policy,
             BillingIngress::Proxy,
@@ -234,6 +283,7 @@ impl NyxAgentEgress for Egress {
                 user_id,
                 turn,
                 credential,
+                &proof,
                 platform_origin
                     .as_ref()
                     .ok_or(AppError::AssistantTurnRequired)?,
@@ -348,8 +398,7 @@ impl NyxAgentEgress for Egress {
                 Err(_) => tracing::warn!("NyxAgent transport identity assertion unavailable"),
             }
         }
-        let metric =
-            super::billing::metric_resolution::platform_metric_for_request(&target.service, false);
+        let metric = if control.is_some() { crate::models::service_billing::BillingMetric::Requests } else { super::billing::metric_resolution::platform_metric_for_request(&target.service, false) };
         // llm-nyx has auth_method=none and no catalog credential. Preserve the
         // ordinary NoAuth outer-hop lane; inner model calls meter independently.
         let class = CredentialClass::NoAuth;
@@ -377,7 +426,7 @@ impl NyxAgentEgress for Egress {
             target.auth_method.clone(),
             class,
             metric,
-            target.service.billing.as_ref(),
+            target.service.billing.as_ref().filter(|_| control.is_none()),
             state.billing.resale_enabled(),
         );
         if let Some(body) = request.body.as_ref().filter(|_| request.relative_path == "v1/responses")
@@ -418,6 +467,7 @@ impl NyxAgentEgress for Egress {
                 user_id,
                 turn,
                 credential,
+                &proof,
                 platform_origin
                     .as_ref()
                     .ok_or(AppError::AssistantTurnRequired)?,
@@ -449,19 +499,35 @@ impl NyxAgentEgress for Egress {
         );
         headers.insert(
             "accept",
-            http::HeaderValue::from_static(if request.relative_path == "v1/responses" {
+            http::HeaderValue::from_static(if request.relative_path == "v1/responses" || (request.method == Method::GET && control.as_ref().is_some_and(Option::is_some)) {
                 "text/event-stream"
             } else {
                 "application/json"
             }),
         );
-        let outbound = vec![
+        let usage_context =
+            response_core::should_capture_llm_usage(&target.service, metric).then(|| {
+                llm_usage_service::UsageAuditContext {
+                    db: state.db.clone(),
+                    user_id: user_id.clone(),
+                    provider_slug: None,
+                    service_id: Some(service.id.clone()),
+                    model: None,
+                    path: request.relative_path.clone(),
+                    api_key_id: Some(key.id.clone()),
+                    api_key_name: Some(key.name.clone()),
+                }
+            });
+        let mut outbound = vec![
             (
                 "authorization".into(),
                 format!("Bearer {}", credential.raw_key.as_str()),
             ),
             ("idempotency-key".into(), request.idempotency_key),
         ];
+        if usage_context.is_some() {
+            outbound.push(llm_usage_service::identity_encoding_header());
+        }
         #[cfg(test)]
         if let Some(boundary) = &self.dispatch_boundary {
             boundary.entered.add_permits(1);
@@ -475,6 +541,8 @@ impl NyxAgentEgress for Egress {
             self.fence_channel(user_id, turn, credential, session)
                 .await
                 .map(|_| ())
+        } else if proof.attempt.is_some() || proof.close {
+            self.fence_owner(user_id, turn, credential, &proof, platform_origin.as_ref().ok_or(AppError::AssistantTurnRequired)?).await.map(|_| ())
         } else {
             Ok(())
         };
@@ -498,14 +566,15 @@ impl NyxAgentEgress for Egress {
             return Err(error);
         }
         let downstream_started = std::time::Instant::now();
+        let (path, query) = request.relative_path.split_once('?').map_or((request.relative_path.as_str(), None), |(path, query)| (path, Some(query)));
         let result = crate::downstream_disconnect::until_client_disconnect(
             &cancellation,
             proxy_service::forward_request_with_extra_outbound_headers(
-                proxy_service::no_redirect_http_client(),
+                proxy_service::Redirects::Return,
                 &target,
                 request.method.clone(),
-                &request.relative_path,
-                None,
+                path,
+                query,
                 headers.clone(),
                 proxy_service::ProxyBody::Buffered(
                     (!payload.is_empty()).then(|| bytes::Bytes::from(payload.clone())),
@@ -568,19 +637,6 @@ impl NyxAgentEgress for Egress {
                 builder = builder.header(name, value);
             }
         }
-        let usage_context =
-            response_core::should_capture_llm_usage(&target.service, metric).then(|| {
-                llm_usage_service::UsageAuditContext {
-                    db: state.db.clone(),
-                    user_id: user_id.clone(),
-                    provider_slug: None,
-                    service_id: Some(service.id.clone()),
-                    model: None,
-                    path: request.relative_path.clone(),
-                    api_key_id: Some(key.id.clone()),
-                    api_key_name: Some(key.name.clone()),
-                }
-            });
         let mut response = response_core::relay_response(
             state,
             HttpResponseContext {
@@ -682,6 +738,7 @@ impl Egress {
         user_id: &str,
         turn: &TurnRef,
         credential: &RuntimeCredential,
+        proof: &ManagerRequestFence,
         expected_origin: &PlatformTurnOrigin,
     ) -> AppResult<AssistantConversation> {
         let db = self.state.db.clone();
@@ -700,12 +757,13 @@ impl Egress {
             credential.api_key_id.clone(),
             turn.clone(),
             expected_origin.clone(),
+            proof.clone(),
         );
         session
             .start_transaction()
             .and_run(
                 context,
-                |session, (db, identity, user_id, key_id, turn, origin)| {
+                |session, (db, identity, user_id, key_id, turn, origin, proof)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
                             let row = db
@@ -717,13 +775,35 @@ impl Egress {
                                 .session(&mut *session)
                                 .await?
                                 .ok_or(AppError::AssistantTurnRequired)?;
+                            if proof.close && let Some((key, destination, None)) = &proof.window
+                                && (row.active_turn.is_none() || row.active_turn.as_ref().is_some_and(|active| active.stop_requested)) {
+                                let expected = super::platform_personal_turn_service::model_origin(origin);
+                                let mut filter = doc! {"_id":&turn.conversation_id,"user_id":&*user_id,"credential_api_key_id":&*key_id};
+                                if let Some(active) = &row.active_turn {
+                                    if active.execution_attempt != proof.attempt || active.platform_origin.as_ref() != Some(&expected) || active.turn_id != turn.turn_id {return Err(AppError::AssistantTurnRequired);}
+                                    filter.extend(doc! {"active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":true,"active_turn.restart_admission.window.key":key,"active_turn.restart_admission.window.terminal":{"$ne":true},"active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.credential_id":&*key_id,"active_turn.restart_admission.reattach.destination_hash":destination});
+                                } else {
+                                    if row.stopped_window.as_ref().and_then(|window| window.manager_origin.as_deref()) != Some(&expected) {return Err(AppError::AssistantTurnRequired);}
+                                    filter.extend(doc! {"active_turn":mongodb::bson::Bson::Null,"stopped_window.turn_id":&turn.turn_id,"stopped_window.window_key":key,"stopped_window.credential_id":&*key_id,"stopped_window.destination_hash":destination});
+                                }
+                                let fenced = db.collection::<AssistantConversation>(CONVERSATIONS).update_one(filter,doc! {"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?;
+                                if fenced.matched_count != 1 || identity.fence_personal_origin(db, session, &origin.authority).await? != FenceOutcome::Authorized {return Err(AppError::AssistantTurnRequired);}
+                                return Ok(row);
+                            }
                             let active = engine::live_turn(&row, Utc::now())
                                 .filter(|active| {
                                     active.turn_id == turn.turn_id && !active.stop_requested
                                 })
                                 .ok_or(AppError::AssistantTurnRequired)?;
-                            if active.platform_origin.is_none() {
+                            if active.platform_origin.is_none() || active.execution_attempt != proof.attempt || (proof.foreground_post && active.restart_admission.is_some()) ||
+                                (proof.attempt.is_some() && !super::assistant_turn_restart::owns_subscriber(&row, &super::assistant_engine_worker::instance().id)) {
                                 return Err(AppError::AssistantTurnRequired);
+                            }
+                            if let Some((key, destination, response)) = &proof.window {
+                                let source = active.restart_admission.as_deref().ok_or(AppError::AssistantTurnRequired)?;
+                                if source.credential_ended || source.credential_id != *key_id || source.window.as_ref().is_none_or(|window| window.key != *key || window.terminal) || source.reattach.as_ref().is_none_or(|deployment| deployment.destination_hash != *destination) || response.as_ref().is_some_and(|id| active.running_response.as_ref().is_none_or(|bound| &bound.response_id != id || bound.credential_api_key_id != *key_id)) {
+                                    return Err(AppError::AssistantTurnRequired);
+                                }
                             }
                             let fence =
                                 super::platform_personal_turn_service::fence_execution_in_session(

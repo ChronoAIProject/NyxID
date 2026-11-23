@@ -276,7 +276,7 @@ async fn gateway_reask_transport_matrix_confirms_one_identical_platform_message(
             assert!(outcomes(&f).await.is_empty());
             assert_eq!(provider(&f).await, "started");
             let advice = health(&f).await;
-            assert_eq!(advice.action, "none");
+            assert_eq!(advice.action, "gateway");
             assert!(advice.text.contains("still trying"));
             assert!(!advice.text.contains("accepted"));
             due(&f).await;
@@ -318,7 +318,7 @@ async fn gateway_reask_transport_matrix_expires_with_truthful_health_and_lookup(
             assert_eq!(wait_row(&f).await.get_bool("pending"), Ok(false));
             server.assert_one_message(2);
             let advice = health(&f).await;
-            assert_eq!(advice.action, "none");
+            assert_eq!(advice.action, "gateway");
             assert!(!advice.text.contains("accepted"));
             assert!(!advice.text.contains("still trying"));
             assert!(advice.text.contains("before checking stopped"));

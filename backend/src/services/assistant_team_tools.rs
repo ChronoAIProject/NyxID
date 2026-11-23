@@ -261,7 +261,19 @@ pub fn schema(name: &str) -> Value {
                 },
             )
         }
-        "list_schedules" => (json!({}), vec![]),
+        "list_schedules" => (
+            json!({
+                "cursor": {
+                    "type":"object", "additionalProperties":false, "required":["created_at","id"],
+                    "properties":{"created_at":{"type":"string","format":"date-time"},"id":{"type":"string","format":"uuid"}},
+                    "description":"Pass the previous page's next_cursor with the same filters until next_cursor is null. If the result has a ref, first assemble the page with nyxid__read_tool_result(ref, part=next_part)."
+                },
+                "limit":{"type":"integer","minimum":1,"maximum":50,"default":20},
+                "enabled":{"type":"boolean","description":"True selects active automations and false selects disabled automations. Omit to include both."},
+                "agent_id":{"type":"string","format":"uuid","description":"Only assistant deliveries to this agent ID."}
+            }),
+            vec![],
+        ),
         "list_notifications" => (
             json!({
                 "since": {"type":"string","format":"date-time","maxLength":64,"description":"Only activity updated at or after this RFC3339 timestamp."},
@@ -355,7 +367,7 @@ pub fn schema(name: &str) -> Value {
         }
         "get_agent_operations" => (
             json!({"subagent":subagent,"guests":{"type":"boolean"},
-                "service_id":string(64),"cursor":string(128),
+                "service_id":string(64),"effect_class":{"type":"string","enum":["read","change","sensitive","destructive"]},"cursor":string(128),
                 "limit":{"type":"integer","minimum":1,"maximum":50}}),
             vec!["subagent"],
         ),
@@ -470,6 +482,7 @@ pub fn schema(name: &str) -> Value {
         "stop_following_thread" => (json!({"thread_id":string(64)}), vec!["thread_id"]),
         "update_channel_chat" => (
             json!({"chat_id": string(64),
+                "notice_language":{"type":"string","enum":["en","zh-CN","zh-TW","default"],"description":"Language for fixed notices in this chat and its followed threads. Default is English."},
                 "threads":{"type":"string","enum":["follow","off"]},
                 "reply_mode": {"type": "string", "enum": ["mention", "all"],
                     "description": "Groups and channels: answer only when mentioned or \
@@ -630,6 +643,10 @@ pub fn schema(name: &str) -> Value {
         properties["org"] = json!({"type":"string","minLength":1,"maxLength":128,
             "description":"Organization ID, slug or unambiguous name. Uses live member access; omit for personal agents."});
     }
+    if name == "set_agent_operations" {
+        properties["selection"]["properties"]["read_only"] = json!({"const":true,
+            "description":"Snapshot currently allowed, published read operations and preserve their input limits. Use with expected_revision alone."});
+    }
     if matches!(
         name,
         "create_schedule" | "update_schedule" | "settings_link"
@@ -659,7 +676,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Read the owner's Notifications with bounded previews and links. When the owner asks what they missed, or a NyxBot automation asks for a digest, call this tool. Defaults to unread activity; optional kinds, since and limit narrow the results. Since selects rows by their latest update; a coalesced count covers its entire unread window, starting at created_at, and may include older activity. Reading never marks notifications as seen. Available only in the owner's NyxBot threads, including scheduled NyxBot turns."
         }
         "list_schedules" => {
-            "List the owner's schedules and assistant webhook automations, including confirmation policy, timezone and next runs."
+            "List the owner's schedules and assistant webhook automations with full details, newest first. If a page has a ref, concatenate its content with each nyxid__read_tool_result(ref, part=next_part) until complete. Pass the page's next_cursor as cursor with the same filters until next_cursor is null."
         }
         "update_schedule" => {
             "Edit a schedule or assistant webhook automation, including confirmation_policy and thread_policy. Webhooks default to dedicated; home requires explicit owner acceptance of untrusted text persisting into later full-authority turns. Pause/resume with paused. Read back returned next runs."
@@ -746,10 +763,10 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Request a change of your operation selection for a granted service. Only work NyxBot assigned to you (or that runs in a group NyxBot is in) can raise a request, and only when routed specialist requests are enabled; other work gets missing_access with no request and tells the person it works for. Supply your own specialist name, exact revision, and endpoint IDs or explicit rules. This requests permission; it grants nothing. Widening also needs an owner action card."
         }
         "get_agent_operations" => {
-            "Page a specialist's granted services, stable operation IDs, current selections and revisions. Optional service_id filters an exact granted connection or platform service ID; limit is 1–50 (default 20), with a smaller page when needed to fit. Repeat with cursor=next_cursor and the same subagent, service_id and guests until complete=true. Append each service's operations, endpoint_ids and rules and merge inputs across pages before editing a selection; an empty array on one page is not a complete selection. If the snapshot changes, discard collected pages and restart without cursor. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
+            "Page a specialist's granted services, stable operation IDs, current selections and revisions. Optional effect_class (read, change, sensitive or destructive) returns only matching published endpoints and their saved IDs/inputs. For a complete selection including explicit rules, omit effect_class. Optional service_id filters an exact granted connection or platform service ID; limit is 1–50 (default 20), with a smaller page when needed to fit. Repeat with cursor=next_cursor and the same subagent, service_id, effect_class and guests until complete=true. Append each service's operations, endpoint_ids and rules and merge inputs across pages before editing a selection; an empty array on one page is not a complete selection. If the snapshot changes, discard collected pages and restart without cursor. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
         }
         "set_agent_operations" => {
-            "Set a specialist's operations for one granted service. Narrowing applies immediately; widening runs automatically with a receipt in Full access and requires the owner's action card in Auto and Ask every time. Use the exact revision and IDs from get_agent_operations, and send back any inputs it lists for operations you keep. After a card, retry with its retry_arguments plus acknowledgement_id. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
+            "Set a specialist's operations for one granted service. Narrowing applies immediately; widening runs automatically with a receipt in Full access and requires the owner's action card in Auto and Ask every time. To narrow in one call, pass selection {expected_revision, read_only:true}. This snapshots currently allowed published read operations, keeps their input limits, and excludes future publications. Revision 0 applies to a new grant. For explicit edits use the exact revision and IDs from unfiltered get_agent_operations, and send back any inputs it lists for operations you keep. After a card, retry with its retry_arguments plus acknowledgement_id. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
         }
         "set_guest_access" => {
             "Set what people other than the user (guests: other members of a group or shared \
@@ -1276,6 +1293,41 @@ mod tests {
     }
 
     #[test]
+    fn list_schedules_advertises_continuation_and_read_only_annotations() {
+        let annotations =
+            crate::services::mcp_service::tool_annotations("nyxid__list_schedules", &[]).unwrap();
+        assert!(annotations["title"].is_string());
+        assert_eq!(annotations["readOnlyHint"], true);
+        assert_eq!(annotations["destructiveHint"], false);
+        assert_eq!(annotations["openWorldHint"], false);
+        let cursor = json!({"created_at":"2026-01-01T00:00:00Z","id":"e98c2ab2-8bdb-4bc9-b9a9-5b7614ca498c"});
+        assert!(
+            validate(
+                "list_schedules",
+                &json!({"cursor":cursor,"limit":50,"enabled":false})
+            )
+            .is_ok()
+        );
+        for args in [
+            json!({"limit":0}),
+            json!({"limit":51}),
+            json!({"cursor":{}}),
+            json!({"user_id":"other"}),
+        ] {
+            assert!(validate("list_schedules", &args).is_err());
+        }
+        for text in [
+            description("list_schedules"),
+            schema("list_schedules")["properties"]["cursor"]["description"]
+                .as_str()
+                .unwrap(),
+        ] {
+            assert!(text.contains("next_cursor"));
+            assert!(text.contains("nyxid__read_tool_result"));
+        }
+    }
+
+    #[test]
     fn operation_discovery_pagination_schema_advertises_real_recovery_parameters() {
         assert!(validate("get_agent_operations", &json!({"subagent":"worker"})).is_ok());
         let args = json!({"subagent":"worker","guests":true,"service_id":"connection-id","limit":1,"cursor":"v1:snapshot:1"});
@@ -1285,6 +1337,7 @@ mod tests {
             ("limit", json!(51)),
             ("limit", json!(1.5)),
             ("cursor", json!("x".repeat(129))),
+            ("effect_class", json!("read_only")),
             ("service_id", json!("x".repeat(65))),
         ] {
             let mut invalid = args.clone();
@@ -1293,7 +1346,7 @@ mod tests {
         }
         let spec = schema("get_agent_operations");
         assert_eq!(spec["required"], json!(["subagent"]));
-        for field in ["service_id", "limit", "cursor", "guests"] {
+        for field in ["service_id", "limit", "cursor", "guests", "effect_class"] {
             assert!(spec["properties"].get(field).is_some());
             assert!(description("get_agent_operations").contains(field));
         }

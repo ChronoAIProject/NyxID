@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    models::assistant_conversation::{EngineWorkerInstance, RestartSource},
+    models::assistant_conversation::{EngineWorkerInstance, RestartSource, TeamRestartSource},
     services::assistant_turn_restart,
 };
 
@@ -71,22 +71,56 @@ pub(crate) async fn cancel(state: &AppState, row: &AssistantConversation) {
             if credential.api_key_id != stopped.credential_id {
                 return None;
             }
-            let result = proxy_raw(
-                state,
-                &auth,
-                &credential.raw_key,
-                "POST",
-                "v1/responses/cancel",
-                None,
-                Some(&stopped.window_key),
-                Some(
-                    crate::services::platform_manager_contract::NyxAgentDestination(
-                        destination.clone(),
+            let result = if let Some(origin) = &stopped.manager_origin {
+                use crate::services::platform_manager_contract as contract;
+                manager_egress(state)
+                    .request(
+                        &contract::NyxAgentExecutionContext::Owner {
+                            user_id: row.user_id.clone(),
+                            attempt: None,
+                            turn: contract::TurnRef {
+                                conversation_id: row.id.clone(),
+                                turn_id: stopped.turn_id.clone(),
+                            },
+                            platform_origin: Some(
+                                crate::services::platform_personal_turn_service::contract_origin(
+                                    origin,
+                                )
+                                .ok()?,
+                            ),
+                        },
+                        &contract::RuntimeCredential {
+                            api_key_id: credential.api_key_id.clone(),
+                            raw_key: credential.raw_key.clone(),
+                        },
+                        contract::NyxAgentRequest {
+                            method: http::Method::POST,
+                            relative_path: "v1/responses/cancel".into(),
+                            body: None,
+                            idempotency_key: stopped.window_key.clone(),
+                            destination: Some(contract::NyxAgentDestination(destination.clone())),
+                            billing_policy: Some(SERVER_TURN_POLICY),
+                        },
+                    )
+                    .await
+            } else {
+                proxy_raw(
+                    state,
+                    &auth,
+                    &credential.raw_key,
+                    "POST",
+                    "v1/responses/cancel",
+                    None,
+                    Some(&stopped.window_key),
+                    Some(
+                        crate::services::platform_manager_contract::NyxAgentDestination(
+                            destination.clone(),
+                        ),
                     ),
-                ),
-                Some(SERVER_TURN_POLICY),
-            )
-            .await
+                    Some(SERVER_TURN_POLICY),
+                )
+                .await
+            }
             .ok()?;
             if !result.status().is_success() {
                 return None;
@@ -140,7 +174,15 @@ pub(crate) async fn cancel(state: &AppState, row: &AssistantConversation) {
         .ok()
         .flatten()
         .filter(|credential| credential.api_key_id == admission.credential_id)?;
-        let transport = http_egress(state.clone(), auth.clone());
+        let transport = if row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.platform_origin.is_some())
+        {
+            manager_egress(state)
+        } else {
+            http_egress(state.clone(), auth.clone())
+        };
         crate::services::assistant_nyxagent_runtime::cancel_background(
             state,
             transport.as_ref(),
@@ -258,6 +300,16 @@ pub(in crate::handlers) async fn take_one(
         TurnOrigin::Trigger | TurnOrigin::Event => "event",
         TurnOrigin::Group => "group",
         TurnOrigin::Orchestrator => "orchestrator",
+        TurnOrigin::Channel
+            if matches!(
+                admission.chat_source.as_deref(),
+                Some(
+                    crate::models::assistant_conversation::ChatRestartSource::PrivateChannel { .. }
+                )
+            ) =>
+        {
+            "user"
+        }
         TurnOrigin::Channel => return Ok(false),
     };
     let message = state
@@ -278,31 +330,50 @@ pub(in crate::handlers) async fn take_one(
     }
     let limiter = &state.direct_chat_limiter;
     let owner = &admission.actor_id;
-    let team_limit = match admission.source {
-        RestartSource::FirstPartyOwner => None,
+    use crate::models::assistant_conversation::{ChatRestartSource, PlatformOriginSource};
+    let channel_pool = match admission.chat_source.as_deref() {
+        Some(ChatRestartSource::PrivateChannel { .. }) => true,
+        Some(ChatRestartSource::PersonalManager { origin }) => {
+            matches!(origin.source, PlatformOriginSource::Ingress { .. })
+        }
+        _ => false,
+    };
+    let team_limit = match (&admission.source, &admission.team_source) {
+        _ if !channel_pool && admission.chat_source.is_some() => {
+            Some(crate::handlers::assistant_team::team_pool_limit(state, owner).await + 1)
+        }
+        (RestartSource::FirstPartyOwner, None) => None,
         _ => Some(
             crate::handlers::assistant_team::team_pool_limit(state, owner).await
-                + u32::from(!offered.is_subagent()),
+                + u32::from(
+                    !offered.is_subagent()
+                        || matches!(
+                            admission.team_source,
+                            Some(TeamRestartSource::GroupMember { .. })
+                        ),
+                ),
         ),
     };
-    let (row, permit) = if let Some(token) = &admission.capacity {
-        let context = (
-            state.db.clone(),
-            limiter.clone(),
-            token.clone(),
-            owner.clone(),
-            team_limit,
-            offered.clone(),
-            worker.clone(),
-        );
-        let claimed = crate::services::transaction_service::run_db_only(
+    let (row, permit) =
+        if let Some(token) = &admission.capacity {
+            let context = (
+                state.db.clone(),
+                limiter.clone(),
+                token.clone(),
+                owner.clone(),
+                team_limit,
+                channel_pool,
+                offered.clone(),
+                worker.clone(),
+            );
+            let claimed = crate::services::transaction_service::run_db_only(
             &state.db,
             &context,
-            |session, (db, limiter, token, owner, team_limit, offered, worker)| {
+            |session, (db, limiter, token, owner, team_limit, channel_pool, offered, worker)| {
                 Box::pin(async move {
-                    let transferred = limiter
-                        .transfer_capacity(session, token, owner, *team_limit)
-                        .await?;
+                    let transferred = if *channel_pool {
+                        limiter.transfer_channel_capacity(session, token, owner).await?
+                    } else { limiter.transfer_capacity(session, token, owner, *team_limit).await? };
                     if transferred.is_none()
                         && crate::services::assistant_nyxagent_runtime::expired_handoff(offered)
                             .is_none()
@@ -313,7 +384,7 @@ pub(in crate::handlers) async fn take_one(
                         db,
                         offered,
                         worker,
-                        transferred.as_ref(),
+                        transferred.as_ref().map(|grant| &grant.token),
                         session,
                     )
                     .await?
@@ -323,34 +394,51 @@ pub(in crate::handlers) async fn take_one(
             },
         )
         .await;
-        let (row, transferred) = match claimed {
-            Ok(claimed) => claimed,
-            Err(AppError::AssistantTurnActive) => return Ok(false),
-            Err(error) => return Err(error),
+            let (row, transferred) = match claimed {
+                Ok(claimed) => claimed,
+                Err(AppError::AssistantTurnActive) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            let permit = match transferred {
+                Some(grant) => limiter.transferred_permit(owner, grant),
+                None => DirectChatPermit::settlement_only(),
+            };
+            (row, permit)
+        } else {
+            let permit = match team_limit {
+                None if channel_pool => {
+                    limiter
+                        .try_acquire_pool(
+                            "assistant_channel",
+                            owner,
+                            crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+                        )
+                        .await?
+                }
+                None => limiter.recover_owner_slot(owner).await?,
+                Some(limit) => {
+                    limiter
+                        .try_acquire_pool("assistant_team", owner, limit)
+                        .await?
+                }
+            };
+            let Some(permit) = permit else {
+                return Ok(false);
+            };
+            let Some(row) = assistant_turn_restart::claim(&state.db, offered, worker).await? else {
+                return Ok(false);
+            };
+            (row, permit)
         };
-        let permit = match transferred {
-            Some(token) => limiter.transferred_permit(owner, token),
-            None => DirectChatPermit::settlement_only(),
-        };
-        (row, permit)
-    } else {
-        let permit = match team_limit {
-            None => limiter.recover_owner_slot(owner).await?,
-            Some(limit) => {
-                limiter
-                    .try_acquire_pool("assistant_team", owner, limit)
-                    .await?
-            }
-        };
-        let Some(permit) = permit else {
-            return Ok(false);
-        };
-        let Some(row) = assistant_turn_restart::claim(&state.db, offered, worker).await? else {
-            return Ok(false);
-        };
-        (row, permit)
-    };
     credentials::validate_claimed(&state.db, &row, &credential).await?;
+    let mut row = row;
+    if let Some(crate::models::assistant_conversation::ChatRestartSource::Wake {
+        reply_channel,
+        ..
+    }) = admission.chat_source.as_deref()
+    {
+        row.reply_channel = reply_channel.clone();
+    }
     let cursor = active
         .reply
         .as_ref()

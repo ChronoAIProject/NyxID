@@ -364,7 +364,7 @@ async fn cancel_in_session(
         db,
         doc! {"_id": id, "outcome": {"$in": ["pending", "started", "waiting"]}},
         RunOutcome::Failed,
-        Some(reason),
+        FinishReason::Scheduler(Some(reason)),
         frontend,
         session,
     )

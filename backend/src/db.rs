@@ -3349,6 +3349,14 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    org_invites
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"org_user_id":1, "created_by":1, "redeemed_at":1, "expires_at":1})
+                .build(),
+        )
+        .await?;
+
     // ── telemetry erasure queue (docs/TELEMETRY.md §8) ──
     // The drain worker atomically claims the oldest pending job; the
     // `status + created_at` compound index matches that query. `user_id`
@@ -6556,6 +6564,7 @@ mod tests {
             is_active: true,
             created_by: "system".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

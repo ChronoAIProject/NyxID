@@ -130,6 +130,7 @@ describe("ApprovalsView", () => {
     expect(await screen.findAllByText("Approved")).toHaveLength(1);
     expect(screen.getAllByText("Denied")).toHaveLength(1);
     expect(screen.getAllByText("Expired")).toHaveLength(1);
+    expect(screen.getByText(/Nothing was sent\./)).toBeVisible();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     const rows = screen.getByRole("tabpanel").querySelectorAll('[data-grouped-row]');
     expect(rows).toHaveLength(3);

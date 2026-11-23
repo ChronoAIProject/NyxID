@@ -436,7 +436,7 @@ pub async fn admit(
             // Provider playback differs from model generation. Rebuild context from
             // retained transcript evidence instead of reusing unconfirmed audio history.
             db.collection::<AssistantConversation>(THREADS).update_one(doc!{"_id":&s.conversation_id,"user_id":&b.user_id},doc!{"$set":{"nyxagent_session_id":bson::Bson::Null,"nyxagent_last_response_id":bson::Bson::Null,"nyxagent_instruction_binding":bson::Bson::Null,"context_reset_at":bson::DateTime::now(),"context_reset_reason":"channel_delivery"}}).session(&mut *tx).await?;
-            let mut claim=Box::pin(engine::begin_owner_turn_in_session(&db,tx,&keys,&b.user_id,&start,&ids,&agent,None,None,None)).await?.into_started()?;
+            let mut claim=Box::pin(engine::begin_owner_turn_in_session(&db,tx,&keys,&b.user_id,&start,&ids,&agent,None,None,None, None)).await?.into_started()?;
             let authority=TurnAuthority{binding_id:b.id.clone(),session_id:s.id.clone(),binding_revision:b.revision,generation:s.generation,credential_identity:s.credential_identity.clone()};
             db.collection::<AssistantConversation>(THREADS).update_one(doc!{"_id":&ids.conversation_id,"active_turn.turn_id":&ids.turn_id},doc!{"$set":{"active_turn.channel_adapter_origin":bson::to_bson(&authority).map_err(|_|AppError::AssistantTurnRequired)?}}).session(&mut *tx).await?;
             if let Some(turn)=claim.conversation.active_turn.as_mut(){turn.channel_adapter_origin=Some(authority);}

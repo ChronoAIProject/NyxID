@@ -304,6 +304,19 @@ fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
 #[derive(Clone, Copy)]
 pub(crate) struct ProxyExchangeStartedAt(pub(crate) std::time::Instant);
 
+fn direct_response_header_value(
+    status: StatusCode,
+    name_lower: &str,
+    value: &[u8],
+    is_sse: bool,
+    context: Option<&AsyncLocationContext>,
+) -> Option<axum::http::HeaderValue> {
+    if name_lower == "location" && status.is_redirection() {
+        return axum::http::HeaderValue::from_bytes(value).ok();
+    }
+    forwarded_response_header_value(name_lower, value, is_sse, context)
+}
+
 fn forwarded_response_header_value(
     name_lower: &str,
     value: &[u8],
@@ -655,10 +668,10 @@ fn effective_header_map(
     Ok(result)
 }
 
-fn strip_durable_idempotency_defaults(
-    headers: &mut Vec<crate::models::default_request_header::ResolvedDefaultRequestHeader>,
-) {
-    headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
+fn retain_durable_default(
+    header: &crate::models::default_request_header::ResolvedDefaultRequestHeader,
+) -> bool {
+    !header.name.eq_ignore_ascii_case("idempotency-key")
 }
 
 fn single_system_header(
@@ -787,6 +800,7 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    crate::mw::csrf::check_proxy_navigation(&state.config, &auth_user.auth_method, &request)?;
     ingress::execute(
         &state.refusal_throttle,
         &auth_user,
@@ -1177,6 +1191,7 @@ pub async fn proxy_request_by_slug(
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    crate::mw::csrf::check_proxy_navigation(&state.config, &auth_user.auth_method, &request)?;
     ingress::execute(
         &state.refusal_throttle,
         &auth_user,
@@ -4171,14 +4186,14 @@ async fn execute_resolved_proxy_inner<'a>(
     if is_pool_attempt {
         // The common owner observes native bytes for accounting (and may translate
         // them); reqwest/node transports do not automatically decode compression.
-        extra_outbound_headers.push(("accept-encoding".into(), "identity".into()));
+        extra_outbound_headers.push(llm_usage_service::identity_encoding_header());
         if catalog_service_slug.as_deref() == Some("llm-openai-codex")
             && pool_accounting
                 .as_ref()
                 .is_some_and(|c| c.prepared_chat.is_some())
             && target.service.custom_user_agent.is_none()
             && !target
-                .catalog_default_headers
+                .catalog_headers()
                 .iter()
                 .chain(target.user_service_default_headers.iter())
                 .any(|header| header.name.eq_ignore_ascii_case("user-agent"))
@@ -4612,8 +4627,12 @@ async fn execute_resolved_proxy_inner<'a>(
         // Idempotency forwarding is owned exclusively by the durable endpoint
         // contract. Service defaults cannot create replay semantics that the
         // selected operation did not authorize.
-        strip_durable_idempotency_defaults(&mut target.catalog_default_headers);
-        strip_durable_idempotency_defaults(&mut target.user_service_default_headers);
+        target
+            .catalog_default_headers
+            .retain(retain_durable_default);
+        target
+            .user_service_default_headers
+            .retain(retain_durable_default);
     }
     if scheduled_api_key_id.is_none()
         && (durable_grant_id.is_some() || durable_operation_id.is_some())
@@ -4641,7 +4660,7 @@ async fn execute_resolved_proxy_inner<'a>(
     let node_forward_headers = proxy_service::collect_forward_headers_with_defaults(
         &all_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -4748,6 +4767,7 @@ async fn execute_resolved_proxy_inner<'a>(
             method.as_str(),
             operation_path.as_ref(),
             crate::services::agent_operation_scope_service::GuestHttpContext {
+                catalog_slug: catalog_service_slug.as_deref(),
                 query: query.as_deref(),
                 websocket: is_ws_candidate,
                 // The webhook floor runs before assistant selection/consent.
@@ -4801,10 +4821,23 @@ async fn execute_resolved_proxy_inner<'a>(
         query.as_deref(),
         &body_bytes,
     );
-    // Only POST needs catalog authority to become a read. Preserve method
-    // classification and the existing endpoint-query budget for other raw
-    // requests; guest/operation-scope authorization has already run above.
-    let effects = if method == reqwest::Method::POST {
+    // Apply destructive overlay routes even without endpoint rows (including PUT
+    // cell edits). Only POST needs the additional stored-endpoint lookup.
+    let compiled = catalog_service_slug
+        .as_deref()
+        .and_then(crate::services::catalog_spec_registry::spec_key_for_slug)
+        .and_then(|key| {
+            crate::services::catalog_spec_registry::compiled_effects(
+                key,
+                &method,
+                operation_path.as_ref()?,
+                query.as_deref(),
+                method_override,
+            )
+        });
+    let effects = if let Some(destructive) = compiled.filter(|effects| effects.destructive) {
+        destructive
+    } else if method == reqwest::Method::POST {
         crate::services::agent_operation_scope_service::unscoped_effects(
             &state.db,
             operation_scope_id,
@@ -4817,6 +4850,7 @@ async fn execute_resolved_proxy_inner<'a>(
     } else {
         crate::services::mcp_service::operation_effects(&method, Default::default())
     };
+    assistant_projection.destructive = effects.destructive;
     operation_descriptor::apply_operation_effects(&mut operation, effects, method_override);
     operation_descriptor::apply_inference_contract(
         &mut operation,
@@ -5178,6 +5212,15 @@ async fn execute_resolved_proxy_inner<'a>(
                     auth_user.api_key_id.as_deref(),
                 )
                 .await?;
+            let waiter = approval_service::ConnectedWait::for_service(
+                &state.db,
+                &pending.resolution.mode,
+                &mut request_operation,
+                &operation,
+                auth_user.assistant_chat.as_deref(),
+                timeout_secs,
+            )
+            .await?;
             let approval_request = box_proxy_future(|| {
                 approval_service::create_approval_request(
                     &state.db,
@@ -5212,7 +5255,8 @@ async fn execute_resolved_proxy_inner<'a>(
             }
             // Block until the user approves/rejects or timeout expires
             let req_id = approval_request.id.clone();
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+            waiter
+                .wait(&approval_request, &downstream_cancellation, timeout_secs)
                 .await
                 .map_err(|error| {
                     approval_service::map_wait_for_decision_error(
@@ -5635,6 +5679,13 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
+    let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
+    let read_usage = capture_usage || model_request.is_some();
+    let mut has_operation_headers = !extra_outbound_headers.is_empty();
+    if read_usage && !is_pool_attempt && !is_ws && !shared_connect {
+        extra_outbound_headers.push(llm_usage_service::identity_encoding_header());
+    }
+
     let dispatch_admission = {
         let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
             actor_user_id: &user_id_str,
@@ -5689,7 +5740,7 @@ async fn execute_resolved_proxy_inner<'a>(
             || streaming_body.is_some()
             || node_route.is_some()
             || !delegated.is_empty()
-            || !extra_outbound_headers.is_empty()
+            || has_operation_headers
         {
             return Err(AppError::BadRequest(
                 "This Telnyx platform operation supports direct HTTP and MCP calls only".into(),
@@ -5856,6 +5907,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     })),
                 );
                 if reservation.replay_policy == DurableReplayPolicy::DownstreamIdempotencyKey {
+                    has_operation_headers = true;
                     extra_outbound_headers.push((
                         "Idempotency-Key".to_string(),
                         reservation.operation_id.clone(),
@@ -6467,17 +6519,16 @@ async fn execute_resolved_proxy_inner<'a>(
 
                             if let Some(accounting) = pool_accounting.clone() {
                                 let usage =
-                                    should_capture_llm_usage(&target.service, platform_metric)
-                                        .then(|| llm_usage_service::UsageAuditContext {
-                                            db: state.db.clone(),
-                                            user_id: user_id_str.clone(),
-                                            provider_slug: None,
-                                            service_id: Some(service_id.to_owned()),
-                                            model: None,
-                                            path: path.to_owned(),
-                                            api_key_id: auth_user.api_key_id.clone(),
-                                            api_key_name: auth_user.api_key_name.clone(),
-                                        });
+                                    capture_usage.then(|| llm_usage_service::UsageAuditContext {
+                                        db: state.db.clone(),
+                                        user_id: user_id_str.clone(),
+                                        provider_slug: None,
+                                        service_id: Some(service_id.to_owned()),
+                                        model: None,
+                                        path: path.to_owned(),
+                                        api_key_id: auth_user.api_key_id.clone(),
+                                        api_key_name: auth_user.api_key_name.clone(),
+                                    });
                                 let mut response = box_proxy_future(|| {
                                     pool_attempt::node_response(
                                         state,
@@ -6525,7 +6576,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             ProxyResponseType::Complete(node_response) => {
                                 let response_len = node_response.body.len() as i64;
                                 let request_len = request_body_len;
-                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
+                                if capture_usage {
+                                    llm_usage_service::warn_node_usage_encoding(service_id, node_response.status, &node_response.headers);
+                                }
+                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && capture_usage)
                                     .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
                                 settle_meter_async(
                                     state.billing.clone(),
@@ -6592,6 +6646,9 @@ async fn execute_resolved_proxy_inner<'a>(
                                     }
                                 };
 
+                                if capture_usage {
+                                    llm_usage_service::warn_node_usage_encoding(service_id, status, &resp_headers);
+                                }
                                 let http_status =
                                     StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                                 let stream_diagnostics = ProxyExchangeDiagnostics::new(
@@ -6639,7 +6696,6 @@ async fn execute_resolved_proxy_inner<'a>(
                                 let stream_metered = metered.clone();
                                 let request_len = request_body_len;
                                 let usage_path = path.to_string();
-                                let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
 
                                 // Convert the mpsc receiver into a streaming body.
                                 let mut exchange_diagnostics =
@@ -7461,7 +7517,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         && streaming_body.is_none()
                         && body.as_ref().is_none_or(|bytes| bytes.is_empty())
                         && delegated.is_empty()
-                        && extra_outbound_headers.is_empty(),
+                        && !has_operation_headers,
                 )
             })
             .await
@@ -7527,16 +7583,17 @@ async fn execute_resolved_proxy_inner<'a>(
                 &downstream_cancellation,
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
-                        if is_pool_attempt
+                        if crate::services::credential_verification::checking()
+                            || is_pool_attempt
                             || operation_scoped
                             || operation_guest
                             || permission_ingress.is_some()
                             || target.service.offering_kind
                                 == crate::models::downstream_service::OfferingKind::Tool
                         {
-                            proxy_service::no_redirect_http_client()
+                            proxy_service::Redirects::Return
                         } else {
-                            &state.http_client
+                            proxy_service::Redirects::SameOrigin
                         },
                         &target,
                         reqwest_method,
@@ -7743,9 +7800,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 },
                 &all_headers,
             );
-            let usage_context = (should_capture_llm_usage(&target.service, platform_metric)
-                || model_request.is_some())
-            .then(|| llm_usage_service::UsageAuditContext {
+            let usage_context = read_usage.then(|| llm_usage_service::UsageAuditContext {
                 db: state.db.clone(),
                 user_id: user_id_str.clone(),
                 provider_slug: None,
@@ -7803,7 +7858,8 @@ async fn execute_resolved_proxy_inner<'a>(
                 let name_lower = name.as_str().to_lowercase();
                 if let Ok(header_name) =
                     axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                    && let Some(header_value) = forwarded_response_header_value(
+                    && let Some(header_value) = direct_response_header_value(
+                        status,
                         &name_lower,
                         value.as_bytes(),
                         is_sse,
@@ -8283,7 +8339,7 @@ pub(crate) fn build_downstream_ws_request(
     // set by layers 1–2; overridable defaults only fill in when the
     // handshake doesn't already carry that header.
     for h in target
-        .catalog_default_headers
+        .catalog_headers()
         .iter()
         .chain(target.user_service_default_headers.iter())
     {
@@ -8412,11 +8468,19 @@ async fn connect_downstream_ws(
     ws_config.max_frame_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     let (ws_stream, response) = tokio::time::timeout(
         std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false),
+        async {
+            let destination = target.direct_destination(url).await?;
+            let stream = destination
+                .connect()
+                .await
+                .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
+            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
+                .await
+                .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
+        },
     )
     .await
-    .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))?
-    .map_err(|e| AppError::Internal(format!("Downstream WS connection failed: {e}")))?;
+    .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))??;
 
     let selected_protocol = response
         .headers()
@@ -8545,8 +8609,8 @@ fn audit_ws_frame_auth_injected(
     db: &mongodb::Database,
     user_id: &str,
     service_id: &str,
-    action: &ws_frame_injector::InjectionAction,
-    routed_node_id: Option<&str>,
+    action: &ws_frame_injector::InjectionAction<'_>,
+    skipped: bool,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
     ip_address: Option<String>,
@@ -8557,11 +8621,8 @@ fn audit_ws_frame_auth_injected(
         "trigger_kind": action.trigger_kind,
         "frame_index_in": action.frame_index_in,
     });
-    if let Some(node_id) = routed_node_id
-        && let Some(obj) = data.as_object_mut()
-    {
-        obj.insert("routed_via".to_string(), serde_json::json!("node"));
-        obj.insert("node_id".to_string(), serde_json::json!(node_id));
+    if skipped {
+        data["outcome"] = serde_json::json!("skipped");
     }
 
     audit_service::log_async(
@@ -8717,41 +8778,33 @@ async fn bridge_websockets(
                                         &ws_frame_injections,
                                         &mut injector_state,
                                         &frame,
-                                        &credential,
                                     ) {
-                                        tracing::info!(
-                                            service_id = %service_id,
-                                            trigger_kind = action.trigger_kind,
-                                            frame_index_in = action.frame_index_in,
-                                            credential_sha256_prefix = %action.credential_sha256_prefix,
-                                            "Injected WebSocket auth frame"
-                                        );
+                                        let reply = action.frame_for_caller();
                                         audit_ws_frame_auth_injected(
                                             &db,
                                             &user_id,
                                             &service_id,
                                             &action,
-                                            None,
+                                            reply.is_none(),
                                             api_key_id.clone(),
                                             api_key_name.clone(),
                                             ip_address.clone(),
                                             user_agent.clone(),
                                         );
-                                        // NOTE: `direction` is the trigger direction. The injected
-                                        // frame is sent to the opposite side so a downstream
-                                        // auth challenge can produce an upstream auth response.
-                                        if deadline.expired() {
-                                            break;
-                                        }
-                                        if client_sink
-                                            .send(injection_frame_to_axum(action.send_frame))
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                        if !action.forward_original {
-                                            continue;
+                                        if let Some(reply) = reply {
+                                            tracing::info!(
+                                                service_id = %service_id,
+                                                trigger_kind = action.trigger_kind,
+                                                frame_index_in = action.frame_index_in,
+                                                credential_sha256_prefix = %ws_frame_injector::credential_hash_prefix(&credential),
+                                                "Injected WebSocket auth frame"
+                                            );
+                                            if deadline.expired() || client_sink.send(injection_frame_to_axum(reply)).await.is_err() {
+                                                break;
+                                            }
+                                            if !action.forward_original {
+                                                continue;
+                                            }
                                         }
                                     }
                                 }
@@ -8810,13 +8863,12 @@ async fn bridge_websockets(
                                         &ws_frame_injections,
                                         &mut injector_state,
                                         &frame,
-                                        &credential,
                                     ) {
                                         tracing::info!(
                                             service_id = %service_id,
                                             trigger_kind = action.trigger_kind,
                                             frame_index_in = action.frame_index_in,
-                                            credential_sha256_prefix = %action.credential_sha256_prefix,
+                                            credential_sha256_prefix = %ws_frame_injector::credential_hash_prefix(&credential),
                                             "Injected WebSocket auth frame"
                                         );
                                         audit_ws_frame_auth_injected(
@@ -8824,7 +8876,7 @@ async fn bridge_websockets(
                                             &user_id,
                                             &service_id,
                                             &action,
-                                            None,
+                                            false,
                                             api_key_id.clone(),
                                             api_key_name.clone(),
                                             ip_address.clone(),
@@ -8837,7 +8889,7 @@ async fn bridge_websockets(
                                             break;
                                         }
                                         if downstream_sink
-                                            .send(injection_frame_to_tungstenite(action.send_frame))
+                                            .send(injection_frame_to_tungstenite(action.frame_for_downstream(&credential)))
                                             .await
                                             .is_err()
                                         {
@@ -9165,7 +9217,7 @@ async fn handle_ws_passthrough_via_node(
     enriched_headers = crate::models::default_request_header::merge_into_header_list(
         enriched_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -9667,9 +9719,9 @@ mod tests {
         compose_pre_resolved_node_ids, enforce_node_route_scope, ensure_proxy_request_id,
         final_credential_class, forwarded_response_header_value, is_chat_completions_proxy_path,
         is_codex_transport_path, is_ws_upgrade_request, read_proxy_request_body,
-        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
-        strip_durable_idempotency_defaults, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        retain_durable_default, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -9755,6 +9807,95 @@ mod tests {
             claims.act.expect("delegation actor should be present").sub,
             "custom-sandbox"
         );
+    }
+
+    #[tokio::test]
+    async fn session_proxy_navigation_checks_the_browser_origin_before_service_lookup() {
+        use crate::mw::auth::AuthMethod;
+        use crate::test_utils::{test_app_state_no_db, test_auth_user};
+        use axum::extract::{Path, State};
+
+        let mut state = test_app_state_no_db().await;
+        state.config.frontend_url = "https://front.example".into();
+        state.config.domain_aliases.frontend_urls = vec!["https://alias.test".into()];
+        let session = test_auth_user(&uuid::Uuid::new_v4().to_string());
+        for by_slug in [true, false] {
+            for (auth_method, site, origin, referer, blocked) in [
+                (AuthMethod::Session, "cross-site", None, None, true),
+                (
+                    AuthMethod::Session,
+                    "same-site",
+                    Some("https://other.example"),
+                    None,
+                    true,
+                ),
+                (
+                    AuthMethod::Session,
+                    "same-site",
+                    Some("https://front.example"),
+                    Some("https://other.example/doc"),
+                    true,
+                ),
+                (AuthMethod::Session, "same-site", Some("null"), None, true),
+                (
+                    AuthMethod::Session,
+                    "cross-site",
+                    None,
+                    Some("https://alias.test/docs"),
+                    false,
+                ),
+                (
+                    AuthMethod::Session,
+                    "same-origin",
+                    Some("https://front.example"),
+                    None,
+                    false,
+                ),
+                (AuthMethod::Session, "none", None, None, false),
+                (AuthMethod::AccessToken, "cross-site", None, None, false),
+                (AuthMethod::ApiKey, "cross-site", None, None, false),
+            ] {
+                let mut auth = session.clone();
+                auth.auth_method = auth_method;
+                auth.scope = "proxy".into();
+                let mut req = axum::http::Request::builder().header("sec-fetch-site", site);
+                if let Some(value) = origin {
+                    req = req.header("origin", value);
+                }
+                if let Some(value) = referer {
+                    req = req.header("referer", value);
+                }
+                let req = req.body(axum::body::Body::empty()).unwrap();
+                if !blocked {
+                    crate::mw::csrf::check_proxy_navigation(&state.config, &auth.auth_method, &req)
+                        .expect("allow this caller to enter proxy routing");
+                    continue;
+                }
+                let path = Path(("missing".into(), "resource".into()));
+                let result = if by_slug {
+                    Box::pin(super::proxy_request_by_slug(
+                        State(state.clone()),
+                        auth,
+                        Default::default(),
+                        path,
+                        req,
+                    ))
+                    .await
+                } else {
+                    Box::pin(super::proxy_request(
+                        State(state.clone()),
+                        auth,
+                        Default::default(),
+                        path,
+                        req,
+                    ))
+                    .await
+                };
+                assert!(
+                    matches!(result, Err(crate::errors::AppError::Forbidden(ref message)) if message == "Cross-site request blocked")
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -9848,7 +9989,7 @@ mod tests {
                 sensitive: false,
             },
         ];
-        strip_durable_idempotency_defaults(&mut headers);
+        headers.retain(retain_durable_default);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name, "X-Amz-Target");
     }
@@ -9883,6 +10024,30 @@ mod tests {
 
         headers.insert("x-request-id", "caller-owned".parse().unwrap());
         assert_eq!(ensure_proxy_request_id(&mut headers), "caller-owned");
+    }
+
+    #[test]
+    fn proxy_destination_download_location_is_returned_verbatim() {
+        let value = b"https://download.example/archive?signature=fixture";
+        for status in [
+            axum::http::StatusCode::MULTIPLE_CHOICES,
+            axum::http::StatusCode::FOUND,
+        ] {
+            let header =
+                super::direct_response_header_value(status, "location", value, false, None)
+                    .expect("redirect Location");
+            assert_eq!(header.as_bytes(), value);
+        }
+        assert!(
+            super::direct_response_header_value(
+                axum::http::StatusCode::ACCEPTED,
+                "location",
+                value,
+                false,
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -10624,6 +10789,7 @@ mod tests {
                 >,
             >,
         >,
+        rules: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
         db: mongodb::Database,
     }
 
@@ -10643,16 +10809,7 @@ mod tests {
                 downstream_ws,
                 "svc-ha".to_string(),
                 false,
-                vec![crate::models::ws_frame_injection::WsFrameInjection {
-                    trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
-                        path: "$.type".to_string(),
-                        value: serde_json::json!("auth_required"),
-                    },
-                    template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
-                    frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-                    consume_trigger: true,
-                    direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
-                }],
+                state.rules,
                 "TEST_CRED".to_owned().into(),
                 state.db,
                 "user-1".to_string(),
@@ -10666,6 +10823,103 @@ mod tests {
             )
             .await;
         })
+    }
+
+    async fn connect_test_bridge(
+        state: WsBridgeTestState,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let app = Router::new()
+            .route("/ws", get(ws_bridge_test_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bridge");
+        let bridge_addr = listener.local_addr().expect("bridge addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve bridge");
+        });
+
+        let (client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
+            .await
+            .expect("connect client");
+        (client_ws, server_task)
+    }
+
+    #[tokio::test]
+    async fn stored_caller_rule_skips_reply_and_audits_only_metadata() {
+        use crate::models::audit_log::{AuditLog, COLLECTION_NAME};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let db = crate::test_utils::connect_test_database("ws_recipient_audit")
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let original = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(original, r#"{"type":"forward"}"#);
+            ws.send(Message::Text("forwarded".into())).await.unwrap();
+            ws.next().await;
+        });
+        let (downstream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        // Decode the same BSON representation used by catalog and user-service rows.
+        let rules = ["${credential}", "ready"]
+            .into_iter()
+            .zip(["forward", "status"])
+            .map(|(template, kind)| {
+                bson::from_document(bson::doc! {
+                    "trigger": {"json_field_equals": {"path": "$.type", "value": kind}},
+                    "template": template, "direction": "upstream", "consume_trigger": true
+                })
+                .unwrap()
+            })
+            .collect();
+        let (mut caller, server) = connect_test_bridge(WsBridgeTestState {
+            downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream))),
+            rules,
+            db: db.clone(),
+        })
+        .await;
+        for (message, expected) in [
+            (r#"{"type":"forward"}"#, "forwarded"),
+            (r#"{"type":"status"}"#, "ready"),
+        ] {
+            caller.send(Message::Text(message.into())).await.unwrap();
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(5), caller.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.into_text().unwrap(), expected);
+        }
+        caller.close(None).await.unwrap();
+        peer.await.unwrap();
+        server.abort();
+        crate::services::shutdown::process().idle().await;
+        let skipped = db
+            .collection::<AuditLog>(COLLECTION_NAME)
+            .find_one(
+                bson::doc! {"event_type":"ws_frame_auth_injected","event_data.outcome":"skipped"},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            skipped.event_data,
+            Some(serde_json::json!({
+                "service_id":"svc-ha", "trigger_kind":"json_field_equals", "frame_index_in":0, "outcome":"skipped"
+            }))
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -10720,21 +10974,18 @@ mod tests {
         let state = WsBridgeTestState {
             downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream_ws))),
             db,
+            rules: vec![crate::models::ws_frame_injection::WsFrameInjection {
+                trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
+                    path: "$.type".to_string(),
+                    value: serde_json::json!("auth_required"),
+                },
+                template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
+                frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+                consume_trigger: true,
+                direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
+            }],
         };
-        let app = Router::new()
-            .route("/ws", get(ws_bridge_test_handler))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind bridge");
-        let bridge_addr = listener.local_addr().expect("bridge addr");
-        let server_task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve bridge");
-        });
-
-        let (mut client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
-            .await
-            .expect("connect client");
+        let (mut client_ws, server_task) = connect_test_bridge(state).await;
         let client_msg = client_ws
             .next()
             .await
@@ -10773,7 +11024,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -10989,6 +11240,26 @@ mod tests {
             url,
             "wss://api.example.com/socket?stream=true&api_key=secret%20value"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_websocket_checks_address_before_connect() {
+        // Port zero has no listening peer. The policy must refuse this URL before a TCP dial.
+        let url = "ws://[::]:0/socket";
+        let target = make_target(url);
+        use crate::services::billing::{BillingIngress, route_inventory};
+        let permit = route_inventory::enforce_billing_egress_classification(
+            Some(route_inventory::BillingRoutePolicy::Metered(
+                BillingIngress::Proxy,
+            )),
+            BillingIngress::Proxy,
+        )
+        .unwrap();
+        let result = super::connect_downstream_ws(url, &target, &[], &[], &[], None, permit).await;
+        assert!(matches!(
+            result,
+            Err(crate::errors::AppError::ValidationError(_))
+        ));
     }
 
     #[tokio::test]
@@ -13449,33 +13720,26 @@ mod proxy_resolution_integration_tests {
         node
     }
 
-    async fn wait_for_node_audit_event(
+    async fn node_audit_after_write(
         db: &mongodb::Database,
         node_id: &str,
-        event_type: &str,
-    ) -> Option<AuditLog> {
-        for _ in 0..100 {
-            let found = db
-                .collection::<AuditLog>(AUDIT_LOG)
-                .find_one(doc! {
-                    "event_type": event_type,
-                    "event_data.routed_via": "node",
-                    "event_data.node_id": node_id,
-                })
-                .await
-                .expect("query audit log");
-            if found.is_some() {
-                return found;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-
-        None
-    }
-
-    async fn wait_for_node_proxy_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
-        wait_for_node_audit_event(db, node_id, "proxy_request").await
+        mut written: tokio::sync::oneshot::Receiver<String>,
+    ) -> AuditLog {
+        let writers = crate::services::shutdown::process();
+        let id = tokio::select! {
+            biased;
+            result = &mut written => result.expect("node audit writer closed"),
+            () = writers.idle() => written.try_recv().expect("node audit writer finished without a committed row"),
+        };
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "_id": id,
+                "event_data.routed_via": "node",
+                "event_data.node_id": node_id,
+            })
+            .await
+            .expect("query committed node audit")
+            .expect("audit must identify the node that handled the request")
     }
 
     async fn find_org_routing_audit(
@@ -13544,6 +13808,302 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("query approval request")
             .expect("approval request should exist")
+    }
+
+    #[derive(Clone, Copy)]
+    enum ApprovalWaitCase {
+        Disconnect,
+        Deadline,
+        Approve,
+        NyxbotAt70,
+        NyxbotAt85,
+    }
+
+    async fn exercise_connected_approval(case: ApprovalWaitCase) {
+        use crate::downstream_disconnect::{DisconnectAwareListener, DisconnectAwareMakeService};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let nyxbot = matches!(
+            case,
+            ApprovalWaitCase::NyxbotAt70 | ApprovalWaitCase::NyxbotAt85
+        );
+        let (state, owner, auth) = if nyxbot {
+            let fixture = crate::services::assistant_authority_tests::orchestrator_fixture(
+                "nyxbot_connected_write",
+            )
+            .await;
+            let mut auth = fixture.auth;
+            auth.assistant_chat = Some(Arc::new(fixture.chat));
+            auth.allow_all_services = true;
+            (fixture.state, fixture.owner, auth)
+        } else {
+            let db = connect_test_database("proxy_connected_approval")
+                .await
+                .expect("MongoDB required");
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let auth = access_token_auth(&owner);
+            (test_app_state(db), owner, auth)
+        };
+        let db = &state.db;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Router::new().route(
+            "/items",
+            post({
+                let calls = calls.clone();
+                move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    "created"
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_url = format!("http://{}", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+        let service = insert_user_service(db, &owner, "wait", &provider_url, None).await;
+        let timeout = if matches!(case, ApprovalWaitCase::Deadline) {
+            2
+        } else {
+            300
+        };
+        if nyxbot {
+            db.collection::<mongodb::bson::Document>(NOTIFICATION_CHANNELS)
+                .update_one(
+                    doc! {"user_id": &owner},
+                    doc! {"$set": {"approval_timeout_secs": timeout}},
+                )
+                .await
+                .unwrap();
+        } else {
+            let mut channel = notification_channel(&owner, timeout);
+            channel.approval_required = None;
+            db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+                .insert_one(channel)
+                .await
+                .unwrap();
+        }
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(approval_config(&owner, &service.id))
+            .await
+            .unwrap();
+        let ingress = Utc::now();
+        let (clock, at) = tokio::sync::watch::channel(ingress + chrono::Duration::seconds(68));
+        let proxy = Router::new()
+            .route("/proxy/s/{slug}/{*path}", post(ws_proxy_test_route))
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Proxy,
+                ),
+            ))
+            .layer(axum::middleware::from_fn(super::ingress::callback))
+            .layer(axum::Extension(super::ingress::RequestReceivedAt(ingress)))
+            .with_state((state.clone(), auth.clone()));
+        let proxy = if nyxbot {
+            let at = at.clone();
+            proxy.layer(axum::middleware::from_fn(
+                move |request: Request<Body>, next: axum::middleware::Next| {
+                    crate::services::approval_service::APPROVAL_CLOCK
+                        .scope(at.clone(), next.run(request))
+                },
+            ))
+        } else {
+            proxy
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            axum::serve(
+                DisconnectAwareListener::new(listener),
+                DisconnectAwareMakeService::new(proxy),
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        let requests = db.collection::<ApprovalRequest>(APPROVAL_REQUESTS);
+        let card = loop {
+            if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        if nyxbot {
+            assert_eq!(
+                card.expires_at.timestamp_millis(),
+                (ingress + chrono::Duration::seconds(80)).timestamp_millis()
+            );
+            let decision_second = if matches!(case, ApprovalWaitCase::NyxbotAt70) {
+                70
+            } else {
+                85
+            };
+            clock.send_replace(ingress + chrono::Duration::seconds(decision_second));
+        } else {
+            assert_eq!(
+                (card.expires_at - card.created_at).num_seconds(),
+                i64::from(timeout)
+            );
+        }
+        let decide = || async {
+            let decision = crate::handlers::approvals::decide_request(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(card.id.clone()),
+                Default::default(),
+                Default::default(),
+                Json(crate::handlers::approvals::DecideRequest {
+                    approved: true,
+                    duration_sec: None,
+                }),
+            );
+            if nyxbot {
+                crate::services::approval_service::APPROVAL_CLOCK
+                    .scope(at.clone(), decision)
+                    .await
+            } else {
+                decision.await
+            }
+        };
+        match case {
+            ApprovalWaitCase::Disconnect => {
+                drop(client);
+                // Allow the origin to observe EOF, then decide within the original TTL.
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                let late = decide().await;
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "late decision dispatched a write"
+                );
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id": &card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                assert!(late.is_err());
+            }
+            ApprovalWaitCase::Deadline | ApprovalWaitCase::NyxbotAt85 => {
+                if nyxbot {
+                    assert!(decide().await.is_err(), "85-second approval succeeded");
+                }
+                let mut response = String::new();
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    client.read_to_string(&mut response),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                if !nyxbot {
+                    assert!(decide().await.is_err(), "late approval succeeded");
+                }
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id": &card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                if nyxbot {
+                    let listed = crate::handlers::approvals::list_requests(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(&owner),
+                        axum::extract::Query(crate::handlers::approvals::ApprovalRequestsQuery {
+                            status: Some("expired".into()),
+                            page: None,
+                            per_page: None,
+                            org_id: None,
+                            include_admin_orgs: None,
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .0;
+                    assert!(
+                        listed
+                            .requests
+                            .iter()
+                            .any(|item| item.id == card.id && item.status == "expired")
+                    );
+                    let cards = crate::services::assistant_nyxagent::approval_history(
+                        db,
+                        &owner,
+                        auth.api_key_id.as_deref().unwrap(),
+                        &[&card.id],
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        cards
+                            .iter()
+                            .any(|item| item.id == card.id && item.status == "expired")
+                    );
+                    assert!(
+                        response.contains("approval_expired") && response.contains("Ask the owner")
+                    );
+                }
+                assert!(
+                    response.contains("Nothing was sent by this call"),
+                    "{response}"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+            ApprovalWaitCase::Approve | ApprovalWaitCase::NyxbotAt70 => {
+                let decision = decide().await.unwrap().0;
+                assert_eq!(decision.status, "approved");
+                if nyxbot {
+                    assert_eq!(
+                        chrono::DateTime::parse_from_rfc3339(&decision.decided_at.unwrap())
+                            .unwrap()
+                            .timestamp_millis(),
+                        (ingress + chrono::Duration::seconds(70)).timestamp_millis()
+                    );
+                }
+                let mut response = String::new();
+                client.read_to_string(&mut response).await.unwrap();
+                assert!(response.contains("created"), "{response}");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+        origin.abort();
+        upstream.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_disconnected_proxy_expires_without_dispatch() {
+        exercise_connected_approval(ApprovalWaitCase::Disconnect).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_deadline_returns_expiry_and_refuses_late_approval() {
+        exercise_connected_approval(ApprovalWaitCase::Deadline).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_connected_approval_returns_one_provider_result() {
+        exercise_connected_approval(ApprovalWaitCase::Approve).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_nyxbot_approval_at_70_seconds_sends_once() {
+        exercise_connected_approval(ApprovalWaitCase::NyxbotAt70).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_nyxbot_approval_at_85_seconds_expires_in_chat_and_approvals() {
+        exercise_connected_approval(ApprovalWaitCase::NyxbotAt85).await;
     }
 
     #[tokio::test]
@@ -13632,6 +14192,13 @@ mod proxy_resolution_integration_tests {
                 .unwrap();
             assert!(default.overridable);
             assert_eq!(default.value.as_str(), default_version);
+            db.collection::<DownstreamService>(SERVICES)
+                .update_one(
+                    doc! {"_id": &catalog.id},
+                    doc! {"$set": {"base_url": &base_url}},
+                )
+                .await
+                .unwrap();
             for via_node in [false, true] {
                 for explicit_version in [None, Some("2025-09-03")] {
                     let node = if via_node {
@@ -14204,7 +14771,6 @@ mod proxy_resolution_integration_tests {
             eprintln!("skipping proxy integration test: no local MongoDB available");
             return;
         };
-
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
         crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
@@ -14243,6 +14809,10 @@ mod proxy_resolution_integration_tests {
         let (executor, ws_server) =
             start_node_executor(state.clone(), &node, &service.slug, &base_url).await;
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_request",
+            &member_id,
+        );
         let mut resolved_slug = String::new();
         let response = proxy_request_by_slug_inner(
             &state,
@@ -14271,9 +14841,7 @@ mod proxy_resolution_integration_tests {
         assert_eq!(observed["body"], r#"{"operation":"probe"}"#);
         executor.await.expect("node executor task");
 
-        let audit = wait_for_node_proxy_audit(&db, &node.id)
-            .await
-            .expect("node-routed proxy audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),
@@ -14353,6 +14921,8 @@ mod proxy_resolution_integration_tests {
     #[tokio::test]
     async fn org_bound_slug_route_prefers_granted_org_service_and_falls_back_for_ungranted() {
         let f = crate::services::org_agent_tests::Fixture::new("proxy_org_slug_collision").await;
+        crate::services::security_readiness_service::refresh_test_replica_heartbeat(&f.state.db)
+            .await;
         let (agent, row) = f.create().await;
         let nyxbot = crate::services::assistant_authority_tests::new_orchestrator(
             &f.state,
@@ -14586,6 +15156,10 @@ mod proxy_resolution_integration_tests {
         crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_ws_upgrade",
+            &member_id,
+        );
         assert_ws_proxy_upgrade(
             state.clone(),
             access_token_auth(&member_id),
@@ -14594,9 +15168,7 @@ mod proxy_resolution_integration_tests {
         .await;
         responder.await.expect("node ws responder task");
 
-        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
-            .await
-            .expect("node-routed ws upgrade audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),
@@ -14645,6 +15217,10 @@ mod proxy_resolution_integration_tests {
         crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_ws_upgrade",
+            &owner_id,
+        );
         assert_ws_proxy_upgrade(
             state.clone(),
             access_token_auth(&owner_id),
@@ -14653,9 +15229,7 @@ mod proxy_resolution_integration_tests {
         .await;
         responder.await.expect("node ws responder task");
 
-        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
-            .await
-            .expect("node-routed ws upgrade audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),

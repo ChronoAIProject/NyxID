@@ -181,6 +181,24 @@ async fn creation_preflights_once_and_review_binding_does_not_repeat_it() {
     f.state.db.drop().await.unwrap();
 }
 
+async fn assert_source_approval_expired(db: &mongodb::Database, owner: &str, service: &str) {
+    let requests =
+        db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME);
+    let filter = doc! {"user_id": owner, "service_id": service};
+    assert_eq!(requests.count_documents(filter.clone()).await.unwrap(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let row = requests.find_one(filter.clone()).await.unwrap().unwrap();
+            if row.get_str("status").unwrap() == "expired" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed-out source reader expires its undispatched approval");
+}
+
 #[tokio::test]
 async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
     let f = fixture("authoring_snapshot_approval_timeout").await;
@@ -275,15 +293,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
             .unwrap(),
         0
     );
-    assert_eq!(
-        f.state
-            .db
-            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
-            .count_documents(doc! {"user_id":&f.owner,"service_id":&service.id,"status":"pending"})
-            .await
-            .unwrap(),
-        1
-    );
+    assert_source_approval_expired(&f.state.db, &f.owner, &service.id).await;
     assert!(ornn_requests(&server).await.is_empty());
     f.state.db.drop().await.unwrap();
 }
@@ -5468,7 +5478,7 @@ async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
     assert!(event.text.contains(&format!("agent_id {}", agent.id)));
     assert!(!event.text.contains(['"', '\n']));
     assert!(event.text.contains("1.0"));
-    assert!(event.text.contains(acks::DECISION_NARRATION));
+    assert!(event.text.contains(acks::allowed_card_continuation()));
 
     f.state.db.drop().await.unwrap();
 }
@@ -5567,15 +5577,7 @@ async fn pending_source_read_timeout_keeps_retryable_reservation_without_a_card(
             .unwrap(),
         0
     );
-    assert_eq!(
-        f.state
-            .db
-            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
-            .count_documents(doc! {"user_id":&f.owner,"service_id":&service.id,"status":"pending"})
-            .await
-            .unwrap(),
-        1
-    );
+    assert_source_approval_expired(&f.state.db, &f.owner, &service.id).await;
     assert!(server.received_requests().await.unwrap().is_empty());
     f.state.db.drop().await.unwrap();
 }

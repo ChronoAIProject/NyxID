@@ -1,10 +1,12 @@
 import { localizedError } from "../../i18n/localizedError";
 import { conversationIdSchema } from "./assistantTypes";
 import { z } from "zod";
+import { ApiError } from "../../lib/api/ApiError";
 
 export type AssistantTurnInput = {
   conversationId?: string;
   agentId?: string;
+  model?: string;
   text: string;
   retryOf?: string;
   /** The allowed card this turn resumes; the server records it as `continuation_of`. */
@@ -37,6 +39,7 @@ export function assistantTurnBody(input: AssistantTurnInput) {
       ? { conversation_id: input.conversationId }
       : {
           ...(input.agentId ? { agent_id: input.agentId } : {}),
+          ...(input.model ? { model: input.model } : {}),
         }),
     text: input.text,
     ...(input.retryOf ? { retry_of: input.retryOf } : {}),
@@ -60,5 +63,15 @@ export function restoreRefusedAssistantSend(
     typeof cause.statusCode === "number" &&
     cause.statusCode >= 400 &&
     cause.statusCode < 500
+  );
+}
+
+/** Bind failures are an atomic refusal. The response does not identify a row. */
+export function isAttachmentBindRefusal(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.hasErrorEnvelope && (
+    (cause.statusCode === 410 && cause.errorKey === "attachment_expired" &&
+      cause.errorCode === 12101) ||
+    (cause.statusCode === 404 && cause.errorKey === "not_found" && cause.errorCode === 1003 &&
+      ["Not found: Attachment not found", "Not found: Attachment not found or expired"].includes(cause.message))
   );
 }

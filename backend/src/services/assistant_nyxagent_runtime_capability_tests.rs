@@ -128,13 +128,19 @@ async fn lookup(state: &AppState, egress: &ScriptedEgress, owner: &Owner) -> Val
 
 #[tokio::test]
 async fn reattach_admission_reuses_authenticated_limits_and_rejects_ambiguous_destinations() {
+    async fn deployment(
+        db: &mongodb::Database,
+    ) -> Option<crate::models::assistant_conversation::ReattachDeployment> {
+        let (destination, value) = unique_cached_destination(&*CAPABILITIES.lock().await, db)?;
+        reattach_deployment(destination, &value)
+    }
     let (state, key) = fixture().await;
     let actor = owner(&state).await;
     let supported = json!({"reattach": {"protocol":"nyxagent-reattach-v1", "credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15}, "max_events":453439,"recent_events":4096,"max_event_bytes":33554432,"absence_retention_seconds":604800,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32}});
     let egress = egress(vec![Ok(axum::Json(&supported).into_response())]);
-    assert!(cached_reattach(&state.db).is_none());
+    assert!(deployment(&state.db).await.is_none());
     assert_eq!(lookup(&state, &egress, &actor).await, supported);
-    let selected = cached_reattach(&state.db).unwrap();
+    let selected = deployment(&state.db).await.unwrap();
     assert_eq!(selected.limits.max_subscribers_per_response, 8);
     let watch = selected.limits.credential_watch.unwrap();
     assert_eq!(
@@ -150,7 +156,7 @@ async fn reattach_admission_reuses_authenticated_limits_and_rejects_ambiguous_de
         .lock()
         .await
         .insert(key.clone(), (Instant::now(), previous_protocol));
-    assert!(cached_reattach(&state.db).is_none());
+    assert!(deployment(&state.db).await.is_none());
     let mut implicit_horizon = supported.clone();
     implicit_horizon["reattach"]
         .as_object_mut()
@@ -161,7 +167,8 @@ async fn reattach_admission_reuses_authenticated_limits_and_rejects_ambiguous_de
         .await
         .insert(key.clone(), (Instant::now(), implicit_horizon));
     assert_eq!(
-        cached_reattach(&state.db)
+        deployment(&state.db)
+            .await
             .unwrap()
             .limits
             .absence_retention_seconds,
@@ -176,13 +183,13 @@ async fn reattach_admission_reuses_authenticated_limits_and_rejects_ambiguous_de
         .lock()
         .await
         .insert(changed.clone(), (Instant::now(), supported.clone()));
-    assert!(cached_reattach(&state.db).is_none());
+    assert!(deployment(&state.db).await.is_none());
     CAPABILITIES.lock().await.remove(&changed);
     CAPABILITIES.lock().await.insert(
         key.clone(),
         (Instant::now() - CAPABILITY_TTL, supported.clone()),
     );
-    assert!(cached_reattach(&state.db).is_none());
+    assert!(deployment(&state.db).await.is_none());
     for (field, invalid) in [
         ("protocol", json!("future")),
         ("credential_watch", json!({})),
@@ -203,10 +210,37 @@ async fn reattach_admission_reuses_authenticated_limits_and_rejects_ambiguous_de
             .lock()
             .await
             .insert(key.clone(), (Instant::now(), value));
-        assert!(cached_reattach(&state.db).is_none());
+        assert!(deployment(&state.db).await.is_none());
     }
     assert_eq!(egress.owners.lock().await.len(), 1);
     CAPABILITIES.lock().await.remove(&key);
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn contended_capability_read_waits_and_reuses_pinned_metadata() {
+    let (state, key) = fixture().await;
+    let supported = json!({"reattach":{"protocol":"nyxagent-reattach-v1","credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15},"recent_events":32,"max_events":64,"max_event_bytes":65536,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32}});
+    for mode in [
+        CapabilityLookup::CurrentCatalog,
+        CapabilityLookup::Admission,
+    ] {
+        let mut held = CAPABILITIES.lock().await;
+        let read = fetch_capabilities(&state, mode, |_| async {
+            panic!("unexpected upstream GET")
+        });
+        tokio::pin!(read);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut read)
+                .await
+                .is_err()
+        );
+        held.insert(key.clone(), (Instant::now(), supported.clone()));
+        drop(held);
+        let (destination, value) = read.await.unwrap();
+        destination.verify(&key.1, &key.2).unwrap();
+        assert!(reattach_deployment(destination, &value).is_some());
+    }
     state.db.drop().await.unwrap();
 }
 

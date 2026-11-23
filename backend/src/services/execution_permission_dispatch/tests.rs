@@ -602,18 +602,39 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
 
 #[tokio::test]
 async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once() {
-    use tracing::instrument::WithSubscriber;
-    let captured = migration_tests::Capture::default();
     let f = Fixture::new("execution_mcp_covered").await;
     f.enroll(true).await;
-    let endpoint = test_utils::test_service_endpoint(&f.catalog, "status", "GET", "/status");
+    f.store(&f.grant().await).await;
+    check_covered_mcp_calls(&f, "GET").await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn assistant_mcp_covered_write_skips_action_and_service_review_on_both_entry_points() {
+    let (f, _) = proposal_tests::assistant("execution_mcp_covered_write").await;
+    seed_for_chat(
+        &f.state,
+        &f.auth().await,
+        &f.connection,
+        &f.catalog,
+        "PUT",
+        "/status",
+    )
+    .await;
+    check_covered_mcp_calls(&f, "PUT").await;
+    f.cleanup().await;
+}
+
+async fn check_covered_mcp_calls(f: &Fixture, method: &str) {
+    use tracing::instrument::WithSubscriber;
+    let captured = migration_tests::Capture::default();
+    let endpoint = test_utils::test_service_endpoint(&f.catalog, "status", method, "/status");
     f.state
         .db
         .collection("service_endpoints")
         .insert_one(endpoint)
         .await
         .unwrap();
-    f.store(&f.grant().await).await;
     for generic in [false, true] {
         let tool = "execution-fixture__status";
         let params = if generic {
@@ -621,7 +642,7 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
         } else {
             json!({"name":tool,"arguments":{}})
         };
-        let response = f
+        let send = f
             .router()
             .oneshot(
                 Request::builder()
@@ -635,8 +656,10 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
                     ))
                     .unwrap(),
             )
-            .with_subscriber(captured.subscriber())
+            .with_subscriber(captured.subscriber());
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), send)
             .await
+            .expect("covered call entered a wait")
             .unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -645,7 +668,12 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
         assert!(body.get("error").is_none(), "{body}");
         assert_eq!(body["result"]["isError"], false, "{body}");
     }
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+    let sent = f.server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent.iter()
+            .all(|r| r.method.as_str() == method && r.url.path() == "/status")
+    );
     assert_eq!(
         captured.0.lock().unwrap().len(),
         2,
@@ -660,7 +688,6 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
             .all(|event| event["cause"] == "permission_covered")
     );
     f.no_prompts().await;
-    f.cleanup().await;
 }
 
 #[tokio::test]

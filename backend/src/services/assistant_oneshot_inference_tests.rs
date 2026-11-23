@@ -304,6 +304,11 @@ async fn outbound_contract(protocol: InferenceWireProtocol) {
     );
     let requests = mock.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.headers["accept-encoding"] == "identity")
+    );
     let call = &requests[1];
     let body: Value = call.body_json().unwrap();
     assert_eq!(
@@ -601,20 +606,29 @@ async fn assistant_oneshot_timeout_cancels_without_retry_and_settles_meter() {
     )
     .await;
     let mut bounds = limits();
-    // The deadline includes model discovery and real database admission.
-    // Leave those steps enough time under parallel suite load so the test
-    // exercises cancellation of a dispatched inference, not admission.
     bounds.timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
-    assert!(
-        one_shot_text(&state, ACTOR, "Summarize", "Data", bounds)
-            .await
-            .is_none()
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(20),
-        "The 10 s deadline must cancel before the 30 s vendor response"
-    );
+    let inference = one_shot_text(&state, ACTOR, "Summarize", "Data", bounds);
+    tokio::pin!(inference);
+    crate::test_utils::with_manual_clock(async {
+        let dispatched = async {
+            while !mock
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path() == "/responses")
+            {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            _ = &mut inference => panic!("inference finished before the provider received it"),
+            () = dispatched => {}
+        }
+        tokio::time::advance(bounds.timeout + Duration::from_millis(1)).await;
+    })
+    .await;
+    assert!(inference.await.is_none());
     let requests = mock.received_requests().await.unwrap();
     let paths: Vec<_> = requests.iter().map(|r| r.url.path()).collect();
     assert_eq!(paths, ["/models", "/responses"]);

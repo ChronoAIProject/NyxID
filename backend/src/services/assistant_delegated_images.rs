@@ -5,7 +5,7 @@ use crate::{
     models::{
         assistant_conversation::{
             ActiveTurn, AgentEvent, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
-            ChannelOrigin, TurnOrigin,
+            ChannelOrigin, TeamRestartSource, TurnOrigin,
         },
         assistant_delegated_image::{Assignment, DeliveryReference},
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
@@ -125,7 +125,28 @@ pub async fn publish_in_session(
         // The durable automation receipt publishes the final logical result.
         return Ok(None);
     }
-    let Some(edge) = &message.delegated_images.assignment else {
+    let edge = message.delegated_images.assignment.as_ref();
+    let team_assignment =
+        turn.restart_admission
+            .as_ref()
+            .and_then(|source| match &source.team_source {
+                Some(TeamRestartSource::Assignment { report_to })
+                    if message.report_to.as_ref() == Some(report_to) =>
+                {
+                    Some((&source.actor_id, &source.agent_id, report_to))
+                }
+                _ => None,
+            });
+    let Some((actor, source_agent, target)) = edge
+        .map(|edge| {
+            (
+                &edge.actor,
+                &edge.source_agent,
+                &edge.recipient_conversation,
+            )
+        })
+        .or(team_assignment)
+    else {
         return Ok(None);
     };
     // A cancelled invocation must still settle its source turn, but cannot
@@ -133,7 +154,7 @@ pub async fn publish_in_session(
     if !super::assistant_invocation_service::fence_in_session(
         db,
         tx,
-        &edge.actor,
+        actor,
         turn.invocation_id.as_deref(),
     )
     .await?
@@ -144,40 +165,34 @@ pub async fn publish_in_session(
         .collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&edge.source_agent})
+        .find_one(doc! {"_id":source_agent})
         .session(&mut *tx)
         .await?;
     let Some(agent) = agent else { return Ok(None) };
-    let status = match message.error_code.as_deref() {
-        None => "replied".to_owned(),
-        Some("cancelled") => "was stopped".to_owned(),
-        Some(code) => format!("failed ({code})"),
-    };
-    let mut event = team::event("subagent_settled", format!(
-        "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent (agent ID {}).",
-        engine::identifier(&agent.name), engine::excerpt(&message.text, 1200).replace('"', "'"), agent.id),
-        Some(&edge.source_agent)).for_invocation(turn.invocation_id.as_deref());
-    event.execution_task = turn.execution_task.clone();
-    event.id = edge.id.clone();
-    event.delegated_result = Some(edge.clone());
+    let mut event = team::specialist_settled_event(
+        &agent,
+        turn,
+        &message.text,
+        message.error_code.as_deref(),
+        message.created_at,
+    );
+    if let Some(edge) = edge {
+        event.id.clone_from(&edge.id);
+    }
+    event.delegated_result = edge.cloned();
     // Preserve exact followed-thread destinations through the event routing reducer.
     event.reply_to = edge
-        .destinations
-        .iter()
+        .into_iter()
+        .flat_map(|edge| &edge.destinations)
         .filter(|o| o.thread.is_some())
         .cloned()
         .collect();
     let refusal = publication_outcome(
-        engine::append_events_in_session(
-            db,
-            &edge.actor,
-            &edge.recipient_conversation,
-            &[event],
-            tx,
-        )
-        .await,
+        engine::append_events_in_session(db, actor, target, &[event], tx).await,
     )?;
-    if let Some(code) = refusal {
+    if let Some(code) = refusal
+        && let Some(edge) = edge
+    {
         tracing::warn!(target: "nyxid::assistant_delegated_images",
             actor_id = %edge.actor, source_agent_id = %edge.source_agent,
             source_conversation_id = %edge.source_conversation, source_turn_id = %edge.source_turn,

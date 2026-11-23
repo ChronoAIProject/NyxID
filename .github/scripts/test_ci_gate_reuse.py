@@ -3,6 +3,7 @@ import fnmatch
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +102,7 @@ class GateReuseTests(unittest.TestCase):
         self.assertNotIn("if", guard)
         step, = guard["steps"]
         self.assertNotIn("uses", step)
+        self.assertEqual(step["shell"], "python")
         self.assertNotIn("${{", step["run"])
         self.assertEqual(step["env"], {
             "BASE": "${{ github.base_ref }}",
@@ -130,11 +132,15 @@ class GateReuseTests(unittest.TestCase):
             ("main", branch, "o/r", "g" * 40, "", False),
             ("main", "dev", "fork/r", sha, "", False),
             ("main", branch, "fork/r", sha, "", False),
+            ("dev", "main", "o/r", sha, "", True),
+            ("main", "hotfix/fix", "fork/r", sha, "", False),
+            ("main", "hotfix/fix", "o/r", "BAD", "", False),
             ("dev", "feature", "fork/r", "", "", True),
             ("rollup-fix", "dev", "fork/r", "", "", True),
         ]
         for name in ("feature", "Dev", "release/", "release/../x", "release/2026-13-40",
-                     "release/2026-02-29", branch + "-1", branch + "-02", branch + "/extra"):
+                     "release/2026-02-29", branch + "-1", branch + "-02", branch + "/extra",
+                     "hotfix/", "hotfix/.fix", "hotfix/-fix", "hotfix/Fix", "hotfix/a/b", "hotfix/" + "a" * 65):
             cases.append(("main", name, "o/r", sha, "", False))
         with tempfile.TemporaryDirectory() as tmp:
             gh = Path(tmp, "gh")
@@ -146,7 +152,7 @@ class GateReuseTests(unittest.TestCase):
             for base, head, repo, commit, status, allowed in cases:
                 with self.subTest(base=base, head=head, repo=repo, status=status, commit=commit):
                     calls.write_text("")
-                    result = subprocess.run(["bash", "-e", "-c", step["run"]], text=True,
+                    result = subprocess.run([sys.executable, "-c", step["run"]], text=True,
                         capture_output=True, env={
                             "BASE": base, "HEAD_BRANCH": head, "HEAD_REPO": repo, "HEAD_SHA": commit,
                             "GITHUB_REPOSITORY": "o/r", "GH_TOKEN": "test", "STATUS": status,
@@ -157,6 +163,56 @@ class GateReuseTests(unittest.TestCase):
                                      [f"api repos/o/r/compare/dev...{sha} --jq .status"] if status else [])
                     if not allowed:
                         self.assertTrue(result.stdout.startswith("::error::"), result.stdout)
+
+    def test_hotfix_guard_compares_complete_pinned_histories(self):
+        guard = strict_load_workflow(Path(".github/workflows/main-merge-guard.yml").read_text())
+        step, = guard["jobs"]["main-merge-guard"]["steps"]
+        main, head, dev, common = (c * 40 for c in "abcd")
+
+        def pages(status, *chunks, total=None):
+            count = sum(map(len, chunks)) if total is None else total
+            return json.dumps([{"status": status, "total_commits": count, "commits": [
+                {"sha": sha} for sha in chunk
+            ]} for chunk in chunks])
+
+        clean = pages("ahead", [head])
+        # The last-page overlap is the only unreleased commit the branches share.
+        mixed = pages("ahead", ["1" * 40], [common, head])
+        for hotfix, integration, error in [
+            (clean, pages("diverged", [dev]), None),
+            (clean, pages("ahead", [dev]), None),
+            (clean, pages("behind", []), None),
+            (pages("diverged", [head]), None, "current head of main"),
+            (pages("behind", []), None, "current head of main"),
+            (mixed, pages("ahead", ["2" * 40], [common, dev]), "unreleased dev commit " + common),
+            (mixed, pages("diverged", [common, dev]), "unreleased dev commit " + common),
+            (clean, pages("ahead", [dev], total=2), "incomplete"),
+            (clean, pages("unexpected", [dev]), "incomplete"),
+            (clean, "truncated JSON", "incomplete"),
+            (None, None, "GitHub could not verify"),
+            (clean, None, "GitHub could not verify"),
+        ]:
+            with self.subTest(hotfix=hotfix, integration=integration), tempfile.TemporaryDirectory() as tmp:
+                replies = {
+                    "api repos/o/r/git/ref/heads/main --jq .object.sha": main,
+                    "api repos/o/r/git/ref/heads/dev --jq .object.sha": dev,
+                    f"api repos/o/r/compare/{main}...{head}?per_page=100 --paginate --slurp": hotfix,
+                    f"api repos/o/r/compare/{main}...{dev}?per_page=100 --paginate --slurp": integration,
+                }
+                gh = Path(tmp, "gh")
+                gh.write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
+                              "reply = json.loads(os.environ['REPLIES'])[' '.join(sys.argv[1:])]\n"
+                              "if reply is None: sys.exit(1)\nprint(reply)\n")
+                gh.chmod(0o755)
+                result = subprocess.run([sys.executable, "-c", step["run"]], text=True, capture_output=True,
+                    env={"BASE": "main", "HEAD_BRANCH": "hotfix/0.a_b-" + "x" * 58, "HEAD_REPO": "o/r",
+                         "HEAD_SHA": head, "GITHUB_REPOSITORY": "o/r", "REPLIES": json.dumps(replies),
+                         "PATH": tmp + os.pathsep + os.environ["PATH"]})
+                self.assertEqual(result.returncode, int(error is not None), result.stderr + result.stdout)
+                if error:
+                    self.assertIn(error, result.stdout)
+                    for source in ("dev", "release/YYYY-MM-DD", "hotfix/<name>"):
+                        self.assertIn(source, result.stdout)
 
     def test_profile_selection_preserves_reusable_and_filtered_events(self):
         jobs = strict_load_workflow(Path(".github/workflows/ci.yml").read_text())["jobs"]

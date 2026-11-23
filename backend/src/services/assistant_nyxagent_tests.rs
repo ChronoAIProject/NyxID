@@ -117,6 +117,201 @@ fn fragmented_sse_unicode_keepalive_unknown_events_and_terminal_replay() {
 }
 
 #[test]
+fn completed_response_preserves_multipart_answers_with_and_without_phases() {
+    let answer = json!([
+        {"type":"output_text","text":"第一段"},
+        {"type":"output_text","text":"第二段\n\n含有空行"}
+    ]);
+    for (phased, with_commentary) in [(true, true), (false, false), (false, true)] {
+        let mut items = json!([
+            {"type":"message","role":"assistant","content":answer},
+            {"type":"mcp_call","name":"read_booking"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"结论"}]}
+        ]);
+        if phased {
+            items[0]["phase"] = json!("final_answer");
+            items[2]["phase"] = json!("final_answer");
+        }
+        if with_commentary {
+            items.as_array_mut().unwrap().insert(
+                1,
+                json!({"type":"message","role":"assistant","phase":"commentary",
+                "content":[{"type":"output_text","text":"Checking."}]}),
+            );
+        }
+        let mut event = terminal("response.completed", 0, "");
+        event["response"]["output"] = items;
+        let mut stream = ResponseStream::default();
+        stream.push(&frame(event)).unwrap();
+        assert_eq!(
+            stream.terminal.unwrap().text,
+            "第一段\n\n第二段\n\n含有空行\n\n结论"
+        );
+    }
+}
+
+#[test]
+fn completed_response_keeps_lone_commentary_and_failed_response_keeps_partial_text() {
+    for kind in ["response.completed", "response.failed"] {
+        let mut event = terminal(kind, 0, "First part");
+        let item = &mut event["response"]["output"][0];
+        item["phase"] = json!("commentary");
+        item["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"output_text","text":"Second part"}));
+        let mut stream = ResponseStream::default();
+        stream.push(&frame(event)).unwrap();
+        assert_eq!(stream.terminal.unwrap().text, "First part\n\nSecond part");
+    }
+}
+
+#[test]
+fn discarded_attempt_group_is_atomic_and_done_replaces_one_part() {
+    let mut stream = ResponseStream::default();
+    for (seq, (item, part, text)) in [(2, 0, "old"), (1, 1, "B"), (0, 0, "bad"), (1, 0, "A")]
+        .into_iter()
+        .enumerate()
+    {
+        stream
+            .event(
+                json!({"type":"response.output_text.delta","sequence_number":seq,
+            "output_index":item,"content_index":part,"delta":text}),
+            )
+            .unwrap();
+    }
+    assert_eq!(stream.text(), "badABold");
+    stream.event(json!({"type":"response.output_text.done","sequence_number":4,
+        "output_index":0,"content_index":0,"text":"","status":"incomplete","discarded_output_indices":[0,2]})).unwrap();
+    assert_eq!(stream.text(), "AB");
+    stream
+        .event(
+            json!({"type":"response.output_text.done","sequence_number":5,
+        "output_index":1,"content_index":0,"text":"甲"}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "甲B");
+    stream
+        .event(
+            json!({"type":"response.output_item.done","sequence_number":6,"output_index":1,
+        "item":{"type":"message","role":"assistant","status":"incomplete","content":[]}}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "");
+}
+
+#[test]
+fn discarded_attempt_releases_the_output_budget_before_a_full_size_retry() {
+    let mut stream = ResponseStream::default();
+    stream
+        .push(&frame(
+            json!({"type":"response.output_text.delta","sequence_number":0,
+        "output_index":0,"delta":"x".repeat(MAX_OUTPUT_BYTES)}),
+        ))
+        .unwrap();
+    stream
+        .push(&frame(
+            json!({"type":"response.output_text.done","sequence_number":1,
+        "output_index":0,"text":"","discarded_output_indices":[0]}),
+        ))
+        .unwrap();
+    let answer = "界".repeat(MAX_OUTPUT_BYTES / 3) + "ab";
+    assert_eq!(answer.len(), MAX_OUTPUT_BYTES);
+    stream
+        .push(&frame(
+            json!({"type":"response.output_text.delta","sequence_number":2,
+        "output_index":1,"delta":answer}),
+        ))
+        .unwrap();
+    let mut done = terminal("response.completed", 3, &answer);
+    done["response"]["output"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "type":"message","role":"assistant","status":"incomplete","phase":"final_answer",
+            "content":[{"type":"output_text","text":""}]
+        }),
+    );
+    stream.push(&frame(done)).unwrap();
+    assert_eq!(stream.terminal.unwrap().text, answer);
+}
+
+#[test]
+fn discarded_attempt_unsuccessful_retry_keeps_partial_and_original_joining() {
+    for kind in ["response.failed", "response.completed"] {
+        let mut stream = ResponseStream::default();
+        for (seq, text) in ["甲\n", "乙"].into_iter().enumerate() {
+            stream
+                .event(
+                    json!({"type":"response.output_text.delta","sequence_number":seq*2,
+                "output_index":seq,"delta":text}),
+                )
+                .unwrap();
+            stream
+                .event(
+                    json!({"type":"response.output_text.done","sequence_number":seq*2+1,
+                "output_index":seq,"text":text}),
+                )
+                .unwrap();
+        }
+        assert_eq!(stream.text(), "甲\n乙");
+        let mut done = terminal(kind, 4, "甲\n");
+        done["response"]["output"].as_array_mut().unwrap().push(json!({
+            "type":"message","role":"assistant","status":if kind == "response.failed" {"incomplete"} else {"completed"},
+            "content":[{"type":"output_text","text":"乙"}]
+        }));
+        stream.event(done).unwrap();
+        let result = stream.terminal.unwrap();
+        assert_eq!(result.text, "甲\n\n\n乙");
+        assert_eq!(result.error.is_some(), kind == "response.failed");
+    }
+}
+
+#[test]
+fn discarded_attempt_trimmed_snapshot_round_trips_item_indices_and_separators() {
+    let item = |text: &str| json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]});
+    let response = json!({"output":[item("丢"),{"type":"mcp_call"},item("kept"),item("tail")]});
+    let output = OutputText::from_snapshot(&response).unwrap();
+    assert_eq!(output.text(), "丢\n\nkept\n\ntail");
+    let cursor = crate::models::assistant_conversation::SubscriberCheckpoint {
+        window_key: "window".into(),
+        response_id: "response".into(),
+        sequence: 8,
+        window_text: output.text(),
+        part_lengths: Some(output.layout()),
+    };
+    let saved = bson::from_bson(bson::to_bson(&cursor).unwrap()).unwrap();
+    let mut stream = ResponseStream {
+        replay: true,
+        sequence: Some(cursor.sequence),
+        output: OutputText::restore(&saved).unwrap(),
+        ..ResponseStream::default()
+    };
+    stream
+        .event(
+            json!({"type":"response.output_text.done","sequence_number":9,"output_index":0,
+        "text":"","status":"incomplete","discarded_output_indices":[0,3]}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "kept");
+    stream
+        .event(
+            json!({"type":"response.output_text.delta","sequence_number":10,
+        "output_index":4,"delta":"!"}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "kept!");
+    assert!(
+        OutputText::restore(
+            &crate::models::assistant_conversation::SubscriberCheckpoint {
+                part_lengths: None,
+                ..cursor
+            }
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn mixed_sse_line_endings_in_one_chunk_preserve_frame_order() {
     let mut bytes =
         frame(json!({"type":"response.output_text.delta","sequence_number":0,"delta":"hello"}));
@@ -133,7 +328,7 @@ fn stream_rejects_invalid_sequences_json_identifiers_and_bounds() {
         frame(json!({"type":"response.output_text.delta","sequence_number":4,"delta":"partial"}));
     stream.push(&delta).unwrap();
     assert_eq!(stream.push(&delta).unwrap_err().code, "invalid_stream");
-    assert_eq!(stream.text, "partial");
+    assert_eq!(stream.text(), "partial");
     assert!(ResponseStream::default().push(b"data: broken\n\n").is_err());
     let mut wrong = terminal("response.completed", 1, "hi");
     wrong["response"]["conversation"]["id"] = json!("../../arbitrary");
@@ -148,7 +343,26 @@ fn stream_rejects_invalid_sequences_json_identifiers_and_bounds() {
         oversized.push(&too_large).unwrap_err().code,
         "output_too_large"
     );
-    assert!(oversized.text.is_empty());
+    assert!(oversized.text().is_empty());
+}
+
+#[test]
+fn completed_response_validates_and_bounds_commentary_before_selecting_the_answer() {
+    let mut event = terminal("response.completed", 0, "Answer");
+    let items = event["response"]["output"].as_array_mut().unwrap();
+    items[0]["phase"] = json!("final_answer");
+    items.push(
+        json!({"type":"message","role":"assistant","phase":"commentary",
+        "content":[{"type":"output_text","text":false}]}),
+    );
+    for (text, code) in [
+        (json!(false), "invalid_stream"),
+        (json!("x".repeat(MAX_OUTPUT_BYTES)), "output_too_large"),
+    ] {
+        event["response"]["output"][1]["content"][0]["text"] = text;
+        let mut stream = ResponseStream::default();
+        assert_eq!(stream.push(&frame(event.clone())).unwrap_err().code, code);
+    }
 }
 
 #[test]
@@ -431,7 +645,13 @@ fn guest_1995_failure_reason_requires_recent_unambiguous_evidence() {
     turn.model_refusal = Some(bson::from_document(old).unwrap());
     fallback(turn, now);
     assert!(failure_reason(&TurnError::internal("cancelled", "stop"), turn, now).is_none());
-    assert!(failure_reason(&TurnError::new("SECRET unsafe arbitrary prose"), turn, now).is_none());
+    let error = TurnError::new("SECRET unsafe arbitrary prose").at_stage("upstream_response");
+    let reason = failure_reason(&error, turn, now).unwrap();
+    assert_eq!(
+        (&*reason.source, &*reason.stage, &*reason.code),
+        ("nyxagent", "upstream_response", "unrecognized_failure")
+    );
+    assert!(!serde_json::to_string(&reason).unwrap().contains("SECRET"));
 }
 
 #[test]
@@ -1678,6 +1898,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
         Some(99),
         Some(&proof),
         None,
+        None,
     )
     .await
     .unwrap()
@@ -1710,6 +1931,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
         &agent,
         Some(99),
         Some(&proof),
+        None,
         None,
     )
     .await
@@ -1835,6 +2057,200 @@ async fn expire_turn(db: &Database, row: &AssistantConversation) {
 }
 
 #[tokio::test]
+async fn internal_failure_reason_reaches_reply_audit_and_trigger_run() {
+    let db = connect_transaction_test_database("turn_local_failure").await;
+    let state = test_app_state(db.clone());
+    for (code, stage) in [
+        ("assistant_unavailable", "permit"),
+        ("turn_lost", "shutdown"),
+    ] {
+        let row = begin_turn(&db, "owner", &request(None, "work"), &state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        let runs = db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME);
+        runs.insert_one(doc! {"_id": stage, "user_id": "owner", "turn_id": &turn.turn_id})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(doc! {"_id": &row.id}, doc! {"$set": {"active_turn.trigger_run_id": stage, "active_turn.origin":"trigger"}})
+            .await.unwrap();
+        let error = finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &TurnResult {
+                text: "partial".into(),
+                session_id: None,
+                response_id: None,
+                error: Some(TurnError::internal(code, stage)),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = messages(&db, "owner", &row.id, 10, None)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(reply.status, "failed");
+        assert_eq!(reply.error_code.as_deref(), Some(code));
+        assert!(reply.upstream_error_code.is_none());
+        let reason = reply
+            .turn_metadata
+            .unwrap()
+            .failure_reason
+            .expect("saved failure reason");
+        assert_eq!(
+            (&*reason.source, &*reason.stage, &*reason.code),
+            ("nyxid", stage, code)
+        );
+        let expected = bson::to_document(&reason).unwrap();
+        assert_eq!(
+            bson::to_document(&error.metadata.unwrap().failure_reason.unwrap()).unwrap(),
+            expected
+        );
+        let run = runs.find_one(doc! {"_id": stage}).await.unwrap().unwrap();
+        assert_eq!(run.get_document("failure_reason").unwrap(), &expected);
+        let audit = db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(
+                doc! {"event_type":"assistant_turn_failed", "event_data.turn_id": &turn.turn_id},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get_document("failure_reason")
+                .unwrap(),
+            &expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn scheduler_finalization_before_matching_turn_preserves_both_diagnoses_and_stop() {
+    use crate::models::trigger_run::{RunOutcome, TriggerRun};
+    use crate::services::trigger_schedule as schedules;
+
+    let db = connect_transaction_test_database("turn_run_precedence").await;
+    let state = test_app_state(db.clone());
+    let runs = db.collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME);
+    for reason in ["coordinator_protocol_unsupported", "cancelled"] {
+        let mut row = begin_turn(&db, "owner", &request(None, "work"), &state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.origin = TurnOrigin::Trigger;
+        turn.trigger_run_id = Some(reason.into());
+        let turn_id = turn.turn_id.clone();
+        let stopped = reason == "cancelled";
+        if stopped {
+            row.automation_v2 = true;
+            turn.automation_work = Some(crate::models::trigger_run::AutomationWork {
+                run_id: reason.into(),
+                work_id: turn_id.clone(),
+                coordinator_thread_id: row.id.clone(),
+                role: "coordinator".into(),
+                confirmation_policy: None,
+            });
+        }
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .replace_one(doc! {"_id": &row.id}, &row)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        let run: TriggerRun = bson::from_document(doc! {
+            "_id": reason, "trigger_id": "trigger", "user_id": "owner",
+            "scheduled_at": now, "deadline": now, "outcome": "started",
+            "turn_id": &turn_id, "thread_id": &row.id, "fence": "fence", "lease_until": now, "expires_at": now,
+            "coordinator": {"protocol": if stopped { 2 } else { 3 }, "deadline": now,
+                "continuations": 0, "dispatches": 0, "closed": false, "version": 0},
+        }).unwrap();
+        runs.insert_one(run).await.unwrap();
+        if stopped {
+            request_stop(&db, "owner", &row.id).await.unwrap();
+        } else {
+            schedules::finish(&db, reason, RunOutcome::Failed, Some(reason), "")
+                .await
+                .unwrap();
+        }
+        let first = runs.find_one(doc! {"_id": reason}).await.unwrap().unwrap();
+        assert_eq!(first.outcome, RunOutcome::Failed);
+        assert_eq!(first.reason.as_deref(), Some(reason));
+        assert_eq!(
+            first.failure_reason.as_ref().map(|r| (
+                r.source.as_str(),
+                r.stage.as_str(),
+                r.code.as_str()
+            )),
+            (!stopped).then_some(("nyxid", "scheduler", reason))
+        );
+        let message_id = Uuid::new_v4().to_string();
+        let error = finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &message_id,
+            &TurnResult {
+                text: String::new(),
+                session_id: None,
+                response_id: None,
+                error: Some(TurnError::new("turn_interrupted")),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id": &message_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let diagnosis = reply.turn_metadata.unwrap().failure_reason;
+        assert_eq!(
+            diagnosis
+                .as_ref()
+                .map(|r| (r.source.as_str(), r.stage.as_str(), r.code.as_str())),
+            (!stopped).then_some(("nyxagent", "stream", "turn_interrupted"))
+        );
+        if stopped {
+            assert_eq!(reply.error_code.as_deref(), Some("cancelled"));
+        }
+        assert_eq!(
+            bson::to_bson(&error.metadata.unwrap().failure_reason).unwrap(),
+            bson::to_bson(&diagnosis).unwrap()
+        );
+        let audit = db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {"event_type": "assistant_turn_failed", "event_data.turn_id": &turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get("failure_reason"),
+            Some(&bson::to_bson(&diagnosis).unwrap())
+        );
+        let last = runs.find_one(doc! {"_id": reason}).await.unwrap().unwrap();
+        assert_eq!(last.reason, first.reason);
+        assert_eq!(
+            bson::to_bson(&last.failure_reason).unwrap(),
+            bson::to_bson(&first.failure_reason).unwrap()
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop() {
     let db = connect_transaction_test_database("nyxa_reclaim").await;
     ensure_indexes(&db).await.unwrap();
@@ -1919,6 +2335,13 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        run.get_document("failure_reason")
+            .unwrap()
+            .get_str("stage")
+            .unwrap(),
+        "lease_expiry"
+    );
     assert_eq!(run.get_i64("attempts").unwrap(), 2);
     assert!(run.get_i64("capacity_wait_ms").unwrap() >= 20_000);
     assert_eq!(
@@ -2314,6 +2737,7 @@ async fn restart_offer_keeps_one_logical_turn_and_fences_competing_survivors_and
         &window_key,
         window_deadline,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -2518,6 +2942,7 @@ async fn late_worker_cannot_renew_checkpoint_replace_or_finish_successor_attempt
         &request(None, "question"),
         &state.encryption_keys,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -2590,7 +3015,7 @@ async fn late_worker_cannot_renew_checkpoint_replace_or_finish_successor_attempt
     let now = Utc::now();
     let deadline = now + chrono::Duration::seconds(60);
     assert!(
-        observation::attempt(&db, &first, "old-window", deadline, None)
+        observation::attempt(&db, &first, "old-window", deadline, None, None)
             .await
             .is_err()
     );
@@ -5148,6 +5573,17 @@ fn production_recap_reports_tail_truncation_without_sniffing_message_text() {
         "0 earlier owner messages / 1 truncated; read them with nyx__conversation_history"
     ));
 
+    let mut channel = recap_owner_message(2, "文🦉".repeat(3000));
+    channel.origin = Some(TurnOrigin::Channel);
+    let expected = format!("[truncated=true, original_bytes={}]", channel.text.len());
+    assert!(
+        recap_line(&channel, true, 1000)
+            .unwrap()
+            .text
+            .contains(&expected)
+    );
+    assert!(owner_recap_line(&channel, 1000).text.contains(&expected));
+
     let short = recap_owner_message(
         1,
         "A literal [truncated] marker is part of the instruction".into(),
@@ -7607,7 +8043,7 @@ async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_ded
                 .capacity_wait_note_origin
                 .is_none()
         );
-        let first_attempt = observed::attempt(&db, &row, "first-window", Utc::now(), None)
+        let first_attempt = observed::attempt(&db, &row, "first-window", Utc::now(), None, None)
             .await
             .unwrap();
         assert_eq!(first_attempt, 1);
@@ -7685,7 +8121,7 @@ async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_ded
             );
             assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
             assert_eq!(
-                observed::attempt(&db, &row, "first-window", Utc::now(), None)
+                observed::attempt(&db, &row, "first-window", Utc::now(), None, None)
                     .await
                     .unwrap(),
                 2
@@ -8358,7 +8794,7 @@ fn response_notices_accept_only_the_bounded_known_image_code() {
         let mut decoder = ResponseStream::default();
         decoder.push(&frame(event)).unwrap();
         assert_eq!(decoder.image_input_unsupported, expected);
-        assert_eq!(decoder.text, "Answer");
+        assert_eq!(decoder.text(), "Answer");
     }
 }
 

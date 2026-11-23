@@ -1,3 +1,4 @@
+pub(crate) mod app_management_observations;
 pub mod assistant_trace;
 pub mod auth;
 pub mod csrf;

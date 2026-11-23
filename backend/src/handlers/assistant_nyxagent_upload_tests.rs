@@ -312,6 +312,13 @@ async fn check_turn(
     };
     let marker = context.as_ref().unwrap().binding.marker.as_deref().unwrap();
     assert!(input.starts_with(&format!("[NYXID_CONTEXT:{marker}]")));
+    assert_eq!(
+        input
+            .split_once(&format!("[/NYXID_CONTEXT:{marker}]\n\n"))
+            .unwrap()
+            .1,
+        text
+    );
     assert_eq!(input.matches("Message attachments (").count(), 1);
     let listing = input
         .lines()
@@ -396,7 +403,7 @@ async fn all_ten_upload_types_reach_first_resumed_and_attachment_only_turns() {
     for file in fixtures() {
         let id = Box::pin(draft_id(&state)).await;
         for (text, resumed) in [
-            ("Read my file", false),
+            ("請讀這份文件", false),
             ("Read the next file", true),
             ("", true),
         ] {

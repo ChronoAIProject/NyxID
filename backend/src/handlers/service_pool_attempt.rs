@@ -563,7 +563,7 @@ pub(super) async fn direct_response(
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers() {
         if let Some(value) =
-            forwarded_response_header_value(name.as_str(), value.as_bytes(), sse, location)
+            direct_response_header_value(status, name.as_str(), value.as_bytes(), sse, location)
         {
             builder = builder.header(name, value);
         }

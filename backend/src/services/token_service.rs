@@ -64,22 +64,21 @@ enum RefreshTokenDisposition {
 async fn follow_active_replacement_chain(
     db: &mongodb::Database,
     first_replacement_id: &str,
-    user_id: &str,
-    request_jti: &str,
+    parent: &RefreshToken,
 ) -> AppResult<Option<RefreshToken>> {
     let mut current_id = first_replacement_id.to_string();
 
     for depth in 0..MAX_REPLACEMENT_CHAIN_DEPTH {
         let candidate = db
             .collection::<RefreshToken>(REFRESH_TOKENS)
-            .find_one(doc! { "_id": &current_id })
+            .find_one(doc! { "_id": &current_id, "client_id": &parent.client_id, "user_id": &parent.user_id })
             .await?;
 
         match candidate {
             Some(r) if !r.revoked && r.expires_at > Utc::now() => {
                 tracing::info!(
-                    user_id = %user_id,
-                    jti = %request_jti,
+                    user_id = %parent.user_id,
+                    jti = %parent.jti,
                     replacement_id = %current_id,
                     chain_depth = depth,
                     "Refresh token retry resolved to active replacement token"
@@ -91,7 +90,7 @@ async fn follow_active_replacement_chain(
                 ..
             }) => {
                 tracing::debug!(
-                    user_id = %user_id,
+                    user_id = %parent.user_id,
                     replacement_id = %current_id,
                     chain_depth = depth,
                     "Following replacement chain (concurrent rotation)"
@@ -628,6 +627,87 @@ pub async fn refresh_tokens(
     mcp_sessions: Option<&McpSessionStore>,
     requested_resources: Option<&[String]>,
 ) -> AppResult<IssuedTokens> {
+    refresh_tokens_for_client(
+        db,
+        config,
+        jwt_keys,
+        refresh_token_str,
+        mcp_sessions,
+        requested_resources,
+        RefreshClient::Unidentified,
+    )
+    .await
+}
+
+pub enum RefreshClient<'a> {
+    Unidentified,
+    Identified(&'a str, Option<&'a str>),
+    Invalid(&'static str),
+}
+
+impl RefreshClient<'_> {
+    async fn check(
+        &self,
+        db: &mongodb::Database,
+        issuer: &str,
+        client: Option<&OauthClient>,
+    ) -> AppResult<()> {
+        let reason = match (self, client) {
+            (Self::Unidentified, None) => return Ok(()),
+            (Self::Invalid(reason), _) => *reason,
+            (Self::Unidentified, Some(_)) => "missing_client_id",
+            (Self::Identified(id, _), _) if *id != issuer || client.is_none() => {
+                "client_id_mismatch"
+            }
+            (Self::Identified(_, secret), Some(client))
+                if super::oauth_service::validate_client_secret(client, *secret).is_err() =>
+            {
+                if secret.is_none() {
+                    "missing_client_secret"
+                } else {
+                    "invalid_client_secret"
+                }
+            }
+            (Self::Identified(_, _), _) => return Ok(()),
+        };
+        use super::oauth_service::observations::Windows;
+        use std::sync::LazyLock;
+        type Observation = (String, &'static str, &'static str);
+        static WINDOWS: LazyLock<Windows<Observation>> = LazyLock::new(Default::default);
+        let kind = match client.map(|c| c.client_type.as_str()) {
+            Some("confidential") => "confidential",
+            Some("public") => "public",
+            Some(_) => "other",
+            None => "session",
+        };
+        WINDOWS.record((issuer.to_owned(), kind, reason), |_| {}, |(id, kind, reason), count| {
+            tracing::info!(parent: None, client_id = %id, client_type = kind, reason, count, "oauth_refresh_client_auth_observation");
+        });
+        if super::feature_flag_service::oauth_refresh_client_auth_enforced(db).await? {
+            return Err(match reason {
+                "client_id_mismatch" => AppError::ExternalTokenInvalid(
+                    "Refresh token is not bound to this client".into(),
+                ),
+                "ambiguous_credentials" => {
+                    AppError::BadRequest("Use one client authentication method".into())
+                }
+                _ => AppError::AuthenticationFailed("Invalid client credentials".into()),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Apply the live issuing-client policy before rotation or family reuse handling.
+pub async fn refresh_tokens_for_client(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    refresh_token_str: &str,
+    mcp_sessions: Option<&McpSessionStore>,
+    requested_resources: Option<&[String]>,
+    client_credentials: RefreshClient<'_>,
+) -> AppResult<IssuedTokens> {
     // Verify the refresh JWT
     let claims = jwt::verify_token(jwt_keys, config, refresh_token_str).map_err(|error| {
         if matches!(error, AppError::TokenExpired) {
@@ -668,12 +748,11 @@ pub async fn refresh_tokens(
     // (see `oauth_service::exchange_authorization_code`), so this is
     // the matching gate on the refresh side.
     if stored.client_id != Uuid::nil().to_string() {
-        let client_active = db
+        let client = db
             .collection::<OauthClient>(OAUTH_CLIENTS)
             .find_one(doc! { "_id": &stored.client_id, "is_active": true })
-            .await?
-            .is_some();
-        if !client_active {
+            .await?;
+        let Some(client) = client else {
             tracing::warn!(
                 client_id = %stored.client_id,
                 reason = "client_inactive",
@@ -698,9 +777,29 @@ pub async fn refresh_tokens(
             return Err(AppError::AuthenticationFailed(
                 "Issuing OAuth client is no longer active".to_string(),
             ));
-        }
+        };
+        client_credentials
+            .check(db, &stored.client_id, Some(&client))
+            .await?;
+    } else {
+        client_credentials
+            .check(db, &stored.client_id, None)
+            .await?;
     }
 
+    let within_grace = stored
+        .revoked_at
+        .is_none_or(|at| (Utc::now() - at).num_seconds() <= REUSE_GRACE_PERIOD_SECS);
+    if stored.client_id != Uuid::nil().to_string()
+        && stored.revoked
+        && let Some(next_id) = stored.replaced_by.as_deref()
+        && !within_grace
+    {
+        revoke_oauth_successors(db, &stored, next_id).await?;
+        tracing::warn!(user_id = %stored.user_id, client_id = %stored.client_id,
+            reason = "refresh_reused", "Refresh token reuse detected, revoking OAuth token family");
+        return Err(Refusal::RefreshReused.unauthorized("Refresh token has been revoked"));
+    }
     // PD-3: only an unused legacy OAuth record demonstrably newer than the
     // current grant may acquire its revision. Keep the original row unbound:
     // once consumed, it must never enter the normal rotation retry grace path.
@@ -806,21 +905,9 @@ pub async fn refresh_tokens(
     // again, otherwise stale responses can overwrite the browser cookie with
     // an older token and eventually trigger false theft detection.
     let disposition = if stored.revoked {
-        let within_grace = stored
-            .revoked_at
-            .map(|ra| (Utc::now() - ra).num_seconds() <= REUSE_GRACE_PERIOD_SECS)
-            .unwrap_or(true); // None means pre-migration token; allow chain check
-
         match (&stored.replaced_by, within_grace) {
             (Some(first_replacement_id), true) => {
-                match follow_active_replacement_chain(
-                    db,
-                    first_replacement_id,
-                    &stored.user_id,
-                    &claims.jti,
-                )
-                .await?
-                {
+                match follow_active_replacement_chain(db, first_replacement_id, &stored).await? {
                     Some(token) => RefreshTokenDisposition::Reuse(token),
                     None => {
                         // Chain exhausted without finding a valid token.
@@ -985,22 +1072,26 @@ pub async fn refresh_tokens(
     let new_refresh_id = Uuid::new_v4().to_string();
     let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
 
-    // Atomically revoke the active refresh token using find_one_and_update
-    // with a "revoked: false" guard. This prevents two concurrent rotation
-    // requests from both succeeding (only the first CAS wins).
-    let revoked = db
-        .collection::<RefreshToken>(REFRESH_TOKENS)
-        .find_one_and_update(
-            doc! { "_id": &active_token.id, "revoked": false },
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-                "replaced_by": &new_refresh_id,
-            }},
-        )
-        .await?;
+    // Persist new refresh token
+    let new_refresh = RefreshToken {
+        protected_consent: active_token.protected_consent.clone(),
+        id: new_refresh_id,
+        jti: new_jti,
+        client_id: active_token.client_id.clone(),
+        user_id: user_id_str.clone(),
+        session_id: session_id.clone(),
+        scope: active_token.scope.clone(),
+        expires_at: refresh_expires,
+        revoked: false,
+        replaced_by: None,
+        revoked_at: None,
+        resource_uris: active_token.resource_uris.clone(),
+        allowed_service_ids: active_token.allowed_service_ids.clone(),
+        allow_all_services: active_token.allow_all_services,
+        created_at: now,
+    };
 
-    if revoked.is_none() {
+    if !rotate_refresh_row(db, &active_token, &new_refresh).await? {
         if legacy_upgrade {
             return Err(super::consent_service::grant_changed());
         }
@@ -1014,13 +1105,8 @@ pub async fn refresh_tokens(
 
         if let Some(current_token) = current
             && let Some(first_replacement_id) = current_token.replaced_by.as_deref()
-            && let Some(recovered) = follow_active_replacement_chain(
-                db,
-                first_replacement_id,
-                &active_token.user_id,
-                &active_token.jti,
-            )
-            .await?
+            && let Some(recovered) =
+                follow_active_replacement_chain(db, first_replacement_id, &active_token).await?
         {
             tracing::info!(
                 user_id = %active_token.user_id,
@@ -1056,29 +1142,6 @@ pub async fn refresh_tokens(
         ));
     }
 
-    // Persist new refresh token
-    let new_refresh = RefreshToken {
-        protected_consent: active_token.protected_consent.clone(),
-        id: new_refresh_id,
-        jti: new_jti,
-        client_id: active_token.client_id.clone(),
-        user_id: user_id_str,
-        session_id: session_id.clone(),
-        scope: active_token.scope.clone(),
-        expires_at: refresh_expires,
-        revoked: false,
-        replaced_by: None,
-        revoked_at: None,
-        resource_uris: active_token.resource_uris.clone(),
-        allowed_service_ids: active_token.allowed_service_ids.clone(),
-        allow_all_services: active_token.allow_all_services,
-        created_at: now,
-    };
-
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .insert_one(&new_refresh)
-        .await?;
-
     if let Err(error) = super::consent_service::fence_protected_reference_for_route(
         db,
         &active_token.user_id,
@@ -1104,6 +1167,68 @@ pub async fn refresh_tokens(
         access_expires_in: config.jwt_access_ttl_secs,
         resource_uris: token_resource_scope.resource_uris,
     })
+}
+
+/// Publish the successor and its predecessor link in a single commit.
+async fn rotate_refresh_row(
+    db: &mongodb::Database,
+    parent: &RefreshToken,
+    child: &RefreshToken,
+) -> AppResult<bool> {
+    let rows = db.collection::<RefreshToken>(REFRESH_TOKENS);
+    let parent_id = parent.id.clone();
+    let child = child.clone();
+    let mut session = db.client().start_session().await?;
+    Ok(session.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let updated = rows.update_one(
+                doc! {"_id": &parent_id, "revoked": false},
+                doc! {"$set": {"revoked": true, "revoked_at": bson::DateTime::from_chrono(child.created_at), "replaced_by": &child.id}},
+            ).session(&mut *session).await?;
+            if updated.matched_count == 0 {
+                return Ok(false);
+            }
+            rows.insert_one(&child).session(&mut *session).await?;
+            Ok(true)
+        }).await?)
+}
+
+/// A rotation has one durable successor. Contend on the same row as a
+/// concurrent rotation, and follow its committed link if rotation won.
+async fn revoke_oauth_successors(
+    db: &mongodb::Database,
+    parent: &RefreshToken,
+    first_id: &str,
+) -> AppResult<()> {
+    let rows = db.collection::<RefreshToken>(REFRESH_TOKENS);
+    let mut visited = std::collections::HashSet::new();
+    let mut next = Some(first_id.to_owned());
+    while let Some(id) = next {
+        if !visited.insert(id.clone()) {
+            break;
+        }
+        let filter = doc! {"_id": &id, "user_id": &parent.user_id, "client_id": &parent.client_id};
+        // Older writers commit the link before inserting the successor. If
+        // that slot is still empty, reserve its exact ID as a revoked row.
+        let tombstone = doc! {
+            "jti": Uuid::new_v4().to_string(),
+            "expires_at": bson::DateTime::from_chrono(parent.expires_at),
+            "created_at": bson::DateTime::now(), "replaced_by": bson::Bson::Null,
+            "revoked_at": bson::DateTime::now(), "session_id": bson::Bson::Null,
+            "allow_all_services": false,
+        };
+        let previous = rows
+            .find_one_and_update(
+                filter,
+                doc! {"$set": {"revoked": true}, "$setOnInsert": tombstone},
+            )
+            .upsert(true)
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
+        next = previous.and_then(|row| row.replaced_by);
+    }
+    Ok(())
 }
 
 /// Old first-party issuers had no sid. The first refresh creates one fixed
@@ -1665,6 +1790,7 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -1718,7 +1844,16 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            refresh_tokens(&db, &config, &jwt_keys, &refresh_jwt, None, None).await,
+            refresh_tokens_for_client(
+                &db,
+                &config,
+                &jwt_keys,
+                &refresh_jwt,
+                None,
+                None,
+                crate::services::token_service::RefreshClient::Identified(&client_id, None)
+            )
+            .await,
             Err(AppError::Conflict(_))
         ));
         db.collection::<RefreshToken>(REFRESH_TOKENS)
@@ -1729,9 +1864,17 @@ mod tests {
             .await
             .unwrap();
 
-        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &refresh_jwt, None, None)
-            .await
-            .unwrap();
+        let refreshed = refresh_tokens_for_client(
+            &db,
+            &config,
+            &jwt_keys,
+            &refresh_jwt,
+            None,
+            None,
+            crate::services::token_service::RefreshClient::Identified(&client_id, None),
+        )
+        .await
+        .unwrap();
         let access_claims =
             crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.access_token).unwrap();
         assert_eq!(access_claims.scope, "openid proxy");
@@ -1850,6 +1993,7 @@ mod tests {
                 is_active: true,
                 delegation_scopes: String::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -1919,13 +2063,14 @@ mod tests {
             .unwrap();
 
         let requested_a = vec![resource_a.clone()];
-        let refreshed = refresh_tokens(
+        let refreshed = refresh_tokens_for_client(
             &db,
             &config,
             &jwt_keys,
             &refresh_jwt,
             None,
             Some(&requested_a),
+            crate::services::token_service::RefreshClient::Identified(&client_id, None),
         )
         .await
         .unwrap();
@@ -1951,13 +2096,14 @@ mod tests {
         assert_eq!(new_stored.allowed_service_ids, vec![service_a_id]);
 
         let requested_b = vec![resource_b];
-        let err = match refresh_tokens(
+        let err = match refresh_tokens_for_client(
             &db,
             &config,
             &jwt_keys,
             &refreshed.refresh_token,
             None,
             Some(&requested_b),
+            crate::services::token_service::RefreshClient::Identified(&client_id, None),
         )
         .await
         {

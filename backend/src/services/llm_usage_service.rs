@@ -455,6 +455,60 @@ pub fn force_stream_options_include_usage(body: &mut serde_json::Value) -> bool 
     }
 }
 
+pub(crate) fn identity_encoding_header() -> (String, String) {
+    ("accept-encoding".into(), "identity".into())
+}
+
+pub(crate) fn warn_http_usage_encoding(service_id: &str, response: &reqwest::Response) {
+    warn_usage_encoding(
+        service_id,
+        response.status().as_u16(),
+        response
+            .headers()
+            .get_all(http::header::CONTENT_ENCODING)
+            .iter()
+            .map(|value| value.to_str().unwrap_or("<invalid>")),
+    );
+}
+
+pub(crate) fn warn_node_usage_encoding(
+    service_id: &str,
+    status: u16,
+    headers: &[(String, String)],
+) {
+    warn_usage_encoding(
+        service_id,
+        status,
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+            .map(|(_, value)| value.as_str()),
+    );
+}
+
+fn warn_usage_encoding<'a>(service_id: &str, status: u16, values: impl Iterator<Item = &'a str>) {
+    if let Some(coding) = values
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .find(|coding| !coding.eq_ignore_ascii_case("identity"))
+    {
+        let content_encoding = if coding.len() <= 64
+            && !coding.is_empty()
+            && coding.bytes().all(|b| b.is_ascii_graphic())
+        {
+            coding
+        } else {
+            "<invalid>"
+        };
+        tracing::warn!(
+            service_id,
+            status,
+            content_encoding,
+            "Encoded response received for usage capture"
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UsageAuditContext {
     pub db: mongodb::Database,

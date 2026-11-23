@@ -201,17 +201,23 @@ pub(crate) async fn claim_platform_worker(
     row: &AssistantConversation,
     key_id: &str,
 ) -> AppResult<()> {
-    mutate_platform_turn(
-        db,
-        row,
-        doc! {"$set":{
-            "active_turn.execution_started":true,
-            "active_turn.worker_instance":bson::to_bson(super::assistant_engine_worker::instance())
-                .map_err(|_|AppError::Internal("Worker identity encoding failed".into()))?,
-        }},
-        Some(key_id.to_owned()),
-    )
-    .await
+    claim_worker_with_restart(db, row, key_id, &bson::Document::new()).await
+}
+
+pub(super) async fn claim_worker_with_restart(
+    db: &Database,
+    row: &AssistantConversation,
+    key_id: &str,
+    restart: &bson::Document,
+) -> AppResult<()> {
+    let mut fields = restart.clone();
+    fields.insert("active_turn.execution_started", true);
+    fields.insert(
+        "active_turn.worker_instance",
+        bson::to_bson(super::assistant_engine_worker::instance())
+            .map_err(|_| AppError::AssistantTurnRequired)?,
+    );
+    mutate_platform_turn(db, row, doc! {"$set": fields}, Some(key_id.to_owned())).await
 }
 
 async fn mutate_platform_turn(
@@ -239,6 +245,7 @@ async fn mutate_platform_turn(
     let context = (
         db.clone(),
         row.user_id.clone(),
+        engine::WorkerFence::capture(row)?,
         turn,
         expected,
         update,
@@ -248,15 +255,12 @@ async fn mutate_platform_turn(
         .start_transaction()
         .and_run(
             context,
-            |session, (db, user, turn, origin, update, worker_key_id)| {
+            |session, (db, user, worker, turn, origin, update, worker_key_id)| {
                 Box::pin(async move {
                     let result: AppResult<()> = async {
                         let row = db
                             .collection::<AssistantConversation>(CONVERSATIONS)
-                            .find_one(doc! {
-                                "_id": &turn.conversation_id, "user_id": &*user,
-                                "active_turn.turn_id": &turn.turn_id,
-                            })
+                            .find_one(worker.filter())
                             .session(&mut *session)
                             .await?
                             .ok_or(AppError::AssistantTurnRequired)?;
@@ -442,6 +446,7 @@ pub(crate) async fn claim_personal_turn_in_session(
         agent,
         None,
         Some(&model_origin(&origin)),
+        None,
         None,
     ))
     .await?
@@ -767,7 +772,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         &self,
         effects: &contract::CapturedPlatformStop,
     ) -> AppResult<contract::ExactStopProgress> {
-        apply_exact_stop(&self.state, effects).await
+        apply_exact_stop(&self.state, effects, self.egress.clone()).await
     }
 
     async fn decide_platform_reply(
@@ -799,6 +804,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
 async fn apply_exact_stop(
     state: &AppState,
     effects: &contract::CapturedPlatformStop,
+    egress: Arc<dyn contract::NyxAgentEgress>,
 ) -> AppResult<contract::ExactStopProgress> {
     use contract::{ExactMachineCancelOutcome as Outcome, ExactStopSettlement as Settlement};
     if !engine::valid_id(&effects.turn.conversation_id)
@@ -823,6 +829,25 @@ async fn apply_exact_stop(
                     && turn.stop_requested
             }) =>
         {
+            if row
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.restart_admission.as_deref())
+                .is_some_and(|source| source.window.is_some())
+            {
+                let state = state.clone();
+                let target = row.clone();
+                state.shutdown.clone().spawn(async move {
+                    let work = async {
+                        let key = super::assistant_agent_credential_service::load_for_conversation(&state.db, &state.encryption_keys, &target.user_id, &target.id).await.ok()??;
+                        runtime::cancel_background(&state, egress.as_ref(), &target, &key, Some(super::billing::route_inventory::BillingRoutePolicy::Metered(super::billing::route_inventory::BillingIngress::Proxy))).await;
+                        Some(())
+                    };
+                    if !matches!(tokio::time::timeout(Duration::from_secs(4), work).await, Ok(Some(()))) {
+                        super::audit_service::log_async(state.db.clone(),Some(target.user_id),"assistant_background_cancel".into(),Some(serde_json::json!({"conversation_id":target.id,"outcome":"cancel_unconfirmed","reason":"manager_stop"})),None,None,None,None);
+                    }
+                });
+            }
             match tokio::time::timeout(
                 Duration::from_secs(5),
                 engine::force_stop(db, &row.user_id, &row.id, &effects.turn.turn_id),
@@ -919,7 +944,7 @@ async fn apply_exact_stop(
 
 #[cfg(test)]
 #[path = "platform_personal_turn_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "platform_personal_turn_kms_tests.rs"]

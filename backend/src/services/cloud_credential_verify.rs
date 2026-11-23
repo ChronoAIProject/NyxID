@@ -27,6 +27,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
 
 use crate::errors::{AppError, AppResult};
+use crate::services::url_validation::url_host_for_logs;
 
 /// How long to wait on the probe before giving up. Keep short so a
 /// flaky cloud doesn't block credential creation indefinitely.
@@ -85,17 +86,16 @@ pub async fn verify_aws_sigv4(
 
     let response = match tokio::time::timeout(VERIFY_TIMEOUT, req.send()).await {
         Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
+        Ok(Err(_)) => {
             tracing::warn!(
-                error = %e,
-                base_url = %base_url,
+                host = %url_host_for_logs(base_url),
                 "AWS credential verify network error; allowing add"
             );
             return Ok(());
         }
         Err(_) => {
             tracing::warn!(
-                base_url = %base_url,
+                host = %url_host_for_logs(base_url),
                 timeout = ?VERIFY_TIMEOUT,
                 "AWS credential verify timed out; allowing add"
             );
@@ -110,26 +110,14 @@ pub async fn verify_aws_sigv4(
     if status.is_server_error() {
         tracing::warn!(
             status = %status,
-            base_url = %base_url,
+            host = %url_host_for_logs(base_url),
             "AWS credential verify hit 5xx; allowing add"
         );
         return Ok(());
     }
 
-    // 4xx — capture a bounded slice of the body so the error message
-    // points the user at the actual cause without dumping a huge XML
-    // response into the log.
-    let body = response.text().await.unwrap_or_default();
-    let snippet: String = body.chars().take(400).collect();
-    let hint = if body.contains("not authorized") || body.contains("AccessDenied") {
-        " — verify the IAM policy includes ce:GetCostAndUsage and that this is a credential from the AWS Organizations management (payer) account, not a linked account."
-    } else if body.contains("InvalidSignatureException") {
-        " — the signature didn't match; double-check the secret_access_key is correct and matches the access_key_id."
-    } else {
-        ""
-    };
     Err(AppError::BadRequest(format!(
-        "AWS rejected the credential ({status}){hint} Response: {snippet}"
+        "AWS rejected the credential ({status}). Check the access key and the payer account's ce:GetCostAndUsage permission."
     )))
 }
 
@@ -165,7 +153,7 @@ mod tests {
             response_body: Arc::new(std::sync::Mutex::new(body.to_string())),
         };
         let app = Router::new()
-            .route("/", post(mock_handler))
+            .fallback(post(mock_handler))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -274,51 +262,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aws_verify_invalid_signature_hint() {
-        let (base_url, _) = start_aws_mock(
-            400,
-            "{\"__type\":\"InvalidSignatureException\",\"message\":\"The request signature we calculated does not match\"}",
-        )
-        .await;
-        let client = reqwest::Client::new();
-        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
-            .await
-            .unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("secret_access_key") || msg.contains("signature"),
-            "expected InvalidSignature hint, got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn aws_verify_generic_400_has_no_extra_hint() {
-        let (base_url, _) = start_aws_mock(
-            400,
-            "{\"__type\":\"SomeOtherError\",\"message\":\"unknown\"}",
-        )
-        .await;
-        let client = reqwest::Client::new();
-        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
-            .await
-            .unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("400"),
-            "error should contain status code: {msg}"
-        );
-        // Should NOT contain IAM or signature hints for generic errors
-        assert!(
-            !msg.contains("ce:GetCostAndUsage"),
-            "generic 400 should not have IAM hint: {msg}"
-        );
-        assert!(
-            !msg.contains("secret_access_key"),
-            "generic 400 should not have signature hint: {msg}"
-        );
-    }
-
-    #[tokio::test]
     async fn aws_verify_soft_warns_on_500() {
         let (base_url, _) = start_aws_mock(500, "Internal Server Error").await;
         let client = reqwest::Client::new();
@@ -338,21 +281,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aws_verify_response_body_truncated_in_error() {
-        // Simulate a very long response body
-        let long_body = "x".repeat(2000);
-        let (base_url, _) = start_aws_mock(400, &long_body).await;
+    async fn aws_probe_diagnostics_record_host_and_status() {
+        use tracing::instrument::WithSubscriber;
+
+        let captured = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(captured.reopen().unwrap())
+            .finish();
+        let marker = "synthetic-probe-value";
         let client = reqwest::Client::new();
-        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
-            .await
-            .unwrap_err();
-        let msg = format!("{err}");
-        // The snippet is capped at 400 chars
-        assert!(
-            msg.len() < 600,
-            "error message should be bounded, got {} chars",
-            msg.len()
-        );
+        let (base, mock) = start_aws_mock(503, marker).await;
+        let url = format!("{base}/{marker}?fixture={marker}");
+        async {
+            verify_aws_sigv4(&client, &valid_aws_credential(), &url)
+                .await
+                .unwrap();
+            *mock.response_status.lock().unwrap() = 403;
+            let err = verify_aws_sigv4(&client, &valid_aws_credential(), &url)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("ce:GetCostAndUsage"));
+            let response = err.into_response();
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let message = std::str::from_utf8(&body).unwrap();
+            assert!(message.contains("403") && !message.contains(marker));
+
+            // Keep the port reserved while the test generates a transport failure.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let close = tokio::spawn(async move {
+                drop(listener.accept().await.unwrap());
+            });
+            let url = format!("http://{address}/{marker}?fixture={marker}");
+            verify_aws_sigv4(&client, &valid_aws_credential(), &url)
+                .await
+                .unwrap();
+            close.await.unwrap();
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(mock.hits.load(Ordering::SeqCst), 2);
+        let logs = std::fs::read_to_string(captured.path()).unwrap();
+        assert!(logs.contains("http://127.0.0.1") && logs.contains("503"));
+        assert!(logs.contains("network error"));
+        assert!(!logs.contains(marker));
     }
 
     #[test]

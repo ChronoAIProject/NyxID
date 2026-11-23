@@ -128,6 +128,7 @@ export async function withAttachmentUploadDeadline<T>(
   upload: (signal: AbortSignal) => Promise<T>,
   signal?: AbortSignal,
   milliseconds = ASSISTANT_UPLOAD_TIMEOUT_MS,
+  timeoutError = () => localizedError("Upload timed out. Try a smaller file."),
 ): Promise<T> {
   const cancelled = () =>
     Object.assign(localizedError("Upload cancelled."), { name: "AbortError" });
@@ -138,7 +139,7 @@ export async function withAttachmentUploadDeadline<T>(
   const deadline = new Promise<never>((_, reject) => {
     rejectDeadline = reject;
     timer = setTimeout(() => {
-      reject(localizedError("Upload timed out. Try a smaller file."));
+      reject(timeoutError());
       controller.abort();
     }, milliseconds);
   });

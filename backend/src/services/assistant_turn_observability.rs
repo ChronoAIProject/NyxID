@@ -46,6 +46,7 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (accepted - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        channel_text_completeness: Default::default(),
         continued_after_restart: turn
             .restart_admission
             .as_ref()
@@ -63,22 +64,42 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
     }
 }
 
+pub(super) fn channel_retry_guard(
+    row: &AssistantConversation,
+    session: Option<&str>,
+) -> bson::Document {
+    doc! {
+        "active_turn.worker_instance.id": &super::assistant_engine_worker::instance().id,
+        "active_turn.capacity_accepted_at": bson::Bson::Null,
+        "active_turn.model_attempt_id": bson::Bson::Null,
+        "active_turn.activity_total": {"$in":[0,bson::Bson::Null]},
+        "active_turn.reply.text": {"$in":["",bson::Bson::Null]},
+        "nyxagent_session_id": session,
+        "credential_api_key_id": &row.credential_api_key_id,
+    }
+}
+
 pub async fn attempt(
     db: &Database,
     row: &AssistantConversation,
     request_key: &str,
     capacity_deadline: DateTime<Utc>,
     input: Option<bson::Binary>,
+    channel_retry_session: Option<&Option<String>>,
 ) -> AppResult<u32> {
     let mut update = doc! {"$inc": {"active_turn.engine_attempts": 1}};
     let mut filter =
         WorkerFence::matching(row, doc! {"active_turn.stop_requested": {"$ne": true}})?;
+    if let Some(session) = channel_retry_session {
+        filter.extend(channel_retry_guard(row, session.as_deref()));
+    }
     let mut enrolled = false;
     if let Some(turn) = &row.active_turn
         && let Some(admission) = &turn.restart_admission
         && let Some(deployment) = &admission.reattach
     {
         let window = crate::models::assistant_conversation::ReattachWindow {
+            channel_capacity_retry: channel_retry_session.is_some(),
             refusal: None,
             accepted: false,
             next_continuation: None,
@@ -237,6 +258,8 @@ pub async fn run_metadata_in_session(
     data: &TurnMetadata,
 ) -> AppResult<()> {
     if let Some(run_id) = turn.trigger_run_id.as_ref() {
+        let reason = doc! {"$literal": bson::to_bson(&data.failure_reason)
+        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?};
         db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
             .update_one(
                 doc! {"_id": run_id, "user_id": &row.user_id, "turn_id": &turn.turn_id},
@@ -249,8 +272,9 @@ pub async fn run_metadata_in_session(
                     },
                     "attempts": {"$add": [{"$ifNull": ["$attempts", 0]}, i64::from(turn.engine_attempts)]},
                     "capacity_wait_ms": {"$add": [{"$ifNull": ["$capacity_wait_ms", 0]}, data.capacity_wait_ms.unwrap_or(0) as i64]},
-                    "failure_reason": {"$literal": bson::to_bson(&data.failure_reason)
-                        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?},
+                    // A terminal coordinator decision can precede settlement of its last turn.
+                    "failure_reason": {"$cond": [{"$eq": ["$outcome", "failed"]},
+                        {"$cond": [{"$eq": ["$reason", "cancelled"]}, null, {"$ifNull": ["$failure_reason", &reason]}]}, &reason]},
                 }}],
             )
             .session(session)
@@ -313,7 +337,7 @@ pub fn settled(
         attempts = error.and_then(TurnError::attempts).or(data.attempts),
         capacity_wait_ms = error.and_then(TurnError::capacity_wait_ms).or(data.capacity_wait_ms).unwrap_or(0),
         duration_ms = (now - turn.started_at).num_milliseconds().max(0), origin = origin(turn),
-        trigger_run_id = turn.trigger_run_id.as_deref(), "Assistant turn settled");
+        trigger_run_id = turn.trigger_run_id.as_deref(), restart_eligibility = turn.restart_eligibility.as_deref(), "Assistant turn settled");
 }
 
 fn heartbeat_age(turn: &ActiveTurn, error: Option<&TurnError>, now: DateTime<Utc>) -> Option<i64> {

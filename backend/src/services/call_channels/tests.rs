@@ -3166,6 +3166,7 @@ async fn nyxagent_dispatch_after_forwarded_mark_rechecks_turn_and_key_and_settle
             raw_key: claim.credential.raw_key,
         };
         let authority = NyxAgentExecutionContext::Owner {
+            attempt: None,
             user_id: f.b.user_id.clone(),
             turn: turn.clone(),
             platform_origin: None,

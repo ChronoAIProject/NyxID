@@ -464,6 +464,41 @@ pub(crate) fn strip_identity(target: &mut proxy_service::ProxyTarget) {
     target.ws_frame_injections.clear();
 }
 
+pub(super) async fn send_model_request(
+    state: &AppState,
+    target: &proxy_service::ProxyTarget,
+    method: Method,
+    path: &str,
+    body: &[u8],
+    permit: billing::route_inventory::BillingEgressPermit,
+) -> AppResult<reqwest::Response> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "content-type",
+        http::HeaderValue::from_static("application/json"),
+    );
+    let response = proxy_service::forward_request_with_extra_outbound_headers(
+        proxy_service::Redirects::Return,
+        target,
+        method,
+        path,
+        None,
+        headers,
+        proxy_service::ProxyBody::Buffered(Some(bytes::Bytes::copy_from_slice(body))),
+        vec![],
+        vec![],
+        None,
+        &state.token_exchange_cache,
+        &state.cloud_response_cache,
+        vec![usage::identity_encoding_header()],
+        permit,
+    )
+    .await
+    .map_err(|e| e.into_app_error())?;
+    usage::warn_http_usage_encoding(&target.service.id, &response);
+    Ok(response)
+}
+
 pub(crate) struct ModelRequest<'a> {
     pub key_id: &'a str,
     pub service_id: &'a str,
@@ -574,33 +609,19 @@ pub(crate) async fn dispatch_model(
         )),
         BillingIngress::Proxy,
     )?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "content-type",
-        http::HeaderValue::from_static("application/json"),
-    );
     let remaining = (context.expires_at - chrono::Utc::now())
         .to_std()
         .map_err(|_| denied())?;
     let exchange = async {
-        let response = proxy_service::forward_request_with_extra_outbound_headers(
-            proxy_service::no_redirect_http_client(),
+        let response = send_model_request(
+            state,
             &target.0,
             operation.method.clone(),
             &operation.canonical_path,
-            None,
-            headers,
-            proxy_service::ProxyBody::Buffered(Some(bytes::Bytes::copy_from_slice(body))),
-            vec![],
-            vec![],
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            vec![],
+            body,
             permit,
         )
-        .await
-        .map_err(|e| e.into_app_error())?;
+        .await?;
         let status = response.status();
         let content_type = response.headers().get("content-type").cloned();
         let mut stream = response.bytes_stream();
@@ -912,7 +933,7 @@ pub(crate) async fn dispatch_nyxagent(
     )
     .await?;
     let downstream = proxy_service::forward_request_with_extra_outbound_headers(
-        proxy_service::no_redirect_http_client(),
+        proxy_service::Redirects::Return,
         &target.0,
         Method::POST,
         "v1/responses",

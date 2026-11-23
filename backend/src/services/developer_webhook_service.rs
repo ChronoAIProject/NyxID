@@ -22,14 +22,12 @@ const APP_WEBHOOK_MAX_PER_MINUTE: u32 = 120;
 
 #[derive(Clone)]
 pub struct DeveloperWebhookDispatcher {
-    http_client: reqwest::Client,
     encryption_keys: Arc<EncryptionKeys>,
 }
 
 impl std::fmt::Debug for DeveloperWebhookDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeveloperWebhookDispatcher")
-            .field("http_client", &"configured")
             .field("encryption_keys", &"[REDACTED]")
             .finish_non_exhaustive()
     }
@@ -44,11 +42,8 @@ pub struct ConnectionWebhookEnvelope {
 }
 
 impl DeveloperWebhookDispatcher {
-    pub fn new(http_client: reqwest::Client, encryption_keys: Arc<EncryptionKeys>) -> Self {
-        Self {
-            http_client,
-            encryption_keys,
-        }
+    pub fn new(encryption_keys: Arc<EncryptionKeys>) -> Self {
+        Self { encryption_keys }
     }
 
     pub fn dispatch(&self, db: Database, app_id: String, event_type: &str, data: Value) {
@@ -243,21 +238,7 @@ impl DeveloperWebhookDispatcher {
             });
         }
 
-        let hardened_client = if occurred_at.is_some() {
-            Some(
-                super::channel_media_service::media_client(url, None, None)
-                    .await
-                    .map_err(|_| DeliveryFailure {
-                        attempts: 0,
-                        reason: "destination_unavailable",
-                        last_status: None,
-                    })?,
-            )
-        } else {
-            None
-        };
         webhook_delivery_service::deliver_signed_body(
-            hardened_client.as_ref().unwrap_or(&self.http_client),
             url,
             secret.as_slice(),
             event_type,
@@ -454,6 +435,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -514,7 +496,7 @@ mod tests {
             .await
             .unwrap();
 
-        let failure = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+        let failure = DeveloperWebhookDispatcher::new(keys)
             .deliver_for_app(
                 &db,
                 &client_id,
@@ -620,6 +602,8 @@ mod tests {
             .await
             .expect("bind receiver");
         let address = listener.local_addr().expect("receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
 
         let owner = uuid::Uuid::new_v4().to_string();
@@ -640,7 +624,7 @@ mod tests {
             .await
             .expect("insert configured client");
 
-        let dispatcher = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys);
+        let dispatcher = DeveloperWebhookDispatcher::new(keys);
         dispatcher
             .deliver_for_app(
                 &db,
@@ -709,6 +693,8 @@ mod tests {
             .await
             .expect("bind failing receiver");
         let address = listener.local_addr().expect("failing receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
 
         let owner = uuid::Uuid::new_v4().to_string();
@@ -729,7 +715,7 @@ mod tests {
             .await
             .expect("insert configured client");
 
-        let failure = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+        let failure = DeveloperWebhookDispatcher::new(keys)
             .deliver_for_app(
                 &db,
                 &client_id,

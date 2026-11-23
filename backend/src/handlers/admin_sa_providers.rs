@@ -80,7 +80,7 @@ pub struct AdminSaOAuthInitiateResponse {
     pub authorization_url: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AdminSaDeviceCodeInitiateResponse {
     pub user_code: String,
     pub verification_uri: String,
@@ -89,10 +89,15 @@ pub struct AdminSaDeviceCodeInitiateResponse {
     pub interval: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AdminSaDeviceCodePollRequest {
     pub state: String,
 }
+
+crate::errors::redacted_debug!(
+    AdminSaDeviceCodeInitiateResponse,
+    AdminSaDeviceCodePollRequest,
+);
 
 #[derive(Debug, Serialize)]
 pub struct AdminSaDeviceCodePollResponse {

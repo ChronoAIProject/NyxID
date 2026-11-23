@@ -69,7 +69,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 
 Most endpoints require authentication. NyxID supports three active authentication methods, checked in the following order:
 
-1. **Bearer Token** -- `Authorization: Bearer <access_token>` header
+1. **Access token** -- `Authorization: Bearer <access_token>`. A token bound to a DPoP key also supports `Authorization: DPoP <access_token>` and requires a matching proof for the request method and public URL.
 2. **Session Cookie** -- `nyx_session` HttpOnly cookie for first-party browser sessions
 3. **API Key** -- `X-API-Key: <key>` header
 
@@ -79,6 +79,12 @@ Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = 
 Endpoints marked **Auth: None** may still require a grant-specific credential in the request body, such as a refresh token.
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
+
+### Registered apps and account management
+
+The global rollout flag `auth:app-token-management-v1` defaults to off. Each server replica logs the first request that would require designation for a registered client ID, HTTP method and matched route template with `count=1`. It then logs the number of additional matching requests at most once per minute while the caller is active, including the final nonempty interval. When enforcement is enabled, an ordinary registered-app access token needs an admin-designated client for account management. An undesignated client receives HTTP 403 with `error_code=1002`, `details.reason="credential_type_unsupported"` and `details.credential_type="oauth_client"`. The admin OAuth client PATCH controls designation. Each handler still applies its scopes, ownership checks and first-party session requirements.
+
+Apps retain access to the organization metadata and AI-service inventory GETs available to general Agent Keys, and to the two channel lists below. OAuth userinfo, creator-side connect links, token exchange, broker client authentication and execution routes retain their own authorization contracts.
 
 ### Channel management and agent discovery
 
@@ -3883,7 +3889,7 @@ For channel bot setup, see [Bot connection links](#bot-connection-links). Bot li
 1. Obtain a normal user OAuth access token through the authorization-code flow.
 2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
 3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
-4. On a terminal outcome, the browser returns to the stored callback URI after NyxID adds `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
+4. The browser that completes or declines the link returns to the stored callback URI. A later visit shows the outcome. The callback URI for each terminal state includes `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
 5. Use `GET /api/v1/connect-links/{id}` as the polling fallback. `POST /api/v1/connect-links/{id}/cancel` cancels an attempt from the creating app.
 
 **Create request:**
@@ -4736,7 +4742,7 @@ NyxID implements the OpenID Connect Authorization Code flow with mandatory PKCE.
 
 #### GET /oauth/authorize
 
-Authorization endpoint. Validates the OAuth client and parameters, then issues an authorization code. Only `response_type=code` is supported. PKCE with `S256` method is required for all requests.
+Authorization endpoint. A first-party account session approves the grant for every scope. Browsers can start the flow before sign-in. NyxID validates the OAuth client and parameters before issuing an authorization code. Only `response_type=code` is supported. PKCE with `S256` method is required for all requests.
 
 **Auth:** Required (the user must be logged in)
 
@@ -7082,6 +7088,7 @@ Update an OAuth client by `_id` as a platform admin, including ownerless Dynamic
 
 | Field                       | Type     | Description                                                  |
 |-----------------------------|----------|--------------------------------------------------------------|
+| `first_party_management`    | boolean  | A first-party platform-admin session can designate the client for management access. Defaults to false. |
 | `broker_capability_enabled` | boolean  | Grants or removes admin-provisioned OAuth broker capability  |
 | `is_active`                 | boolean  | Activates or deactivates the client                          |
 | `redirect_uris`             | string[] | Replacement redirect URI list                                |
@@ -9760,6 +9767,22 @@ requires the 24-hour dispatch window to have elapsed and `dispatch_drained: true
 absence alone never proves no creation. A stale revision/observation returns
 conflict; an invalid action returns validation failure. Authority/storage
 unavailability is retryable. No action deletes a replacement version.
+
+For a Discord bot stopped by `create_outcome_unconfirmed`, use the owner's
+NyxID bot page to identify its `channel_bot_id`. Page through the release list
+and inspect the corresponding parent release. The list and inspection expose
+`channel_bot_id` and `dispatch_started_at` (null for an undispatched attempt
+or when historical data is unavailable). Give the gateway operator the captured
+creator, gateway service, reserved `record_id` and dispatch time so they can
+verify that the original request has drained and the connection is absent.
+Repeated missing reads and elapsed time alone cannot establish this.
+
+Only after that verification and the 24-hour minimum, submit `confirm_missing`
+with `dispatch_drained: true`, the inspected revision and the inspected
+`{"status":"missing"}` observation. If the revision changes, inspect again.
+Once the release settles, the sweep starts the 90-second Discord drain and
+relay discovery resumes when all fences clear. If the gateway operator cannot
+establish the dispatch outcome, leave the release under automatic observation.
 
 ### OAuth consent decisions
 

@@ -4,6 +4,7 @@ use super::*;
 /// target and its fresh authoritative resolution. Never constructed from input.
 pub struct HttpProjection {
     pub apply_agent_override: bool,
+    pub(crate) destructive: bool,
     pub replace_headers: bool,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
@@ -17,6 +18,7 @@ impl Default for HttpProjection {
     fn default() -> Self {
         Self {
             apply_agent_override: true,
+            destructive: false,
             replace_headers: false,
             base_url: None,
             extra_headers: Vec::new(),
@@ -57,7 +59,7 @@ impl HttpProjection {
         let mut headers = crate::services::proxy_service::collect_forward_headers_with_defaults(
             headers,
             &[
-                target.catalog_default_headers.as_slice(),
+                target.catalog_headers(),
                 target.user_service_default_headers.as_slice(),
             ],
         );
@@ -624,7 +626,7 @@ async fn check_http_projected_inner(
     let read = matches!(method, "GET" | "HEAD" | "OPTIONS")
         && !method_override
         && !(stream && is_shared_chat(chat));
-    let destructive = method == "DELETE" || method_override;
+    let destructive = projection.destructive || method == "DELETE" || method_override;
     let summary = if raw_inference {
         format!(
             "Use {} / {} for this turn",

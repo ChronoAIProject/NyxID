@@ -42,10 +42,18 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
 }
 
 async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_with_discovery(name, reply, Router::new()).await
+}
+
+async fn setup_with_discovery(
+    name: &str,
+    reply: &str,
+    discovery: Router,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let reply = reply.to_owned();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
-    let upstream = Router::new().route(
+    let upstream = discovery.route(
         "/v1/responses",
         post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
@@ -89,6 +97,9 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
     let (state, _, server) = setup_with_response_router(name, upstream).await;
     (state, calls, server)
 }
+
+#[path = "trigger_handoff_discovery_tests.rs"]
+mod handoff_discovery;
 
 async fn setup_with_response_router(
     name: &str,
@@ -254,6 +265,7 @@ async fn schedule_on_stopped_home_replaces_unconfirmed_execution_credential() {
             .unwrap()
             .unwrap();
     let stopped = crate::models::assistant_conversation::StoppedWindow {
+        manager_origin: None,
         turn_id: Uuid::new_v4().to_string(),
         window_key: Uuid::new_v4().to_string(),
         credential_id: old.api_key_id.clone(),
@@ -3583,6 +3595,26 @@ async fn scheduler_terminal_paths_reset_admitted_failure_streaks() {
             .unwrap();
         assert_eq!(saved_run.outcome, RunOutcome::Failed, "{reason}");
         assert_eq!(saved_run.reason.as_deref(), Some(reason));
+        if reason == "credential_invalid" {
+            assert!(
+                saved_run.failure_reason.is_none(),
+                "legacy reply had no attribution"
+            );
+            assert!(
+                crate::handlers::triggers::run_response(saved_run.clone())
+                    .failure_reason
+                    .is_none()
+            );
+        } else {
+            let failure = saved_run
+                .failure_reason
+                .as_ref()
+                .expect("scheduler failure reason");
+            assert_eq!(
+                (&*failure.source, &*failure.stage, &*failure.code),
+                ("nyxid", "scheduler", reason)
+            );
+        }
         assert!(saved_run.terminal_result_recorded);
         let saved = state
             .db

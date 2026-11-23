@@ -65,6 +65,7 @@ pub struct StatusResponse {
     pub callback_url: Option<String>,
     pub last_error: Option<String>,
     pub delivery_status: Option<String>,
+    pub delivery_failure_reason: Option<String>,
 }
 
 fn headers() -> HeaderMap {
@@ -98,6 +99,11 @@ fn status(link: ChannelConnectLink, private: bool) -> AppResult<StatusResponse> 
         telegram_requires_original_actor: false,
         callback_url,
         last_error: if private { link.last_error } else { None },
+        delivery_failure_reason: if private {
+            link.delivery_failure_reason
+        } else {
+            None
+        },
         delivery_status: if private { link.delivery_status } else { None },
     })
 }

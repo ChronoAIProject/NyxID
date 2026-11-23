@@ -87,6 +87,12 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             TRIGGERS,
+            doc! { "user_id": 1, "created_at": -1, "_id": 1 },
+            "trigger_owner_created",
+            false,
+        ),
+        (
+            TRIGGERS,
             doc! { "user_id": 1, "source": 1 },
             "trigger_owner_source",
             false,
@@ -570,6 +576,26 @@ pub async fn history(
         .await?)
 }
 
+/// Preserve who chose the terminal code, including when recovering an old reply.
+#[derive(Clone, Copy)]
+pub enum FinishReason<'a> {
+    Scheduler(Option<&'a str>),
+    SettledTurn(&'a str),
+}
+
+impl<'a> FinishReason<'a> {
+    pub fn from_result(turn: Option<&'a str>, delivery: Option<&'a str>) -> Self {
+        turn.map_or(Self::Scheduler(delivery), Self::SettledTurn)
+    }
+
+    fn code(self) -> Option<&'a str> {
+        match self {
+            Self::Scheduler(code) => code,
+            Self::SettledTurn(code) => Some(code),
+        }
+    }
+}
+
 pub async fn finish(
     db: &Database,
     run_id: &str,
@@ -581,7 +607,7 @@ pub async fn finish(
         db,
         doc! {"_id": run_id, "outcome": {"$in": ["pending", "started", "waiting"]}},
         outcome,
-        reason,
+        FinishReason::Scheduler(reason),
         frontend,
     )
     .await
@@ -607,7 +633,7 @@ pub async fn finish_thread_result(
         } else {
             RunOutcome::Completed
         },
-        error,
+        FinishReason::from_result(error, None),
         frontend,
     )
     .await
@@ -617,27 +643,29 @@ async fn finish_matching(
     db: &Database,
     filter: Document,
     outcome: RunOutcome,
-    reason: Option<&str>,
+    reason: FinishReason<'_>,
     frontend: &str,
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
-    let work_db = db.clone();
-    let reason = reason.map(str::to_owned);
-    let frontend = frontend.to_owned();
     let run = session
         .start_transaction()
-        .and_run2(async move |session| {
-            let result = Box::pin(finish_update(
-                &work_db,
-                filter.clone(),
-                outcome,
-                reason.as_deref(),
-                &frontend,
-                session,
-            ))
-            .await;
-            transactions::transaction_result(result)
-        })
+        .and_run(
+            (db, filter, outcome, reason, frontend),
+            |session, (db, filter, outcome, reason, frontend)| {
+                Box::pin(async move {
+                    let result = Box::pin(finish_update(
+                        db,
+                        filter.clone(),
+                        *outcome,
+                        *reason,
+                        frontend,
+                        session,
+                    ))
+                    .await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(transactions::map_transaction_error)?;
     if let Some(run) = run {
@@ -705,7 +733,7 @@ async fn finish_claimed_inner(
                         "outcome": { "$in": [RunOutcome::Pending.as_str(),RunOutcome::Waiting.as_str()] },
                     },
                     outcome,
-                    reason.as_deref(),
+                    FinishReason::Scheduler(reason.as_deref()),
                     &frontend,
                     session,
                 ))
@@ -722,34 +750,57 @@ async fn finish_claimed_inner(
     Ok(())
 }
 
+fn scheduler_failure(
+    reason: Option<&str>,
+) -> Box<crate::models::assistant_message::TurnFailureReason> {
+    let code = reason
+        .and_then(super::assistant_nyxagent::diagnostic_code)
+        .unwrap_or("run_failed");
+    Box::new(crate::models::assistant_message::TurnFailureReason::new(
+        "nyxid",
+        "scheduler",
+        code,
+        None,
+    ))
+}
+
 async fn finish_update(
     db: &Database,
     filter: Document,
     outcome: RunOutcome,
-    reason: Option<&str>,
+    finish_reason: FinishReason<'_>,
     frontend: &str,
     session: &mut ClientSession,
 ) -> AppResult<Option<TriggerRun>> {
+    let reason = finish_reason.code();
     let now = Utc::now();
     let collection = db.collection::<TriggerRun>(RUNS);
+    let mut fields = doc! {
+        "outcome": outcome.as_str(),
+        "reason": {"$cond": [{"$and": [{"$eq": ["$coordinator.protocol", 2]}, outcome == RunOutcome::Completed && reason.is_none()]}, "coordinator_completed", {"$literal": reason}]},
+        "finished_at": date(now),
+        "duration_ms": {
+            "$cond": [
+                { "$ne": ["$started_at", null] },
+                { "$subtract": [date(now), "$started_at"] },
+                null,
+            ],
+        },
+    };
+    if reason == Some("cancelled") {
+        fields.insert("failure_reason", bson::Bson::Null);
+    } else if outcome == RunOutcome::Failed
+        && let FinishReason::Scheduler(reason) = finish_reason
+    {
+        let fallback = bson::to_bson(&scheduler_failure(reason))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        fields.insert(
+            "failure_reason",
+            doc! {"$ifNull": ["$failure_reason", {"$literal": fallback}]},
+        );
+    }
     let action = collection
-        .find_one_and_update(
-            filter,
-            vec![doc! {
-                "$set": {
-                    "outcome": outcome.as_str(),
-                    "reason": {"$cond": [{"$and": [{"$eq": ["$coordinator.protocol", 2]}, outcome == RunOutcome::Completed && reason.is_none()]}, "coordinator_completed", {"$literal": reason}]},
-                    "finished_at": date(now),
-                    "duration_ms": {
-                        "$cond": [
-                            { "$ne": ["$started_at", null] },
-                            { "$subtract": [date(now), "$started_at"] },
-                            null,
-                        ],
-                    },
-                },
-            }],
-        )
+        .find_one_and_update(filter, vec![doc! {"$set": fields}])
         .return_document(ReturnDocument::After);
     let mut run = action.session(&mut *session).await?;
     if let Some(run) = &mut run {

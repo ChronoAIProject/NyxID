@@ -800,9 +800,12 @@ provider bodies or text enter the event. Decision causes distinguish:
   `additional_floor_required`.
 - `hard_denial`: explicit policy/ceiling, revoked or invalid permission, unsupported
   version, used claim, dead task, resource denial or ineligible decider. A marked
-  resume that no longer covers refuses; it cannot fall back to Full.
+  resume that no longer covers refuses. A rejected or expired review reports
+  `proposal_not_live`. A duplicate submission that finds an approved occurrence
+  reports `occurrence_already_reviewed` and keeps the original review handle.
 - `operational_error`: unavailable authority/readiness/enrollment resolution,
-  candidate overflow, required resource verification, uncertain outcome or
+  candidate overflow, required resource verification, an uncertain outcome
+  (including a retry that finds an `unknown` receipt), or
   `admission_abandoned` when a started admission future is dropped.
 - `legacy`: a stale-positive hint resolved off, unsupported source/transport, or
   no eligible floor. This is not a denial of the ordinary legacy path.

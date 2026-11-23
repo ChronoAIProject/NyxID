@@ -2514,6 +2514,7 @@ async fn org_restore_transport_choice_covers_telegram_discord_and_lark_gateway_o
 fn org_restore_health_states_have_no_owner_action_and_truthful_wait_text() {
     use crate::services::channel_bot_health::{HealthFacts, codes};
     let facts = |failure_reason| HealthFacts {
+        answer_delivery: None,
         org_guest_billing: None,
         platform: "telegram",
         status: "failed",
@@ -2525,6 +2526,7 @@ fn org_restore_health_states_have_no_owner_action_and_truthful_wait_text() {
         subscription_registered: None,
         backoff_active: false,
         gateway: true,
+        gateway_not_received: None,
         discord_intake: None,
     };
     for (code, expected) in [

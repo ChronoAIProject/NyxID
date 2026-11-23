@@ -110,7 +110,7 @@ async fn fixture(migration: Migration) -> Fixture {
     let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
     catalog.id = uuid::Uuid::new_v4().to_string();
     catalog.slug = "migration-fixture".into();
-    catalog.base_url = "https://example.invalid".into();
+    catalog.base_url = "https://127.0.0.1".into();
     db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .insert_one(&catalog)
         .await
@@ -125,7 +125,7 @@ async fn fixture(migration: Migration) -> Fixture {
             db.collection::<Document>(USER_ENDPOINTS)
                 .insert_one(doc! {
                     "_id": &endpoint_id, "user_id": &owner, "label": "Fixture",
-                    "url": "https://example.invalid", "created_at": now, "updated_at": now,
+                    "url": &catalog.base_url, "created_at": now, "updated_at": now,
                 })
                 .await
                 .unwrap();

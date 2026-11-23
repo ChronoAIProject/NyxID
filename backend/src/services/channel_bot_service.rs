@@ -84,7 +84,7 @@ async fn maybe_rebuild_bot_token(
     {
         return Ok(None);
     }
-    let current = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, bot).await?);
+    let current = decrypt_bot_token(encryption_keys, bot).await?;
     let Some(token) = adapter.updated_token(&current, &fields)? else {
         return Ok(None);
     };
@@ -994,7 +994,7 @@ pub async fn reregister_managed_bot(
         .ok_or_else(super::channel_managed::unavailable)?;
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
-    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
+    let token = decrypt_bot_token(keys, bot).await?;
     let pin_bytes = zeroize::Zeroizing::new(
         keys.decrypt(
             bot.registration_pin_encrypted
@@ -1046,7 +1046,7 @@ pub async fn repair_managed_bot(
         .ok_or_else(super::channel_managed::unavailable)?;
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
-    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
+    let token = decrypt_bot_token(keys, bot).await?;
     let pin = zeroize::Zeroizing::new(
         keys.decrypt(
             bot.registration_pin_encrypted
@@ -1672,6 +1672,24 @@ async fn register_webhook_inner(
     ).await
 }
 
+/// Finish a previously interrupted manual setup without overwriting an inbound activation.
+pub(crate) async fn resume_manual_registration(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    if bot.is_active && matches!(bot.status.as_str(), "pending" | "failed") {
+        store_webhook_registration(
+            db,
+            adapter,
+            doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true,
+            "status": &bot.status, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn store_webhook_registration(
     db: &mongodb::Database,
     adapter: &dyn PlatformAdapter,
@@ -2085,11 +2103,13 @@ pub async fn get_bot_for_user(
 pub async fn decrypt_bot_token(
     encryption_keys: &EncryptionKeys,
     bot: &ChannelBot,
-) -> AppResult<String> {
-    let bytes = encryption_keys.decrypt(&bot.bot_token_encrypted).await?;
-    String::from_utf8(bytes).map_err(|e| {
-        AppError::Internal(format!("bot token decryption produced invalid UTF-8: {e}"))
-    })
+) -> AppResult<zeroize::Zeroizing<String>> {
+    let bytes = zeroize::Zeroizing::new(encryption_keys.decrypt(&bot.bot_token_encrypted).await?);
+    std::str::from_utf8(&bytes)
+        .map(|token| zeroize::Zeroizing::new(token.to_owned()))
+        .map_err(|e| {
+            AppError::Internal(format!("bot token decryption produced invalid UTF-8: {e}"))
+        })
 }
 
 /// Soft-delete a bot: deregister webhook, deactivate bot and its conversations.
@@ -2281,7 +2301,7 @@ async fn delete_bot_inner(
         Some(if result.is_ok() { "removed" } else { "failed" })
     } else if adapter.serializes_lifecycle() {
         let result = async {
-            let token = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, &bot).await?);
+            let token = decrypt_bot_token(encryption_keys, &bot).await?;
             adapter
                 .remove_bot_webhook(db, http_client, &bot, &token)
                 .await
@@ -2325,7 +2345,7 @@ async fn cleanup_managed_webhook(
         .ok_or_else(super::channel_managed::unavailable)?;
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
-    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
+    let token = decrypt_bot_token(keys, bot).await?;
     let credentials = BotCredentials {
         billing: None,
         token: &token,
@@ -2369,7 +2389,7 @@ async fn verify_under_lifecycle(
         if !bot.is_active {
             return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
         }
-        let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, &bot).await?);
+        let token = decrypt_bot_token(keys, &bot).await?;
         adapter
             .verify_bot_token(
                 http,
@@ -2526,7 +2546,7 @@ pub(crate) async fn erase_personal_bot(
                 if bot.credential_source=="platform" {
                     return cleanup_managed_webhook(db,http,keys,adapter,&bot).await;
                 }
-                let token=zeroize::Zeroizing::new(decrypt_bot_token(keys,&bot).await?);
+                let token=decrypt_bot_token(keys,&bot).await?;
                 if bot.platform=="telegram" {verify_telegram_token_identity(http,adapter,&bot,&token).await?;}
                 adapter.remove_bot_webhook(db,http,&bot,&token).await?;
                 Ok("personal_webhook_removed")
@@ -3038,11 +3058,30 @@ mod tests {
     // ---- decrypt_bot_token ----
 
     #[tokio::test]
+    async fn bot_token_decode_error_omits_plaintext() {
+        let keys = test_encryption_keys();
+        let mut bot = make_lark_bot(&keys, "fixture").await;
+        bot.bot_token_encrypted = keys
+            .encrypt(b"fixture-private-bot-token\xff")
+            .await
+            .unwrap();
+        let error = decrypt_bot_token(&keys, &bot).await.unwrap_err();
+        for output in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!output.contains("fixture-private-bot-token"));
+        }
+    }
+
+    #[tokio::test]
     async fn decrypt_bot_token_roundtrips() {
         let encryption_keys = test_encryption_keys();
         let bot = make_lark_bot(&encryption_keys, "test_app:test_secret").await;
-        let decrypted = decrypt_bot_token(&encryption_keys, &bot).await.unwrap();
-        assert_eq!(decrypted, "test_app:test_secret");
+        let decrypted: zeroize::Zeroizing<String> =
+            decrypt_bot_token(&encryption_keys, &bot).await.unwrap();
+        assert_eq!(decrypted.as_str(), "test_app:test_secret");
     }
 
     // ---- webhook_secret_hash properties ----

@@ -6,6 +6,7 @@ import { DocsLayout, type TocItem } from "./docs-layout";
 import { DocsIndexPage } from "./docs-index-page";
 import { DocMarkdown } from "./docs-markdown";
 import { findDocPage, docTabForSlug, type DocTabId } from "./manifest";
+import { useDocumentTitle } from "@/hooks/use-document-title";
 
 const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n*/;
 
@@ -54,6 +55,7 @@ export function DocsPage() {
   const { _splat } = useParams({ from: "/docs/$" });
   const slug = (_splat ?? "").replace(/\/+$/, "");
   const known = findDocPage(slug);
+  useDocumentTitle(slug ? "nyxid - docs" : null);
 
   // Fetched content is tagged with the slug it belongs to and only ever written
   // from async callbacks — never synchronously inside the effect — so status/doc
@@ -195,17 +197,13 @@ export function DocsPage() {
     }
   }, [rawTab]);
 
-  // Title + description + canonical + Open Graph/Twitter tags for SEO & sharing.
+  // Description + canonical + Open Graph/Twitter tags for SEO & sharing.
   // Tags we create are removed on unmount; tags we only edit are restored.
   useEffect(() => {
     if (status !== "ok" || !doc) return;
-    const fullTitle = "nyxid - docs";
     const ogTitle = `${doc.title || known?.title || "Docs"} · NyxID Docs`;
     const description = doc.description;
     const url = `${window.location.origin}/docs/${slug}`;
-
-    const prevTitle = document.title;
-    document.title = fullTitle;
 
     const cleanups: Array<() => void> = [];
     const upsert = (
@@ -258,7 +256,6 @@ export function DocsPage() {
     upsert('meta[name="twitter:card"]', meta("twitter:card"), "content", "summary");
 
     return () => {
-      document.title = prevTitle;
       for (const cleanup of cleanups) cleanup();
     };
   }, [status, doc, known, slug]);

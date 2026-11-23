@@ -1,0 +1,18 @@
+{
+  "https://nyx.chrono-ai.fun/activity": {
+    "command": "adb -s emulator-5572 shell am start -W -a android.intent.action.VIEW -d https://nyx.chrono-ai.fun/activity",
+    "output": "Starting: Intent { act=android.intent.action.VIEW dat=https://nyx.chrono-ai.fun/... }\nWarning: Activity not started, its current task has been brought to the front\nStatus: ok\nLaunchState: HOT\nActivity: org.chromium.webview_shell/.WebViewBrowserActivity\nTotalTime: 197\nWaitTime: 204\nComplete\n",
+    "exitCode": 0
+  },
+  "https://nyxid.ai/activity": {
+    "command": "adb -s emulator-5572 shell am start -W -a android.intent.action.VIEW -d https://nyxid.ai/activity",
+    "output": "Starting: Intent { act=android.intent.action.VIEW dat=https://nyxid.ai/... }\nStatus: ok\nLaunchState: WARM\nActivity: org.chromium.webview_shell/.WebViewBrowserActivity\nTotalTime: 177\nWaitTime: 208\nComplete\n",
+    "exitCode": 0
+  },
+  "packageScopedSchemeControl": {
+    "command": "adb -s emulator-5572 shell am start -W -a android.intent.action.VIEW -d nyxid://activity -p dev.nyxid.nativecheck",
+    "output": "Starting: Intent { act=android.intent.action.VIEW dat=nyxid://activity/... pkg=dev.nyxid.nativecheck }\nWarning: Activity not started, its current task has been brought to the front\nStatus: ok\nLaunchState: HOT\nActivity: dev.nyxid.nativecheck/.MainActivity\nTotalTime: 107\nWaitTime: 110\nComplete\n",
+    "exitCode": 0
+  },
+  "verificationState": "  dev.nyxid.nativecheck:\n    ID: 018328c4-55d6-4753-8ed8-86823a9e6ecf\n    Signatures: [FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C]\n    Domain verification state:\n      nyxid.ai: legacy_failure\n"
+}

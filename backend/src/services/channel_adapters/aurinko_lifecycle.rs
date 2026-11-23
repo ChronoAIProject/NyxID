@@ -286,10 +286,9 @@ impl AurinkoAdapter {
             "_id": uuid::Uuid::new_v4().to_string(), "bot_id": &bot.id, "user_id": &bot.user_id,
             "digest": digest, "next_offset": 0_i64, "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::days(31)),
         }}).upsert(true).return_document(mongodb::options::ReturnDocument::After).await?.ok_or_else(upstream)?;
-        let token = Zeroizing::new(
+        let token =
             crate::services::channel_bot_service::decrypt_bot_token(context.encryption_keys, bot)
-                .await?,
-        );
+                .await?;
         let account = self.account(&token, Some(&bot.platform_bot_id)).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let mut failed = false;

@@ -198,6 +198,7 @@ async fn channel_routes_keep_human_success_and_agent_denial() {
         delegation_scopes: String::new(),
         default_service_catalog_slugs: vec![],
         broker_capability_enabled: false,
+        first_party_management: false,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
         connection_webhook_url: None,
@@ -236,7 +237,31 @@ async fn channel_routes_keep_human_success_and_agent_denial() {
         Some(&reference),
     )
     .unwrap();
-    let (_, private) = crate::routes::build_router();
+    let (public, private) = crate::routes::build_router();
+    let public = public.with_state(state.clone());
+    for (method, path) in [
+        ("GET", "/oauth/authorize"),
+        ("POST", "/oauth/authorize/decision"),
+        ("POST", "/oauth/authorize/incremental/decision"),
+    ] {
+        let response = public
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {oauth}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(response).await["details"]["credential_type"],
+            "oauth_client"
+        );
+    }
     let app = private.with_state(state.clone());
     for path in ["/api/v1/channel-bots", "/api/v1/channel-conversations"] {
         let request = |token: &str| {
@@ -418,6 +443,9 @@ fn denial_guidance_verified_first_party_guard_matches_early_guard() {
 #[tokio::test]
 async fn notification_routes_are_first_party_human_only_and_require_both_flags() {
     use crate::services::feature_flag_service as flags;
+    use crate::services::oauth_token_authority_service::{
+        with_fixture_read_budget, with_unavailable_user_read,
+    };
     let db =
         crate::test_utils::connect_transaction_test_database("notifications_auth_matrix").await;
     crate::services::assistant_notification_service::ensure_indexes(&db)
@@ -448,6 +476,16 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
     let (_, private) = crate::routes::build_router();
     let app = private.with_state(state);
     let root = "/api/v1/assistant/nyxagent/notifications";
+    let human_request = |method: &str, uri: &str, body: String| {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {human}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        with_fixture_read_budget(app.clone().oneshot(request))
+    };
     for enabled in [false, true] {
         flags::set_platform_override(
             &db,
@@ -465,19 +503,7 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
             } else {
                 String::new()
             };
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(&uri)
-                        .header("authorization", format!("Bearer {human}"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.clone()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = human_request(method, &uri, body.clone()).await.unwrap();
             if enabled {
                 assert!(
                     response.status().is_success(),
@@ -588,19 +614,18 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
     .await
     .unwrap();
     for suffix in ["", "/summary"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("{root}{suffix}"))
-                    .header("authorization", format!("Bearer {human}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let response = human_request("GET", &format!("{root}{suffix}"), String::new())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+    let refused = with_unavailable_user_read(human_request("GET", root, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let error = json_body(refused).await;
+    assert_eq!(error["error"], "oauth_authority_unavailable");
+    assert_eq!(error["error_code"], 12900);
     db.drop().await.unwrap();
 }
 
@@ -788,6 +813,251 @@ async fn notification_routes_preserve_settings_and_audit_only_explicit_mark_all(
                 .get_bool("unread")
                 .unwrap()
         );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_policy_management_routes_return_typed_denials() {
+    let db = crate::test_utils::connect_transaction_test_database("management_route_policy").await;
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(crate::test_utils::test_app_state(db.clone()));
+    // Deny-only route classification precedes body parsing and authentication.
+    // These fixtures cannot authorize a request.
+    let mut failures = Vec::new();
+    for (claims, kind) in [
+        (json!({"sa":true}), "service_account"),
+        (json!({"relay":true}), "relay"),
+        (json!({"delegated":true}), "delegated"),
+        (Value::Null, "api_key"),
+    ] {
+        let token = if claims.is_null() {
+            "nyx_fixture".into()
+        } else {
+            format!(
+                "header.{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+            )
+        };
+        for scheme in ["Bearer", "DPoP"] {
+            for (method, path) in [
+                ("POST", "/api/v1/api-keys"),
+                ("POST", "/api/v1/approvals/requests/fixture/decide"),
+                ("POST", "/api/v1/orgs"),
+                ("DELETE", "/api/v1/sessions/fixture"),
+                ("POST", "/api/v1/developer/oauth-clients"),
+                ("POST", "/api/v1/admin/users"),
+                ("POST", "/api/v1/channel-bots"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header("authorization", format!("{scheme} {token}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                if status != StatusCode::FORBIDDEN {
+                    failures.push(format!("{scheme} {kind} {method} {path}: {status}"));
+                } else {
+                    let body = json_body(response).await;
+                    assert_eq!(body["error"], "forbidden");
+                    assert_eq!(body["error_code"], 1002);
+                    assert_eq!(body["details"]["reason"], "credential_type_unsupported");
+                    assert_eq!(body["details"]["accepted"], json!(["user_session"]));
+                    assert_eq!(body["details"]["credential_type"], kind);
+                }
+            }
+        }
+    }
+    db.drop().await.unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn credential_policy_authorization_requires_a_human_before_processing_inputs() {
+    let db = crate::test_utils::connect_transaction_test_database("authorize_route_policy").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &actor,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let key = "nyxid_ag_fixture_consent";
+    let parent = super::tests::delegated_fixture_api_key(
+        &Uuid::new_v4().to_string(),
+        &actor,
+        &hash_token(key),
+    );
+    db.collection::<ApiKey>(API_KEYS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    let child = "nyxid_ag_fixture_child_consent";
+    let child_id = Uuid::new_v4().to_string();
+    db.collection::<bson::Document>(crate::models::api_key_credential::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &child_id, "api_key_id": &parent.id, "user_id": &actor,
+            "secret_hash": hash_token(child), "secret_prefix": "nyxid_ag_fixture",
+            "label": "fixture", "login_request_id": Uuid::new_v4().to_string(),
+            "is_active": true, "created_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    let (public, private) = crate::routes::build_router();
+    let app = public.merge(private).with_state(state.clone());
+    for (credential, expected_child) in [(key, None), (child, Some(child_id.as_str()))] {
+        let (mut parts, _) = Request::post("/api/v1/monitoring/invocation-diagnostics")
+            .header("x-api-key", credential)
+            .body(())
+            .unwrap()
+            .into_parts();
+        let verified = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap();
+        assert_eq!(verified.auth_method, AuthMethod::ApiKey);
+        assert_eq!(verified.api_key_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(verified.api_key_credential_id.as_deref(), expected_child);
+        for (method, path) in [
+            ("GET", "/oauth/authorize"),
+            ("POST", "/oauth/authorize/decision"),
+            ("POST", "/oauth/authorize/incremental/decision"),
+            ("POST", "/api/v1/api-keys"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("accept", "application/json")
+                        .header("x-api-key", credential)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            assert_eq!(
+                json_body(response).await["details"]["credential_type"],
+                "api_key"
+            );
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_policy_dpop_requires_a_key_bound_access_token() {
+    let db = crate::test_utils::connect_transaction_test_database("dpop_scheme_policy").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &actor.to_string(),
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let token = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &actor,
+        "openid",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let app = Router::new()
+        .route("/test", get(|_: AuthUser| async { StatusCode::NO_CONTENT }))
+        .with_state(state);
+    for (scheme, expected) in [
+        ("Bearer", StatusCode::NO_CONTENT),
+        ("DPoP", StatusCode::UNAUTHORIZED),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("authorization", format!("{scheme} {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_policy_mounted_userinfo_accepts_sender_bound_tokens() {
+    use crate::crypto::dpop::{jwk_thumbprint, sign_test_proof, test_dpop_keypair};
+
+    let db = crate::test_utils::connect_transaction_test_database("sender_bound_userinfo").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &actor.to_string(),
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let (key, jwk) = test_dpop_keypair();
+    let token = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &actor,
+        "openid",
+        None,
+        None,
+        Some(&jwk_thumbprint(&jwk)),
+        None,
+        None,
+    )
+    .unwrap();
+    let htu = format!(
+        "{}/oauth/userinfo",
+        state.config.base_url.trim_end_matches('/')
+    );
+    let (public, _) = crate::routes::build_router();
+    let app = public.with_state(state);
+    for scheme in ["DPoP", "Bearer"] {
+        let proof = sign_test_proof(
+            &key,
+            &jwk,
+            "GET",
+            &htu,
+            chrono::Utc::now().timestamp(),
+            &Uuid::new_v4().to_string(),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/oauth/userinfo")
+                    .header("authorization", format!("{scheme} {token}"))
+                    .header("dpop", proof)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{scheme}");
+        assert_eq!(json_body(response).await["sub"], actor.to_string());
     }
     db.drop().await.unwrap();
 }

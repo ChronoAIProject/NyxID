@@ -1512,6 +1512,10 @@ pub(crate) async fn set_service_route(
     id: &str,
     target: Option<node_service::RouteNode>,
 ) -> AppResult<()> {
+    if target.is_none() {
+        let current = get_user_service(db, owner, id).await?;
+        validate_direct_route(db, &current).await?;
+    }
     let edit = PreparedServiceUpdate {
         filter: doc! {"_id": id, "user_id": owner},
         update: versioned_service_update(doc! {"node_id":target.as_ref().map(|node| node.id())}),
@@ -1560,6 +1564,16 @@ pub(crate) fn map_connection_write_error(error: mongodb::error::Error) -> AppErr
     } else {
         map_transaction_error(error)
     }
+}
+
+async fn validate_direct_route(db: &Database, current: &UserService) -> AppResult<()> {
+    if current.service_type == "ssh" {
+        return Ok(());
+    }
+    let endpoint =
+        super::user_endpoint_service::get_endpoint(db, &current.user_id, &current.endpoint_id)
+            .await?;
+    super::url_validation::validate_user_endpoint_url(&endpoint.url, false, "endpoint_url").await
 }
 
 fn versioned_service_update(mut fields: Document) -> Document {
@@ -1664,6 +1678,7 @@ async fn prepare_service_update(
     let mut target = None;
     if let Some(nid) = node_id {
         if nid.is_empty() {
+            validate_direct_route(db, &current).await?;
             // Empty string clears the node_id
             set_doc.insert("node_id", bson::Bson::Null);
         } else {
@@ -2989,6 +3004,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_destination_node_clear_validates_saved_endpoint() {
+        let db = connect_test_database("proxy_destination_node_clear")
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint("ep", &owner, "node", "http://192.168.1.1", None, None);
+        db.collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        let service = test_user_service("svc", &owner, "test-node", "ep", None, Some("node"));
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let result = update_user_service(
+            &db,
+            &owner,
+            &owner,
+            "svc",
+            None,
+            None,
+            Some(""),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+        assert_eq!(
+            get_user_service(&db, &owner, "svc")
+                .await
+                .unwrap()
+                .node_id
+                .as_deref(),
+            Some("node")
+        );
+    }
+
+    #[tokio::test]
     async fn update_user_service_round_trips_admin_only_policy() {
         let Some(db) = connect_test_database("user_service_admin_only_update").await else {
             eprintln!("skipping user service admin-only update test: no local MongoDB available");
@@ -3148,6 +3207,7 @@ mod tests {
             is_active: true,
             created_by: "test".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

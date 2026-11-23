@@ -1493,6 +1493,9 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let message=messages.find_one(doc! {"conversation_id":&current.id,"turn_id":&written.turn_id,"role":{"$ne":"assistant"}}).await.unwrap().unwrap();
             let captured = calls.lock().await.last().unwrap().clone();
             assert!(current.active_turn.is_none());
+            let input = captured_text(&captured);
+            let (_, caption) = input.rsplit_once("]\n\n").unwrap();
+            assert_eq!(caption, text, "{transport}/{sender}");
             if sender == "guest" {
                 assert!(current.guest_turn);
                 assert_ne!(Some(&current.id), owner_conversation.as_ref());
@@ -1695,6 +1698,8 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
         body["input"][0]["content"][0]["text"] = json!("OLD RENDERING must disappear");
         let text = if kind == "capped" {
             format!("{}\n[post truncated]", "Dinner ".repeat(5000))
+        } else if kind == "all_failed" {
+            String::new()
         } else {
             "Dinner".into()
         };
@@ -1706,10 +1711,12 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
                 .await
                 .contains("Here is your answer")
         );
-        let input = calls.lock().await.last().unwrap().to_string();
+        let captured = calls.lock().await.last().unwrap().clone();
+        let input = captured.to_string();
         assert!(!input.contains("OLD RENDERING"));
         if kind == "all_failed" {
             assert!(input.contains(crate::services::assistant_channel_media::FAILED_NOTE));
+            assert!(captured_text(&captured).trim_end().ends_with(']'));
         } else {
             assert!(input.contains("too large"));
             assert!(!input.contains("too_large"));
@@ -2131,8 +2138,9 @@ async fn channel_media_gateway_headers_return_while_download_is_blocked_in_run_t
 
 #[tokio::test]
 async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_finalize() {
+    let clock_jump = Duration::from_secs(91);
     for deadline in [false, true] {
-        let (state, row, key, calls, server) =
+        let (mut state, row, key, calls, server) =
             media_fixture("media_fetch_cancellation", "gateway").await;
         enable_media(&state).await;
         gateway_ready(&state, &key).await;
@@ -2141,6 +2149,15 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
             streaming_ingestion_provider(&state, &row, native_png(), false, Some(gate)).await;
         let mut source = media_source(&state, &row, "cancel-fetch", "cancel-fetch", "").await;
         if deadline {
+            // Advancing Tokio time must expire the media budget while the turn still owns its slot.
+            let slots = crate::services::cluster_slot_service::RenewableSlotManager::new(
+                state.db.clone(),
+                state.replica_identity.coordination_holder(),
+                clock_jump + Duration::from_secs(state.config.cluster_slot_ttl_secs),
+                Duration::from_secs(state.config.cluster_slot_renew_secs),
+            );
+            state.direct_chat_limiter =
+                crate::mw::rate_limit::create_direct_chat_rate_limiter(state.db.clone(), slots);
             let mut fast = source.attachments[0].clone();
             fast.provider_ref = fast.provider_ref.replace("img_receipt", "fast");
             fast.image_key = Some("fast".into());
@@ -2186,7 +2203,7 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
             .unwrap();
         if deadline {
             tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(91)).await;
+            tokio::time::advance(clock_jump).await;
             tokio::time::resume();
         } else {
             engine::request_stop(&state.db, OWNER, event.conversation_id.as_deref().unwrap())

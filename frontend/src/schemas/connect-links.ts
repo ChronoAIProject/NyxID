@@ -88,6 +88,7 @@ export const completeConnectLinkResponseSchema = z.object({
 });
 
 export const connectLinkStatusResponseSchema = z.object({
+  cancelled_here: z.boolean().optional(),
   scopes: z.array(z.string()).default([]),
   id: z.string().uuid(),
   status: connectLinkStatusSchema,

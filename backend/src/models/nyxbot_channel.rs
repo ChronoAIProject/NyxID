@@ -276,12 +276,25 @@ impl std::fmt::Debug for NyxbotChannel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoticeLanguage {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-CN")]
+    Simplified,
+    #[serde(rename = "zh-TW")]
+    Traditional,
+}
+
 /// One chat the bot is in, answered by one agent conversation: each private
 /// chat, and each group, channel or topic (shared by its members). Gateway
 /// partitions of other senders in a group are also stored here, without a
 /// `kind`, so the gateway's conversation registry keeps working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotThread {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_language: Option<NoticeLanguage>,
     #[serde(default)]
     pub execution_policy_revision: i64,
     /// Native bot-message handoffs left until the next admitted human message.
@@ -595,6 +608,10 @@ impl std::fmt::Debug for TriggerPrefill {
 /// neither they nor sender identifiers appear in Debug, logs or audit.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelTurnDelivery {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_owner_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_language: Option<NoticeLanguage>,
     /// Set only by verified original human ingress; legacy events are ineligible.
     #[serde(default)]
     pub execution_owner_verified: bool,

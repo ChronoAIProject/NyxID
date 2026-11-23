@@ -680,6 +680,13 @@ impl TokenBucketStore {
 
 pub use crate::models::coordination::SlotToken;
 
+/// Local dispatch time bounds the confirmed TTL. Only the fence token travels between replicas.
+#[derive(Debug, Clone)]
+pub struct SlotGrant {
+    pub token: SlotToken,
+    pub dispatched_at: tokio::time::Instant,
+}
+
 pub struct SlotStore;
 
 impl SlotStore {
@@ -690,7 +697,7 @@ impl SlotStore {
         limit: u32,
         holder: &CoordinationHolder,
         ttl: Duration,
-    ) -> AppResult<Option<SlotToken>> {
+    ) -> AppResult<Option<SlotGrant>> {
         if limit == 0 {
             return Ok(None);
         }
@@ -736,6 +743,7 @@ impl SlotStore {
                 },
                 doc! { "$unset": "__claimable" },
             ];
+            let dispatched_at = tokio::time::Instant::now();
             let result = db
                 .collection::<CoordinationSlot>(SLOT_COLLECTION_NAME)
                 .find_one_and_update(doc! { "_id": &id }, update)
@@ -744,7 +752,7 @@ impl SlotStore {
                 .await;
             match result {
                 Ok(Some(record)) if record.lease_id == lease_id => {
-                    return Ok(Some(SlotToken {
+                    let token = SlotToken {
                         id,
                         namespace: namespace.to_string(),
                         scope_hash,
@@ -753,6 +761,10 @@ impl SlotStore {
                         acquired_at: record.acquired_at,
                         order_id: lease_id.clone(),
                         lease_id,
+                    };
+                    return Ok(Some(SlotGrant {
+                        token,
+                        dispatched_at,
                     }));
                 }
                 Ok(Some(_)) => continue,
@@ -786,7 +798,7 @@ impl SlotStore {
                 }],
             )
             .await?;
-        Ok(result.modified_count == 1)
+        Ok(result.matched_count == 1)
     }
 
     pub async fn release(db: &mongodb::Database, token: &SlotToken) -> AppResult<bool> {
@@ -835,7 +847,7 @@ impl SlotStore {
         holder: &CoordinationHolder,
         ttl: Duration,
         limit: u32,
-    ) -> AppResult<Option<SlotToken>> {
+    ) -> AppResult<Option<SlotGrant>> {
         if token.namespace != namespace
             || token.scope_hash != hash_parts(&[scope])
             || token.id != hash_parts(&[namespace, scope, &token.slot.to_string()])
@@ -871,6 +883,7 @@ impl SlotStore {
             }
             let mut values = update.clone();
             values.insert("slot", i64::from(slot));
+            let dispatched_at = tokio::time::Instant::now();
             let saved = slots
                 .update_one(filter, vec![doc! {"$set":values}])
                 .session(&mut *session)
@@ -879,7 +892,10 @@ impl SlotStore {
             if saved.matched_count == 1 || saved.upserted_id.is_some() {
                 next.id = id;
                 next.slot = slot;
-                return Ok(Some(next));
+                return Ok(Some(SlotGrant {
+                    token: next,
+                    dispatched_at,
+                }));
             }
         }
         Ok(None)

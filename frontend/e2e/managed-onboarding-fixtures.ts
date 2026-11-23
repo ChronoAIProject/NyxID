@@ -45,7 +45,10 @@ export const managedBootstrap = {
   },
 };
 
-export async function mockDashboard(page: Page) {
+export async function mockDashboard(
+  page: Page,
+  options: { readonly enabledFeatures?: readonly string[] } = {},
+) {
   await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
     let body: unknown = {};
@@ -65,6 +68,9 @@ export async function mockDashboard(page: Page) {
         is_active: true,
         email_verified: true,
         created_at: managedBot.created_at,
+        ...(options.enabledFeatures !== undefined
+          ? { capabilities: { enabled_features: options.enabledFeatures } }
+          : {}),
       };
     else if (path === "/channel-platforms") body = { platforms: channelPlatforms };
     else if (path === "/channel-bots") body = { bots: [], total: 0 };
@@ -85,6 +91,7 @@ export async function mockDashboard(page: Page) {
     else if (path === "/api-keys") body = { keys: [] };
     else if (path === "/nodes") body = { nodes: [] };
     else if (path === "/services") body = { services: [] };
+    else if (path === "/user-services") body = { services: [] };
     else if (path === "/admin/users") body = { users: [], total: 0, page: 1, per_page: 50 };
     else if (path === "/admin/channel-adapter-accounts") body = { accounts: [], next_after_id: null };
     else if (path === "/admin/channel-adapter-allocations") body = { allocations: [], next_after_id: null };

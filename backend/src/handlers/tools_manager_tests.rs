@@ -2279,6 +2279,7 @@ async fn tools_manager_local_fake_vendor_e2e() {
     let user = seed(&db, "user", false, false).await;
     let byok_user = seed(&db, "user", false, false).await;
     let vendor = MockServer::start().await;
+    let _origin = crate::services::resource_adapter::register_test_origin(&vendor.uri());
     Mock::given(method("POST"))
         .and(path("/v2/search"))
         .and(header(
@@ -3457,6 +3458,7 @@ async fn tools_manager_authoritative_discovery_withdraws_and_delete_demotes() {
     let manager = seed(&db, "operator", true, false).await;
     let admin = seed(&db, "admin", false, false).await;
     let vendor = MockServer::start().await;
+    let _origin = crate::services::resource_adapter::register_test_origin(&vendor.uri());
     for discoverer in [&manager, &admin] {
         let tool = create(
             &state,
@@ -5124,6 +5126,7 @@ async fn catalog_manager_shared_discovery_rejects_nonhuman_before_vendor_request
     let admin = seed(&db, "admin", false, false).await;
     let state = test_app_state(db.clone());
     let vendor = MockServer::start().await;
+    let _origin = crate::services::resource_adapter::register_test_origin(&vendor.uri());
     Mock::given(method("GET")).and(path("/spec"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"openapi":"3.0.3","info":{"title":"Shared","version":"1"},"paths":{"/read":{"get":{"operationId":"read","responses":{"200":{"description":"ok"}}}}}})))
         .mount(&vendor).await;

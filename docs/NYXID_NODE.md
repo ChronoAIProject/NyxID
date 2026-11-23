@@ -467,7 +467,7 @@ On Unix systems, the config file is written atomically (write to temp file with 
 
 ## HMAC Request Signing
 
-When HMAC signing is enabled on the NyxID server (default: enabled), proxy requests sent to the agent include an HMAC-SHA256 signature. The agent verifies this signature to ensure request integrity and authenticity.
+The agent requires an HMAC-SHA256 signature on every HTTP proxy request. Enable `NODE_HMAC_SIGNING_ENABLED=true` (the default) on every server replica before upgrading agents. A server configured with `false` can still connect to the agent. Its unsigned HTTP requests receive a non-retryable 403.
 
 ### How It Works
 

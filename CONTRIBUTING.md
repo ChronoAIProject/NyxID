@@ -363,8 +363,9 @@ Include:
 
 Open feature and fix PRs against `dev`. Two required checks protect both branches.
 **CI Pipeline** collects the correctness jobs. **Main Merge Guard** accepts any
-head into `dev`. For PRs into `main`, it accepts this repository's `dev` branch
-or a dated release branch whose head commit is in `dev`'s history.
+head into `dev`. For PRs into `main`, it accepts this repository's `dev` branch,
+a dated release branch on `dev`'s history, or a hotfix from current `main`
+that carries no unreleased `dev` commits. See [Releasing to production](docs/DEPLOYMENT.md#releasing-to-production).
 GitHub runs the guard from the repository's default branch on `pull_request_target`,
 including when a PR changes its base branch.
 

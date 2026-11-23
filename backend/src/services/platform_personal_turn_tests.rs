@@ -65,7 +65,7 @@ fn legacy_turn_without_execution_marker_remains_readable() {
     assert!(turn.platform_origin.is_none());
 }
 
-pub(super) async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
+pub(crate) async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
     let (db, update, owner) =
         super::super::platform_personal_binding_service::tests::fixture(name).await;
     engine::ensure_indexes(&db).await.unwrap();
@@ -624,6 +624,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             &db,
             contract::NyxAgentExecutionContext::Owner {
                 user_id: "missing".into(),
+                attempt: None,
                 turn: turn.clone(),
                 platform_origin: None,
             },
@@ -935,6 +936,7 @@ async fn fresh_event_read_cannot_commit_after_concurrent_revocation() {
         &event_start(id),
         &ids,
         &agent,
+        None,
         None,
         None,
         None,

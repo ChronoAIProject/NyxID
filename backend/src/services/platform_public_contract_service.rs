@@ -431,7 +431,7 @@ async fn control(
             http::HeaderValue::from_static("application/json"),
         );
         let response = proxy_service::forward_request_with_extra_outbound_headers(
-            proxy_service::no_redirect_http_client(),
+            proxy_service::Redirects::Return,
             &target.0,
             http::Method::POST,
             path,
@@ -1458,29 +1458,15 @@ pub(crate) async fn dispatch_probe(
         billing::BillingIngress::Proxy,
     )?;
     let run = async {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            "content-type",
-            http::HeaderValue::from_static("application/json"),
-        );
-        let response = proxy_service::forward_request_with_extra_outbound_headers(
-            proxy_service::no_redirect_http_client(),
+        let response = super::platform_public_proxy_service::send_model_request(
+            state,
             &target.0,
             http::Method::POST,
             path,
-            None,
-            headers,
-            proxy_service::ProxyBody::Buffered(Some(bytes::Bytes::copy_from_slice(body))),
-            vec![],
-            vec![],
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            vec![],
+            body,
             permit,
         )
-        .await
-        .map_err(|e| e.into_app_error())?;
+        .await?;
         let status = response.status();
         let mut stream = response.bytes_stream();
         let mut output = Zeroizing::new(Vec::new());

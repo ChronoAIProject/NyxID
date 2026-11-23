@@ -4,6 +4,7 @@ import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import { historySchema, type AssistantHistory } from "./assistantTypes";
 import type { useAssistant } from "./useAssistant";
+import { buildApiError } from "../../lib/api/responseError";
 import type { streamAssistantTurn } from "../../lib/api/assistantApi";
 
 const A = `nyxa-${"a".repeat(32)}`;
@@ -27,7 +28,7 @@ function history(id: string): AssistantHistory {
   });
 }
 
-async function harness() {
+async function harness(overrideStream?: typeof streamAssistantTurn) {
   const agent = {
     id: "nyxbot",
     kind: "nyxbot",
@@ -84,7 +85,7 @@ async function harness() {
     },
     "../../lib/api/agentsApi": { agentsApi: { list: async () => agentList } },
     "../../lib/api/assistantApi": {
-      streamAssistantTurn: stream,
+      streamAssistantTurn: overrideStream ?? stream,
       assistantApi: {
         history: async (id: string) => {
           if (historyError) throw historyError;
@@ -340,7 +341,7 @@ test("an allowed card resumes the chat as a continuation bound to that card", as
   assert.equal(sent[0].conversationId, A);
   assert.equal(sent[0].acknowledgementId, card);
   assert.match(sent[0].text, /^Confirmed: Create a scheduled automation/);
-  assert.match(sent[0].text, /what you did and the result\.$/);
+  assert.match(sent[0].text, /continue the original task and tell the user when it is finished or when you need their input\.$/);
   h.unmount();
 });
 
@@ -411,4 +412,37 @@ test("2345 malformed history never leaks validation JSON or creates a recovery l
   await x.h.settle();
   assert.equal(x.h.value().error, undefined);
   x.h.unmount();
+});
+
+test("private send surfaces definite attachment refusals and consumes after possible admission", async () => {
+  for (const [error, admitted, expected] of [
+    [buildApiError({ error: "attachment_expired", error_code: 12101, message: "Attachment expired" }, 410), false, "attachment"],
+    [buildApiError({ error: "not_found", error_code: 1003, message: "Not found: Attachment not found" }, 404), false, "attachment"],
+    [buildApiError({ error: "not_found", error_code: 1003, message: "Not found: Conversation not found" }, 404), false, "refused"],
+    [buildApiError({ error: "attachment_expired", error_code: 12101, message: "Attachment expired" }, 410), true, "uncertain"],
+    [buildApiError(null, 0), false, "uncertain"],
+  ] as const) {
+    let attempts = 0;
+    const x = await harness(async (input, _event, _controller, accept) => {
+      attempts++;
+      assert.equal(input.attachmentIds?.length, 1);
+      if (admitted) accept?.();
+      throw error;
+    });
+    if (expected === "uncertain") x.setHistoryError(new Error("History connection lost"));
+    const send = x.h.value().send("Read this", undefined, {
+      conversationId: A,
+      attachmentIds: ["11111111-1111-4111-8111-111111111111"],
+      attachments: [],
+    });
+    if (expected === "attachment")
+      await assert.rejects(send, (cause) => cause === error);
+    else
+      assert.equal(await send, expected === "uncertain");
+    await x.h.settle();
+    assert.equal(x.h.value().sending, false);
+    assert.equal(x.h.value().recoveryRequired, expected === "uncertain");
+    assert.equal(attempts, 1);
+    x.h.unmount();
+  }
 });

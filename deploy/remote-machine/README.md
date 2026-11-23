@@ -221,9 +221,8 @@ and exercise the actual API; unavailable metadata, TLS, 401/403 or inaccessible
 resources remain unavailable/unknown through those paths. Existing untrusted
 metadata/private-network URL and Machine egress restrictions are unchanged.
 
-The backend Pod's Google identity (`chrono-nyxid` in the intended deployment)
-is distinct from the Kubernetes ServiceAccount `nyxid-machine-manager` in the
-example RBAC. That binding does **not** establish access for a Google principal.
+The backend's Google service account is distinct from the Kubernetes
+ServiceAccount `nyxid-machine-manager` in the example RBAC. That binding does **not** establish access for a Google principal.
 Before environment acceptance, an operator must record the actual authenticated
 principal, its least-privilege Sandbox writes, namespaced Pod/PVC GET/LIST and
 UID/resourceVersion-preconditioned Sandbox DELETE, Node/PV GET,

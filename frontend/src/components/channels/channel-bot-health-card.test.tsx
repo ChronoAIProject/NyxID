@@ -367,3 +367,45 @@ it.each([
   expect(screen.getByText(label)).toBeVisible();
   expect(mockPost).not.toHaveBeenCalled();
 });
+
+it.each([
+  ["prepared", "answer_prepared", "none", "Answer prepared", "Healthy"],
+  ["confirmed", "platform_delivery_confirmed", "none", "Delivery confirmed", "Healthy"],
+  ["unconfirmed", "gateway_does_not_confirm", "none", "Delivery not confirmed by the gateway", "Healthy"],
+  ["unconfirmed", "delivery_sending", "none", "Sending answer", "Healthy"],
+  ["unconfirmed", "gateway_receipt_pending", "none", "Awaiting delivery confirmation", "Healthy"],
+  ["unconfirmed", "delivery_stalled", "verify", "Delivery stalled", "Needs attention"],
+  ["unconfirmed", "platform_delivery_unconfirmed", "verify", "Delivery unconfirmed", "Needs attention"],
+  ["unconfirmed", "platform_delivery_unconfirmed", "none", "Delivery unconfirmed", "Needs attention"],
+  ["rejected", "gateway_reply_rejected", "reconnect", "Delivery rejected", "Needs attention"],
+  ["unconfirmed", "gateway_does_not_confirm", "reconnect", "Delivery not confirmed by the gateway", "Needs attention"],
+])("shows %s/%s with action %s", async (state, reason, action, label, badge) => {
+  mockGet.mockResolvedValue(health({
+    platform: "lark",
+    answer_delivery: { state, reason },
+    recommended_action: action,
+  }));
+  renderCard();
+  expect(await screen.findByText("Latest answer delivery")).toBeVisible();
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.getByText(badge)).toBeVisible();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["zh-CN", "网关未确认送达", "网关不提供这条回复的送达回执。"],
+  ["zh-TW", "閘道未確認送達", "閘道不提供這則回覆的送達回條。"],
+])("localizes the neutral stream explanation in %s", async (language, label, explanation) => {
+  mockGet.mockResolvedValue(health({
+    platform: "lark",
+    answer_delivery: { state: "unconfirmed", reason: "gateway_does_not_confirm" },
+    recommended_action: "none",
+    recommended_action_text: "The gateway does not provide a delivery receipt for this answer.",
+  }));
+  renderCard();
+  await screen.findByText("Healthy");
+  await act(async () => { await appI18n.changeLanguage(language); });
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.getByText(explanation)).toBeVisible();
+  expect(screen.queryByText("需要注意")).not.toBeInTheDocument();
+});

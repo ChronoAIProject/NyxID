@@ -129,9 +129,9 @@ Readiness checks the selected configuration, then existing async API probes
 exercise actual credentials/authorization; metadata mode never requires a token
 file. Managed bootstrap still uses a Pod-bound Kubernetes token with audience
 `nyxid-remote-machine-v1`. Tokens remain backend-only; untrusted metadata/network
-restrictions are not relaxed. Google `chrono-nyxid` is not the Kubernetes
-`nyxid-machine-manager` ServiceAccount: its actual principal, target permissions,
-API connectivity and CA must be verified in the deployment environment. See
+restrictions are not relaxed. The backend's Google service account is distinct from the
+Kubernetes `nyxid-machine-manager` ServiceAccount. Verify the Google principal,
+its target permissions, API connectivity and CA in the deployment environment. See
 [Remote Machine deployment](../deploy/remote-machine/README.md) for the distinction,
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
@@ -711,13 +711,36 @@ These variables are reserved for a future mail transport. The current NyxID serv
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for authenticated proxy and MCP routes in bytes (100 MiB). Direct and node-routed proxy requests share this raw-body cap; upgraded node agents advertise their capacity, while legacy agents are limited to 11 MiB because their WebSocket frame cap predates capacity negotiation. |
+| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for authenticated proxy, MCP and channel-event routes in bytes (100 MiB). Direct and node-routed proxy requests share this raw-body cap; upgraded node agents advertise their capacity, while legacy agents are limited to 11 MiB because their WebSocket frame cap predates capacity negotiation. |
 | `LLM_MAX_BODY_SIZE` | `10485760` | Maximum request body size for `/api/v1/llm/*` provider and gateway routes in bytes (10 MiB). |
 | `PUBLIC_PROXY_MAX_BODY_SIZE` | `1048576` | Maximum request body size for anonymous public proxy and public MCP routes in bytes (1 MiB). |
 | `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE` | `60` | Dedicated per-IP rate limit for `/public/s/{slug}/{path}` anonymous proxy requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE` | `30` | Dedicated per-IP rate limit for `POST /public/mcp` anonymous MCP discovery requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
+| `NYXID_PROXY_ALLOW_DEV_LOOPBACK` | `false` | Allow direct proxy connections to loopback for local development. Startup rejects this setting in production. |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
 | `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections across the cluster. MongoDB capacity slots enforce the global cap. |
+
+Direct HTTP requests reuse pooled connections. Each new HTTP or WebSocket connection resolves
+and checks every downstream address before dialing. Literal IPs are checked at request selection.
+Ordinary buffered HTTP requests follow up to five redirects on the same scheme, host and port.
+A cross-origin redirect or a redirect for a one-shot upload comes back to the caller with its
+Location. Operation-scoped calls keep their single-destination contract.
+
+A platform Admin can approve a catalog-owned private destination. Check the service ID and its
+base URL in the catalog, then run `nyxid admin catalog private-destination <service-id>`, or
+send `{"approve_private_destination":true}` to `PUT /api/v1/services/{id}`. To revoke it,
+add `--revoke` or send `false`. Approval covers that exact base URL. A change to the base
+requires a fresh approval. Loopback also requires the development opt-in. The audit event
+records the row ID and approval state.
+
+On the first upgraded startup, NyxID approves eligible active catalog rows with private or
+loopback IP literals, single-label names, or names ending in `.svc`, `.cluster.local`,
+`.internal` or `.local`. When a public-looking name resolves privately, the server logs
+the service ID and returns `Direct proxy destination is not permitted`. Check the row and
+approve its catalog base if appropriate. User-chosen private endpoints use a credential node.
+Node transfer and deletion release route bindings. A direct request after release checks its
+destination when used. The Codex translator uses its fixed ChatGPT origin and the deployment's
+configured forward proxy.
 
 Other forwarding surfaces remain intentionally fixed and bounded: assistant direct/chat
 requests are capped at 256 KiB, SSH exec JSON requests at 64 KiB, and Oracle consumer
@@ -921,7 +944,7 @@ once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 
 `ANDROID_APP_PACKAGE` is the Android application id (for example `fun.chronoai.nyxid`). `ANDROID_APP_SHA256_CERT_FINGERPRINTS` is a comma-separated list of SHA-256 signing-certificate fingerprints, each exactly 32 colon-delimited hexadecimal bytes (`AA:BB:…`). Empty or whitespace-only comma-separated segments are ignored; surrounding whitespace is trimmed and fingerprints are normalized to uppercase and deduplicated. Malformed nonempty values fail startup, consistent with other validated configuration. Missing either value makes `GET /.well-known/assetlinks.json` return 404. With both configured, it returns standard Digital Asset Links JSON with `application/json` and `Cache-Control: public, max-age=300`. These values are public identity metadata.
 
-Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
+Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Mobile `DEV_NATIVE_LINK_HOSTS` and `PROD_NATIVE_LINK_HOSTS` select `api` (default) or `api+frontend`; the latter also requires that active profile's explicit `*_FRONTEND_URL`, never a fallback from the other profile or legal URL. The shared path manifest is `shared/native-app-links.json`. See [business-link configuration](../mobile/docs/APP_LINKS.md#business-links-on-frontend-hosts) and [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
 
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
 

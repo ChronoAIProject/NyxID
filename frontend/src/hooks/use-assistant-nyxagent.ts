@@ -1,3 +1,4 @@
+import allowedCardContinuation from "../../../shared/allowed-card-continuation.json";
 import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -75,9 +76,7 @@ function liveSend(
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
 export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
-  const narration = "Then tell the user in one or two plain sentences what you did and the result.";
-  const instruction = continuationInstruction(acknowledgement);
-  return `${instruction} ${narration}`;
+  return `${continuationInstruction(acknowledgement)} ${allowedCardContinuation}`;
 }
 
 function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): string {

@@ -93,6 +93,7 @@ function setup(
       Fragment: "Fragment",
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
     "react-native": {
       ...Object.fromEntries(
         [
@@ -111,6 +112,7 @@ function setup(
       Keyboard: { dismiss: () => dismissCount++ },
       Platform: { OS: "ios" },
       StyleSheet: { create: (styles: unknown) => styles },
+      useWindowDimensions: () => ({ width: 309, height: 549, fontScale: 1.3 }),
     },
     "lucide-react-native": Object.fromEntries(
       ["Check", "ChevronLeft", "ChevronRight", "Search", "X"].map((name) => [
@@ -277,6 +279,32 @@ test("search matches service names and opaque IDs while preserving selections", 
   state.harness.flush();
   assert.deepEqual(state.rowIds(), ["github", "svc-opaque-7"]);
   assert.equal(state.saves.length, 0);
+});
+
+test("keyboard search gives results the footer's space and keeps the selection for explicit save", async () => {
+  const state = setup({ creating: true });
+  state.search("research");
+  const viewport = state.one((row) => row.type === "KeyboardViewport");
+  viewport.props.onViewportChange({ y: 48, height: 206 });
+  state.harness.flush();
+  assert.deepEqual(state.rowIds(), ["svc-opaque-7"]);
+  assert.equal(state.all().some((row) => row.type === "ActionButton"), false, "fixed save footer cannot consume the search result viewport");
+  assert.equal(state.all().some((row) => row.props.accessibilityRole === "tablist"), false, "filters yield space while the search keyboard is open");
+  assert.equal(state.one((row) => row.type === "FlatList").props.ListHeaderComponent, null, "intro and account controls yield to search results while typing");
+  state.select("Document research");
+  assert.equal(state.checkbox("Document research").props.accessibilityState.checked, true);
+  assert.equal(state.saves.length, 0);
+  viewport.props.onViewportChange({ y: 48, height: 700 });
+  state.harness.flush();
+  assert.equal(state.action().props.disabled, false, "a tall keyboard-visible window retains its save action");
+  assert.equal(state.all().some((row) => row.props.accessibilityRole === "tablist"), true);
+  viewport.props.onViewportChange(undefined);
+  state.harness.flush();
+  assert.equal(state.action().props.disabled, false);
+  state.action().props.onPress();
+  await state.harness.settle();
+  assert.deepEqual(state.saves[0]?.services, ["github", "svc-opaque-7"]);
+  state.harness.unmount();
 });
 
 test("an unavailable existing grant survives removal, reselecting and connection refresh", async () => {
@@ -644,4 +672,48 @@ test("unexpected save rejection shows a retry error without losing the draft", a
   state.action().props.onPress();
   await state.harness.settle();
   assert.equal(state.closed(), 1);
+});
+
+test("compact keyboard search renders discovery status and restores the selected filter and save", () => {
+  const state = setup({ options: [], value: { services: [], account_read: false, guest_access: {} }, connectionsLoading: true });
+  const viewport = state.one((row) => row.type === "KeyboardViewport");
+  const search = () => state.one((row) => row.type === "TextInput");
+  const text = () => state.all().map((row) => row.props.children).filter((copy) => typeof copy === "string");
+  viewport.props.onViewportChange({ y: 48, height: 206 });
+  state.harness.flush();
+  assert.ok(state.all().some((row) => row.type === "SkeletonRows"));
+  assert.equal(text().some((copy) => copy.startsWith("No connected services")), false);
+  state.props.connectionsLoading = false;
+  state.props.connectionsError = true;
+  state.harness.render();
+  assert.ok(state.all().some((row) => row.type === "Notice" && row.props.tone === "error"));
+  state.search("research");
+  assert.equal(text().some((copy) => copy.startsWith("No matching services")), false);
+  state.props.options = options;
+  state.harness.render();
+  assert.ok(state.checkbox("Document research"));
+  assert.ok(state.all().some((row) => row.type === "Notice"));
+  state.props.connectionsError = false;
+  state.harness.render();
+  state.search("no such service");
+  assert.ok(text().some((copy) => copy.startsWith("No matching services")));
+
+  viewport.props.onViewportChange(undefined);
+  state.harness.flush();
+  state.one((row) => row.props.accessibilityLabel === "Selected services").props.onPress();
+  state.search("research");
+  assert.deepEqual(state.rowIds(), []);
+  viewport.props.onViewportChange({ y: 48, height: 206 });
+  state.harness.flush();
+  assert.equal(search().props.placeholder, "Search all services");
+  assert.deepEqual(state.rowIds(), ["svc-opaque-7"]);
+  state.select("Document research");
+  search().props.onSubmitEditing();
+  assert.equal(state.dismissedKeyboard(), 1);
+  viewport.props.onViewportChange(undefined);
+  state.harness.flush();
+  assert.equal(state.one((row) => row.props.accessibilityLabel === "Selected services").props.accessibilityState.selected, true);
+  assert.equal(state.action().props.disabled, false);
+  assert.deepEqual(state.saves, []);
+  state.harness.unmount();
 });

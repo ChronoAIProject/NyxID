@@ -31,6 +31,19 @@ use crate::services::ssh_service::SshSessionManager;
 
 mod mongo_readiness;
 
+// MongoDB uses real sockets. Suppress Tokio's automatic clock jumps while I/O
+// is pending so fixtures can advance their timers at known protocol boundaries.
+pub(crate) async fn with_manual_clock<T>(future: impl std::future::Future<Output = T>) -> T {
+    let (release, hold) = tokio::sync::oneshot::channel::<()>();
+    let guard = tokio::task::spawn_blocking(move || hold.blocking_recv());
+    tokio::time::pause();
+    let result = future.await;
+    tokio::time::resume();
+    release.send(()).unwrap();
+    guard.await.unwrap().unwrap();
+    result
+}
+
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_MAX_NAME_LEN: usize = 63;
 const TEST_DB_CREATED_AT_HEX_LEN: usize = 16;
@@ -348,102 +361,6 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
         .expect("MongoDB required");
     assert_transaction_test_topology(&db).await;
     db
-}
-
-pub(crate) trait OAuthAuthorityOutcome {
-    fn authority_unavailable(&self) -> bool;
-}
-
-impl OAuthAuthorityOutcome for (axum::http::StatusCode, serde_json::Value) {
-    fn authority_unavailable(&self) -> bool {
-        self.0 == axum::http::StatusCode::SERVICE_UNAVAILABLE
-            && self.1["error"] == "oauth_authority_unavailable"
-            && self.1["error_code"] == 12900
-    }
-}
-
-impl<T> OAuthAuthorityOutcome for crate::errors::AppResult<T> {
-    fn authority_unavailable(&self) -> bool {
-        matches!(
-            self,
-            Err(crate::errors::AppError::OAuthAuthorityUnavailable)
-        )
-    }
-}
-
-/// Exercise the client contract with the original token and request identity.
-pub(crate) async fn retry_oauth_authority<T: OAuthAuthorityOutcome>(
-    mut request: impl AsyncFnMut() -> T,
-    mut assert_no_effect: impl AsyncFnMut(),
-) -> T {
-    const MAX_ATTEMPTS: usize = 3;
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let mut attempt = 1;
-        loop {
-            let outcome = request().await;
-            if !outcome.authority_unavailable() {
-                return outcome;
-            }
-            assert_no_effect().await;
-            if attempt == MAX_ATTEMPTS {
-                return outcome;
-            }
-            attempt += 1;
-            // The OAuth authority refusal specifies Retry-After: 1.
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
-    .await
-    .expect("protected fixture operation exceeded its 30-second client deadline")
-}
-
-#[tokio::test(start_paused = true)]
-async fn oauth_authority_retry_requires_the_exact_response_and_stops_at_three_attempts() {
-    use axum::http::StatusCode;
-    let unavailable = (
-        StatusCode::SERVICE_UNAVAILABLE,
-        serde_json::json!({
-            "error":"oauth_authority_unavailable", "error_code":12900,
-        }),
-    );
-    for (response, expected_attempts) in [
-        (unavailable.clone(), 3),
-        ((StatusCode::FORBIDDEN, unavailable.1.clone()), 1),
-        (
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                serde_json::json!({
-                    "error":"security_readiness_unavailable", "error_code":12900
-                }),
-            ),
-            1,
-        ),
-        (
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                serde_json::json!({
-                    "error":"oauth_authority_unavailable", "error_code":1004
-                }),
-            ),
-            1,
-        ),
-    ] {
-        let mut attempts = 0;
-        let mut refusals = 0;
-        let received = retry_oauth_authority(
-            async || {
-                attempts += 1;
-                response.clone()
-            },
-            async || {
-                refusals += 1;
-            },
-        )
-        .await;
-        assert_eq!(received, response);
-        assert_eq!(attempts, expected_attempts);
-        assert_eq!(refusals, if expected_attempts == 3 { 3 } else { 0 });
-    }
 }
 
 /// Wait, within the shared readiness budget, until majority-acknowledged
@@ -2317,7 +2234,6 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let developer_webhook_dispatcher = Arc::new(
         crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
             encryption_keys.clone(),
         ),
     );
@@ -2331,6 +2247,8 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        jobs: Arc::new(crate::services::job_health::Jobs::new(&config)),
+        app_management_observations: Arc::default(),
         refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),
         crash_reports: Arc::new(Default::default()),
@@ -3046,6 +2964,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         is_active: true,
         created_by: "system".to_string(),
         caller_token_approved_destinations: Default::default(),
+        approved_private_base_url: None,
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,
@@ -3482,6 +3401,23 @@ pub async fn connect_catalog_fixture_services(
         }
     }
     Ok(())
+}
+
+/// A valid unencrypted one-page PDF shared by media ingestion and Base wire tests.
+pub fn test_pdf() -> Vec<u8> {
+    use lopdf::{Document, Object, dictionary};
+    let mut pdf = Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
+    pdf.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1}),
+    );
+    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
 }
 
 #[cfg(test)]
@@ -4395,21 +4331,4 @@ mod tests {
             assert_eq!(options.direct_connection, expected);
         }
     }
-}
-
-/// A valid unencrypted one-page PDF shared by media ingestion and Base wire tests.
-pub fn test_pdf() -> Vec<u8> {
-    use lopdf::{Document, Object, dictionary};
-    let mut pdf = Document::with_version("1.5");
-    let pages = pdf.new_object_id();
-    let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
-    pdf.objects.insert(
-        pages,
-        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1}),
-    );
-    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
-    pdf.trailer.set("Root", catalog);
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    bytes
 }

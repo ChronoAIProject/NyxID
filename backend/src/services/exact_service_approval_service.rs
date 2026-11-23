@@ -2387,6 +2387,8 @@ mod tests {
                 fresh_decision: false,
                 caller_api_key_id: None,
                 protocol: None,
+                connected_request_id: None,
+                connected_deadline: None,
                 approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),

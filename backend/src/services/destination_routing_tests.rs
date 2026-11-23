@@ -742,24 +742,27 @@ async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_wi
             );
         }
     }
-    let response = rest_call(
-        &state,
-        &owner,
-        "api-google-docs",
-        "/v1/documents/redirect:batchUpdate",
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(response.status(), 200, "existing product redirect behavior");
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    let response = crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER
+        .scope(
+            echo.client_builder.clone(),
+            rest_call(
+                &state,
+                &owner,
+                "api-google-docs",
+                "/v1/documents/redirect:batchUpdate",
+                false,
+            ),
+        )
         .await
         .unwrap();
+    assert_eq!(response.status(), 302);
     assert_eq!(
-        serde_json::from_slice::<Value>(&body).unwrap()["host"],
-        "sheets.googleapis.com"
+        response.headers()["location"],
+        "https://sheets.googleapis.com/redirected"
     );
-    assert_eq!(echo.calls.lock().unwrap().len(), 7);
+    let calls = echo.calls.lock().unwrap();
+    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.last().unwrap()["host"], "docs.googleapis.com");
 }
 
 #[tokio::test]
@@ -1645,7 +1648,7 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
             auth_key_name: "Authorization".into(),
             credential: "platform-token".to_owned().into(),
             service: service.clone(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -1706,7 +1709,7 @@ fn user_owned_bearer_target_does_not_become_platform_by_catalog_category() {
         auth_key_name: "Authorization".into(),
         credential: "user-owned-token".to_owned().into(),
         service,
-        catalog_default_headers: vec![],
+        catalog_default_headers: Default::default(),
         user_service_default_headers: vec![],
         ws_frame_injections: vec![],
         connection_id: None,

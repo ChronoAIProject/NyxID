@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "users";
+pub const PROVIDER_DISPLAY_NAME: &str = "profile_config.provider_display_name";
 
 /// Distinguishes a real person account from an organization account.
 ///
@@ -77,6 +78,10 @@ impl PlatformRole {
 /// `User`; extend by adding new preference groups as fields here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserProfileConfig {
+    /// Last name supplied by social login. Only that exact default may be refreshed.
+    /// A local name save clears this field, including when confirming the same text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_display_name: Option<String>,
     #[serde(default)]
     pub security: SecurityPreferences,
     #[serde(default)]

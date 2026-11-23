@@ -104,6 +104,19 @@ async fn external_proxy_uuid_and_slug_save_resume_readback_without_task_or_dupli
         run(&f, &approved).await;
         run(&f, &approved).await;
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        let capture = super::migration_tests::Capture::default();
+        let (_, replay) = tracing::instrument::WithSubscriber::with_subscriber(
+            call(&f, &route, "one"),
+            capture.subscriber(),
+        )
+        .await;
+        assert!(replay.contains(&requested.id));
+        {
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["decision"], "hard_denial");
+            assert_eq!(events[0]["cause"], "occurrence_already_reviewed");
+        }
         let completed = row(&f).await;
         assert_eq!(v2::proposal(&completed).unwrap().state, "completed");
         assert_eq!(completed.activity_outcome.as_deref(), Some("completed"));
@@ -288,6 +301,19 @@ async fn external_revocation_and_uncertain_barrier_never_replay() {
                 _ => "cancelled",
             }
         );
+        if scenario == "uncertain" {
+            let capture = super::migration_tests::Capture::default();
+            let (_, body) = tracing::instrument::WithSubscriber::with_subscriber(
+                call(&f, "/proxy/s/execution-fixture/status", "async-occurrence"),
+                capture.subscriber(),
+            )
+            .await;
+            assert!(body.contains(&r.id));
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["decision"], "operational_error");
+            assert_eq!(events[0]["cause"], "provider_outcome_unknown");
+        }
         assert!(f.server.received_requests().await.unwrap().is_empty());
         f.cleanup().await;
     }
@@ -1252,7 +1278,11 @@ async fn external_connected_rejection_preserves_http_and_mcp_legacy_wording() {
         super::super::phase_b_tests::enroll_global(&f.state.db, &f.owner).await;
         approval_timeout(&f, 10).await;
         let (app, request) = connected_request(&f, kind).await;
-        let waiter = tokio::spawn(app.oneshot(request));
+        let capture = super::migration_tests::Capture::default();
+        let waiter = tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+            app.oneshot(request),
+            capture.subscriber(),
+        ));
         let pending = pending_request(&f).await;
         let mut decision = choice(&pending, "operation");
         decision.approved = false;
@@ -1285,6 +1315,12 @@ async fn external_connected_rejection_preserves_http_and_mcp_legacy_wording() {
         } else {
             assert!(text.contains("Approval request was rejected"), "{text}");
             assert!(text.contains(&f.state.config.frontend_url), "{text}");
+        }
+        {
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1, "{kind}");
+            assert_eq!(events[0]["decision"], "hard_denial", "{kind}");
+            assert_eq!(events[0]["cause"], "proposal_not_live", "{kind}");
         }
         v2::sweep(&f.state).await.unwrap();
         assert!(f.server.received_requests().await.unwrap().is_empty());

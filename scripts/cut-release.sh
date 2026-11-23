@@ -65,13 +65,43 @@ main_sha=$(gh api "$api/git/ref/heads/main" --jq '.object.sha')
 changes=$(gh api --paginate --slurp "$api/compare/$main_sha...$sha?per_page=100" | python3 -c '
 import json, re, subprocess, sys
 pages = json.load(sys.stdin)
-snapshot, api = sys.argv[1:]
+snapshot, main, api = sys.argv[1:]
 status = pages[0]["status"]
 if status in ("identical", "behind"):
     sys.exit(f"{snapshot} is already contained in main.")
 commits = {c["sha"]: c for page in pages for c in page["commits"]}
 if status not in ("ahead", "diverged") or snapshot not in commits or len(commits) != pages[0]["total_commits"]:
     sys.exit("Incomplete comparison with main.")
+
+def api_pages(path):
+    return json.loads(subprocess.check_output(["gh", "api", "--paginate", "--slurp", f"{api}/{path}"]))
+
+def associated_prs(sha):
+    return [pr for page in api_pages(f"commits/{sha}/pulls?per_page=100") for pr in page
+            if pr["merged_at"] and pr["merge_commit_sha"] == sha]
+
+def is_rollup_merge(commit, missing):
+    parents = commit["parents"]
+    if len(parents) != 2 or parents[1]["sha"] in missing:
+        return False
+    for pr in associated_prs(commit["sha"]):
+        base, head = pr["base"], pr["head"]
+        if base["ref"] != "main" or not head["repo"] or head["repo"]["id"] != base["repo"]["id"]:
+            continue
+        if head["ref"] == "dev" or head["ref"].startswith("release/"):
+            return True
+    return False
+
+if status == "diverged":
+    # Ordinary rollups leave merge commits on main. Every other main-only
+    # commit (including a hotfix merge) must reach the selected snapshot.
+    reverse = api_pages(f"compare/{snapshot}...{main}?per_page=100")
+    missing = {c["sha"]: c for page in reverse for c in page["commits"]}
+    if main not in missing or len(missing) != reverse[0]["total_commits"]:
+        sys.exit("Incomplete comparison with the release snapshot.")
+    if not all(is_rollup_merge(commit, missing) for commit in missing.values()):
+        sys.exit("Merge main into dev first, then cut from a snapshot containing the sync.")
+
 entries = []
 current = snapshot
 while current in commits:
@@ -83,17 +113,13 @@ while current in commits:
         title = f"{lines[2]} (#{merge[1]})"
     elif not re.search(r"\(#\d+\)$", title):
         # A maintainer can edit the merge message and omit the PR number.
-        pulls = json.loads(subprocess.check_output([
-            "gh", "api", "--paginate", "--slurp", f"{api}/commits/{current}/pulls?per_page=100"
-        ]))
-        for page in pulls:
-            for pr in page:
-                if pr["base"]["ref"] == "dev" and pr["merge_commit_sha"] == current and pr["merged_at"]:
-                    title = "{} (#{})".format(pr["title"], pr["number"])
+        for pr in associated_prs(current):
+            if pr["base"]["ref"] == "dev":
+                title = "{} (#{})".format(pr["title"], pr["number"])
     entries.append(f"- {title} ({current[:7]})")
     parents = commit["parents"]
     current = parents[0]["sha"] if parents else None
-print("\n".join(reversed(entries)))' "$sha" "$api")
+print("\n".join(reversed(entries)))' "$sha" "$main_sha" "$api")
 
 day=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).date())')
 branch="release/$day"

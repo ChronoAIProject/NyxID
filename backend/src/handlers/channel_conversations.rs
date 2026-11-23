@@ -603,6 +603,8 @@ fn default_per_page() -> u64 {
 /// longer persisted.
 pub struct ConversationMessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<crate::models::channel_message::TextCompleteness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery: Option<super::channel_relay::DeliveryItem>,
     pub id: String,
     pub direction: String,
@@ -613,6 +615,7 @@ pub struct ConversationMessageItem {
     pub content_type: String,
     pub agent_api_key_id: Option<String>,
     pub callback_status: Option<String>,
+    pub callback_failure_reason: Option<String>,
     pub reply_to_message_id: Option<String>,
     pub created_at: String,
 }
@@ -662,6 +665,7 @@ pub async fn list_conversation_messages(
     let items = messages
         .into_iter()
         .map(|m| ConversationMessageItem {
+            text_completeness: m.text_completeness,
             delivery: delivery
                 .remove(&m.id)
                 .map(super::channel_relay::DeliveryItem::from),
@@ -673,6 +677,7 @@ pub async fn list_conversation_messages(
             sender_display_name: m.sender_display_name,
             content_type: m.content_type,
             agent_api_key_id: m.agent_api_key_id,
+            callback_failure_reason: m.callback_failure_reason,
             callback_status: m.callback_status,
             reply_to_message_id: m.reply_to_message_id,
             created_at: m.created_at.to_rfc3339(),

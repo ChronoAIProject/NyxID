@@ -42,6 +42,7 @@
   "Approve Request": "Approve Request",
   "Approve and Reject buttons in your linked Telegram chat.": "Approve and Reject buttons in your linked Telegram chat.",
   "Approve and send": "Approve and send",
+  "Approve within {{seconds}} seconds": "Approve within {{seconds}} seconds",
   "Approved": "Approved",
   "Approving also allows repeat {{service}} writes for the next {{duration}} without asking again.": "Approving also allows repeat {{service}} writes for the next {{duration}} without asking again.",
   "Are you sure you want to approve access to \"{{value1}}\"? A reusable approval grant will be created using your configured expiry.": "Are you sure you want to approve access to \"{{value1}}\"? A reusable approval grant will be created using your configured expiry.",

@@ -110,9 +110,7 @@ impl CredentialSnapshot {
         &self,
         keys: &crate::crypto::aes::EncryptionKeys,
     ) -> AppResult<zeroize::Zeroizing<String>> {
-        super::channel_bot_service::decrypt_bot_token(keys, &self.bot)
-            .await
-            .map(zeroize::Zeroizing::new)
+        super::channel_bot_service::decrypt_bot_token(keys, &self.bot).await
     }
 
     pub(crate) async fn secrets(
@@ -565,6 +563,9 @@ mod tests {
         let snapshot = CredentialSnapshot::load(&db, &WhatsAppAdapter, &bot)
             .await
             .unwrap();
+        let token: zeroize::Zeroizing<String> =
+            snapshot.send_token(&state.encryption_keys).await.unwrap();
+        assert_eq!(token.as_str(), "test-bot-token");
         let check = begin(&db, &snapshot).await.unwrap();
         let secret = state
             .encryption_keys

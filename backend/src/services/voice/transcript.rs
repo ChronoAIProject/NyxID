@@ -227,6 +227,30 @@ fn assemble(p: &Pending, speaker: Speaker, sealed: bool, complete: bool) -> Segm
     }
 }
 
+/// Most recent captions in the order in which the conversation allocated them.
+pub async fn snapshot_captions(
+    db: &mongodb::Database,
+    call: &crate::models::assistant_voice_session::VoiceSession,
+) -> AppResult<Vec<crate::models::assistant_message::AssistantMessage>> {
+    use crate::models::assistant_message::COLLECTION_NAME;
+    use futures::TryStreamExt;
+    use mongodb::bson::doc;
+
+    let mut captions: Vec<_> = db
+        .collection(COLLECTION_NAME)
+        .find(
+            doc! {"user_id": &call.user_id, "conversation_id": &call.conversation_id,
+            "voice.session_id": &call.id},
+        )
+        .sort(doc! {"seq": -1})
+        .limit(16)
+        .await?
+        .try_collect()
+        .await?;
+    captions.reverse();
+    Ok(captions)
+}
+
 /// Checkpoint a segment into the existing sequence allocator, under the session
 /// lease. Transcript-only rows never become agent instructions by themselves.
 pub async fn persist(

@@ -872,7 +872,7 @@ or audit data.
 - **Delivered** to the node agent in the `register_ok` WebSocket message (raw, shown once)
 - **Stored** on the node agent as AES-256-GCM encrypted ciphertext in the config file (or in OS keychain)
 - **Rotated** alongside auth token rotation (`rotate-token` endpoint returns both new auth token and new signing secret)
-- **Configurable**: `NODE_HMAC_SIGNING_ENABLED` (default: `true`) controls whether signing is active
+- **Configurable**: `NODE_HMAC_SIGNING_ENABLED` (default: `true`) controls server signing for ordinary proxy requests. Upgraded agents require signed HTTP proxy requests and return a non-retryable 403 for unsigned frames. Enable signing on all server replicas before upgrading HTTP proxy agents
 
 ### Signature Computation
 
@@ -1326,7 +1326,7 @@ Admin routes under the admin router:
 
 ### Node Limits
 - Configurable max nodes per user (default: 10) prevents abuse
-- Configurable max concurrent node WebSocket connections per replica (default: 100)
+- Each replica admits up to 32 pending handshakes. Authenticated sockets use `NODE_MAX_WS_CONNECTIONS` (default 100).
 - Proxy requests through nodes have a timeout (default: 30s)
 - Streaming responses have a max duration (default: 300s)
 

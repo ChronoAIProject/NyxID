@@ -607,7 +607,7 @@ impl DirectChatRateLimiter {
         token: &crate::models::coordination::SlotToken,
         owner: &str,
         team_limit: Option<u32>,
-    ) -> Result<Option<crate::models::coordination::SlotToken>, AppError> {
+    ) -> Result<Option<crate::services::coordination_service::SlotGrant>, AppError> {
         let (namespace, limit) = match team_limit {
             Some(limit) => ("assistant_team", limit.max(1)),
             None if token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE => {
@@ -622,17 +622,36 @@ impl DirectChatRateLimiter {
             .await
     }
 
+    pub(crate) async fn transfer_channel_capacity(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &crate::models::coordination::SlotToken,
+        owner: &str,
+    ) -> Result<Option<crate::services::coordination_service::SlotGrant>, AppError> {
+        self.slot_manager
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?
+            .transfer(
+                session,
+                token,
+                "assistant_channel",
+                owner,
+                crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+            )
+            .await
+    }
+
     pub(crate) fn transferred_permit(
         &self,
         owner: &str,
-        token: crate::models::coordination::SlotToken,
+        grant: crate::services::coordination_service::SlotGrant,
     ) -> DirectChatPermit {
         let manager = self
             .slot_manager
             .as_ref()
             .expect("transferred database slot");
-        let queued = token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE;
-        let place = manager.guard(token);
+        let queued = grant.token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE;
+        let place = manager.guard(grant);
         if !queued {
             return DirectChatPermit::running(place);
         }
@@ -1745,7 +1764,7 @@ pub async fn rate_limit_middleware(
     // Check per-IP rate limit first
     if !per_ip_limiter.check_shared(client_ip).await? {
         tracing::warn!(
-            path = %path,
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             ip = %client_ip,
             "Per-IP rate limit exceeded"
         );
@@ -1755,7 +1774,7 @@ pub async fn rate_limit_middleware(
     // Also check global rate limit as a safety net
     if !global_limiter.check_shared().await? {
         tracing::warn!(
-            path = %path,
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             "Global rate limit exceeded"
         );
         return Err(AppError::RateLimited);
@@ -1777,8 +1796,13 @@ pub async fn device_code_rate_limit_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())
-        .await?;
+    enforce_device_code_ip_rate_limit(
+        &limiters,
+        request.headers(),
+        peer,
+        crate::mw::request_trace::route_label(request.extensions()),
+    )
+    .await?;
 
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, 64 * 1024)
@@ -1789,7 +1813,7 @@ pub async fn device_code_rate_limit_middleware(
         && !limiters.per_pubkey.check_shared(&pubkey).await?
     {
         tracing::warn!(
-            path = %parts.uri.path(),
+            path = %crate::mw::request_trace::route_label(&parts.extensions),
             device_pubkey = %hex::encode(pubkey),
             "Device-code per-pubkey rate limit exceeded"
         );

@@ -188,14 +188,32 @@ pub async fn enforce_turn_gate(
 
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
-pub const DECISION_NARRATION: &str = "Then tell the user in one or two plain sentences what you actually did and observed. An allowed card is permission, not execution. A denied card means that action was not sent; it does not cancel work already running in an external service.";
+pub(crate) fn allowed_card_continuation() -> &'static str {
+    static INSTRUCTION: std::sync::LazyLock<&str> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!(
+            "../../../shared/allowed-card-continuation.json"
+        ))
+        .expect("allowed-card continuation is a JSON string")
+    });
+    &INSTRUCTION
+}
+
+pub(crate) fn decision_narration(allowed: bool) -> String {
+    let guidance = "Report only what you actually did and observed. An allowed card is permission, not execution. A denied card means that action was not sent; it does not cancel work already running in an external service.";
+    if allowed {
+        format!("{guidance} {}", allowed_card_continuation())
+    } else {
+        guidance.to_owned()
+    }
+}
 
 const ACTION_STATE_GUIDANCE: &str = " This confirmation authorizes only the exact requested action. While pending, that action has not been sent. Denying it sends nothing to the external service, including no native approval refusal or task cancellation. Do not claim work completed or stopped without an observed result. End this turn while waiting; never retry a denied action unless the user explicitly asks again.";
 
 /// How risky an assistant action is. The owner's access mode decides which
 /// classes need a single-use action card; policy floors (webhook automations,
 /// machine and saved-login confirmation) apply in Auto and Ask every time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OwnerActionClass {
     Read,
     Change,
@@ -3694,7 +3712,7 @@ pub(crate) async fn decide_in_session(
                         } else {
                             "Do not execute or retry the denied action; finish what you can and report."
                         },
-                        DECISION_NARRATION
+                        decision_narration(allow)
                     ),
                     None,
                 ),

@@ -218,7 +218,7 @@ async fn unified_route_edits_sync_node_but_keep_binding_priority_separate() {
         &uuid::Uuid::new_v4().to_string(),
         &f.owner,
         "Fixture",
-        "https://example.invalid",
+        "https://127.0.0.1",
         None,
         Some(&f.catalog),
     );

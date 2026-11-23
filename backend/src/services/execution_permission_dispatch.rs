@@ -618,7 +618,7 @@ fn target_digest(target: &proxy_service::ProxyTarget) -> String {
     super::mcp_service::canonical_sha256(json!({
         "catalog":target.service.id,"base":target.base_url,"destination":target.target_id,
         "auth":target.auth_method,"key_name":target.auth_key_name,
-        "catalog_headers":target.catalog_default_headers,"connection_headers":target.user_service_default_headers,
+        "catalog_headers":target.catalog_header_binding(std::convert::identity),"connection_headers":target.user_service_default_headers,
         "policy":target.service.proxy_operation_policy,
         "forward_access_token":target.service.forward_access_token,
         "delegation":target.service.inject_delegation_token,
@@ -814,6 +814,7 @@ pub(crate) fn prepare<'a>(
         {
             proposals::existing_effect(
                 db,
+                context,
                 chat,
                 effect.connection,
                 &digest,
@@ -1026,6 +1027,12 @@ pub(crate) fn prepare<'a>(
                 .copied()
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
+        // Voice can continue through ordinary dispatch when there is no
+        // outstanding approval to request, even without an execution grant.
+        if effect.floors.is_empty() && chat.is_some_and(|c| c.execution_voice_task) {
+            let _ = context.decision.set(Resolution::Gap);
+            return Ok(None);
+        }
         context.observation.stage(diagnostics::Stage::Proposal);
         super::assistant_model_observer::before_approval_request(None).await?;
         chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
@@ -1051,6 +1058,9 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
+            if let Ok(p) = proposals::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
+            }
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
@@ -1102,6 +1112,9 @@ pub(crate) fn prepare<'a>(
                     .await?;
                 }
                 return prepare(state, Some(context), chat, key, effect).await;
+            }
+            if let Ok(p) = proposals::v2::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));
         }
@@ -1436,7 +1449,7 @@ impl Permit {
         let actual = proxy_service::collect_forward_headers_with_defaults(
             headers,
             &[
-                target.catalog_default_headers.as_slice(),
+                target.catalog_headers(),
                 target.user_service_default_headers.as_slice(),
             ],
         );
@@ -1866,7 +1879,7 @@ pub(crate) fn admit_http<'a>(
                     &proxy_service::collect_forward_headers_with_defaults(
                         headers,
                         &[
-                            target.catalog_default_headers.as_slice(),
+                            target.catalog_headers(),
                             target.user_service_default_headers.as_slice(),
                         ],
                     ),
@@ -1955,7 +1968,7 @@ pub(crate) fn admit_http<'a>(
             proxy_service::collect_forward_headers_with_defaults(
                 headers,
                 &[
-                    target.catalog_default_headers.as_slice(),
+                    target.catalog_headers(),
                     target.user_service_default_headers.as_slice(),
                 ],
             )

@@ -178,13 +178,24 @@ async fn org_admin_route(op: Operation) {
     assert_org_route(&f, &org, &id, Some(&f.new), priority, &original).await;
     edit(&router, &token, &key_path, json!({"node_id":f.old})).await;
     assert_org_route(&f, &org, &id, Some(&f.old), priority, &original).await;
-    edit(
-        &router,
-        &token,
-        assistant_path,
-        json!({"actionRequestId":"org-clear", "userServiceId":id}),
-    )
-    .await;
+    let clear = json!({"actionRequestId":"org-clear", "userServiceId":id});
+    if matches!(op, Operation::Create) {
+        // This connection was created with its endpoint stored only on the node.
+        let (status, error) =
+            request(router.clone(), &token, "POST", assistant_path, Some(clear)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], "validation_error");
+        assert_org_route(&f, &org, &id, Some(&f.old), priority, &original).await;
+        edit(
+            &router,
+            &token,
+            &key_path,
+            json!({"node_id":"", "endpoint_url":"https://127.0.0.1"}),
+        )
+        .await;
+    } else {
+        edit(&router, &token, assistant_path, clear).await;
+    }
     assert_org_route(&f, &org, &id, None, priority, &original).await;
 }
 

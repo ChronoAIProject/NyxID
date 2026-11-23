@@ -12,7 +12,7 @@ import {
   StyleSheet,
   View,
 } from "react-native";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, X } from "lucide-react-native";
 import { floatingSurface } from "../../components/workspace/workspaceFloatingSurface";
 import { Label } from "../../components/workspace/WorkspaceUI";
@@ -22,6 +22,7 @@ import {
 } from "../../components/workspace/workspaceCloseControl";
 import { useTheme } from "../../theme/ThemeContext";
 import { assistantApi } from "../../lib/api/assistantApi";
+import { useComposerSettingsQuery } from "./useComposerSettingsQuery";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useGroupAvailability } from "../groups/useGroupRuntime";
 import {
@@ -49,12 +50,7 @@ export function AssistantComposerSettings(props: Props) {
   const queryClient = useQueryClient();
   const epoch = getAuthEpoch();
   const settingsKey = ["assistant", "composer-settings", epoch];
-  const settings = useQuery({
-    queryKey: settingsKey,
-    queryFn: ({ signal }) => assistantApi.settings(signal),
-    enabled: availability.active,
-    retry: false,
-  });
+  const settings = useComposerSettingsQuery(epoch, availability.active, availability.available);
   const [pending, setPending] = useState(false);
   const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
@@ -360,11 +356,6 @@ export function useComposerAccessMode(override?: ComposerAccessMode | null) {
   useAppLanguage();
   const availability = useGroupAvailability();
   const epoch = getAuthEpoch();
-  const settings = useQuery({
-    queryKey: ["assistant", "composer-settings", epoch],
-    queryFn: ({ signal }) => assistantApi.settings(signal),
-    enabled: availability.active,
-    retry: false,
-  });
+  const settings = useComposerSettingsQuery(epoch, availability.active, availability.available);
   return override ?? settings.data?.access_mode;
 }

@@ -1394,6 +1394,26 @@ The standalone browser suite covers every supported credential form, a synthetic
 
 NyxID sends a normalized message to the agent's callback URL.
 
+Callbacks with `content.text` send its UTF-8 byte length in the
+`X-NyxID-Text-Original-Bytes` HTTP header and `false` in
+`X-NyxID-Text-Truncated`. Receivers can verify the count against the text in
+the signed body. Both relay history APIs return a `text_completeness` record
+for adapter text alongside routing metadata.
+For example, `{"original_bytes":18000,"truncated":false}` means the complete
+18,000-byte adapter text was available for the callback. A missing record
+means the length is unknown. These measurements start at the text supplied
+by the platform. The receiver can retain the signed callback for later reads.
+For Lark/Feishu structured posts the original document is in
+`raw_platform_data.event.message.content`.
+
+NyxBot uses a 32,768-character input budget for immediate and queued channel
+messages. A bounded projection includes a visible marker and the original
+byte count. Older readers can consume a labelled preview of a long queued
+message during rollout. Followed-thread history has a separate 4 KiB budget
+per message and 32 KiB total. A partial entry identifies the provider message
+and includes `truncated: true` and `original_bytes`. A permitted provider
+message read can use that ID to retrieve the source.
+
 ```json
 {
   "message_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -1719,6 +1739,15 @@ flowchart TD
 | `PATCH` | `/api/v1/channel-bots/{id}` | Update bot label or platform verification material |
 | `DELETE` | `/api/v1/channel-bots/{id}` | Delete bot (deregisters webhook) |
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
+
+Verify returns the bot's stored `status` and `webhook_registered` after the check.
+The response field `verification_scope` identifies the work performed. It is
+`credentials` for credential-only checks and `credentials_and_webhook` when
+Verify also checks or sets up the webhook. The legacy OpenClaw adapter can
+only read local credentials and reports `stored_credentials`. For Discord,
+Verify checks the token with `GET /users/@me`. A pending bot waits for
+authenticated ingress, and an active Gateway bot keeps its existing status
+and webhook registration flag.
 
 The list returns active (not deleted) bots, newest first, as `{ "bots": [...], "total": N }`.
 For Discord, list/detail responses include optional `gateway_state` from the stored
@@ -2863,15 +2892,14 @@ send: exact `409 routed_reply_in_progress`, any 5xx (including
 is no new delivery outbox. See the [gateway receipt and lookup contract](CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup).
 
 Bot Health uses the existing outbound diagnostics. `gateway_reply_unconfirmed`
-means the gateway accepted the reply but delivery is unconfirmed; its action is
-`none`, advising no action unless a later reply repeats the problem.
+means the gateway accepted the reply and platform delivery is unconfirmed.
+Health uses the latest answer to distinguish an active receipt wait from a terminal outcome.
 `gateway_reply_unavailable` records a transient gateway failure without claiming
 acceptance. The closed reasons `gateway_reply_no_response`,
 `gateway_reply_server_error`, `gateway_reply_unreadable_response` and
 `gateway_reply_interrupted` describe the new failures; `_pending` adds that
 NyxBot is still trying with the same reply. Terminal wording says confirmation
-could not be obtained before checking stopped. These have action `none` and
-the same later-reply guidance. Only the first proven admission and the terminal
+could not be obtained before checking stopped. Owners can check the chat before asking again. Only the first proven admission and the terminal
 outcome produce audit rows; polls do not. The event, diagnostic and chained audit commit
 together. Audit retains the HTTP status class, closed gateway code and failure, never
 answer text, problem prose, keys or reply-target references. Terminal rows retain
@@ -2880,6 +2908,21 @@ outcomes emit the Channel trace milestone; its enum has no pending value, so
 first admission uses `unknown`. Local pre-send refusals (missing key, expired
 target or event, changed authority) remain `refused` without a gateway Health
 entry or gateway rejection audit. Only a received status proves gateway refusal.
+
+Owner and admin Health expose optional `answer_delivery` for the latest retained
+turn answer on the selected NyxBot channel. Its `state` is `prepared`,
+`confirmed`, `rejected` or `unconfirmed`, with a closed `reason`. A stream claim
+or a stored answer exposed to the gateway has reason `gateway_does_not_confirm` and
+action `none`: this gateway contract has no primary-answer delivery receipt.
+A send or pending receipt stays neutral through ten minutes from the event's
+`created_at`. An older wait is `delivery_stalled`. A terminal unknown outcome
+and a refused target need attention immediately. Owners can check the original
+chat and verify or reconnect the channel as indicated.
+The current receipt on a late answer supersedes its earlier preparation or
+uncertainty. A thread preflight refusal or a send failure also appears in the
+existing outbound diagnostics and recommendation. An acknowledgement,
+supplemental post or successful inbound callback cannot confirm a primary answer.
+Health reads use metadata only and have no delivery side effects.
 
 ### Retrying a retained Discord release (#2323)
 
@@ -2912,3 +2955,10 @@ Parked releases for other platforms are not claimed by this re-observation
 worker. Their existing platform-specific release and administrator-review
 flows remain authoritative; this worker does not change their retry or
 cleanup behavior.
+
+For `create_outcome_unconfirmed`, send a platform administrator the link to the
+existing bot's NyxID page. The administrator can match the Channel Bot ID to
+the release and check the original dispatch with the gateway operator.
+Re-registering the same Discord bot under a fresh local ID cannot establish
+what happened to the old request. The review procedure covers the evidence
+required to resume this bot and its existing route. [Gateway release review](API.md#nyxbot-gateway-release-review)

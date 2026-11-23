@@ -398,14 +398,12 @@ async fn infer(
                 delegated: vec![],
                 class: CredentialClass::NyxidManagedMaster,
             };
-            let client = inference_client()?;
             let mut attempts = 0;
             // Once available, do not escape to another service after model-list,
             // provider, billing, or credential-materialization failures.
             return Ok(infer_route(
                 state,
                 actor,
-                &client,
                 &service,
                 &route,
                 Some(&config.model),
@@ -445,7 +443,6 @@ async fn infer(
             &grants,
         )
     });
-    let client = inference_client()?;
     let mut attempts = 0;
     for service in services {
         if attempts >= MAX_ATTEMPTS {
@@ -457,7 +454,6 @@ async fn infer(
         match infer_route(
             state,
             actor,
-            &client,
             &service,
             &route,
             None,
@@ -476,19 +472,10 @@ async fn infer(
     Ok(None)
 }
 
-fn inference_client() -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|_| crate::errors::AppError::Internal("Inference client unavailable".into()))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn infer_route(
     state: &AppState,
     actor: &str,
-    client: &reqwest::Client,
     service: &DownstreamService,
     route: &Route,
     configured: Option<&str>,
@@ -535,9 +522,7 @@ async fn infer_route(
     } else {
         let response = tokio::time::timeout(
             Duration::from_secs(3),
-            Box::pin(request(
-                state, actor, client, service, route, "models", None, None,
-            )),
+            Box::pin(request(state, actor, service, route, "models", None, None)),
         )
         .await;
         let value = match response {
@@ -602,7 +587,6 @@ async fn infer_route(
         let result = Box::pin(request(
             state,
             actor,
-            client,
             service,
             route,
             path,
@@ -950,7 +934,6 @@ impl Drop for MeterGuard {
 async fn request(
     state: &AppState,
     actor: &str,
-    client: &reqwest::Client,
     service: &DownstreamService,
     route: &Route,
     path: &str,
@@ -969,7 +952,7 @@ async fn request(
                 })
             })?;
     let execution = Box::pin(request_inner(
-        state, actor, client, service, route, path, body, model,
+        state, actor, service, route, path, body, model,
     ));
     match lease {
         Some(lease) => tokio::select! {
@@ -985,7 +968,6 @@ async fn request(
 async fn request_inner(
     state: &AppState,
     actor: &str,
-    client: &reqwest::Client,
     service: &DownstreamService,
     route: &Route,
     path: &str,
@@ -1066,14 +1048,14 @@ async fn request_inner(
         reqwest::header::CONTENT_TYPE,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    let mut extra_headers = vec![];
+    let mut extra_headers = vec![llm_usage_service::identity_encoding_header()];
     if service.inference.as_ref().is_some_and(|inference| {
         inference.wire_protocol == InferenceWireProtocol::AnthropicMessages
     }) {
         extra_headers.push(("anthropic-version".into(), "2023-06-01".into()));
     }
     let response = Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
-        client,
+        proxy_service::Redirects::Return,
         &route.target,
         if body.is_some() {
             reqwest::Method::POST
@@ -1102,6 +1084,7 @@ async fn request_inner(
     // Invalidate before reading the body: a 4xx still counts if that body is
     // malformed, oversized, or stalls. The next call rediscovers; never retry a
     // paid inference here, and never invalidate on transient 5xx/transport errors.
+    llm_usage_service::warn_http_usage_encoding(&service.id, &response);
     if response.status().is_client_error()
         && let Some(model) = model
         && let Ok(mut cache) = MODEL_CACHE.lock()

@@ -106,7 +106,37 @@ describe("ApprovalCard", () => {
     expect(screen.getByText("lark-bot")).toBeInTheDocument();
     expect(screen.getByText("nyxid_ag_...7f3d")).toBeInTheDocument();
     expect(screen.getByText("per-request approval")).toBeInTheDocument();
-    expect(screen.getByText(/expires in 14 min/)).toBeInTheDocument();
+    expect(screen.getByText("Approve within 840 seconds")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["zh-CN", "请在 10 秒内批准"],
+    ["zh-TW", "請在 10 秒內核准"],
+  ] as const)("renders the remaining seconds in %s", async (language, label) => {
+    await appI18n.loadLanguages(language);
+    render(
+      <CardLanguageContext.Provider value={language}>
+        <ApprovalCard block={{ ...approval(), expires_at: new Date(NOW + 10_000).toISOString() }} onDecide={vi.fn()} />
+      </CardLanguageContext.Provider>,
+    );
+    expect(screen.getByText(label)).toBeVisible();
+  });
+
+  it("counts down from the stored deadline and requires a fresh request after expiry", () => {
+    const decide = vi.fn();
+    const requestAgain = vi.fn();
+    const block = { ...approval(), expires_at: new Date(NOW + 80_000).toISOString() };
+    render(<ApprovalCard block={block} onDecide={decide} onRequestAgain={requestAgain} />);
+    act(() => { vi.advanceTimersByTime(70_000); });
+    expect(screen.getByText("Approve within 10 seconds")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve and send" })).toBeEnabled();
+    act(() => { vi.advanceTimersByTime(15_000); });
+    expect(screen.getByText("Request expired")).toBeVisible();
+    expect(screen.getByText("Nothing was sent.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Approve and send" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ask for a new confirmation" }));
+    expect(requestAgain).toHaveBeenCalledOnce();
+    expect(decide).not.toHaveBeenCalled();
   });
 
   it("keeps grant approvals purple and explains the broader approval", () => {

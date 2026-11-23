@@ -5616,9 +5616,9 @@ mod tests {
                 run_http_proxy_until_cancel(
                     &mut cancellation.receiver,
                     proxy_executor::execute_proxy_request(
-                        &request,
+                        &proxy_executor::signed_test_request(&request),
                         &credentials,
-                        None,
+                        Some(proxy_executor::TEST_SIGNING_SECRET),
                         &tokio::sync::Mutex::new(ReplayGuard::new()),
                         &NodeMetrics::new(),
                         &tx,
@@ -5839,9 +5839,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5925,9 +5925,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5958,6 +5958,63 @@ mod tests {
         assert_eq!(metrics.snapshot().success_count, 1);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn node_frame_credentials_apply_only_to_downstream_replies() {
+        let (socket, mut peer) = duplex_websocket_pair().await;
+        let (control_tx, control_rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        let rules = serde_json::from_value(serde_json::json!([{
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "upstream"
+        }, {
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "downstream"
+        }]))
+        .unwrap();
+        let session = tokio::spawn(run_ws_proxy_session_with_limits(
+            "node-frame-test".into(),
+            socket,
+            control_rx,
+            tx,
+            Default::default(),
+            rules,
+            Some("fixture-node-credential".to_owned().into()),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ));
+        let challenge = r#"{"type":"auth_required"}"#;
+        control_tx
+            .send(WsProxyControl::Text(challenge.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            challenge
+        );
+        peer.send(Message::Text(challenge.into())).await.unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            "fixture-node-credential"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(
+            receipt,
+            serde_json::json!({
+                "type": "ws_frame_injected", "request_id": "node-frame-test",
+                "trigger_kind": "json_field_equals", "frame_index": 0
+            })
+        );
+        peer.send(Message::Text("ready".into())).await.unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(reply["data"], "ready");
+        drop(control_tx);
+        session.await.unwrap();
     }
 
     #[tokio::test]

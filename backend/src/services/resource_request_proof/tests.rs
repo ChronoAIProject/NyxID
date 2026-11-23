@@ -270,7 +270,7 @@ impl Fixture {
             auth_key_name: String::new(),
             credential: Default::default(),
             service,
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,

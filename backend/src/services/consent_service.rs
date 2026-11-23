@@ -362,6 +362,7 @@ async fn write_consent_in_session(
         scopes: normalized_scopes,
         revision,
         write_version: Some(Uuid::new_v4().to_string()),
+        reviewed_redirect_hash: None,
         issuance_fence: pure_broadening
             .then(|| existing.and_then(|consent| consent.issuance_fence.clone()))
             .flatten(),
@@ -688,6 +689,7 @@ pub fn fingerprint(consent: &Consent) -> AppResult<String> {
     let mut document =
         bson::to_document(&snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
     document.remove("write_version");
+    document.remove("reviewed_redirect_hash");
     let bytes = bson::to_vec(&document).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
@@ -748,6 +750,30 @@ pub async fn replace_incremental_consent_with_machine(
         })
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Record a signed browser decision only while its consent snapshot is current.
+pub async fn record_reviewed_redirect(
+    db: &mongodb::Database,
+    consent: &Consent,
+    redirect_uri: &str,
+) -> AppResult<()> {
+    let digest = crate::crypto::token::hash_token(redirect_uri);
+    if consent.reviewed_redirect_hash.as_deref() == Some(digest.as_str()) {
+        return Ok(());
+    }
+    let result = db
+        .collection::<Consent>(CONSENTS)
+        .update_one(
+            version_filter(consent),
+            doc! {"$set": {"reviewed_redirect_hash": digest}},
+        )
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    if result.matched_count != 1 {
+        return Err(grant_changed());
+    }
+    Ok(())
 }
 
 /// Check if a user has granted consent for the requested scopes to a client.
@@ -1605,6 +1631,7 @@ mod tests {
                 is_active: true,
                 delegation_scopes: String::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -1712,13 +1739,14 @@ mod tests {
             .unwrap();
         assert!(!other_client.revoked);
 
-        let refresh_result = crate::services::token_service::refresh_tokens(
+        let refresh_result = crate::services::token_service::refresh_tokens_for_client(
             &db,
             &config,
             &jwt_keys,
             &refresh_jwt,
             None,
             None,
+            crate::services::token_service::RefreshClient::Identified(&client_id, None),
         )
         .await
         .map_err(AppError::into_refresh_source);

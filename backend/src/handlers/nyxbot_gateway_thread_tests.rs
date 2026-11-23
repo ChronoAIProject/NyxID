@@ -194,10 +194,15 @@ impl Fixture {
         Box::pin(Self::with_org(name, false)).await
     }
     async fn with_org(name: &str, org: bool) -> Self {
-        Box::pin(Self::with_reply(name, org, "Here is your answer")).await
+        Box::pin(Self::with_output(
+            name,
+            org,
+            message_output("Here is your answer"),
+        ))
+        .await
     }
-    async fn with_reply(name: &str, org: bool, reply: &'static str) -> Self {
-        let (state, calls, model) = setup_with_reply(name, reply).await;
+    async fn with_output(name: &str, org: bool, output: Value) -> Self {
+        let (state, calls, model) = Box::pin(setup_with_output(name, output)).await;
         let (mut row, key) = if org {
             let (row, key, _, _) = org_channel_tests::org_channel(&state, false).await;
             (row, key)
@@ -1819,7 +1824,7 @@ async fn org_member_group_dm_group(linking_admin: bool) {
             let health = crate::services::channel_bot_health::recommend(
                 &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true),
             );
-            assert_eq!(health.action, "none");
+            assert_eq!(health.action, "reconnect");
             assert_eq!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
                 .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":&id,"event_data.reason":"thread_target_rejected"}).await.unwrap(),1);
             f.state
@@ -2529,7 +2534,7 @@ async fn thread_health_records_closed_failures_once_excludes_transients_and_clea
                 &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
             )
             .action,
-            "none"
+            "reconnect"
         );
         channel_bot_service::record_outbound_outcome(&f.state.db, &f.row.channel_bot_id, None)
             .await;

@@ -321,6 +321,7 @@ pub struct PublicExecutionContext {
 #[derive(Clone, Debug)]
 pub enum NyxAgentExecutionContext {
     Owner {
+        attempt: Option<crate::models::assistant_conversation::ExecutionAttempt>,
         user_id: String,
         turn: TurnRef,
         platform_origin: Option<PlatformTurnOrigin>,
@@ -879,6 +880,15 @@ pub trait NyxAgentEgress: Send + Sync {
         _row: &crate::models::assistant_conversation::AssistantConversation,
     ) -> Option<tokio::task::JoinHandle<()>> {
         None
+    }
+
+    /// Recheck the original admitted channel source and return its reply deadline.
+    async fn channel_retry_expiry(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+        _source: &str,
+    ) -> AppResult<chrono::DateTime<chrono::Utc>> {
+        Err(crate::errors::AppError::AssistantTurnRequired)
     }
 
     /// Optional human-channel display note after the durable acknowledgement.

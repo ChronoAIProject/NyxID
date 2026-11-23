@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  confirmDisplayNameSchema,
   loginSchema,
   registerSchema,
   forgotPasswordSchema,
@@ -36,6 +37,16 @@ describe("loginSchema", () => {
       password: "",
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("confirmDisplayNameSchema", () => {
+  it.each(["", "  \t", "é".repeat(100) + "a"])("rejects an empty or over-limit name", (display_name) => {
+    expect(confirmDisplayNameSchema.safeParse({ display_name }).success).toBe(false);
+  });
+
+  it.each(["A", " 李 ", "é".repeat(100)])("preserves the exact valid name", (display_name) => {
+    expect(confirmDisplayNameSchema.parse({ display_name })).toEqual({ display_name });
   });
 });
 

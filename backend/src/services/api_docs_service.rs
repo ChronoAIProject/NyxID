@@ -1,4 +1,5 @@
-use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(test)]
+use super::url_validation::is_private_or_internal_ip;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,10 @@ const OPENAPI_PROBE_PATHS: &[&str] = &[
 ];
 
 const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi"];
-const SCALAR_SCRIPT_SRC: &str = "https://cdn.jsdelivr.net";
+const SCALAR_SCRIPT_URL: &str =
+    "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.82.1/dist/browser/standalone.js";
+const SCALAR_SCRIPT_INTEGRITY: &str =
+    "sha384-3llXraiLKrfG/eL4517CCzYH4wdaQ+bXhZeTcZKnEyJUu2vwIdsFBOVMa3m5lD4h";
 const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const SPEC_CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_SPEC_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
@@ -42,15 +46,6 @@ const YAML_PARSE_QUEUE_WAIT: Duration = Duration::from_secs(10);
 static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
 static YAML_PARSE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_YAML_PARSES)));
-static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("Failed to create hardened spec fetch client")
-});
-
 #[derive(Clone)]
 struct CachedSpecEntry {
     spec: Arc<serde_json::Value>,
@@ -61,13 +56,6 @@ impl CachedSpecEntry {
     fn is_fresh(&self, now: Instant) -> bool {
         self.expires_at > now
     }
-}
-
-struct ValidatedSpecFetchTarget {
-    url: url::Url,
-    host: String,
-    resolved_addrs: Vec<SocketAddr>,
-    requires_dns_pinning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,23 +155,6 @@ pub async fn fetch_spec_json(url: &str) -> AppResult<Arc<serde_json::Value>> {
 /// pointing at the same private URL don't share a cached payload.
 pub async fn fetch_spec_json_scoped(url: &str, scope: &str) -> AppResult<Arc<serde_json::Value>> {
     fetch_json_spec_internal(url, Some(scope)).await
-}
-
-/// Render a URL for logs without leaking userinfo or query parameters.
-/// User-supplied spec URLs can be signed URLs or include bearer tokens in
-/// the query string, so we only emit scheme + host (+ port) + path. Parse
-/// failures collapse to `<invalid-url>` rather than the raw input.
-pub fn redact_url_for_logs(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(parsed) => {
-            let scheme = parsed.scheme();
-            let host = parsed.host_str().unwrap_or("");
-            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-            let path = parsed.path();
-            format!("{scheme}://{host}{port}{path}")
-        }
-        Err(_) => "<invalid-url>".to_string(),
-    }
 }
 
 pub async fn fetch_downstream_openapi_spec(
@@ -414,7 +385,7 @@ pub fn render_scalar_html(title: &str, spec_url: &str) -> String {
       data-layout="modern"
       data-proxy-url=""
     ></script>
-    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+    <script src="{SCALAR_SCRIPT_URL}" integrity="{SCALAR_SCRIPT_INTEGRITY}" crossorigin="anonymous"></script>
   </body>
 </html>"#
     )
@@ -625,8 +596,7 @@ pub fn render_catalog_html() -> &'static str {
 
 pub fn scalar_docs_csp() -> String {
     format!(
-        "default-src 'none'; script-src {}; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
-        SCALAR_SCRIPT_SRC
+        "default-src 'none'; script-src '{SCALAR_SCRIPT_INTEGRITY}'; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
     )
 }
 
@@ -897,33 +867,27 @@ async fn fetch_json_spec_internal(
         return Ok(spec);
     }
 
-    let target = validate_spec_fetch_target(url).await?;
-    let cache_key = build_cache_key(target.url.as_ref(), scope);
+    let (url, client) = validate_spec_fetch_target(url)?;
+    let cache_key = build_cache_key(url.as_ref(), scope);
     if let Some(spec) = get_cached_spec(&cache_key) {
         return Ok(spec);
     }
 
     // Pre-compute the redacted URL once -- validated targets strip userinfo
     // but query strings may still carry signed-URL secrets.
-    let log_url = redact_url_for_logs(target.url.as_ref());
-
-    let response = if target.requires_dns_pinning {
-        build_pinned_spec_fetch_client(&target)?
-            .get(target.url.clone())
-            .timeout(SPEC_FETCH_TIMEOUT)
-            .send()
-            .await
-    } else {
-        SPEC_FETCH_CLIENT
-            .get(target.url.clone())
-            .timeout(SPEC_FETCH_TIMEOUT)
-            .send()
-            .await
-    }
-    .map_err(|error| {
-        tracing::warn!(url = %log_url, %error, "Failed to fetch downstream API spec");
-        AppError::BadRequest("Failed to fetch spec".to_string())
-    })?;
+    let log_url = crate::services::url_validation::url_host_for_logs(url.as_ref());
+    let response = client
+        .get(url)
+        .timeout(SPEC_FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| {
+            if super::proxy_destination::http::refused_connection(&error) {
+                return AppError::BadRequest("Spec URL must resolve to public addresses".into());
+            }
+            tracing::warn!(url = %log_url, "Failed to fetch downstream API spec");
+            AppError::BadRequest("Failed to fetch spec".into())
+        })?;
 
     if !response.status().is_success() {
         return Err(AppError::BadRequest(format!(
@@ -942,7 +906,7 @@ async fn fetch_json_spec_internal(
 async fn read_spec_body(mut response: reqwest::Response, log_url: &str) -> AppResult<bytes::Bytes> {
     let mut body = BytesMut::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
-        tracing::warn!(url = %log_url, %error, "Failed to read downstream API spec body");
+        tracing::warn!(url = %log_url, error = %error.without_url(), "Failed to read downstream API spec body");
         AppError::BadRequest("Failed to read spec body".to_string())
     })? {
         if body.len() + chunk.len() > MAX_SPEC_RESPONSE_BYTES {
@@ -1163,7 +1127,7 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTarget> {
+fn validate_spec_fetch_target(url: &str) -> AppResult<(url::Url, reqwest::Client)> {
     let parsed = url::Url::parse(url)
         .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -1189,54 +1153,16 @@ async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTa
         ));
     }
 
-    let port = parsed
-        .port_or_known_default()
-        .ok_or_else(|| AppError::BadRequest("Spec URL must include a valid port".to_string()))?;
-    let (resolved_addrs, requires_dns_pinning) =
-        resolve_fetch_host_socket_addrs(&normalized_host, port).await?;
-    if resolved_addrs.is_empty() {
-        return Err(AppError::BadRequest(
-            "Spec URL host did not resolve to any IP addresses".to_string(),
-        ));
-    }
-    if resolved_addrs
-        .iter()
-        .map(SocketAddr::ip)
-        .any(is_private_or_internal_ip)
-    {
-        return Err(AppError::BadRequest(
-            "Spec URL must not resolve to private or internal IP addresses".to_string(),
-        ));
-    }
-
     let mut url = parsed;
-    url.set_host(Some(&normalized_host))
-        .map_err(|_| AppError::BadRequest("Spec URL hostname is invalid".to_string()))?;
-
-    Ok(ValidatedSpecFetchTarget {
-        url,
-        host: normalized_host,
-        resolved_addrs,
-        requires_dns_pinning,
-    })
-}
-
-async fn resolve_fetch_host_socket_addrs(
-    host: &str,
-    port: u16,
-) -> AppResult<(Vec<SocketAddr>, bool)> {
-    if let Ok(ip) = parse_fetch_host_ip(host) {
-        return Ok((vec![SocketAddr::new(ip, port)], false));
+    url.set_fragment(None);
+    if matches!(url.host(), Some(url::Host::Domain(_))) {
+        url.set_host(Some(&normalized_host))
+            .map_err(|_| AppError::BadRequest("Spec URL hostname is invalid".into()))?;
     }
-
-    let resolved = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to resolve spec host: {e}")))?;
-    Ok((resolved.collect(), true))
-}
-
-fn parse_fetch_host_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
-    normalize_fetch_host(host).parse()
+    let client = super::proxy_destination::http::for_url(None, "", &url, true)
+        .map_err(|_| AppError::BadRequest("Spec URL must resolve to public addresses".into()))?
+        .ordinary()?;
+    Ok((url, client))
 }
 
 fn is_blocked_fetch_hostname(host: &str) -> bool {
@@ -1339,42 +1265,6 @@ fn evict_oldest_cache_entry() -> bool {
     }
 
     false
-}
-
-fn build_pinned_spec_fetch_client(target: &ValidatedSpecFetchTarget) -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&target.host, &target.resolved_addrs)
-        .build()
-        .map_err(|e| AppError::Internal(format!("Failed to build pinned spec fetch client: {e}")))
-}
-
-fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.is_loopback()
-                || ipv4.is_private()
-                || ipv4.is_link_local()
-                || ipv4.is_unspecified()
-                || ipv4.is_broadcast()
-                || is_rfc6598_cgnat(ipv4)
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-                || ipv6.is_unspecified()
-                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-                || ipv6
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
-        }
-    }
-}
-
-fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
-    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
 }
 
 #[cfg(test)]
@@ -1746,9 +1636,23 @@ paths:
     }
 
     #[test]
-    fn scalar_docs_csp_allows_scalar_script_source() {
+    fn scalar_docs_csp_allows_the_integrity_checked_bundle() {
         let csp = scalar_docs_csp();
-        assert!(csp.contains("https://cdn.jsdelivr.net"));
+        let html = render_scalar_html("Docs", "/spec.json");
+        let integrity = html
+            .split_once("integrity=\"")
+            .expect("script integrity")
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        assert!(integrity.starts_with("sha384-"));
+        assert!(html.contains("@scalar/api-reference@1.82.1/dist/browser/standalone.js"));
+        assert!(html.contains("crossorigin=\"anonymous\""));
+        assert!(
+            csp.split(';')
+                .any(|d| d.trim() == format!("script-src '{integrity}'"))
+        );
         assert!(csp.contains("connect-src 'self'"));
     }
 
@@ -1758,27 +1662,13 @@ paths:
         assert!(csp.contains("script-src 'unsafe-inline'"));
     }
 
-    #[tokio::test]
-    async fn spec_fetch_validation_rejects_private_targets() {
+    #[test]
+    fn spec_fetch_validation_rejects_private_targets() {
+        assert!(validate_spec_fetch_target("http://100.64.0.1/openapi.json").is_err());
+        assert!(validate_spec_fetch_target("http://127.0.0.1/openapi.json").is_err());
+        assert!(validate_spec_fetch_target("https://[::1]/openapi.json").is_err());
         assert!(
-            validate_spec_fetch_target("http://100.64.0.1/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("http://127.0.0.1/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("https://[::1]/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("http://metadata.google.internal/openapi.json")
-                .await
-                .is_err()
+            validate_spec_fetch_target("http://metadata.google.internal/openapi.json").is_err()
         );
     }
 
@@ -1845,37 +1735,9 @@ paths:
     }
 
     #[test]
-    fn redact_url_strips_userinfo_and_query() {
-        // Signed URL: the query carries the token and must never appear in logs.
-        let redacted = super::redact_url_for_logs(
-            "https://user:secret@host.example.com:8443/specs/openapi.json?sig=DEADBEEF&exp=12345",
-        );
-        assert_eq!(redacted, "https://host.example.com:8443/specs/openapi.json");
-    }
-
-    #[test]
-    fn redact_url_preserves_default_port() {
-        let redacted = super::redact_url_for_logs("https://host.example.com/openapi.json");
-        assert_eq!(redacted, "https://host.example.com/openapi.json");
-    }
-
-    #[test]
-    fn redact_url_collapses_invalid_input() {
-        assert_eq!(super::redact_url_for_logs("not a url"), "<invalid-url>");
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_urls_with_embedded_credentials() {
-        assert!(
-            validate_spec_fetch_target("https://user:pass@example.com/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("https://user@example.com/openapi.json")
-                .await
-                .is_err()
-        );
+    fn validate_rejects_urls_with_embedded_credentials() {
+        assert!(validate_spec_fetch_target("https://user:pass@example.com/openapi.json").is_err());
+        assert!(validate_spec_fetch_target("https://user@example.com/openapi.json").is_err());
     }
 
     // ---- is_auto_discovered_openapi_spec_url ----
@@ -2120,16 +1982,28 @@ paths:
 
     #[test]
     fn rfc6598_cgnat_detects_range_boundaries() {
-        assert!(super::is_rfc6598_cgnat("100.64.0.0".parse().unwrap()));
-        assert!(super::is_rfc6598_cgnat("100.127.255.255".parse().unwrap()));
-        assert!(super::is_rfc6598_cgnat("100.100.50.25".parse().unwrap()));
+        assert!(super::is_private_or_internal_ip(
+            "100.64.0.0".parse().unwrap()
+        ));
+        assert!(super::is_private_or_internal_ip(
+            "100.127.255.255".parse().unwrap()
+        ));
+        assert!(super::is_private_or_internal_ip(
+            "100.100.50.25".parse().unwrap()
+        ));
     }
 
     #[test]
     fn rfc6598_cgnat_rejects_outside_range() {
-        assert!(!super::is_rfc6598_cgnat("100.63.255.255".parse().unwrap()));
-        assert!(!super::is_rfc6598_cgnat("100.128.0.0".parse().unwrap()));
-        assert!(!super::is_rfc6598_cgnat("8.8.8.8".parse().unwrap()));
+        assert!(!super::is_private_or_internal_ip(
+            "100.63.255.255".parse().unwrap()
+        ));
+        assert!(!super::is_private_or_internal_ip(
+            "100.128.0.0".parse().unwrap()
+        ));
+        assert!(!super::is_private_or_internal_ip(
+            "8.8.8.8".parse().unwrap()
+        ));
     }
 
     // ---- detect_streaming_from_openapi (edge cases) ----
@@ -2179,20 +2053,6 @@ paths:
     fn build_cache_key_scoped_includes_prefix() {
         let key = super::build_cache_key("https://example.com/spec.json", Some("user-abc"));
         assert_eq!(key, "scope:user-abc|https://example.com/spec.json");
-    }
-
-    // ---- redact_url_for_logs (additional edge cases) ----
-
-    #[test]
-    fn redact_url_handles_http_scheme() {
-        let redacted = super::redact_url_for_logs("http://example.com/api/v1");
-        assert_eq!(redacted, "http://example.com/api/v1");
-    }
-
-    #[test]
-    fn redact_url_strips_fragment() {
-        let redacted = super::redact_url_for_logs("https://example.com/docs#section");
-        assert_eq!(redacted, "https://example.com/docs");
     }
 
     // ---- build_asyncapi_document ----
