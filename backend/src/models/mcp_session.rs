@@ -12,6 +12,10 @@ use tokio::sync::mpsc;
 use crate::models::mcp_notification::{
     COLLECTION_NAME as MCP_NOTIFICATION_COLLECTION, McpSessionNotification,
 };
+use crate::services::{
+    api_key_mutation_service::transaction_result,
+    erasure_admission::{OwnerFenceCreationRace, fence_in_session},
+};
 
 pub const MAX_ACTIVATED_SERVICES: usize = 20;
 pub const MCP_SESSION_MAX_IDLE_SECS: u64 = 30 * 24 * 3600;
@@ -246,7 +250,7 @@ impl McpSessionStore {
             ));
         }
 
-        // Admission can conflict with another replica before reclamation starts.
+        // Admission can contend on the owner fence or a slot across replicas.
         // Only retry transactions MongoDB identifies as aborted; an unknown
         // commit result must not create a second session.
         for attempt in 0..SESSION_CREATE_ATTEMPTS {
@@ -261,7 +265,8 @@ impl McpSessionStore {
             {
                 Err(error)
                     if attempt + 1 < SESSION_CREATE_ATTEMPTS
-                        && error.contains_label("TransientTransactionError")
+                        && (error.contains_label("TransientTransactionError")
+                            || error.get_custom::<OwnerFenceCreationRace>().is_some())
                         && !error.contains_label("UnknownTransactionCommitResult") =>
                 {
                     tokio::time::sleep(Duration::from_millis(10 << attempt)).await;
@@ -337,6 +342,12 @@ impl McpSessionStore {
                     return Err(error);
                 }
             }
+            if let Err(error) =
+                transaction_result(fence_in_session(db, user_id, &mut transaction).await)
+            {
+                let _ = transaction.abort_transaction().await;
+                return Err(error);
+            }
             if let Err(error) = db
                 .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
                 .insert_one(&record)
@@ -374,6 +385,12 @@ impl McpSessionStore {
         let cutoff = now - chrono::Duration::seconds(SESSION_RECLAIM_IDLE_SECS);
         let mut transaction = db.client().start_session().await?;
         transaction.start_transaction().await?;
+        if let Err(error) =
+            transaction_result(fence_in_session(db, user_id, &mut transaction).await)
+        {
+            let _ = transaction.abort_transaction().await;
+            return Err(error);
+        }
         let old = db
             .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
             .find_one_and_delete(doc! {
@@ -1604,6 +1621,73 @@ mod tests {
         store.remove(&id).await.unwrap();
 
         assert!(store.notifications_after(&id, 0).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn durable_admission_refuses_account_erasure_without_creating_or_replacing_a_session() {
+        use crate::errors::AppError;
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::services::{api_key_mutation_service, personal_erasure_service};
+        use crate::test_utils::{connect_transaction_test_database, test_user};
+
+        let db = connect_transaction_test_database("mcp_erasure_admission").await;
+        personal_erasure_service::ensure_indexes(&db).await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&owner, UserType::Person),
+                test_user(&other, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        let store = McpSessionStore::with_db(db.clone());
+        let existing = store.create(&owner).await.unwrap().expect("active owner");
+        let sessions = db.collection::<bson::Document>(MCP_SESSION_COLLECTION);
+        sessions
+            .update_one(
+                doc! {"_id": &existing},
+                doc! {"$set": {"last_active_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::hours(2))}},
+            )
+            .await
+            .unwrap();
+        let slots = db.collection::<bson::Document>(MCP_SESSION_SLOT_COLLECTION);
+        let owner_filter = doc! {"user_id": &owner};
+        let session_before = sessions.find_one(owner_filter.clone()).await.unwrap();
+        let slot_before = slots.find_one(owner_filter.clone()).await.unwrap();
+        personal_erasure_service::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+
+        let replica = McpSessionStore::with_db(db.clone());
+        let new_session = replica.create(&owner).await.unwrap_err();
+        let replacement = replica
+            .replace_oldest_idle_session(&owner, true, false, None)
+            .await
+            .unwrap_err();
+        for error in [new_session, replacement] {
+            assert!(matches!(
+                api_key_mutation_service::map_transaction_error(error),
+                AppError::Conflict(_)
+            ));
+        }
+        assert_eq!(
+            sessions
+                .count_documents(owner_filter.clone())
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            slots.count_documents(owner_filter.clone()).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            sessions.find_one(owner_filter.clone()).await.unwrap(),
+            session_before
+        );
+        assert_eq!(slots.find_one(owner_filter).await.unwrap(), slot_before);
+        assert!(replica.create(&other).await.unwrap().is_some());
     }
 
     #[tokio::test]
