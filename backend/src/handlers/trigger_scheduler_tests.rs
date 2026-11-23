@@ -462,6 +462,7 @@ async fn schedule_missed_grace_overlap_and_budgets() {
     let first = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     let skipped = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    assert_eq!(skipped.blocking_run_id.as_deref(), Some(first.id.as_str()));
     let job = schedules::claim(&state.db, &skipped.id, Utc::now())
         .await
         .unwrap()
@@ -479,6 +480,16 @@ async fn schedule_missed_grace_overlap_and_budgets() {
             .as_deref(),
         Some("overlap_skip")
     );
+    let history = schedules::history(&state.db, &trigger, None, None)
+        .await
+        .unwrap();
+    let response = crate::handlers::triggers::run_response(
+        history
+            .into_iter()
+            .find(|run| run.id == skipped.id)
+            .unwrap(),
+    );
+    assert_eq!(response.blocking_run_id.as_deref(), Some(first.id.as_str()));
     state
         .db
         .collection::<Document>(schedules::BUDGETS)
@@ -516,6 +527,49 @@ async fn schedule_missed_grace_overlap_and_budgets() {
             .status,
         TriggerStatus::Active
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn schedule_records_the_owned_overlap_found_at_dispatch() {
+    let (state, calls, server) = setup("schedule_dispatch_overlap").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, Some(ThreadPolicy::New)).await;
+    let now = Utc::now();
+    let runs = state.db.collection::<TriggerRun>(RUNS);
+
+    // Even an older row with this trigger ID cannot identify another owner.
+    let mut foreign = schedules::new_run(&trigger, now - Duration::minutes(2), now);
+    foreign.user_id = Uuid::new_v4().to_string();
+    foreign.outcome = RunOutcome::Started;
+    runs.insert_one(&foreign).await.unwrap();
+    let pending = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    assert!(pending.reason.is_none());
+    assert!(pending.blocking_run_id.is_none());
+
+    // Simulate a different worker starting or recovering an older occurrence
+    // between insertion and assistant turn admission.
+    let mut live = schedules::new_run(&trigger, now - Duration::minutes(1), now);
+    live.outcome = RunOutcome::Waiting;
+    runs.insert_one(&live).await.unwrap();
+    let job = schedules::claim(&state.db, &pending.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    run_job_once(&state, &job).await.unwrap();
+
+    let history = schedules::history(&state.db, &trigger, None, None)
+        .await
+        .unwrap();
+    assert!(!history.iter().any(|run| run.id == foreign.id));
+    let blocked = history.iter().find(|run| run.id == pending.id).unwrap();
+    assert_eq!(blocked.outcome, RunOutcome::Skipped);
+    assert_eq!(blocked.reason.as_deref(), Some("overlap"));
+    assert_eq!(blocked.blocking_run_id.as_deref(), Some(live.id.as_str()));
+    assert!(blocked.started_at.is_none());
+    let live = history.into_iter().find(|run| run.id == live.id).unwrap();
+    assert_eq!(live.outcome, RunOutcome::Waiting);
+    assert!(calls.lock().await.is_empty());
     server.abort();
 }
 

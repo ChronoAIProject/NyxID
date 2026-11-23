@@ -604,13 +604,12 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         Ok(super::assistant_team::Started::Busy) => defer(state, job, &run, "target_busy").await,
         Ok(super::assistant_team::Started::PoolFull) => defer(state, job, &run, "pool_full").await,
         Err(AppError::TriggerRateLimited) => defer(state, job, &run, "budget_exhausted").await,
-        Err(AppError::Conflict(reason)) if reason == "trigger_overlap_skip" => {
-            schedules::finish_claimed(
+        Err(AppError::TriggerOverlapSkip { blocking_run_id }) => {
+            schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await
@@ -783,7 +782,9 @@ async fn deliver_existing(
     if let Err(error) = admitted {
         return match error {
             AppError::TriggerRateLimited => defer(state, job, run, "budget_exhausted").await,
-            AppError::Conflict(_) => defer(state, job, run, "overlap").await,
+            AppError::TriggerOverlapSkip { .. } | AppError::Conflict(_) => {
+                defer(state, job, run, "overlap").await
+            }
             other => Err(other),
         };
     }

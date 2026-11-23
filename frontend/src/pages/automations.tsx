@@ -938,6 +938,7 @@ function AutomationHistory({
   const cancelRun = useCancelAutomationRun();
   const [cancelling, setCancelling] = useState<string | null>(null);
   const runs = history.data?.pages.flatMap((page) => page.runs) ?? [];
+  const historyById = new Map(runs.map((run) => [run.id, run]));
   return (
     <Dialog
       open
@@ -979,6 +980,8 @@ function AutomationHistory({
             {runs.map((run) => (
               <GroupedList
                 key={run.id}
+                id={`automation-run-${run.id}`}
+                tabIndex={-1}
                 title={run.outcome.replaceAll("_", " ")}
                 footer={
                   <>
@@ -1003,6 +1006,13 @@ function AutomationHistory({
                         {formatAutomationTime(run.missed.from, zone)}{translateUi(" and")}{" "}
                         {formatAutomationTime(run.missed.through, zone)}.
                       </p>
+                    ) : run.outcome === "skipped" && (run.reason === "overlap_skip" || run.reason === "overlap") ? (
+                      <OverlapSkipDetails
+                        runId={run.blocking_run_id}
+                        scheduledAt={historyById.get(run.blocking_run_id ?? "")?.scheduled_at}
+                        hasOlderRuns={history.hasNextPage}
+                        zone={zone}
+                      />
                     ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "permit" ? (
                       <p>{translateUi("A temporary server problem interrupted this run. Check completed actions before starting another run.")}</p>
                     ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "shutdown" ? (
@@ -1076,6 +1086,42 @@ function AutomationHistory({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function OverlapSkipDetails({ runId, scheduledAt, hasOlderRuns, zone }: {
+  readonly runId: string | null | undefined;
+  readonly scheduledAt: string | undefined;
+  readonly hasOlderRuns: boolean | undefined;
+  readonly zone: string;
+}) {
+  if (!runId) {
+    return <p>{translateUi("Skipped because another run was in progress. The blocking run was not recorded.")}</p>;
+  }
+  if (!scheduledAt) {
+    return (
+      <p>{hasOlderRuns
+        ? translateUi("Skipped because of run {{value1}}. Load older runs to look for it.", { value1: runId })
+        : translateUi("Skipped because of run {{value1}}. That run is unavailable in history.", { value1: runId })}
+      </p>
+    );
+  }
+  return (
+    <p>
+      <button
+        type="button"
+        className="text-primary-text underline"
+        onClick={() => {
+          const section = document.getElementById(`automation-run-${runId}`);
+          section?.scrollIntoView({ block: "nearest" });
+          section?.focus({ preventScroll: true });
+        }}
+      >
+        {translateUi("Skipped because of the run scheduled for {{value1}}", {
+          value1: formatAutomationTime(scheduledAt, zone, true),
+        })}
+      </button>
+    </p>
   );
 }
 

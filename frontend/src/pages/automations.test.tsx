@@ -753,3 +753,76 @@ it("separates task execution from actionable push failure, retry and acceptance"
   expect(screen.getByText(/Provider HTTP 429/)).toBeInTheDocument();
   expect(screen.getAllByRole("link", { name: "Open thread" })[0]).toHaveAttribute("href", expect.stringContaining("saved-report"));
 });
+
+it("locates the blocking run and uses its existing recovery controls", async () => {
+  const user = userEvent.setup();
+  const scheduledAt = trigger.created_at;
+  const skipped = { outcome: "skipped", reason: "overlap_skip", scheduled_at: scheduledAt, duration_ms: null };
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: { pages: [{ runs: [
+      { ...skipped, id: "skipped", blocking_run_id: "blocking" },
+      { ...skipped, id: "older-blocker", blocking_run_id: "outside-page" },
+      { ...skipped, id: "legacy", reason: "overlap" },
+      {
+        id: "blocking", outcome: "waiting", wait_kind: "coordinator",
+        reason: "coordinator_pending", scheduled_at: scheduledAt, duration_ms: null,
+        can_cancel: true, thread_id: "blocking-thread",
+      },
+    ] }] },
+  });
+  render(<AutomationsPage />);
+  await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+  const blocker = screen.getByRole("region", { name: "waiting" });
+  const scroll = vi.fn();
+  Object.defineProperty(blocker, "scrollIntoView", { value: scroll });
+  await user.click(screen.getByRole("button", { name: /Skipped because of the run scheduled for/ }));
+  expect(blocker).toHaveFocus();
+  expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+  expect(screen.getByText("Skipped because of run outside-page. That run is unavailable in history.")).toBeInTheDocument();
+  expect(screen.getByText("Skipped because another run was in progress. The blocking run was not recorded.")).toBeInTheDocument();
+  expect(within(blocker).getByRole("link", { name: "Open thread" })).toHaveAttribute("href", "/assistant?c=blocking-thread");
+  await user.click(within(blocker).getByRole("button", { name: "Cancel run" }));
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Confirm cancellation" }));
+  expect(mocks.cancel).toHaveBeenCalledWith({ triggerId: trigger.id, runId: "blocking" });
+});
+
+it("finds a blocking run after the owner loads older history", async () => {
+  const user = userEvent.setup();
+  const recent = {
+    runs: [
+      { id: "skip", outcome: "skipped", reason: "overlap_skip", scheduled_at: trigger.created_at,
+        duration_ms: null, blocking_run_id: "older-run" },
+      { id: "skip-missing", outcome: "skipped", reason: "overlap_skip", scheduled_at: trigger.created_at,
+        duration_ms: null, blocking_run_id: "expired-run" },
+    ],
+  };
+  const older = {
+    runs: [
+      { id: "older-run", outcome: "waiting", wait_kind: "coordinator", reason: "coordinator_pending",
+        scheduled_at: "2026-09-30T23:00:00Z", duration_ms: null, can_cancel: true },
+    ],
+  };
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: { pages: [recent] },
+    hasNextPage: true,
+    fetchNextPage: mocks.older,
+  });
+  const { rerender } = render(<AutomationsPage />);
+  await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+  expect(screen.getByText("Skipped because of run older-run. Load older runs to look for it.")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Load older runs" }));
+  expect(mocks.older).toHaveBeenCalledTimes(1);
+
+  mocks.history.mockReturnValue({ data: { pages: [recent, older] }, hasNextPage: false });
+  rerender(<AutomationsPage />);
+  const blocker = screen.getByRole("region", { name: "waiting" });
+  Object.defineProperty(blocker, "scrollIntoView", { value: vi.fn() });
+  await user.click(screen.getByRole("button", { name: /Skipped because of the run scheduled for/ }));
+  expect(blocker).toHaveFocus();
+  expect(within(blocker).getByRole("button", { name: "Cancel run" })).toBeEnabled();
+  expect(screen.getByText("Skipped because of run expired-run. That run is unavailable in history.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load older runs" })).not.toBeInTheDocument();
+});
