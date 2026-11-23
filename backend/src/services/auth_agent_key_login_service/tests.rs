@@ -242,9 +242,44 @@ async fn agent_key_admission_refuses_accepted_account_erasure() {
     new_key.id = Uuid::new_v4().to_string();
     new_key.key_hash = hash_token(&credentials::generate_secret());
 
-    super::super::personal_erasure_service::accept(&db, &actor, &actor, None)
+    let approved_row = find_by_user_code(&db, HMAC_KEY, &approved.user_code)
         .await
         .unwrap();
+    assert_eq!(approved_row.status, Status::Approved);
+    assert!(approved_row.mfa_policy_revision.is_none());
+    let prepared = std::sync::Arc::new(tokio::sync::Notify::new());
+    let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+    let encryption = test_encryption_keys();
+    let delivery = BEFORE_DELIVERY_CLAIM.scope(
+        (prepared.clone(), resume.clone()),
+        poll(&db, &encryption, HMAC_KEY, &approved.device_code),
+    );
+    let erasure = async {
+        prepared.notified().await;
+        super::super::personal_erasure_service::accept(&db, &actor, &actor, None)
+            .await
+            .unwrap();
+        resume.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(delivery, erasure)
+    })
+    .await
+    .expect("delivery preparation and erasure acceptance");
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(ref reason))
+            if reason == "Account erasure has closed this owner's write admission"
+    ));
+    let after = find_by_user_code(&db, HMAC_KEY, &approved.user_code)
+        .await
+        .unwrap();
+    assert_eq!(after.status, Status::Approved);
+    assert!(after.delivered_at.is_none());
+    assert_eq!(
+        after.delivery_credential_encrypted,
+        approved_row.delivery_credential_encrypted
+    );
     assert!(matches!(
         super::super::api_key_mutation_service::insert_one_for_actor(
             &db,
@@ -296,16 +331,6 @@ async fn agent_key_admission_refuses_accepted_account_erasure() {
     )
     .await;
     assert!(denied.is_err());
-    assert!(
-        poll(
-            &db,
-            &test_encryption_keys(),
-            HMAC_KEY,
-            &approved.device_code
-        )
-        .await
-        .is_err()
-    );
     assert!(
         db.collection::<ApiKey>(API_KEYS)
             .find_one(doc! {"_id": &new_key.id})

@@ -829,6 +829,11 @@ pub(super) async fn fence_delivery_owners(
     Ok(())
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_DELIVERY_CLAIM: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
+}
+
 #[tracing::instrument(
     name = "agent_key_login.poll",
     skip_all,
@@ -881,6 +886,11 @@ pub async fn poll(
     // Resolve and decrypt before consuming the exchange. A failed read or KMS
     // call leaves the approved row available for retry and expiry cleanup.
     let delivery = prepare_delivery(db, encryption, &row).await?;
+    #[cfg(test)]
+    if let Ok((prepared, resume)) = BEFORE_DELIVERY_CLAIM.try_with(Clone::clone) {
+        prepared.notify_one();
+        resume.notified().await;
+    }
     let context = (db.clone(), &row, delivery.api_key.owner_id.as_str());
     let delivered = super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
         let (db, row, owner_id) = c;

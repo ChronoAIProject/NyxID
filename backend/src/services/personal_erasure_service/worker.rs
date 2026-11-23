@@ -1375,7 +1375,15 @@ mod tests {
     #[tokio::test]
     async fn worker_replays_each_erasure_domain_after_uncheckpointed_work() {
         use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
-        use crate::services::{personal_erasure_registry, telemetry_erasure_service};
+        use crate::models::{
+            channel_bot, oracle_pool, oracle_worker, platform_binding,
+            remote_machine::{self, AuthorizationState, ResourceState},
+            service_account, telemetry_erasure_job,
+        };
+        use crate::services::{
+            personal_erasure_registry, remote_machine_service::CreateMachineInput,
+            service_account_service, telemetry_erasure_service,
+        };
         use crate::test_utils::test_user;
         use futures::TryStreamExt;
         let (db, user) = super::super::tests::fixture().await;
@@ -1388,10 +1396,75 @@ mod tests {
             ])
             .await
             .unwrap();
+        let (account, _) = service_account_service::create_service_account(
+            &db,
+            "Erasure fixture",
+            None,
+            "openid",
+            &[],
+            None,
+            &user,
+        )
+        .await
+        .unwrap();
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
         let original = crate::test_utils::test_app_state(db.clone());
         let restarted = crate::test_utils::test_app_state(db.clone());
         let jobs = db.collection::<Document>(JOBS);
+        let platform_requests = db.collection::<Document>(platform_binding::REQUESTS);
+        platform_requests
+            .insert_one(doc! {
+                "_id": "pending-platform-review", "approved_user_id": &user, "state": "pending",
+            })
+            .await
+            .unwrap();
+        let pool = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>(oracle_pool::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &pool, "user_id": &org, "worker_enrollment_epoch": 0_i64,
+            })
+            .await
+            .unwrap();
+        let oracle_workers = db.collection::<Document>(oracle_worker::COLLECTION_NAME);
+        oracle_workers
+            .insert_one(doc! {
+                "_id": "personal-oracle-worker", "pool_id": &pool,
+                "enrollment": { "owner_user_id": &user, "credential_hash": "synthetic-digest" },
+            })
+            .await
+            .unwrap();
+        let bots = db.collection::<Document>(channel_bot::COLLECTION_NAME);
+        let now = bson::DateTime::now();
+        let bot = doc! {
+            "_id": "polling-channel", "user_id": &user, "platform": "x",
+            "label": "Synthetic polling channel", "platform_bot_id": "synthetic-identity",
+            "platform_bot_username": "synthetic-channel", "webhook_registered": false,
+            "webhook_secret_hash": "", "credential_source": "connection",
+            "bot_token_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic, bytes: Vec::new(),
+            },
+            "status": "active", "is_active": true, "created_at": now, "updated_at": now,
+        };
+        bots.insert_one(&bot).await.unwrap();
+        let machine_input = CreateMachineInput::fixed(&user, true, "sha256:fixture");
+        let machine_history: Vec<_> = (0..33)
+            .map(|index| {
+                let mut machine =
+                    machine_input.preview(&format!("history-{index:02}"), chrono::Utc::now());
+                machine.resource_state = ResourceState::Deleted;
+                machine.authorization_state = AuthorizationState::Revoked;
+                machine.writer_admitted = false;
+                machine.cleanup_state = "complete".into();
+                machine.cleanup_evidence_digest = Some("synthetic-cleanup-evidence".into());
+                machine
+            })
+            .collect();
+        db.collection::<remote_machine::ManagedMachine>(remote_machine::COLLECTION_NAME)
+            .insert_many(&machine_history)
+            .await
+            .unwrap();
+        let vendor_jobs = db.collection::<Document>(telemetry_erasure_job::COLLECTION_NAME);
+        let vendor = doc! {"user_id": &user, "destination_id": bson::Bson::Null};
         let phase_rows = [
             (
                 "local_inventory",
@@ -1413,32 +1486,69 @@ mod tests {
 
         for (index, domain) in DOMAINS.iter().enumerate() {
             if *domain == "vendor" {
-                telemetry_erasure_service::drain_once(&db, &Default::default())
+                let changed = vendor_jobs
+                    .update_one(
+                        vendor.clone(),
+                        doc! {
+                            "$set": {
+                                "status": "completed", "inventory_revision": "stale-fixture",
+                                "completion_verified_at": bson::DateTime::now(),
+                            },
+                        },
+                    )
                     .await
                     .unwrap();
-                telemetry_erasure_service::operator_reconcile_empty_inventory(
-                    &db,
-                    &user,
-                    "operator",
-                    "evidence://synthetic-provider-inventory",
-                    "Reviewed the synthetic deployment inventory",
-                )
-                .await
-                .unwrap();
+                assert_eq!(changed.modified_count, 1);
             }
             retry_now(&db, &accepted.id).await;
             let interrupted = claim(&db).await.unwrap().expect("original worker claim");
             assert_eq!(next_domain_index(&interrupted), Some(index), "{domain}");
             // Execute the production pass and discard its result at the boundary
             // between durable adapter work and the worker checkpoint.
-            run_domain(&original, &db, &interrupted, index)
+            let outcome = run_domain(&original, &db, &interrupted, index)
                 .await
                 .unwrap();
+            match *domain {
+                "platform" => assert!(platform_requests.find_one(doc! {
+                    "_id": "pending-platform-review", "state": "cancelled",
+                }).await.unwrap().is_some()),
+                "oracle" => assert!(oracle_workers.find_one(doc! {
+                    "_id": "personal-oracle-worker", "enrollment.retired_for_owner_erasure": true,
+                }).await.unwrap().is_some()),
+                "channel_bots" => assert!(bots.find_one(doc! {
+                    "_id": "polling-channel", "personal_erasure_cleanup_complete": true,
+                    "personal_erasure_cleanup_basis": "poll_admission_closed", "is_active": false,
+                }).await.unwrap().is_some()),
+                "provider_credentials" => assert!(db.collection::<Document>(service_account::COLLECTION_NAME)
+                    .find_one(doc! {"_id": &account.id, "personal_erasure_credentials_preserved": true})
+                    .await.unwrap().is_some()),
+                "machine" => assert!(matches!(outcome, Outcome::Progress("machine_inventory_pending", _))),
+                "vendor" => {
+                    assert!(matches!(outcome, Outcome::Pending("vendor_erasure_pending")));
+                    assert_eq!(
+                        vendor_jobs.find_one(vendor.clone()).await.unwrap().unwrap().get_str("status"),
+                        Ok("pending"),
+                    );
+                }
+                _ => {}
+            }
             if let Some((_, rows)) = phase_rows.iter().find(|(name, _)| name == domain) {
-                let remaining = rows.count_documents(doc! {"user_id": &user}).await.unwrap();
+                let owner_rows = doc! {"user_id": &user};
+                let mut remaining = rows.count_documents(owner_rows.clone()).await.unwrap();
+                // Other fixtures can require earlier cleanup passes in this
+                // domain. Lose the checkpoint after reaching the seeded page.
+                for _ in 0..16 {
+                    if remaining < 40 {
+                        break;
+                    }
+                    run_domain(&original, &db, &interrupted, index)
+                        .await
+                        .unwrap();
+                    remaining = rows.count_documents(owner_rows.clone()).await.unwrap();
+                }
                 assert!(
                     (1..40).contains(&remaining),
-                    "{domain} must leave a partial page"
+                    "{domain} must leave a partial page, found {remaining} rows"
                 );
             }
             let persisted = super::super::status(&db, &user).await.unwrap().unwrap();
@@ -1466,6 +1576,20 @@ mod tests {
                     .unwrap(),
                 "{domain} expired worker checkpoint"
             );
+            if *domain == "vendor" {
+                telemetry_erasure_service::drain_once(&db, &Default::default())
+                    .await
+                    .unwrap();
+                telemetry_erasure_service::operator_reconcile_empty_inventory(
+                    &db,
+                    &user,
+                    "operator",
+                    "evidence://synthetic-provider-inventory",
+                    "Reviewed the synthetic deployment inventory",
+                )
+                .await
+                .unwrap();
+            }
             for _ in 0..32 {
                 retry_now(&db, &accepted.id).await;
                 assert!(process_one(&restarted).await.unwrap(), "{domain}");
