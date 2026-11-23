@@ -241,6 +241,8 @@ jobs:
               - '.config/nextest.toml'
             frontend:
               - 'frontend/**'
+              # Frontend cross-app tests load real mobile screens and controls.
+              - 'mobile/src/**'
               - 'shared/**'
               - '.node-version'
             mobile:

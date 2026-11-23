@@ -22,6 +22,17 @@ with one read-only GitHub comparison. Run `scripts/cut-release.sh` with your own
 `gh` login to open the PR at the commit staging runs. Keeping that branch fixed
 lets later merges into `dev` proceed without restarting the release PR's CI.
 
+Frontend selection includes `mobile/src/**`: the frontend account-deletion
+tests execute real mobile screens, controls and HTTP helpers in a native mock
+harness. Mobile source changes must run those consumers before merging.
+
+Staging publication runs independently of the full dev CI result. A successful
+publish confirms image rollout; check the separate CI run for correctness.
+The NyxBot model-and-channel smoke check additionally requires both
+`NYXID_CHECK_ACCOUNT` and `NYXID_CHECK_ALERT_URL` in the staging environment.
+Missing configuration emits a warning and a `nyxbot-staging-skipped-*` artifact;
+that deployment has no NyxBot smoke-test evidence.
+
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses
 PR #2428 at `df20e4869`, its PR merge commit and the cold comparison at

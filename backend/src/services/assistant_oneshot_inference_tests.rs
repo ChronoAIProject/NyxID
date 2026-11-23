@@ -609,22 +609,26 @@ async fn assistant_oneshot_timeout_cancels_without_retry_and_settles_meter() {
     bounds.timeout = Duration::from_secs(10);
     let inference = one_shot_text(&state, ACTOR, "Summarize", "Data", bounds);
     tokio::pin!(inference);
-    crate::test_utils::with_manual_clock(async {
-        let dispatched = async {
-            while !mock
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .any(|request| request.url.path() == "/responses")
-            {
-                tokio::task::yield_now().await;
-            }
-        };
-        tokio::select! {
-            _ = &mut inference => panic!("inference finished before the provider received it"),
-            () = dispatched => {}
+    // Database and HTTP dispatch use real I/O and driver timers. Keep their
+    // deadlines running until the provider has received the inference request.
+    let dispatched = async {
+        while !mock
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path() == "/responses")
+        {
+            tokio::task::yield_now().await;
         }
+    };
+    tokio::select! {
+        _ = &mut inference => panic!("inference finished before the provider received it"),
+        result = tokio::time::timeout(Duration::from_secs(20), dispatched) => {
+            result.expect("provider dispatch stalled while waiting for the timeout test request");
+        }
+    }
+    crate::test_utils::with_manual_clock(async {
         tokio::time::advance(bounds.timeout + Duration::from_millis(1)).await;
     })
     .await;

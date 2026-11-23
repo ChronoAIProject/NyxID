@@ -209,7 +209,7 @@ async fn in_session(
         .max_time(BUDGET)
         .session(&mut *tx)
         .await?;
-    let mut raw: Vec<Document> = cursor.stream(&mut *tx).try_collect().await?;
+    let mut raw = read_documents(&mut cursor, tx).await?;
     if raw.len() > 128 {
         return Err(unavailable());
     }
@@ -448,7 +448,7 @@ async fn read_resources(
                 .max_time(BUDGET)
                 .session(&mut *tx)
                 .await?;
-            cursor.stream(&mut *tx).try_collect().await?
+            read_documents(&mut cursor, tx).await?
         };
         let resources = resources
             .into_iter()
