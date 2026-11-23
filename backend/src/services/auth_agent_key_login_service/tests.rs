@@ -200,6 +200,75 @@ async fn start(db: &Database) -> RequestOutput {
     .unwrap()
 }
 
+#[tokio::test]
+async fn agent_key_admission_refuses_accepted_account_erasure() {
+    let (db, actor, key, _) = fixture("agent_key_erasure_admission").await;
+    super::super::personal_erasure_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    let pending = start(&db).await;
+    let approved = start(&db).await;
+    accept(&db, &actor, &key, &approved).await;
+    let child_filter = doc! {"user_id": &actor};
+    let children = db.collection::<ApiKeyCredential>(CREDENTIALS);
+    assert_eq!(
+        children
+            .count_documents(child_filter.clone())
+            .await
+            .unwrap(),
+        1
+    );
+    let mut new_key = key.clone();
+    new_key.id = Uuid::new_v4().to_string();
+    new_key.key_hash = hash_token(&credentials::generate_secret());
+    super::super::api_key_mutation_service::insert_one(&db, &new_key, None)
+        .await
+        .unwrap();
+    new_key.id = Uuid::new_v4().to_string();
+    new_key.key_hash = hash_token(&credentials::generate_secret());
+
+    super::super::personal_erasure_service::accept(&db, &actor, &actor, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        super::super::api_key_mutation_service::insert_one(&db, &new_key, None).await,
+        Err(AppError::Conflict(_))
+    ));
+    let denied = approve(
+        &db,
+        &test_encryption_keys(),
+        HMAC_KEY,
+        &actor,
+        &pending.user_code,
+        Selection::Existing {
+            permission_snapshot: None,
+            api_key_id: key.id,
+        },
+        None,
+        None,
+    )
+    .await;
+    assert!(denied.is_err());
+    assert!(
+        poll(
+            &db,
+            &test_encryption_keys(),
+            HMAC_KEY,
+            &approved.device_code
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        db.collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &new_key.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(children.count_documents(child_filter).await.unwrap(), 1);
+}
+
 async fn accept(db: &Database, actor: &str, key: &ApiKey, request: &RequestOutput) {
     approve(
         db,

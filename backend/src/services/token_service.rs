@@ -1594,6 +1594,13 @@ mod tests {
         };
         let active = prepare().await.unwrap();
         let held = prepare().await.unwrap();
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id": &user_id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
+        create_mfa_pending_session_with_method(&db, &user_id, "synthetic-before", Some("social"))
+            .await
+            .unwrap();
         let mut tx = db.client().start_session().await.unwrap();
         tx.start_transaction().await.unwrap();
         insert_prepared_session(&db, &active, &mut tx)
@@ -1642,6 +1649,16 @@ mod tests {
         assert!(matches!(
             create_session(&db, &user_id, None, None).await,
             Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            create_mfa_pending_session_with_method(
+                &db,
+                &user_id,
+                "synthetic-after",
+                Some("social")
+            )
+            .await,
+            Err(AppError::AuthenticationFailed(_))
         ));
     }
 

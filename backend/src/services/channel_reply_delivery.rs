@@ -55,6 +55,13 @@ impl Delivery {
             .await
             .map_err(claim_error)?;
         if let Some(token) = token {
+            super::channel_relay_service::fence_reply_token_owners(
+                db,
+                token,
+                &source.user_id,
+                session,
+            )
+            .await?;
             db.collection::<ReplyTokenUse>(crate::models::reply_token_use::COLLECTION_NAME)
                 .insert_one(token)
                 .session(session)

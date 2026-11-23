@@ -430,12 +430,17 @@ pub async fn insert_one(
             "new API keys require positive authority evidence".to_string(),
         ));
     }
-    let collection = db.collection::<ApiKey>(API_KEYS);
-    let action = collection.insert_one(key);
-    Ok(match session {
-        Some(session) => action.session(session).await?,
-        None => action.await?,
-    })
+    match session {
+        Some(session) => {
+            super::erasure_admission::fence_in_session(db, &key.user_id, session).await?;
+            Ok(db
+                .collection::<ApiKey>(API_KEYS)
+                .insert_one(key)
+                .session(session)
+                .await?)
+        }
+        None => super::erasure_admission::insert_owned(db, API_KEYS, &key.user_id, key).await,
+    }
 }
 
 #[cfg(test)]
