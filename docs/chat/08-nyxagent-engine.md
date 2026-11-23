@@ -895,10 +895,17 @@ optional `failure.reason`; old rows and unknown reasons retain generic copy.
 Only native diagnostics populate it, never downstream tool text. Neither audit
 nor activity stores rejected note contents or secret matches. Storage/internal
 failures mean the write is unconfirmed: inspect notes before retrying, since the
-write may already have committed. A subsequent successful save does not erase a
-failed step or prove that all of its intended facts were recovered. Prompts require
-reporting unresolved facts and only confirming saves with successful receipts.
-There is no inferred compensation link between different calls.
+write may already have committed. A definite rejection can return
+`details.failed_activity_id`. To recover that intent in the same live turn and
+for the same agent, pass it in `recovery` with a 1-based `part` and a fixed
+`total` of 1–10. A split can only recover a failed new note. A replacement uses
+one part and the original replacement ID. Each part stays reserved while its
+outcome is running, committed or uncertain, and can be retried after a definite
+rejection. An independent save has no recovery link. The settled web activity
+shows committed parts beside the original failure and preserves the original
+diagnostic. If the note committed before its activity receipt could be recorded,
+history shows that part as unconfirmed. Copy contains no note text. The agent
+must report unresolved parts using the tool receipts.
 
 Owner/team appends use an atomic capacity fence; replacements return the atomic
 post-write snapshot, so later edits cannot change the receipt. Destroyed agents

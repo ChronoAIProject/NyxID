@@ -2653,13 +2653,19 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     } else {
         (params["name"].as_str(), params.get("arguments").cloned())
     };
-    if name == Some("nyxid__create_schedule")
-        && let Some(arguments) = arguments
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
+    if let Some(arguments) = arguments
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
     {
-        arguments.remove("acknowledgement_id");
-        return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        let field = match name {
+            Some("nyxid__create_schedule") => Some("acknowledgement_id"),
+            Some("nyxid__remember") => Some("recovery"),
+            _ => None,
+        };
+        if let Some(field) = field {
+            arguments.remove(field);
+            return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        }
     }
     chat_activity_digest(params)
 }
@@ -5117,8 +5123,22 @@ async fn handle_account_tool(
                 true,
             );
         };
-        let (value, is_error) =
-            Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
+        let (value, is_error) = if name == "nyxid__remember" {
+            Box::pin(crate::services::assistant_memory_recovery::run(
+                state,
+                chat,
+                args,
+                |args| async move {
+                    Box::pin(super::assistant_team::execute_tool(
+                        state, chat, name, &args,
+                    ))
+                    .await
+                },
+            ))
+            .await
+        } else {
+            Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await
+        };
         if name == "nyxid__list_schedules" && !is_error {
             let content = vec![serde_json::json!({"type":"text","text":value.to_string()})];
             let (content, digest) =

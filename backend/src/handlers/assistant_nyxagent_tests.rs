@@ -4875,6 +4875,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             digest: None,

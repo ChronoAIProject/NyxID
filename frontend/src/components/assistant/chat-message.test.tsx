@@ -1714,6 +1714,37 @@ it("never renders unrecognized memory diagnostic text", () => {
   expect(screen.queryByText(/untrusted secret/)).toBeNull();
 });
 
+it("shows only the committed parts of a linked memory retry in the settled activity", () => {
+  const original = {
+    id: "20b44753-5c6e-4f19-8931-64c775d64cd4",
+    name: "nyxid__remember", status: "error" as const, startedAt: 1,
+    failure: { kind: "tool_error", reason: "note_too_long" },
+  };
+  const part = (id: string, index: number, committed: boolean, total = 2) => ({
+    id, name: "nyxid__remember", status: "done" as const, startedAt: 2,
+    memoryRecovery: { failed_activity_id: original.id, part: index, total, committed },
+  });
+  const unrelated = { id: "unrelated", name: "nyxid__remember", status: "done" as const, startedAt: 3 };
+  const first = part("first", 1, true);
+  const pending = part("settled with the turn only", 2, false);
+  const { rerender } = render(<ChatMessageBubble message={{
+    ...BASE, toolCalls: [original, first, part("duplicate receipt", 1, true), pending, unrelated],
+  }} />);
+  fireEvent.click(screen.getByRole("button", { name: /actions/ }));
+  expect(screen.getByText("Memory recovery saved 1 of 2 parts. The remaining saves are unconfirmed.")).toBeVisible();
+  expect(screen.getByText("Memory save unconfirmed")).toBeVisible();
+  expect(screen.getByText(/Validation: the note exceeds 500 characters/)).toBeVisible();
+
+  rerender(<ChatMessageBubble message={{
+    ...BASE, toolCalls: [original, first, pending, part("second", 2, true), unrelated],
+  }} />);
+  expect(screen.getByText("Memory recovery saved all 2 parts.")).toBeVisible();
+  expect(screen.getByRole("button", { name: /actions/ })).not.toHaveTextContent("failed");
+
+  rerender(<ChatMessageBubble message={{ ...BASE, toolCalls: [original, part("retry", 1, true, 1)] }} />);
+  expect(screen.getByText("Memory saved after retry.")).toBeVisible();
+});
+
 describe("approval-gated step outcomes", () => {
   it.each([
     ["waiting", "Waiting for approval", "1 waiting"],

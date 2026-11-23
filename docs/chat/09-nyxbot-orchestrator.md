@@ -165,8 +165,10 @@ enforcement is independent of the flag.
 validation, capacity, missing-replacement, authorization, conflict and storage/internal
 diagnostics in the tool result and activity panel. Keep notes to 500 characters
 and 50 total; split long facts deliberately. Confirm saved facts only from
-successful receipts, and report any still-unresolved writes. Later success never
-silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+successful receipts, and report any still-unresolved writes. Pass the rejected
+attempt's `failed_activity_id` in `recovery` when retrying or splitting the
+same intent. The web activity shows the count of committed parts beside the
+original diagnostic. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
 Memory and personas refuse obvious
 credential shapes.
 

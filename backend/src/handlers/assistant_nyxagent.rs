@@ -122,6 +122,8 @@ pub struct ActivityResponse {
     ended_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<crate::models::assistant_conversation::ToolFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_recovery: Option<crate::models::assistant_conversation::MemoryRecovery>,
 }
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
@@ -138,6 +140,7 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             started_at: row.started_at,
             ended_at: row.ended_at,
             failure: row.failure,
+            memory_recovery: row.memory_recovery,
         }
     }
 }
