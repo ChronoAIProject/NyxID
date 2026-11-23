@@ -12,8 +12,8 @@ WORKDIR /input
 # Copy workspace manifests and lock file for dependency caching.
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
 # members; cargo refuses to resolve the workspace if any member's manifest
-# is missing, so they must be staged here even though the backend binary
-# only links cloud-auth directly via path (nyxid-crypto is CLI-only).
+# is missing, so they must be staged here. The backend binary links both by
+# path.
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
@@ -43,8 +43,7 @@ COPY --from=dependency-recipe /recipe/ ./
 # backend, cli, and mcp-demo are binary crates (need main.rs).
 # cloud-auth and nyxid-crypto are library crates (need lib.rs); a stub
 # `pub fn _stub(){}` is enough to satisfy cargo's check that the lib target
-# exists. nyxid-crypto isn't in the backend binary's graph, so its stub is
-# never compiled -- it only needs to exist for workspace resolution.
+# exists. Both stubs are replaced by the real sources before the final build.
 RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs \
     && mkdir -p cloud-auth/src && echo "pub fn _stub() {}" > cloud-auth/src/lib.rs \
@@ -93,6 +92,7 @@ COPY backend/content backend/content
 COPY backend/specs backend/specs
 COPY backend/assets backend/assets
 COPY cloud-auth/src cloud-auth/src
+COPY nyxid-crypto/src nyxid-crypto/src
 COPY service-adapters/src service-adapters/src
 COPY machine/src machine/src
 COPY permissions/src permissions/src
@@ -113,7 +113,7 @@ COPY docs/examples/nyxbot-voice-service.template.json docs/examples/nyxbot-voice
 COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/worker.mjs
 
 # Touch entry points so cargo sees them as newer than the cached dummies.
-RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
+RUN touch backend/src/main.rs cloud-auth/src/lib.rs nyxid-crypto/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
 # Build the real binary without a per-commit input. The runtime stage stamps
 # /health below; unchanged Rust/embedded inputs reuse this entire layer even
