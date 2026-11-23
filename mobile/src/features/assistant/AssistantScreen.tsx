@@ -187,6 +187,7 @@ import {
   composerTrailingControl,
 } from "./voice/voiceSelection";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
+import { assistantApi } from "../../lib/api/assistantApi";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { safeAssistantLinkUrl } from "./assistantMarkdown";
@@ -685,9 +686,17 @@ export function AssistantScreen({
       if (!current()) return;
       const id =
         scope.conversationId ??
-        (await createVoiceDraft(scope.agentId, controller.signal));
+        (await uploads.session.ensureConversation(
+          () => createVoiceDraft(scope.agentId, controller.signal),
+        ));
       if (!current()) return;
       if (!scope.conversationId) {
+        if (uploads.session.model) {
+          await uploads.session.applyDraftModel(id, assistantApi.changeModel);
+          if (!current()) return;
+        }
+        await uploads.session.consumeDraft();
+        if (!current()) return;
         adoptedId.current = id;
         assistant.openConversation(id);
         navigation.setParams({
@@ -853,6 +862,7 @@ export function AssistantScreen({
       navigation.push("AssistantDetails", {
         agentId: currentAgent?.id ?? assistant.agentId,
         conversationId: assistant.conversationId,
+        ...(!assistant.conversationId ? { draftKey, draftEpoch: getAuthEpoch() } : {}),
       }),
     );
   }
@@ -1031,9 +1041,14 @@ export function AssistantScreen({
         getRevision: () => draftRevision.current,
         send: async (text) => {
           if (running) return guidance.submit(text, uploads.files.length);
-          const accepted = await uploads.session.submit((payload) =>
-            assistant.send(connection.prefix(text), undefined, payload),
-          );
+          const accepted = await uploads.session.submit(async (payload) => {
+            const model = assistant.conversationId ? undefined : uploads.session.model;
+            if (model && payload)
+              await uploads.session.applyDraftModel(payload.conversationId, assistantApi.changeModel);
+            return model && !payload
+              ? assistant.send(connection.prefix(text), undefined, undefined, undefined, model)
+              : assistant.send(connection.prefix(text), undefined, payload);
+          });
           if (accepted) connection.sent();
           return accepted;
         },
@@ -1431,7 +1446,7 @@ export function AssistantScreen({
       {homeVisible && uploads.otherDraft ? (
         <View style={styles.errorRow}>
           <ActionButton
-            label={t("Reopen chat with unfinished attachments")}
+            label={t("Reopen draft chat")}
             variant="secondary"
             onPress={() => {
               const target = uploads.otherDraft;
@@ -1442,10 +1457,10 @@ export function AssistantScreen({
             }}
           />
           <ActionButton
-            label={t("Discard attachment draft")}
+            label={t("Discard chat draft")}
             variant="secondary"
             onPress={() =>
-              Alert.alert(t("Discard attachment draft?"), undefined, [
+              Alert.alert(t("Discard chat draft?"), undefined, [
                 { text: t("Cancel"), style: "cancel" },
                 {
                   text: t("Discard"),
@@ -1937,6 +1952,7 @@ export function AssistantScreen({
             <AssistantPendingUploads
               files={uploads.files}
               reselect={uploads.session.reselect}
+              retryDiscard={uploads.session.discardPending ? uploads.retryDiscard : undefined}
               choose={() => void uploads.pick("files")}
               dismiss={() => uploads.session.dismissReselection()}
               resume={() => uploads.session.resume()}

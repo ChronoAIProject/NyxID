@@ -386,15 +386,10 @@ test("api+frontend associates both frontend hosts and shares the path manifest",
   );
 });
 
-test("Expo consumes the selected host list for iOS entitlements and Android Activity links", () => {
-  const env = productionEnv({
-    APP_ENV: "prod",
-    PROD_NATIVE_LINK_HOSTS: "api+frontend",
-    PROD_ANDROID_HTTPS_APP_LINKS: "true",
-  });
-  const config = loadTestModule<{ default: (context: { config: object }) => {
+function expoConfig(env: Record<string, string>) {
+  return loadTestModule<{ default: (context: { config: object }) => {
     ios: { associatedDomains: string[] };
-    android: { intentFilters: { data: { host?: string; path?: string }[] }[] };
+    android: { intentFilters: { data: { host?: string; port?: string; path?: string }[] }[] };
   } }>("../../../app.config.ts", {
     process: { env },
     require: (name: string) => {
@@ -406,6 +401,13 @@ test("Expo consumes the selected host list for iOS entitlements and Android Acti
       throw new Error(`Unexpected Expo config dependency: ${name}`);
     },
   }).default({ config: {} });
+}
+test("Expo consumes the selected host list for iOS entitlements and Android Activity links", () => {
+  const config = expoConfig(productionEnv({
+    APP_ENV: "prod",
+    PROD_NATIVE_LINK_HOSTS: "api+frontend",
+    PROD_ANDROID_HTTPS_APP_LINKS: "true",
+  }));
   for (const host of ["nyx.chrono-ai.fun", "nyxid.ai"]) {
     assert.ok(config.ios.associatedDomains.includes(`applinks:${host}`));
     assert.ok(config.android.intentFilters.some((filter) =>
@@ -706,4 +708,35 @@ test("one path manifest attaches identically to either host set", () => {
         paths,
       );
   }
+});
+
+test("actual Expo config rejects unusable primary and alternate frontend associations only when selected", () => {
+  for (const variable of ["PROD_FRONTEND_URL", "PROD_NEW_FRONTEND_URL"]) {
+    for (const url of ["not-a-url", "http://app.example", "https://name:secret@app.example", "https://app.example?x=1", "https://app.example#fragment"]) {
+      assert.throws(() => expoConfig(productionEnv({
+        APP_ENV: "prod",
+        PROD_NATIVE_LINK_HOSTS: "api+frontend",
+        PROD_ANDROID_HTTPS_APP_LINKS: "true",
+        [variable]: url,
+      })), new RegExp(variable));
+    }
+  }
+  const apiOnly = expoConfig(productionEnv({ APP_ENV: "prod", PROD_FRONTEND_URL: "not-a-url" }));
+  assert.equal(apiOnly.ios.associatedDomains.includes("applinks:not-a-url"), false);
+});
+
+test("Expo preserves a valid frontend base path and represents an HTTPS port separately in Android", () => {
+  const config = expoConfig(productionEnv({
+    APP_ENV: "prod",
+    PROD_NATIVE_LINK_HOSTS: "api+frontend",
+    PROD_ANDROID_HTTPS_APP_LINKS: "true",
+    PROD_FRONTEND_URL: "https://frontend.example:8443/nyxid",
+  }));
+  assert.ok(config.ios.associatedDomains.includes("applinks:frontend.example:8443"));
+  assert.ok(config.android.intentFilters.flatMap((filter) => filter.data).some(
+    (data) => data.host === "frontend.example" && data.port === "8443" && data.path === "/activity",
+  ));
+  assert.equal(config.android.intentFilters.flatMap((filter) => filter.data).some(
+    (data) => data.host === "frontend.example:8443",
+  ), false);
 });

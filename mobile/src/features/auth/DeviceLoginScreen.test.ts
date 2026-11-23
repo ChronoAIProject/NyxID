@@ -26,10 +26,17 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
   const decisions: string[] = [];
   let keyboardVisible = false;
   let keyboardDismissals = 0;
+  let readingModalInsets = false;
+  const modalInsets = { top: 45, bottom: 34 };
   // Render the local ManualCodeModal with the actual screen; native boundaries
   // remain inert elements, so its hook and visible/animation props are exercised.
-  const jsx = (type: any, props: Record<string, unknown>): Element =>
-    typeof type === "function" ? type(props) : { type, props };
+  const jsx = (type: any, props: Record<string, unknown>): Element => {
+    if (typeof type !== "function") return { type, props };
+    // JSX forms child elements before a provider is rendered. Defer the
+    // content under the native provider so its hooks see that provider.
+    if (type.name === "ManualCodeContent") return { type, props };
+    return type(props);
+  };
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "@react-navigation/routers": { StackActions },
@@ -45,11 +52,26 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
         dismiss: () => { keyboardDismissals++; keyboardVisible = false; },
       },
     },
-    "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) },
+    "react-native-safe-area-context": {
+      SafeAreaProvider: (props: any) => {
+        const context = props.children;
+        assert.equal(context.type, "WorkspaceSheetProvider");
+        assert.equal(context.props.value, null);
+        const content = context.props.children;
+        readingModalInsets = true;
+        try {
+          return { type: "SafeAreaProvider", props: { children: content.type(content.props) } };
+        } finally {
+          readingModalInsets = false;
+        }
+      },
+      useSafeAreaInsets: () => readingModalInsets ? modalInsets : { top: 0, bottom: 0 },
+    },
     "lucide-react-native": Object.fromEntries([
       "ChevronDown", "ChevronLeft", "ChevronUp", "Info", "ScanQrCode", "X",
     ].map((name) => [name, name])),
     "../../app/WorkspaceHeader": {
+      WorkspaceSheetContext: { Provider: "WorkspaceSheetProvider" },
       useWorkspaceSheet: () => inSheet ? {} : null,
       useWorkspaceBack: () => {},
     },
@@ -357,3 +379,21 @@ for (const kind of ["browser", "cli", "unknown"] as const) {
     env.harness.unmount();
   });
 }
+
+test("manual code reads full-window safe-area values from its native Modal for both opener contexts", () => {
+  for (const inSheet of [true, false]) {
+    for (const platform of ["android", "ios"] as const) {
+      const env = setup({ inSheet, platform });
+      env.find("DeviceCodeScanner").props.onManualEntry();
+      env.harness.flush();
+      const provider = elements(env.find("Modal")).find((node) => node.type === "SafeAreaProvider")!;
+      const root = elements(provider).find((node) => node.props.accessibilityViewIsModal)!;
+      const scroll = elements(root).find((node) => node.type === "ScrollView")!;
+      assert.equal(root.props.style[1].paddingTop, 45);
+      assert.equal(scroll.props.contentContainerStyle[1].paddingBottom, 34);
+      assert.equal(scroll.props.automaticallyAdjustKeyboardInsets, false);
+      assert.equal(scroll.props.keyboardDismissMode, platform === "ios" ? "interactive" : "none");
+      env.harness.unmount();
+    }
+  }
+});

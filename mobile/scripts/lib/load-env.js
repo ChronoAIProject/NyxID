@@ -144,6 +144,22 @@ function readNewProductionDomains(env) {
   return domains;
 }
 
+function validateFrontendAssociation(value, variable, production) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    fatal(`${variable} must be an absolute frontend origin for native app links.`);
+  }
+  if (
+    !/^https?:\/\/[^/?#@\\\s]+(?:\/[^?#]*)?$/i.test(value) ||
+    url.username || url.password || url.search || url.hash ||
+    (production && url.protocol !== "https:")
+  ) {
+    fatal(`${variable} must use ${production ? "HTTPS" : "HTTP or HTTPS"} without credentials, a query, or a fragment for native app links.`);
+  }
+}
+
 function resolveProfile(appEnv, env, options = {}) {
   if (appEnv !== "dev" && appEnv !== "prod") {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
@@ -200,8 +216,12 @@ function resolveProfile(appEnv, env, options = {}) {
     );
   }
   const associatedUrls = [apiBaseUrl, newDomains?.apiBaseUrl ?? ""];
-  if (nativeLinkHosts === "api+frontend")
+  if (nativeLinkHosts === "api+frontend") {
+    validateFrontendAssociation(frontendUrl, `${appEnv.toUpperCase()}_FRONTEND_URL`, appEnv === "prod");
+    if (newDomains)
+      validateFrontendAssociation(newDomains.frontendUrl, "PROD_NEW_FRONTEND_URL", true);
     associatedUrls.push(frontendUrl, newDomains?.frontendUrl ?? "");
+  }
 
   const resolved = {
     apiBaseUrl,

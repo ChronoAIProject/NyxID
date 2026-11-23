@@ -210,7 +210,7 @@ export function AgentPermissionsSheet({
   const search = query.trim().toLocaleLowerCase();
   const filtered = rows.filter(
     (row) =>
-      (!selectedOnly || draft.services.includes(row.value)) &&
+      (compactSearch || !selectedOnly || draft.services.includes(row.value)) &&
       `${row.label} ${row.detail ?? ""} ${row.value}`
         .toLocaleLowerCase()
         .includes(search),
@@ -294,6 +294,12 @@ export function AgentPermissionsSheet({
           )}
         </Label>
       )}
+    </View>
+  );
+
+  const listHeader = !compactSearch || connectionsLoading || connectionsError ? (
+    <View>
+      {!compactSearch && header}
       {connectionsLoading && (
         <SkeletonRows rows={3} accessibilityLabel={translateApp("Loading services")}
         />
@@ -313,7 +319,7 @@ export function AgentPermissionsSheet({
         />
       )}
     </View>
-  );
+  ) : null;
 
   return (
     <Modal
@@ -444,21 +450,27 @@ export function AgentPermissionsSheet({
                   >
                     <Search size={18} color={colors.textMuted} />
                     <TextInput
-                      accessibilityLabel={translateApp(
-                        "Search service permissions",
-                      )}
-                      placeholder={translateApp("Search services")}
+                      accessibilityLabel={compactSearch && selectedOnly
+                        ? translateApp("Search all services")
+                        : translateApp("Search service permissions")}
+                      placeholder={compactSearch && selectedOnly
+                        ? translateApp("Search all services")
+                        : translateApp("Search services")}
                       placeholderTextColor={colors.textMuted}
                       value={query}
                       onChangeText={setQuery}
                       autoCapitalize="none"
                       autoCorrect={false}
+                      returnKeyType="done"
+                      onSubmitEditing={() => Keyboard.dismiss()}
                       editable={!saving}
                       style={[
                         styles.searchInput,
                         { color: colors.textPrimary },
                       ]}
                     />
+                    {compactSearch && selectedOnly &&
+                      <Label muted>{translateApp("All services")}</Label>}
                     {!!query && (
                       <Pressable
                         accessibilityRole="button"
@@ -518,17 +530,15 @@ export function AgentPermissionsSheet({
                   keyboardShouldPersistTaps="handled"
                   keyboardDismissMode={compactSearch ? "none" : "on-drag"}
                   contentContainerStyle={styles.list}
-                  ListHeaderComponent={compactSearch ? null : header}
+                  ListHeaderComponent={listHeader}
                   ListEmptyComponent={
-                    // While connections load, the header's skeleton rows
-                    // stand in for the list.
-                    !search && !selectedOnly && connectionsLoading ? null : (
+                    connectionsLoading || connectionsError ? null : (
                       <Label muted>
                         {search
                           ? translateApp(
                               "No matching services. Try another name or service ID.",
                             )
-                          : selectedOnly
+                          : selectedOnly && !compactSearch
                             ? translateApp(
                                 "No services selected. Choose services from All.",
                               )

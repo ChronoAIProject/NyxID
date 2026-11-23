@@ -1,3 +1,4 @@
+import { buildApiError } from "../../lib/api/responseError";
 import { createUploadDraftRecovery } from "./uploadDraftRecovery";
 import { createAssistantDraftStore } from "./assistantDraftStore";
 import assert from "node:assert/strict";
@@ -29,6 +30,8 @@ function harness(
     owner: string;
     key: string;
     missing?: boolean;
+    upload?: (id: string, name: string) => Promise<{ id: string }>;
+
   },
 ) {
   let state = "active";
@@ -52,6 +55,9 @@ function harness(
   let installed = true;
   const disposed: string[] = [];
   const requests: string[] = [];
+  const destinations: string[] = [];
+  const deletions: string[] = [];
+  let uploadCount = 0;
   const props: {
     generation: number;
     enabled: boolean;
@@ -89,6 +95,7 @@ function harness(
     "./assistantDraftStore": {
       discardUploadDraft: (owner: string, key: string) =>
         durable.save(owner, key, { rows: [], reselect: false }),
+      pendingUploadDiscard: () => undefined,
       assistantDraftStore: createAssistantDraftStore(() => epoch),
     },
     expo: { requireOptionalNativeModule: () => (installed ? {} : null) },
@@ -172,17 +179,20 @@ function harness(
           requests.push("draft");
           return "draft-1";
         },
-        upload: async () => {
+        upload: async (scope: { id: string }, file: { name: string }) => {
           requests.push("upload");
+          destinations.push(scope.id);
+          const receipt = await recovery?.upload?.(scope.id, file.name);
           return {
-            id: "file-1",
+            id: receipt?.id ?? `file-${++uploadCount}` ,
+            expired: false,
             label: "note.txt",
             size: 3,
             content_type: "text/plain",
             origin: "user_upload",
           };
         },
-        remove: async () => {},
+        remove: async (_scope: unknown, id: string) => { deletions.push(id); },
       },
     },
   });
@@ -195,6 +205,8 @@ function harness(
     durable,
     props,
     requests,
+    destinations,
+    deletions,
     disposed,
     calls,
     picker,
@@ -839,6 +851,7 @@ test("cold local copies resume only on request, and an evicted unuploaded file r
   await cold.h.settle();
   assert.equal(cold.h.value().files[0]?.item?.id, "file-1");
   cold.h.value().remove(cold.h.value().files[0]!.key);
+  await cold.h.settle();
   assert.equal(await cold.durable.load(r.owner, r.key), undefined);
 });
 
@@ -885,11 +898,12 @@ test("an expired upload receipt requires a cached copy or reselection", async ()
   const local = harness("android", r);
   await local.h.settle();
   assert.equal(local.h.value().files[0]?.resumable, true);
-  assert.equal(local.h.value().files[0]?.item, undefined);
+  assert.equal(local.h.value().files[0]?.needsReupload, true);
   const evicted = harness("ios", { ...r, missing: true });
   await evicted.h.settle();
-  assert.equal(evicted.h.value().files.length, 0);
-  assert.equal(evicted.h.value().session.reselect, true);
+  assert.equal(evicted.h.value().files[0]?.needsReupload, true);
+  assert.match(evicted.h.value().files[0]?.error ?? "", /Choose it again/);
+  assert.equal(evicted.h.value().session.blocked, true);
 });
 
 test("text-only send clears an interrupted picker marker and a refused send restores it", async () => {
@@ -905,4 +919,153 @@ test("text-only send clears an interrupted picker marker and a refused send rest
     return true;
   });
   assert.equal(await cold.durable.load(r.owner, r.key), undefined);
+});
+
+test("the serialized conversation survives process death during the first of two queued uploads", async () => {
+  const r = {
+    disk: memoryDisk(),
+    owner: "owner-A",
+    key: JSON.stringify(["private", "specialist", "fresh-composer"]),
+  };
+  const held = deferred<{ id: string }>();
+  const warm = harness("android", { ...r, upload: () => held.promise });
+  await warm.h.settle();
+  const name = (n: string) => ({ name: n, uri: `file:///cache/${n}`, size: 3 });
+  warm.h.value().session.add([name("one.txt"), name("two.txt")]);
+  await warm.h.settle();
+  assert.deepEqual(warm.requests, ["draft", "upload"]);
+
+  // A fresh instance sees only serialized data. The first POST is still held.
+  const cold = harness("android", r);
+  await cold.h.settle();
+  assert.ok(cold.h.value().files.every((row) => row.resumable));
+  cold.h.value().session.resume();
+  await cold.h.settle();
+  assert.deepEqual(cold.requests, ["upload", "upload"]);
+  assert.deepEqual(cold.destinations, ["draft-1", "draft-1"]);
+  held.resolve({ id: "late-old-process-receipt" });
+  warm.h.unmount();
+  cold.h.unmount();
+});
+
+test("a retained crew upload survives optimistic input generations and refusal", async () => {
+  const r = { disk: memoryDisk(), owner: "owner-A", key: "crew:crew-id" };
+  const warm = harness("android", r);
+  await warm.h.settle();
+  warm.h.value().session.add([{ uri: "file:///cache/a.txt", name: "a.txt", size: 3 }]);
+  await warm.h.settle();
+  const session = warm.h.value().session;
+  const held = deferred<boolean>();
+  const submission = session.submit(() => held.promise);
+  warm.props.generation++;
+  warm.h.render();
+  assert.equal(warm.h.value().session, session);
+  assert.equal(session.entries.size, 0);
+  held.resolve(false);
+  assert.equal(await submission, false);
+  warm.props.generation++;
+  warm.h.render();
+  await warm.h.settle();
+  assert.equal(warm.h.value().files[0]?.item?.id, "file-1");
+  assert.deepEqual(warm.deletions, []);
+  assert.deepEqual(warm.disposed, []);
+  warm.h.unmount();
+});
+
+test("real receipts survive cold restore and are invalidated only by a definite live bind refusal", async () => {
+  for (const [status, body] of [
+    [410, { error: "attachment_expired", error_code: 12101, message: "Attachment expired per retention policy" }],
+    [404, { error: "not_found", error_code: 1003, message: "Not found: Attachment not found" }],
+  ] as const) {
+    const r = { disk: memoryDisk(), owner: "owner-A", key: privateKey };
+    const warm = harness("ios", r);
+    await warm.h.settle();
+    warm.h.value().session.add([{ uri: "file:///cache/a.txt", name: "a.txt", size: 3 }]);
+    await warm.h.settle();
+    assert.equal((await warm.durable.load(r.owner, r.key))?.rows[0]?.item?.expired, false);
+    warm.h.unmount();
+
+    // The live policy changed after the receipt was recorded.
+    const cold = harness("ios", { ...r, upload: async () => ({ id: "fresh-id" }) });
+    await cold.h.settle();
+    let sends = 0;
+    assert.equal(await cold.h.value().session.submit(async (uploads) => {
+      sends++;
+      assert.deepEqual(uploads?.attachmentIds, ["file-1"]);
+      throw buildApiError(body, status);
+    }), false);
+    assert.deepEqual(cold.requests, []);
+    assert.equal((await cold.durable.load(r.owner, r.key))?.rows[0]?.needsReupload, true);
+    await assert.rejects(cold.h.value().session.submit(async () => { sends++; return true; }));
+    assert.equal(sends, 1);
+
+    const evicted = harness("android", { ...r, missing: true });
+    await evicted.h.settle();
+    assert.match(evicted.h.value().files[0]?.error ?? "", /Choose it again/);
+    assert.equal(evicted.h.value().files[0]?.resumable, false);
+    evicted.h.unmount();
+
+    cold.h.value().session.resume();
+    await cold.h.settle();
+    assert.deepEqual(cold.deletions, ["file-1"]);
+    assert.equal(await cold.h.value().session.submit(async (uploads) => {
+      assert.deepEqual(uploads?.attachmentIds, ["fresh-id"]);
+      return true;
+    }), true);
+    cold.h.unmount();
+  }
+});
+
+test("a model-only draft restores the model before voice or upload creates its conversation", async () => {
+  const r = { disk: memoryDisk(), owner: "A", key: JSON.stringify(["private", "specialist", "model-first"]) };
+  const warm = harness("ios", r);
+  await warm.h.settle();
+  warm.blur();
+  warm.h.render();
+  await warm.h.value().session.selectModel("nyxagent/research");
+  warm.h.unmount();
+  const cold = harness("android", r);
+  await cold.h.settle();
+  assert.equal(cold.h.value().session.model, "nyxagent/research");
+  const id = await cold.h.value().session.ensureConversation();
+  cold.h.value().session.add([{ name: "a.txt", uri: "file:///cache/a.txt", size: 3 }]);
+  await cold.h.settle();
+  assert.deepEqual(cold.requests, ["draft", "upload"]);
+  assert.deepEqual(cold.destinations, [id]);
+  assert.equal((await cold.durable.load(r.owner, r.key))?.model, "nyxagent/research");
+  assert.equal((await cold.durable.load(r.owner, r.key))?.conversationId, id);
+  cold.h.unmount();
+});
+
+test("a failed model selection cannot leak through a concurrent serialized attachment checkpoint", async () => {
+  const disk = memoryDisk();
+  const put = disk.setItem;
+  const writingModel = deferred<void>();
+  const failWrite = deferred<void>();
+  disk.setItem = async (key, value) => {
+    if (JSON.parse(value).model) {
+      writingModel.resolve();
+      await failWrite.promise;
+    }
+    await put(key, value);
+  };
+  const held = deferred<{ id: string }>();
+  const r = { disk, owner: "A", key: JSON.stringify(["private", "specialist", "race"]), upload: () => held.promise };
+  const warm = harness("android", r);
+  await warm.h.settle();
+  const session = warm.h.value().session;
+  session.add([{ name: "a.txt", uri: "file:///cache/a.txt", size: 3 }]);
+  await warm.h.settle();
+  const choice = session.selectModel("nyxagent/research");
+  await writingModel.promise;
+  held.resolve({ id: "ready" });
+  await warm.h.settle();
+  failWrite.reject(new Error("Storage refused the model checkpoint"));
+  await assert.rejects(choice);
+  await warm.h.settle();
+  const persisted = await warm.durable.load(r.owner, r.key);
+  assert.equal(session.model, undefined);
+  assert.equal(persisted?.model, undefined);
+  assert.equal(persisted?.rows[0]?.item?.id, "ready");
+  warm.h.unmount();
 });

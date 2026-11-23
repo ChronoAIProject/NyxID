@@ -1,4 +1,5 @@
-import { discardUploadDraft } from "./assistantDraftStore";
+import { assistantDraftStore, discardUploadDraft } from "./assistantDraftStore";
+import type { AssistantUploadSession } from "./AssistantUploadSession";
 import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
@@ -85,34 +86,41 @@ export function AssistantDetailsScreen({
   route,
 }: ContentScreenProps<"AssistantDetails">) {
   useAppLanguage();
-  const { conversationId, agentId: requestedAgent } = route.params;
+  const { conversationId, agentId: requestedAgent, draftKey, draftEpoch } = route.params;
   const { runtime, history, agents, conversation, agentId, agent } =
     useChatDetailsData(conversationId, requestedAgent);
   const client = useQueryClient();
+  const draft = !conversationId && draftKey && draftEpoch === runtime.epoch
+    ? assistantDraftStore.get<AssistantUploadSession>(`uploads:${draftKey}`)
+    : undefined;
+  const canDiscoverModels = runtime.active && (!!conversationId ||
+    (!!draft && !!agentId && agent?.can_use === true && agent.status !== "destroyed"));
+  const platformScope = { conversationId, agentId };
   const models = useQuery({
     queryKey: ["assistant", "models", runtime.epoch],
     queryFn: ({ signal }) => assistantApi.models(signal),
-    enabled: runtime.active && !!conversationId,
+    enabled: canDiscoverModels,
     retry: false,
     staleTime: 60_000,
   });
   // This endpoint applies the account feature flag and the thread's effective grants.
   const platformModels = useQuery({
-    queryKey: ["assistant", "platform-models", runtime.epoch, conversationId],
-    queryFn: ({ signal }) =>
-      assistantApi.platformModels(conversationId!, signal),
-    enabled: runtime.active && !!conversationId,
+    queryKey: ["assistant", "platform-models", runtime.epoch, conversationId ?? null, agentId],
+    queryFn: ({ signal }) => assistantApi.platformModels(platformScope, signal),
+    enabled: canDiscoverModels,
     retry: false,
   });
   const choices = [
     ...(models.isError ? [] : (models.data ?? [])),
     ...(platformModels.isError ? [] : (platformModels.data ?? [])),
   ];
-  const scope = `${runtime.epoch}:${conversationId ?? "new"}:${requestedAgent ?? "nyxbot"}`;
+  const scope = JSON.stringify([runtime.epoch, conversationId, draftKey, requestedAgent]);
   const [action, setAction] = useState<"delete" | "model">();
   const busy = action !== undefined;
   const [deleted, setDeleted] = useState(false);
   const [error, setError] = useLocalizedState<string>();
+  const [, updateDraftModel] = useState(0);
+  useEffect(() => draft?.subscribe(() => updateDraftModel((version) => version + 1)), [draft]);
   const mounted = useRef(true);
   const lock = useRef(false);
   const unavailable =
@@ -123,11 +131,14 @@ export function AssistantDetailsScreen({
     busy ||
     deleted;
   const modelLocked =
-    unavailable || !agents.data || !!conversation?.active_turn;
-  const currentModel = choices.find((row) => row.id === conversation?.model);
+    !canDiscoverModels || busy || !agents.data ||
+    (conversationId ? unavailable || !!conversation?.active_turn
+      : !draft || draft.disposed || draft.restoring || draft.discardPending || draft.sending);
+  const modelId = conversation?.model ?? draft?.model ?? (draft ? agent?.model : undefined);
+  const currentModel = choices.find((row) => row.id === modelId);
   const showMissingModel =
-    conversation &&
-    !currentModel &&
+    !!modelId &&
+    !currentModel?.available &&
     !models.isPending &&
     !platformModels.isPending &&
     !models.isError &&
@@ -138,7 +149,8 @@ export function AssistantDetailsScreen({
     unavailable,
     modelLocked,
     choices,
-    conversation,
+    modelId,
+    draft,
   });
   latest.current = {
     scope,
@@ -146,7 +158,8 @@ export function AssistantDetailsScreen({
     unavailable,
     modelLocked,
     choices,
-    conversation,
+    modelId,
+    draft,
   };
   const access = useComposerAccessChange({
     scope,
@@ -190,11 +203,10 @@ export function AssistantDetailsScreen({
   async function changeModel(model: string) {
     const state = latest.current;
     if (
-      !conversationId ||
       !alive() ||
       !state.runtime.available() ||
       state.modelLocked ||
-      model === state.conversation?.model ||
+      model === state.modelId ||
       lock.current ||
       !state.choices.some((row) => row.id === model && row.available)
     )
@@ -204,6 +216,13 @@ export function AssistantDetailsScreen({
     setError(undefined);
     const key = detailsKey(runtime.epoch, conversationId);
     try {
+      if (!conversationId) {
+        if (!state.draft || !draftKey ||
+            assistantDraftStore.get(`uploads:${draftKey}`) !== state.draft)
+          return;
+        await state.draft.selectModel(model);
+        return;
+      }
       const updated = await assistantApi.changeModel(conversationId, model);
       if (!alive()) return;
       await client.cancelQueries({ queryKey: key, exact: true });
@@ -229,7 +248,7 @@ export function AssistantDetailsScreen({
             ? cause.message
             : translateApp("Could not confirm the model change."),
         );
-        void client.invalidateQueries({ queryKey: key, exact: true });
+        if (conversationId) void client.invalidateQueries({ queryKey: key, exact: true });
         void models.refetch();
         void platformModels.refetch();
       }
@@ -253,7 +272,10 @@ export function AssistantDetailsScreen({
     try {
       const owner = getAuthAccountId();
       await assistantApi.delete(conversationId);
-      void discardUploadDraft(owner, JSON.stringify(["private", conversationId])).catch(() => {});
+      void discardUploadDraft(owner, JSON.stringify(["private", conversationId])).catch(() => {
+        if (runtime.epoch === getAuthEpoch() && owner === getAuthAccountId())
+          Alert.alert(translateApp("The draft could not be discarded. Try again."));
+      });
       if (!alive()) return;
       await Promise.allSettled([
         client.invalidateQueries({ queryKey: ["workspace", "drawer-chats"] }),
@@ -376,35 +398,24 @@ export function AssistantDetailsScreen({
       <SettingsGroup
         inset={false}
         title={translateApp("Model")}
-        footer={translateApp(
+        footer={conversationId ? translateApp(
           "Changing the model restarts the working context for this chat.",
-        )}
+        ) : undefined}
       >
         <SettingsRow
           label={translateApp("Current model")}
           value={
             currentModel?.label ||
-            (conversation?.model?.startsWith("nyxid/")
-              ? undefined
-              : conversation?.model)
+            (modelId?.startsWith("nyxid/") ? undefined : modelId)
           }
-          detail={
-            !conversationId
-              ? translateApp(
-                  "Send the first message to choose a model for this chat.",
-                )
-              : conversation?.active_turn
-                ? translateApp("Wait for the current turn to finish.")
-                : showMissingModel
-                  ? translateApp("The current model is unavailable.")
-                  : undefined
-          }
+          detail={conversation?.active_turn
+            ? translateApp("Wait for the current turn to finish.")
+            : showMissingModel
+              ? translateApp("The current model is unavailable.")
+              : undefined}
         />
-        {conversationId &&
-          (models.isPending || platformModels.isPending) &&
-          runtime.active && (
-            <Label muted>{translateApp("Loading models…")}</Label>
-          )}
+        {canDiscoverModels && (models.isPending || platformModels.isPending) &&
+            <Label muted>{translateApp("Loading models…")}</Label>}
         {choices.map((row) => (
           <SettingsRow
             key={row.id}
@@ -419,9 +430,9 @@ export function AssistantDetailsScreen({
                   : (row.description ?? undefined)
             }
             accessibilityRole="radio"
-            accessibilityState={{ checked: row.id === conversation?.model }}
+            accessibilityState={{ checked: row.id === modelId }}
             value={
-              row.id === conversation?.model
+              row.id === modelId
                 ? translateApp("Selected")
                 : undefined
             }

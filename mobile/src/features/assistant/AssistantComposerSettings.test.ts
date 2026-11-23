@@ -4,7 +4,7 @@ import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import { QueryClient, QueryObserver, environmentManager, onlineManager } from "@tanstack/query-core";
 import { buildApiError } from "../../lib/api/responseError";
-import { COMPOSER_ACCESS_DESCRIPTION, composerSettingsRecoveryInterval } from "./composerSettings";
+import { COMPOSER_ACCESS_DESCRIPTION, composerSettingsRecoveryInterval, scheduleComposerSettingsRecovery } from "./composerSettings";
 
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): Element[] =>
@@ -99,6 +99,9 @@ function setup(theme = "light", cornerWindow = false) {
       },
     },
   });
+  h.mock("./useComposerSettingsQuery", h.load(
+    fileURLToPath(new URL("./useComposerSettingsQuery.ts", import.meta.url)),
+  ));
   const C = h.load(
     fileURLToPath(new URL("./AssistantComposerSettings.tsx", import.meta.url)),
   ).AssistantComposerSettings as (props: any) => Element;
@@ -200,7 +203,7 @@ test("the Duo pill keeps every current mode and the base explicit-retry policy",
   }
   const query = x.queries.at(-1);
   assert.equal(query.retry, false);
-  assert.equal(query.refetchOnReconnect, undefined);
+  assert.equal(query.enabled({ state: { status: "error" } }), false);
   x.h.unmount();
 });
 
@@ -224,6 +227,13 @@ test("offline cold start recovers permissions after the first connected GET stil
   const done = deferred<void>();
   const unsubscribe = observer.subscribe((result) => {
     if (result.isSuccess) done.resolve();
+    if (result.isError) {
+      const query = client.getQueryCache().find({ queryKey: options.queryKey })!;
+      const delay = composerSettingsRecoveryInterval(query);
+      if (delay !== false)
+        scheduleComposerSettingsRecovery(result.errorUpdatedAt, delay,
+          () => void observer.refetch({ cancelRefetch: false }));
+    }
   });
   t.after(() => {
     unsubscribe();
@@ -239,11 +249,11 @@ test("offline cold start recovers permissions after the first connected GET stil
   await done.promise;
   assert.deepEqual(observer.getCurrentResult().data, { access_mode: "nyxmode" });
   assert.equal(attempts, 2);
-  assert.equal(options.refetchInterval(client.getQueryCache().find({ queryKey: options.queryKey })), false);
+  assert.equal(composerSettingsRecoveryInterval(client.getQueryCache().find({ queryKey: options.queryKey })!), false);
 });
 
 test("permission recovery backs off on network or gateway failures and leaves other errors for manual retry", () => {
-  for (const [code, expected] of [[0, 5000], [503, 5000], [403, false], [429, false]] as const) {
+  for (const [code, expected] of [[0, 5000], [503, 5000], [403, false], [429, 5000]] as const) {
     assert.equal(composerSettingsRecoveryInterval({
       state: { status: "error", error: buildApiError(null, code), errorUpdateCount: 1 },
     }), expected);

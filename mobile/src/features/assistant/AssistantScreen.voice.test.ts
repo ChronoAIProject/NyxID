@@ -182,8 +182,10 @@ function setup(
       text: string,
       _options?: unknown,
       files?: AssistantUploadedMessage,
+      _acknowledgement?: string,
+      model?: string,
     ) => {
-      events.push(["send", text, files]);
+      events.push(model ? ["send", text, files, model] : ["send", text, files]);
       return true;
     },
     setModel: (model: string) => events.push(["model", model]),
@@ -214,6 +216,12 @@ function setup(
     files: [] as any[],
     session: {
       sending: false,
+      model: undefined as string | undefined,
+      ensureConversation: (create: () => Promise<string>) => create(),
+      applyDraftModel: async (id: string, _change: unknown) => {
+        events.push(["patch-draft-model", id, uploads.session.model]);
+      },
+      consumeDraft: async () => {},
       submit: async (
         submit: (
           payload: AssistantUploadedMessage | undefined,
@@ -454,6 +462,7 @@ function setup(
     },
     "./AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "./useAssistantUploads": { useAssistantUploads: () => uploads },
+    "../../lib/api/assistantApi": { assistantApi: { changeModel: () => {} } },
     "./useComposerDictation": {
       useComposerDictation: () =>
         dictating
@@ -3414,5 +3423,69 @@ test("private chat mounts the guarded attachment-source sheet returned by its up
   const picker = x.all().find(n => n.type === "AttachmentSourcePicker")!;
   assert.equal(picker.props.choices, sourcePicker.choices);
   assert.equal(picker.props.onClose, sourcePicker.onClose);
+  x.harness.unmount();
+});
+
+test("the selected draft model reaches a first text-only send", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxagent/research";
+  x.input().props.onChangeText("Compare these plans");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.deepEqual(x.events.find(([name]) => name === "send"),
+    ["send", "Compare these plans", undefined, "nyxagent/research"]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a previously created attachment draft applies the selected model to that ID before sending", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxid/model-choice";
+  const payload: AssistantUploadedMessage = {
+    conversationId: A,
+    attachmentIds: ["11111111-1111-4111-8111-111111111111"],
+    attachments: [],
+  };
+  x.uploads.session.submit = async (submit) => submit(payload);
+  x.input().props.onChangeText("Review this file");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.deepEqual(x.events.filter(([name]) => name === "patch-draft-model" || name === "send"), [
+    ["patch-draft-model", A, "nyxid/model-choice"],
+    ["send", "Review this file", payload],
+  ]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a refused draft model PATCH prevents dispatch and preserves the message and model", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxid/revoked";
+  x.uploads.session.applyDraftModel = async () => { throw new Error("The selected model is unavailable."); };
+  x.uploads.session.submit = async (submit) => submit({ conversationId: A, attachmentIds: [], attachments: [] });
+  x.input().props.onChangeText("Keep this draft");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.events.some(([name]) => name === "send"), false);
+  assert.equal(x.input().props.value, "Keep this draft");
+  assert.equal(x.uploads.session.model, "nyxid/revoked");
+  x.harness.unmount();
+});
+
+test("opening voice reuses a draft prepared earlier and applies its model before adoption", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxagent/research";
+  x.uploads.session.ensureConversation = async () => A;
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, A);
+  assert.deepEqual(x.events.filter(([name]) => name === "patch-draft-model" || name === "open"), [
+    ["patch-draft-model", A, "nyxagent/research"],
+    ["open", A, undefined],
+  ]);
+  assert.equal(x.drafts.length, 0);
   x.harness.unmount();
 });

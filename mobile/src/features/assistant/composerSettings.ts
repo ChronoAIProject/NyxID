@@ -15,9 +15,31 @@ export function composerSettingsRecoveryInterval(query: {
 }): number | false {
   const { status, error, errorUpdateCount } = query.state;
   if (status !== "error" || !(error instanceof ApiError)) return false;
-  if (error.statusCode !== 0 && error.statusCode !== 408 && error.statusCode < 500)
+  if (![0, 408, 429].includes(error.statusCode) && error.statusCode < 500)
     return false;
-  return Math.min(5_000 * Math.max(1, errorUpdateCount), 30_000);
+  const retryAfter = error.retryAfterMs;
+  return Math.max(
+    Math.min(5_000 * Math.max(1, errorUpdateCount), 30_000),
+    retryAfter !== undefined && Number.isFinite(retryAfter) ? retryAfter : 0,
+  );
+}
+
+/** Each focused observer may schedule the same deadline. Only the observer
+ * that still sees this exact idle failure may start the shared query. */
+export function scheduleComposerSettingsRecovery(
+  failedAt: number,
+  delay: number,
+  retry: () => void,
+) {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = failedAt + delay;
+  const wait = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) retry();
+    else timer = setTimeout(wait, Math.min(remaining, 2_147_483_647));
+  };
+  timer = setTimeout(wait, Math.max(0, Math.min(deadline - Date.now(), 2_147_483_647)));
+  return () => clearTimeout(timer);
 }
 
 export const COMPOSER_ACCESS_LABEL = {

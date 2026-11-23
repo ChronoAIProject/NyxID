@@ -27,6 +27,7 @@ export function AssistantPendingUploads({
   dismiss,
   resume,
   canResume,
+  retryDiscard,
 }: {
   files: PendingAssistantUpload[];
   remove: (key: string) => void;
@@ -37,6 +38,7 @@ export function AssistantPendingUploads({
   dismiss: () => void;
   resume: () => void;
   canResume: boolean;
+  retryDiscard?: () => void;
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
@@ -53,6 +55,8 @@ export function AssistantPendingUploads({
   useEffect(() => {
     if (preview && !files.some((row) => row === preview)) setPreview(undefined);
   }, [files, preview]);
+  if (retryDiscard)
+    return <ActionButton label={t("Retry discard")} onPress={retryDiscard} variant="secondary" />;
   return (
     <>
       {reselect && (
@@ -160,8 +164,8 @@ export function AssistantPendingUploads({
                   accessibilityLabel={t("Remove {{name}}", {
                     name: row.file.name,
                   })}
-                  accessibilityState={{ disabled }}
-                  disabled={disabled}
+                  accessibilityState={{ disabled: disabled || !!row.removing, busy: !!row.removing }}
+                  disabled={disabled || row.removing}
                   onPress={() => remove(row.key)}
                   style={styles.close}
                 >

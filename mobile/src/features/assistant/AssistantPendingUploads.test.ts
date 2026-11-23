@@ -177,3 +177,14 @@ test("four attachment controls wrap within the bounded composer and the last rem
   );
   x.h.unmount();
 });
+
+test("a removing upload has visible busy feedback and disables only its remove action", () => {
+  const x = setup();
+  Object.assign(x.file, { removing: true });
+  x.h.render();
+  const remove = x.all().find((node) => node.props.accessibilityLabel === "Remove Draft.png")!;
+  assert.equal(remove.props.disabled, true);
+  assert.equal(remove.props.accessibilityState.busy, true);
+  assert.ok(x.all().some((node) => node.props.children === "Removing attachment…"));
+  x.h.unmount();
+});

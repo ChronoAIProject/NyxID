@@ -46,11 +46,30 @@ export function assistantDraftKey(
 }
 
 /** Release an explicitly discarded draft or the attachments of a removed chat. */
-export async function discardUploadDraft(owner: string | null, key: string) {
-  if (!owner || getAuthAccountId() !== owner) return;
-  assistantDraftStore.get<AssistantUploadSession>(`uploads:${key}`)?.dispose();
-  assistantDraftStore.delete(`uploads:${key}`);
-  const { uploadDraftStorage } = await import("./uploadDraftStorage");
-  if (getAuthAccountId() === owner)
-    await uploadDraftStorage.save(owner, key, { rows: [], reselect: false });
+const discards = new Map<string, Promise<void>>();
+export function pendingUploadDiscard(owner: string, key: string) {
+  return discards.get(JSON.stringify([owner, key]));
+}
+
+export function discardUploadDraft(owner: string | null, key: string) {
+  if (!owner || getAuthAccountId() !== owner) return Promise.resolve();
+  const epoch = getAuthEpoch();
+  const operationKey = JSON.stringify([owner, key]);
+  const pending = discards.get(operationKey);
+  if (pending) return pending;
+
+  const operation = (async () => {
+    const session = assistantDraftStore.get<AssistantUploadSession>(`uploads:${key}`);
+    await session?.prepareDiscard();
+    const { discardStoredUploadDraft, uploadDraftAuthority } = await import("./uploadDraftStorage");
+    const guard = uploadDraftAuthority(owner, epoch);
+    guard();
+    await discardStoredUploadDraft(owner, key, epoch);
+    guard();
+    assistantDraftStore.get<AssistantUploadSession>(`uploads:${key}`)?.suspend();
+    assistantDraftStore.delete(`uploads:${key}`);
+    assistantDraftStore.delete(`text:${key}`);
+  })().finally(() => discards.delete(operationKey));
+  discards.set(operationKey, operation);
+  return operation;
 }

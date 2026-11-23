@@ -1182,6 +1182,7 @@ function GroupChat({
               <AssistantPendingUploads
                 files={uploads.files}
                 reselect={uploads.session.reselect}
+                retryDiscard={uploads.session.discardPending ? uploads.retryDiscard : undefined}
                 choose={() => void uploads.pick("files")}
                 dismiss={() => uploads.session.dismissReselection()}
                 resume={() => uploads.session.resume()}

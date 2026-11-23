@@ -133,7 +133,7 @@ test("model options use the saved thread's grants, page every platform model and
     fileURLToPath(new URL("./assistantApi.ts", import.meta.url)),
   ) as unknown as typeof import("./assistantApi");
   assert.equal((await assistantApi.models(signal))[0]!.id, "nyxagent/chat");
-  const rows = await assistantApi.platformModels(thread.id, signal);
+  const rows = await assistantApi.platformModels({ conversationId: thread.id }, signal);
   assert.deepEqual(
     Array.from(rows, (row) => [row.id, row.available]),
     [
@@ -166,5 +166,19 @@ test("model selection refuses a mismatched confirmation or repeating platform cu
     assistantApi.changeModel(row.id, "nyxagent/other"),
     /confirm the model change/,
   );
-  await assert.rejects(assistantApi.platformModels(row.id), /load models/);
+  await assert.rejects(assistantApi.platformModels({ conversationId: row.id }), /load models/);
+});
+
+test("unsent platform model discovery sends only the effective agent scope", async () => {
+  const signal = new AbortController().signal;
+  const h = hookHarness({ "./http": { requestJson: async (path: string, options: { signal: AbortSignal }) => {
+    const url = new URL(path, "https://api.example");
+    assert.equal(url.pathname, "/assistant/nyxagent/platform-models");
+    assert.equal(url.searchParams.get("agent_id"), "specialist");
+    assert.equal(url.searchParams.has("conversation_id"), false);
+    assert.equal(options.signal, signal);
+    return { models: [], next_after: null };
+  } } });
+  const { assistantApi } = h.load(fileURLToPath(new URL("./assistantApi.ts", import.meta.url))) as unknown as typeof import("./assistantApi");
+  assert.equal((await assistantApi.platformModels({ agentId: "specialist" }, signal)).length, 0);
 });
