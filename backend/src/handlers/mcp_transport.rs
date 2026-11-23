@@ -4573,7 +4573,9 @@ fn annotate_shared_connection(
 }
 
 fn chat_access_hint(auth: &McpAuthContext) -> &'static str {
-    if auth
+    if guest_turn(auth) {
+        "chat_access meanings: granted = the guest may call this tool within the specialist's live guest limits. Use the arguments the tool requires. NyxID will refuse actions that require owner approval. Report the tool's actual outcome."
+    } else if auth
         .org_agent_access
         .as_ref()
         .is_some_and(|a| a.shared().is_some())

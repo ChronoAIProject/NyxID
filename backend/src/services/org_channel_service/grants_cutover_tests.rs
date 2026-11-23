@@ -888,6 +888,15 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
     google::seed(&db).await;
     let workspace = google::connect(&db, &f.org.org, "api-google-workspace").await;
     google::connect(&db, &f.org.org, "api-google-drive").await;
+    // Exercise the real chat search limit with a tool whose full schema is too large.
+    db.collection::<Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .update_one(
+            doc! {"service_id":workspace.catalog_service_id.as_ref().unwrap(),"name":"sheets_append_values"},
+            doc! {"$set":{"description":"Sheet append help. ".repeat(40),
+                "request_body_schema.description":"Detailed body help. ".repeat(600)}},
+        )
+        .await
+        .unwrap();
     team::set_grants(
         &db,
         &f.org.admin,
@@ -991,6 +1000,35 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
                 .starts_with("api-google-drive__")
         }));
 
+        let search = rpc(
+            "tools/call",
+            json!({"name":"nyx__search_tools","arguments":{"query":"api-google-workspace__sheets_append_values"}}),
+        );
+        let response = Box::pin(router.clone().oneshot(search)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let search: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        let found = &search["matches"][0];
+        assert_eq!(found["name"], append["name"]);
+        assert_eq!(found["input_schema_omitted"], true);
+        assert_eq!(found["chat_access"], "granted");
+        assert!(
+            found["description"]
+                .as_str()
+                .unwrap()
+                .contains("insertDataOption=INSERT_ROWS")
+        );
+        assert!(
+            search["chat_access_hint"]
+                .as_str()
+                .unwrap()
+                .contains("within the specialist's live guest limits")
+        );
+
         let sheet = "/api/v1/proxy/s/api-google-workspace/v4/spreadsheets/event/values";
         let written = json!({"values":[["Guest question"]]});
         for (method, path, body, status) in [
@@ -1045,7 +1083,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
         let args = json!({"spreadsheetId":"event","range":"Questions!A1:B1","valueInputOption":"RAW","insertDataOption":"INSERT_ROWS","body":{"values":[["MCP question"]]}});
         let call = rpc(
             "tools/call",
-            json!({"name":"api-google-workspace__sheets_append_values","arguments":args}),
+            json!({"name":"nyx__call_tool","arguments":{"tool_name":found["name"],"arguments_json":args.to_string()}}),
         );
         let reply = Box::pin(router.clone().oneshot(call)).await.unwrap();
         assert_eq!(reply.status(), StatusCode::OK);

@@ -2048,16 +2048,17 @@ pub async fn filter_guest_catalog(
                 && metadata.append_only
                 && let Some(query) = metadata.append_only_query.filter(|query| !query.is_empty())
             {
-                let description = endpoint
-                    .description
-                    .get_or_insert_with(|| endpoint.name.clone());
+                // Chat search can truncate long descriptions when it omits the schema.
+                let mut description = String::new();
                 for (name, value) in query.iter().filter_map(|(name, value)| {
                     value.as_str().map(|value| (name, value))
                 }) {
                     description.push_str(&format!(
-                        " Guest access requires the query argument {name}={value}. Supply it once per request."
+                        "Guest access requires the query argument {name}={value}. Supply it once per request. "
                     ));
                 }
+                description.push_str(endpoint.description.as_deref().unwrap_or(&endpoint.name));
+                endpoint.description = Some(description);
             }
             true
         });
