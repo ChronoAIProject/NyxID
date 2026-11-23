@@ -594,7 +594,46 @@ async fn execute_proxy_request_inner(
 
     // 7. Execute request
     match req_builder.send().await {
-        Ok(response) => {
+        Ok(mut response) => {
+            if nyxid_service_adapters::response_location::HEADERS
+                .iter()
+                .any(|name| response.headers().contains_key(*name))
+            {
+                let initial = reqwest::Url::parse(&url).ok();
+                let url_credential = cred
+                    .path_prefix()
+                    .or_else(|| cred.query_param())
+                    .map(|(_, v)| v);
+                for name in nyxid_service_adapters::response_location::HEADERS {
+                    let safe = response.headers().get_all(name).iter().all(|value| {
+                        let Ok(reference) = value.to_str() else {
+                            return false;
+                        };
+                        // reqwest may have followed a redirect. Forward the reference only
+                        // if it has the same meaning at both ends of that redirect chain.
+                        initial.as_ref().is_some_and(|initial| {
+                            initial.join(reference).ok().is_some_and(|destination| {
+                                let external_download = name == "location"
+                                    && response.status().is_redirection()
+                                    && destination.origin() != initial.origin()
+                                    && destination.origin() != response.url().origin();
+                                let same_service = !base_url.is_empty()
+                                    && initial.origin() == response.url().origin();
+                                (external_download || same_service)
+                                    && response.url().join(reference).ok().as_ref()
+                                        == Some(&destination)
+                            })
+                        }) && !url_credential.is_some_and(|credential| {
+                            nyxid_service_adapters::response_location::carries_credential(
+                                reference, credential,
+                            )
+                        })
+                    });
+                    if !safe {
+                        response.headers_mut().remove(name);
+                    }
+                }
+            }
             let status = response.status().as_u16();
             let is_streaming = streamed_request || should_stream_response(&response, status);
 

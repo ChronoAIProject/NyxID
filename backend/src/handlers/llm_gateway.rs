@@ -449,6 +449,8 @@ async fn llm_proxy_request_inner(
     // policies can short-circuit without decrypting downstream credentials.
     let request_method_str = request.method().as_str().to_string();
     let method = request.method().clone();
+    let caller_uri = request.uri().clone();
+    let caller_path = path.clone();
     let query = request.uri().query().map(String::from);
     let headers = request.headers().clone();
     let body_bytes =
@@ -1057,6 +1059,12 @@ async fn llm_proxy_request_inner(
             let reqwest_headers = convert_headers(&headers);
 
             state.billing.mark_forwarded(&metered).await?;
+            let location = super::proxy::AsyncLocationContext::new(
+                &target,
+                &caller_uri,
+                &caller_path,
+                &delegated,
+            );
             let downstream_result = proxy_service::forward_request_with_egress_guard(
                 llm_scope.redirects(),
                 &target,
@@ -1105,8 +1113,10 @@ async fn llm_proxy_request_inner(
                 api_key_name: auth_user.api_key_name.clone(),
             };
 
+            let location = location.map(|ctx| ctx.after_redirects(&downstream_response));
             build_filtered_response(
                 downstream_response,
+                location.as_ref(),
                 Some(usage_context),
                 state.config.proxy_stream_idle_timeout_secs,
                 metered.clone(),
@@ -2010,6 +2020,8 @@ async fn gateway_provider_request(
             .await?
         } else {
             state.billing.mark_forwarded(&metered).await?;
+            // The body selects the provider, so only external downloads have a caller URL.
+            let location = super::proxy::AsyncLocationContext::for_target(&target, &delegated);
             let downstream_result = proxy_service::forward_request_with_egress_guard(
                 llm_scope.redirects(),
                 &target,
@@ -2076,6 +2088,7 @@ async fn gateway_provider_request(
             } else {
                 build_filtered_response(
                     downstream_response,
+                    location.as_ref(),
                     Some(usage_context),
                     idle_timeout_secs,
                     metered.clone(),
@@ -2370,6 +2383,7 @@ async fn read_response_with_limit(response: reqwest::Response) -> AppResult<byte
 
 async fn build_filtered_response(
     downstream_response: reqwest::Response,
+    location: Option<&super::proxy::AsyncLocationContext>,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
     idle_timeout_secs: u64,
     metered: crate::services::billing::MeteredProxyContext,
@@ -2393,8 +2407,15 @@ async fn build_filtered_response(
         if is_sse && name_lower == "content-length" {
             continue;
         }
-        if (ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
-            || (status.is_redirection() && name_lower == "location"))
+        if status.is_redirection() && name_lower == "location" {
+            if let Some(value) = location
+                .and_then(|context| context.header_value(status, &name_lower, value.to_str().ok()?))
+            {
+                response_builder = response_builder.header(name, value);
+            }
+            continue;
+        }
+        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
