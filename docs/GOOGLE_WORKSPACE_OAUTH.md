@@ -272,8 +272,8 @@ is enabled for the acting administrator. See [Operation scopes](AGENT_OPERATION_
 
 The effective approval policy also applies. For an organization channel guest
 using the organization's Workspace connection, NyxID checks the organization's
-approval policy for the Workspace catalog service first. Without a matching
-service policy, the organization's global preference applies. The default
+approval policy for the Workspace catalog service first. If that service has no
+approval configuration, the organization's global preference applies. The default
 **Writes only** allows reads and requires approval for writes. A guest cannot
 request an owner approval or use an existing one, so a write that still requires
 approval is refused before reaching Google.
