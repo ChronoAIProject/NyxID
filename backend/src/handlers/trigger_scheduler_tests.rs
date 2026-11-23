@@ -556,6 +556,33 @@ async fn schedule_records_the_owned_overlap_found_at_dispatch() {
         .await
         .unwrap()
         .unwrap();
+
+    // A new blocker can also appear after the worker's preliminary check.
+    // Verify what the admission transaction returns in that case.
+    let claim = schedules::TurnClaim {
+        enroll_v2: false,
+        run_id: pending.id.clone(),
+        fence: job.get_str("fence").unwrap().to_owned(),
+        trigger_updated_at: trigger.updated_at,
+        continuation: false,
+    };
+    let db = state.db.clone();
+    let mut session = db.client().start_session().await.unwrap();
+    let conflict = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            crate::services::api_key_mutation_service::transaction_result(
+                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", session).await,
+            )
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        AppError::TriggerOverlapSkip { blocking_run_id } if blocking_run_id == live.id
+    ));
+
     run_job_once(&state, &job).await.unwrap();
 
     let history = schedules::history(&state.db, &trigger, None, None)

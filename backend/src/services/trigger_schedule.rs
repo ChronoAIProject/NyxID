@@ -357,7 +357,7 @@ pub(crate) async fn insert_run(
     };
     let mut run = run.clone();
     if trigger.overlap == crate::models::trigger_schedule::OverlapPolicy::Skip {
-        if let Some(blocking_run_id) = find_blocking_run(db, outstanding, session).await? {
+        if let Some(blocking_run_id) = find_blocking_run(db, outstanding, Some(session)).await? {
             run.reason = Some("overlap_skip".into());
             run.blocking_run_id = Some(blocking_run_id);
         }
@@ -392,15 +392,17 @@ pub(crate) async fn insert_run(
 async fn find_blocking_run(
     db: &Database,
     filter: Document,
-    session: &mut ClientSession,
+    session: Option<&mut ClientSession>,
 ) -> AppResult<Option<String>> {
-    let blocker = db
-        .collection::<Document>(RUNS)
+    let runs = db.collection::<Document>(RUNS);
+    let lookup = runs
         .find_one(filter)
         .sort(doc! { "scheduled_at": 1, "_id": 1 })
-        .projection(doc! { "_id": 1 })
-        .session(session)
-        .await?;
+        .projection(doc! { "_id": 1 });
+    let blocker = match session {
+        Some(session) => lookup.session(session).await?,
+        None => lookup.await?,
+    };
     blocker
         .map(|row| {
             row.get_str("_id")
@@ -408,6 +410,24 @@ async fn find_blocking_run(
                 .map_err(|error| AppError::Internal(format!("Read blocking schedule run: {error}")))
         })
         .transpose()
+}
+
+pub(crate) async fn find_running_blocker(
+    db: &Database,
+    run: &TriggerRun,
+    session: Option<&mut ClientSession>,
+) -> AppResult<Option<String>> {
+    find_blocking_run(
+        db,
+        doc! {
+            "trigger_id": &run.trigger_id,
+            "user_id": &run.user_id,
+            "_id": { "$ne": &run.id },
+            "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
+        },
+        session,
+    )
+    .await
 }
 
 /// Advance the schedule and create its occurrence in one transaction. The job's
@@ -1120,13 +1140,7 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
-    let running = doc! {
-        "trigger_id": &run.trigger_id,
-        "user_id": owner,
-        "_id": { "$ne": &run.id },
-        "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
-    };
-    if let Some(blocking_run_id) = find_blocking_run(db, running, session).await? {
+    if let Some(blocking_run_id) = find_running_blocker(db, &run, Some(session)).await? {
         return Err(match trigger.overlap {
             crate::models::trigger_schedule::OverlapPolicy::Skip => {
                 AppError::TriggerOverlapSkip { blocking_run_id }
