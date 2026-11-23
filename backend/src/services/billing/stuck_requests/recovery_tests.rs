@@ -660,7 +660,18 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
     );
     // A pass can commit its last quantity immediately before its budget
     // cancels inline settlement. Production's ordinary reconciliation finishes
-    // that durable decision; recovery-only passes deliberately skip it.
+    // that durable decision after any interrupted worker's funding lease
+    // expires. Advancing the retry scan alone does not advance that lease's
+    // independent UTC clock, so model expiry while retaining its claim fence.
+    f.db.collection::<Document>(METERS)
+        .update_many(
+            doc! {"released":false,"quantity":{"$ne":Bson::Null},
+            "funding.settlement_claim_id":{"$type":"string"}},
+            doc! {"$set":{"funding.settlement_claimed_at":bson::DateTime::from_millis(0),
+            "settlement_next_retry_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
     finish(&f).await;
     finish(&f).await;
     assert_eq!(
