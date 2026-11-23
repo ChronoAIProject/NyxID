@@ -587,17 +587,8 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                     if entry.collection == "users" {
                         continue;
                     }
-                    for person in [&owner, &other] {
-                        let id = format!(
-                            "domain-{}-{}-{}",
-                            entry.collection,
-                            field,
-                            if person == &owner {
-                                "target"
-                            } else {
-                                "bystander"
-                            }
-                        );
+                    for person in [&owner, &other, &org] {
+                        let id = format!("domain-{}-{field}-{person}", entry.collection);
                         let mut row = settled_durable_fixture(entry.collection, person, &id)
                             .or_else(|| {
                                 model_inputs
@@ -634,17 +625,7 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                                 row.insert("status", "offline");
                             }
                             "node_pending_credentials" | "node_service_bindings" => {
-                                row.insert(
-                                    "node_id",
-                                    format!(
-                                        "domain-nodes-user_id-{}",
-                                        if person == &owner {
-                                            "target"
-                                        } else {
-                                            "bystander"
-                                        }
-                                    ),
-                                );
+                                row.insert("node_id", format!("domain-nodes-user_id-{person}"));
                             }
                             "oracle_pools" => {
                                 row.insert("is_active", false);
@@ -729,7 +710,7 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                         }
                     } else if entry.collection == "service_change_events" && *field == "owner_id" {
                         covered_fields.insert((entry.collection, (*field).to_owned()));
-                        for person in [&owner, &other] {
+                        for person in [&owner, &other, &org] {
                             let id = format!("history-owner-{person}");
                             let row = doc! {"_id": &id, "owner_id": person};
                             db.collection::<Document>(entry.collection)

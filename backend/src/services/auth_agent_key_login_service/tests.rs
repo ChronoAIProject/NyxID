@@ -221,9 +221,24 @@ async fn agent_key_admission_refuses_accepted_account_erasure() {
     let mut new_key = key.clone();
     new_key.id = Uuid::new_v4().to_string();
     new_key.key_hash = hash_token(&credentials::generate_secret());
-    super::super::api_key_mutation_service::insert_one(&db, &new_key, None)
+    super::super::api_key_mutation_service::insert_one(&db, &new_key, Some(&actor), None)
         .await
         .unwrap();
+    let org = Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    let mut org_key = new_key.clone();
+    org_key.user_id = org.clone();
+    org_key.id = Uuid::new_v4().to_string();
+    org_key.key_hash = hash_token(&credentials::generate_secret());
+    super::super::api_key_mutation_service::insert_one(&db, &org_key, Some(&actor), None)
+        .await
+        .unwrap();
+    let existing_org_key = org_key.id.clone();
+    org_key.id = Uuid::new_v4().to_string();
+    org_key.key_hash = hash_token(&credentials::generate_secret());
     new_key.id = Uuid::new_v4().to_string();
     new_key.key_hash = hash_token(&credentials::generate_secret());
 
@@ -231,9 +246,29 @@ async fn agent_key_admission_refuses_accepted_account_erasure() {
         .await
         .unwrap();
     assert!(matches!(
-        super::super::api_key_mutation_service::insert_one(&db, &new_key, None).await,
+        super::super::api_key_mutation_service::insert_one(&db, &new_key, Some(&actor), None).await,
         Err(AppError::Conflict(_))
     ));
+    assert!(matches!(
+        super::super::api_key_mutation_service::insert_one(&db, &org_key, Some(&actor), None).await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        db.collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"user_id": &org, "is_active": true})
+            .await
+            .unwrap()
+            .expect("prior organization key persists")
+            .id,
+        existing_org_key
+    );
+    assert_eq!(
+        db.collection::<ApiKey>(API_KEYS)
+            .count_documents(doc! {"user_id": &org})
+            .await
+            .unwrap(),
+        1
+    );
     let denied = approve(
         &db,
         &test_encryption_keys(),

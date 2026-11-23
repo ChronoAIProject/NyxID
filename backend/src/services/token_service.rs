@@ -1094,6 +1094,11 @@ pub async fn refresh_tokens_for_client(
         created_at: now,
     };
 
+    #[cfg(test)]
+    if let Ok(gate) = BEFORE_REFRESH_ROTATION.try_with(std::sync::Arc::clone) {
+        gate.reached.notify_one();
+        gate.resume.notified().await;
+    }
     if !rotate_refresh_row(db, &active_token, &new_refresh).await? {
         if legacy_upgrade {
             return Err(super::consent_service::grant_changed());
@@ -1170,6 +1175,18 @@ pub async fn refresh_tokens_for_client(
         access_expires_in: config.jwt_access_ttl_secs,
         resource_uris: token_resource_scope.resource_uris,
     })
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct RefreshRotationGate {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_REFRESH_ROTATION: std::sync::Arc<RefreshRotationGate>;
 }
 
 /// Publish the successor and its predecessor link in a single commit.
@@ -1452,6 +1469,111 @@ mod tests {
             .insert_one(&user)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_first_party_refresh_rotation_cannot_mint_after_erasure_acceptance() {
+        let db = connect_transaction_test_database("held_refresh_erasure").await;
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let tokens = create_session_and_issue_tokens(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let first = std::sync::Arc::new(RefreshRotationGate::default());
+        let second = std::sync::Arc::new(RefreshRotationGate::default());
+        let rotate = || {
+            refresh_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &tokens.refresh_token,
+                None,
+                None,
+            )
+        };
+        let (winner, retry, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(
+                BEFORE_REFRESH_ROTATION.scope(first.clone(), rotate()),
+                BEFORE_REFRESH_ROTATION.scope(second.clone(), rotate()),
+                async {
+                    first.reached.notified().await;
+                    second.reached.notified().await;
+                    first.resume.notify_one();
+                    second.resume.notify_one();
+                },
+            )
+        })
+        .await
+        .expect("both active requests reached the rotation boundary");
+        let active = winner.unwrap();
+        let reused = retry.unwrap();
+        let claims =
+            |token: &str| jwt::verify_token(&state.jwt_keys, &state.config, token).unwrap();
+        assert_eq!(
+            claims(&active.refresh_token).jti,
+            claims(&reused.refresh_token).jti
+        );
+
+        let gate = std::sync::Arc::new(RefreshRotationGate::default());
+        let held = BEFORE_REFRESH_ROTATION.scope(
+            gate.clone(),
+            refresh_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &active.refresh_token,
+                None,
+                None,
+            ),
+        );
+        let accept = async {
+            gate.reached.notified().await;
+            super::super::personal_erasure_service::accept(&db, &user_id, &user_id, None)
+                .await
+                .unwrap();
+            gate.resume.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(held, accept)
+        })
+        .await
+        .expect("refresh reached the rotation boundary and resumed");
+        assert!(matches!(
+            result.map_err(AppError::into_refresh_source),
+            Err(AppError::Conflict(_))
+        ));
+        let rows = db.collection::<RefreshToken>(REFRESH_TOKENS);
+        assert_eq!(
+            rows.count_documents(doc! {"user_id": &user_id})
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            rows.count_documents(doc! {"user_id": &user_id, "revoked": false})
+                .await
+                .unwrap(),
+            0
+        );
+        let predecessor = rows
+            .find_one(doc! {"user_id": &user_id, "replaced_by": null})
+            .await
+            .unwrap()
+            .expect("last legitimate token");
+        assert!(predecessor.revoked);
+        assert!(predecessor.replaced_by.is_none());
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

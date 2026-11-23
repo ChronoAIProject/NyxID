@@ -426,110 +426,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
             "Erasure checkpoint has no pending domain".into(),
         ));
     };
-    let domain = &job.domains[index];
-    use super::super::personal_data_registry::ErasureDomain;
-    let result: AppResult<Outcome> = async {
-        // Defend jobs accepted by an earlier writer too. Provider credentials
-        // must remain intact until publication reconciliation has settled.
-        if !Box::pin(super::learning::clear(db, &job.user_id)).await? {
-            return Ok(Outcome::OperatorAction(super::learning::REASON));
-        }
-        match domain.domain.as_str() {
-            "platform" => Ok(
-                if Box::pin(
-                    super::super::platform_personal_owner_lifecycle::retire_batch(
-                        db,
-                        &job.user_id,
-                        true,
-                    ),
-                )
-                .await?
-                {
-                    Outcome::Complete
-                } else {
-                    Outcome::Pending("platform_lifecycle_pending")
-                },
-            ),
-            name if name == ErasureDomain::Oracle.execution().0 => Ok(
-                if Box::pin(super::super::oracle_pool_service::personal_erasure_pass(
-                    db,
-                    &job.user_id,
-                    &job.requested_by,
-                ))
-                .await?
-                {
-                    Outcome::Complete
-                } else {
-                    Outcome::Pending("oracle_lifecycle_pending")
-                },
-            ),
-            // Adapters are integrated one domain at a time. Never convert a
-            // missing adapter or a scheduled effect into completion evidence.
-            "provider_credentials" => Ok(
-                match Box::pin(super::provider::pass(db, keys, &job)).await? {
-                    super::provider::Pass::Complete => Outcome::Complete,
-                    super::provider::Pass::CompleteWithException(reason) => {
-                        Outcome::CompleteWithException(reason)
-                    }
-                    super::provider::Pass::Pending => {
-                        Outcome::Pending("provider_revocation_pending")
-                    }
-                    super::provider::Pass::Action(reason) => Outcome::OperatorAction(reason),
-                },
-            ),
-            "vendor" => Ok(
-                match Box::pin(super::vendor::pass(db, &job.user_id)).await? {
-                    super::vendor::Pass::Complete(evidence) => {
-                        Outcome::CompleteWithEvidence(evidence)
-                    }
-                    super::vendor::Pass::Pending => Outcome::Pending("vendor_erasure_pending"),
-                    super::vendor::Pass::Action => {
-                        Outcome::OperatorAction("vendor_reconciliation_required")
-                    }
-                },
-            ),
-            name if name == ErasureDomain::ChannelBots.execution().0 => {
-                Ok(if Box::pin(super::channel::pass(state, &job)).await? {
-                    Outcome::Complete
-                } else {
-                    Outcome::Pending("channel_webhook_cleanup_pending")
-                })
-            }
-            "machine" => Ok(match Box::pin(super::machine::pass(state, &job)).await? {
-                super::machine::Pass::Complete => Outcome::Complete,
-                super::machine::Pass::Retained => {
-                    Outcome::CompleteWithException("admin_retained_machine_workspace")
-                }
-                super::machine::Pass::Progress(cursor) => {
-                    Outcome::Progress("machine_inventory_pending", cursor)
-                }
-                super::machine::Pass::Pending => Outcome::Pending("machine_lifecycle_pending"),
-                super::machine::Pass::Action => {
-                    Outcome::OperatorAction("machine_lifecycle_reconciliation_required")
-                }
-            }),
-            name if name == ErasureDomain::LocalEvidence.execution().0 => {
-                Ok(if Box::pin(super::local::pass(state, &job)).await? {
-                    Outcome::Complete
-                } else if super::local::remote_cleanup_pending(&state.db, &job.user_id).await? {
-                    Outcome::Pending("remote_cleanup_pending")
-                } else {
-                    Outcome::Pending("local_inventory_cleanup_pending")
-                })
-            }
-            name if name == ErasureDomain::Source.execution().0 => {
-                Ok(if Box::pin(super::local::source(db, &job)).await? {
-                    Outcome::Complete
-                } else if super::local::remote_cleanup_pending(db, &job.user_id).await? {
-                    Outcome::Pending("remote_cleanup_pending")
-                } else {
-                    Outcome::Pending("source_cleanup_pending")
-                })
-            }
-            _ => Ok(Outcome::OperatorAction("unknown_inventory_domain")),
-        }
-    }
-    .await;
+    let result = run_domain(state, db, &job, index).await;
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(AppError::Conflict(_)) => {
@@ -543,6 +440,112 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
     checkpoint(db, &job, index, outcome).await?;
     release.completed();
     Ok(true)
+}
+
+async fn run_domain(
+    state: &crate::AppState,
+    db: &Database,
+    job: &PersonalErasureJob,
+    index: usize,
+) -> AppResult<Outcome> {
+    use super::super::personal_data_registry::ErasureDomain;
+    let keys = &state.encryption_keys;
+    let domain = &job.domains[index];
+    // Defend jobs accepted by an earlier writer too. Provider credentials
+    // must remain intact until publication reconciliation has settled.
+    if !Box::pin(super::learning::clear(db, &job.user_id)).await? {
+        return Ok(Outcome::OperatorAction(super::learning::REASON));
+    }
+    match domain.domain.as_str() {
+        "platform" => Ok(
+            if Box::pin(
+                super::super::platform_personal_owner_lifecycle::retire_batch(
+                    db,
+                    &job.user_id,
+                    true,
+                ),
+            )
+            .await?
+            {
+                Outcome::Complete
+            } else {
+                Outcome::Pending("platform_lifecycle_pending")
+            },
+        ),
+        name if name == ErasureDomain::Oracle.execution().0 => Ok(
+            if Box::pin(super::super::oracle_pool_service::personal_erasure_pass(
+                db,
+                &job.user_id,
+                &job.requested_by,
+            ))
+            .await?
+            {
+                Outcome::Complete
+            } else {
+                Outcome::Pending("oracle_lifecycle_pending")
+            },
+        ),
+        // Adapters are integrated one domain at a time. Never convert a
+        // missing adapter or a scheduled effect into completion evidence.
+        "provider_credentials" => Ok(
+            match Box::pin(super::provider::pass(db, keys, job)).await? {
+                super::provider::Pass::Complete => Outcome::Complete,
+                super::provider::Pass::CompleteWithException(reason) => {
+                    Outcome::CompleteWithException(reason)
+                }
+                super::provider::Pass::Pending => Outcome::Pending("provider_revocation_pending"),
+                super::provider::Pass::Action(reason) => Outcome::OperatorAction(reason),
+            },
+        ),
+        "vendor" => Ok(
+            match Box::pin(super::vendor::pass(db, &job.user_id)).await? {
+                super::vendor::Pass::Complete(evidence) => Outcome::CompleteWithEvidence(evidence),
+                super::vendor::Pass::Pending => Outcome::Pending("vendor_erasure_pending"),
+                super::vendor::Pass::Action => {
+                    Outcome::OperatorAction("vendor_reconciliation_required")
+                }
+            },
+        ),
+        name if name == ErasureDomain::ChannelBots.execution().0 => {
+            Ok(if Box::pin(super::channel::pass(state, job)).await? {
+                Outcome::Complete
+            } else {
+                Outcome::Pending("channel_webhook_cleanup_pending")
+            })
+        }
+        "machine" => Ok(match Box::pin(super::machine::pass(state, job)).await? {
+            super::machine::Pass::Complete => Outcome::Complete,
+            super::machine::Pass::Retained => {
+                Outcome::CompleteWithException("admin_retained_machine_workspace")
+            }
+            super::machine::Pass::Progress(cursor) => {
+                Outcome::Progress("machine_inventory_pending", cursor)
+            }
+            super::machine::Pass::Pending => Outcome::Pending("machine_lifecycle_pending"),
+            super::machine::Pass::Action => {
+                Outcome::OperatorAction("machine_lifecycle_reconciliation_required")
+            }
+        }),
+        name if name == ErasureDomain::LocalEvidence.execution().0 => {
+            Ok(if Box::pin(super::local::pass(state, job)).await? {
+                Outcome::Complete
+            } else if super::local::remote_cleanup_pending(&state.db, &job.user_id).await? {
+                Outcome::Pending("remote_cleanup_pending")
+            } else {
+                Outcome::Pending("local_inventory_cleanup_pending")
+            })
+        }
+        name if name == ErasureDomain::Source.execution().0 => {
+            Ok(if Box::pin(super::local::source(db, job)).await? {
+                Outcome::Complete
+            } else if super::local::remote_cleanup_pending(db, &job.user_id).await? {
+                Outcome::Pending("remote_cleanup_pending")
+            } else {
+                Outcome::Pending("source_cleanup_pending")
+            })
+        }
+        _ => Ok(Outcome::OperatorAction("unknown_inventory_domain")),
+    }
 }
 
 /// The authenticated operator API supplies the user and domain. The job ID is
@@ -1370,12 +1373,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_resumes_each_erasure_domain_after_lease_expiry() {
-        use crate::services::telemetry_erasure_service;
+    async fn worker_replays_each_erasure_domain_after_uncheckpointed_work() {
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::services::{personal_erasure_registry, telemetry_erasure_service};
+        use crate::test_utils::test_user;
+        use futures::TryStreamExt;
         let (db, user) = super::super::tests::fixture().await;
+        let other = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&other, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let original = crate::test_utils::test_app_state(db.clone());
         let restarted = crate::test_utils::test_app_state(db.clone());
         let jobs = db.collection::<Document>(JOBS);
+        let phase_rows = [
+            (
+                "local_inventory",
+                db.collection::<Document>("assistant_wire_logs"),
+            ),
+            (
+                "source",
+                db.collection::<Document>(personal_erasure_registry::REVOCATION_RECEIPTS),
+            ),
+        ];
+        for (_, rows) in &phase_rows {
+            rows.insert_many([&user, &other, &org].into_iter().flat_map(|owner| {
+                (0..40)
+                    .map(move |index| doc! {"_id": format!("{owner}-{index:02}"), "user_id": owner})
+            }))
+            .await
+            .unwrap();
+        }
 
         for (index, domain) in DOMAINS.iter().enumerate() {
             if *domain == "vendor" {
@@ -1395,6 +1429,24 @@ mod tests {
             retry_now(&db, &accepted.id).await;
             let interrupted = claim(&db).await.unwrap().expect("original worker claim");
             assert_eq!(next_domain_index(&interrupted), Some(index), "{domain}");
+            // Execute the production pass and discard its result at the boundary
+            // between durable adapter work and the worker checkpoint.
+            run_domain(&original, &db, &interrupted, index)
+                .await
+                .unwrap();
+            if let Some((_, rows)) = phase_rows.iter().find(|(name, _)| name == domain) {
+                let remaining = rows.count_documents(doc! {"user_id": &user}).await.unwrap();
+                assert!(
+                    (1..40).contains(&remaining),
+                    "{domain} must leave a partial page"
+                );
+            }
+            let persisted = super::super::status(&db, &user).await.unwrap().unwrap();
+            assert_eq!(
+                bson::to_bson(&persisted.domains).unwrap(),
+                bson::to_bson(&interrupted.domains).unwrap(),
+                "{domain} lost worker did not write a checkpoint"
+            );
             assert!(
                 !process_one(&restarted).await.unwrap(),
                 "{domain} lease still held"
@@ -1440,6 +1492,30 @@ mod tests {
         let finished = super::super::status(&db, &user).await.unwrap().unwrap();
         assert_eq!(finished.status, ErasureStatus::Complete);
         assert!(finished.completed_at.is_some());
+        for (_, rows) in &phase_rows {
+            assert_eq!(
+                rows.count_documents(doc! {"user_id": &user}).await.unwrap(),
+                0
+            );
+            for owner in [&other, &org] {
+                let expected: Vec<_> = (0..40)
+                    .map(|index| {
+                        doc! {
+                            "_id": format!("{owner}-{index:02}"), "user_id": owner
+                        }
+                    })
+                    .collect();
+                let actual: Vec<_> = rows
+                    .find(doc! {"user_id": owner})
+                    .sort(doc! {"_id": 1})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
         db.drop().await.unwrap();
     }
 

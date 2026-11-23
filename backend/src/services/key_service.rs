@@ -683,7 +683,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    key_mutations::insert_one(db, &new_key, session).await?;
+    key_mutations::insert_one(db, &new_key, scope_actor_user_id, session).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -1324,7 +1324,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         "rotation predecessor changed concurrently".to_string(),
                     ));
                 }
-                key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                key_mutations::insert_one(&db, &successor, actor_id.as_deref(), Some(&mut *session)).await?;
                 let assistant_managed =
                     super::assistant_agent_credential_service::adopt_rotated_key(
                         &db,

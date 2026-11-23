@@ -1880,7 +1880,7 @@ mod tests {
         key.scheduled_write_enabled = false;
         key.updated_at = Some(Utc::now() - Duration::minutes(1));
         let initial_updated_at = key.updated_at.expect("initial authority timestamp");
-        key_mutations::insert_one(&db, &key, None)
+        key_mutations::insert_one(&db, &key, None, None)
             .await
             .expect("insert scheduled key");
 
