@@ -133,7 +133,7 @@ overlays use ordinary additive reconciliation: they are compiled into the binary
 and are not invalidated by unrelated parent timestamps. Hosted overlays and Tool
 sync remain additive by name; unrelated administrator operations are retained.
 
-`GET /api/v1/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints` under `/api/v1` accept general and scoped agent API keys via `X-API-Key` or Bearer without proxy scope. Scheduled-invocation keys, service accounts, and relay tokens are rejected; delegated access retains the exact `account:read` GET exception. Catalog metadata uses template values and live platform grants, without instance connection flags or overrides. Private instance-backed access and mounted-spec fallback obey the effective key allowlist and Member/Admin org scopes. Discovery performs no auto-provisioning or pending-OAuth reconciliation. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; credential-free auto-connected templates remain suppressed for all callers. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability.
+`GET /api/v1/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints` under `/api/v1` accept general and scoped agent API keys via `X-API-Key` or Bearer without proxy scope. Scheduled-invocation keys, service accounts, and relay tokens are rejected; delegated access retains the exact `account:read` GET exception. Catalog metadata uses template values and live platform grants, without instance connection flags or overrides. Private instance-backed access and mounted-spec fallback obey the effective key allowlist and Member/Admin org scopes. Discovery performs no auto-provisioning or pending-OAuth reconciliation. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; eligible unconnected templates remain discoverable until explicit opt-in; connected instances suppress their catalog duplicate. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability.
 
 The catalog API exposes parsed OpenAPI endpoint metadata for any service that has an `openapi_spec_url`:
 
@@ -1139,3 +1139,14 @@ request-count usage metadata when billing metering is enabled, but never apply
 catalog prices or consume wallet credits, grants or allowances. This exemption
 is server-authored and limited to the declared verification operation; ordinary
 requests through the same connection retain their configured billing policy.
+
+
+Catalog availability is metadata, not a connection. NyxBot Plugins and Studio AI
+Services share personal `POST /api/v1/catalog/{slug}/connect` and the same saved
+connection Enable/Disable state. HTTP and MCP refuse catalog-only and legacy
+automatic execution before opt-in. Existing explicit credentials, legacy connections
+and node bindings retain their authority. Private consent discovery adds only the
+formerly eligible no-auth HTTP service class, queried through active app consents;
+it grants no visibility to unrelated private catalog entries. Endpoint maintenance
+runs from catalog updates/startup, and discovery, login and inventory perform no
+connection or endpoint-repair writes.

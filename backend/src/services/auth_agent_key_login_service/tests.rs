@@ -1098,7 +1098,7 @@ async fn login_options_show_shared_service_organization_to_members_without_key_a
 }
 
 #[tokio::test]
-async fn auto_connected_login_options_provision_and_mark_platform_services() {
+async fn login_options_require_explicit_opt_in_and_mark_catalog_services() {
     let (db, actor, _, _) = fixture("auto_connected_login_options").await;
     let catalog = crate::test_utils::test_auto_connected_catalog_service();
     db.collection::<crate::models::downstream_service::DownstreamService>(
@@ -1107,6 +1107,23 @@ async fn auto_connected_login_options_provision_and_mark_platform_services() {
     .insert_one(&catalog)
     .await
     .unwrap();
+    let before = options_for_actor(&db, &actor).await.unwrap();
+    assert!(
+        !before
+            .services
+            .iter()
+            .any(|service| service.name == catalog.slug)
+    );
+    assert_eq!(
+        db.collection::<UserService>(SERVICES)
+            .count_documents(doc! {"catalog_service_id": &catalog.id})
+            .await
+            .unwrap(),
+        0
+    );
+    crate::test_utils::connect_catalog_fixture_services(&db, &actor)
+        .await
+        .unwrap();
     let options = options_for_actor(&db, &actor).await.unwrap();
     assert_eq!(options.personal_owner_id, actor);
     let service = options
@@ -1565,13 +1582,13 @@ async fn consent_platform_grants_are_owner_bound_and_use_live_platform_readiness
             .insert_one(service)
             .await
             .unwrap();
-        if owner == actor.as_str() && active {
+        if owner == actor.as_str() && active && explicit_binding {
             expected.push(id);
         }
     }
     key.allow_auto_connected_services = true;
     let enabled = key_summary(&db, &key, false).await.unwrap();
-    assert_eq!(enabled.effective_services.len(), 3);
+    assert_eq!(enabled.effective_services.len(), 2);
     for id in &expected {
         assert!(
             enabled

@@ -656,7 +656,7 @@ async fn actual_managed_nonassistant_org_connection_keeps_resource_acl_and_perso
 }
 
 #[tokio::test]
-async fn actual_managed_catalog_only_call_keeps_final_turn_and_scope_fences() {
+async fn actual_managed_opted_in_catalog_call_keeps_final_turn_and_scope_fences() {
     for drift in ["stop", "scope"] {
         let (mut f, id, catalog) = fixture(false).await;
         f.state
@@ -681,6 +681,33 @@ async fn actual_managed_catalog_only_call_keeps_final_turn_and_scope_fences() {
             .await
             .unwrap();
         f.auth.allowed_service_ids = vec![catalog];
+        assert!(
+            call(&f, "", false).await.is_err(),
+            "catalog permission alone cannot create a connection"
+        );
+        test_utils::connect_catalog_fixture_services(&f.state.db, &f.owner)
+            .await
+            .unwrap();
+        let opted_in = f
+            .state
+            .db
+            .collection::<crate::models::user_service::UserService>("user_services")
+            .find_one(
+                doc! {"user_id": &f.owner, "catalog_service_id": &f.auth.allowed_service_ids[0]},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        f.state
+            .db
+            .collection::<Document>("api_keys")
+            .update_one(
+                doc! {"_id": &f.chat.api_key_id},
+                doc! {"$set": {"allowed_service_ids": [&opted_in.id]}},
+            )
+            .await
+            .unwrap();
+        f.auth.allowed_service_ids = vec![opted_in.id];
         let mut provider = nyxid_service_adapters::test_support::scripted_fixture(
             "api.telnyx.com",
             vec![response(true)],
@@ -716,7 +743,7 @@ async fn actual_managed_catalog_only_call_keeps_final_turn_and_scope_fences() {
                 .collection::<Document>("api_keys")
                 .update_one(
                     doc! {"_id":&f.chat.api_key_id},
-                    doc! {"$set":{"allowed_platform_service_ids":[]}},
+                    doc! {"$set":{"allowed_platform_service_ids":[], "allowed_service_ids":[]}},
                 )
                 .await
                 .unwrap();

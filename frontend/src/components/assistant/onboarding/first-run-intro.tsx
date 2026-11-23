@@ -22,6 +22,7 @@ import type {
   NextStep,
   OnboardingChoice,
 } from "@/schemas/assistant-onboarding";
+import { StepDots } from "@/components/ui/step-dots";
 import { NextStepCards } from "./next-step-cards";
 import { OnboardingIcon } from "./onboarding-icons";
 import { AccessModesPreview } from "./intro-previews";
@@ -413,32 +414,13 @@ function Progress({
 }) {
   useUiTranslation();
   return (
-    <nav aria-label={translateUi("Intro steps")} className="-mx-0.75 flex items-center pt-1 md:mx-0 md:px-5.25 md:pt-4">
-      {STEPS.map((step, position) => (
-        <button
-          key={step}
-          type="button"
-          title={STEP_LABELS[step]}
-          aria-label={translateUi("Step {{value1}} of {{value2}}: {{value3}}", { value1: position + 1, value2: STEPS.length, value3: STEP_LABELS[step] })}
-          aria-current={position === index ? "step" : undefined}
-          onClick={() => onSelect(position)}
-          data-icon-button=""
-          className="group flex items-center justify-center rounded-full px-0.75 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus"
-        >
-          <span
-            aria-hidden="true"
-            className={cn(
-              "block h-1 rounded-full transition-all duration-300 motion-reduce:transition-none",
-              position === index
-                ? "w-6 bg-foreground"
-                : position < index
-                  ? "w-3 bg-muted-foreground group-hover:w-4 group-hover:bg-foreground"
-                  : "w-3 bg-overlay-strong group-hover:w-4 group-hover:bg-muted-foreground",
-            )}
-          />
-        </button>
-      ))}
-    </nav>
+    <StepDots
+      label={translateUi("Intro steps")}
+      steps={STEPS.map((step) => STEP_LABELS[step])}
+      index={index}
+      onSelect={onSelect}
+      className="-mx-0.75 pt-1 md:mx-0 md:px-5.25 md:pt-4"
+    />
   );
 }
 

@@ -140,6 +140,8 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::approval_service::RULES_READINESS,
+    super::unified_key_service::CATALOG_OPT_IN_READINESS,
     super::billing::schedules::recipients::READINESS,
     super::assistant_wake_service::READINESS,
     TURN_HANDOFF,

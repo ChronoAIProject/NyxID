@@ -349,7 +349,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               (developerApps.length > 0 || unavailableAppIds.length > 0) && (
                 <div className="space-y-2">
                   <p className="type-row-title">{translateUi("Developer App Scoping")}</p>
-                  <p className="text-13 text-muted-foreground">{translateUi("Select which developer apps grant access to this service. Users who log in through a selected app will have this service auto-provisioned in their AI Services. Remove inactive applications before saving changes to this selection.")}</p>
+                  <p className="text-13 text-muted-foreground">{translateUi("Select developer apps whose consenting users may discover eligible no-auth HTTP services. Users must choose Connect in NyxBot or AI Services. Login does not create connections. Remove inactive applications before saving.")}</p>
                   <div className="space-y-2">
                     {unavailableAppIds.map((id) => (
                       <div key={id} className="flex items-center gap-2">

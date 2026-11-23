@@ -135,8 +135,9 @@ fn build_catalog_entry(
     // 1. It requires per-user credentials (connection services), OR
     // 2. It has an actual auth method (not "none"), OR
     // 3. It has auth_method "none" but an SPR exists (uses master credentials)
-    let requires_credential =
-        svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
+    let requires_credential = svc.requires_user_credential
+        || svc.auth_method != "none"
+        || spr.is_some_and(|requirement| requirement.required);
     let platform_client_id_present = oauth_client_id.is_some();
     let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
         &crate::services::catalog_skill_service::state(&svc),
@@ -473,10 +474,16 @@ async fn list_catalog_filtered(
         .iter()
         .map(String::as_str)
         .collect();
+    let consented_ids = consented_no_auth_catalog_ids(db, user_id).await?;
+    let mut visibility = visibility_filter(user_id, &owner_ids);
+    visibility
+        .get_array_mut("$or")
+        .map_err(|_| AppError::Internal("Missing catalog visibility".into()))?
+        .push(doc! {"_id":{"$in":&consented_ids}}.into());
     filter
         .get_array_mut("$and")
         .map_err(|_| AppError::Internal("Missing catalog filter".into()))?
-        .push(visibility_filter(user_id, &owner_ids).into());
+        .push(visibility.into());
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(filter)
@@ -550,6 +557,7 @@ async fn list_catalog_filtered(
             && catalog_owner(&svc) != user_id
             && !grants.readable_owner_ids().contains(catalog_owner(&svc))
             && !available
+            && !consented_ids.contains(&svc.id)
         {
             continue;
         }
@@ -653,6 +661,15 @@ pub(crate) async fn enforce_catalog_read_access(
             .await?
             .readable_owner_ids()
             .contains(catalog_owner(svc))
+    {
+        return Ok(());
+    }
+    if svc.auth_method == "none"
+        && !svc.requires_user_credential
+        && svc.service_type == "http"
+        && consented_no_auth_catalog_ids(db, user_id)
+            .await?
+            .contains(&svc.id)
     {
         return Ok(());
     }
@@ -1656,4 +1673,51 @@ mod catalog_icon_tests {
             "Tool offerings keep their own icon"
         );
     }
+}
+
+/// Only the former consent-eligible no-auth class gains discoverability.
+/// Read the actor's consent identifiers first; never load unrelated private catalog rows.
+pub(crate) async fn consented_no_auth_catalog_ids(
+    db: &mongodb::Database,
+    actor: &str,
+) -> AppResult<Vec<String>> {
+    use mongodb::bson::{Bson, Document};
+    let consent_apps = db.collection::<Document>(crate::models::consent::COLLECTION_NAME)
+        .distinct("client_id",doc! {"user_id":actor,"$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]}).await?;
+    if consent_apps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let apps = db
+        .collection::<Document>(crate::models::oauth_client::COLLECTION_NAME)
+        .distinct("_id", doc! {"_id":{"$in":consent_apps},"is_active":true})
+        .await?;
+    if apps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = db
+        .collection::<Document>(DOWNSTREAM_SERVICES)
+        .distinct(
+            "_id",
+            doc! {
+                "developer_app_ids":{"$in":apps},"is_active":true,"visibility":"private",
+                "auth_method":"none","requires_user_credential":false,"service_type":"http",
+                "platform_key":null,"service_category":{"$in":["connection","internal"]}
+            },
+        )
+        .await?;
+    let required = db
+        .collection::<Document>(SERVICE_PROVIDER_REQUIREMENTS)
+        .distinct(
+            "service_id",
+            doc! {"service_id":{"$in":&ids},"required":{"$ne":false}},
+        )
+        .await?;
+    Ok(ids
+        .into_iter()
+        .filter(|id| !required.contains(id))
+        .filter_map(|id| match id {
+            Bson::String(id) => Some(id),
+            _ => None,
+        })
+        .collect())
 }

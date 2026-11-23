@@ -81,8 +81,7 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as BINDINGS, UserService};
     use crate::services::{
-        catalog_service, platform_key_service, proxy_service, unified_key_service,
-        user_service_service,
+        catalog_service, platform_key_service, proxy_service, user_service_service,
     };
     use crate::test_utils::{
         connect_test_database, test_auto_connected_catalog_service, test_encryption_keys,
@@ -273,7 +272,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        unified_key_service::auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
         assert_eq!(

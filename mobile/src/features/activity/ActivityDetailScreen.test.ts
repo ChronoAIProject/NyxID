@@ -13,7 +13,7 @@ const nodes = (e: Element): Element[] => [
     .flat(Infinity)
     .flatMap((c) => (c?.props ? nodes(c) : [])),
 ];
-function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
+function setup(execution_proposal?: ChallengeDetail["execution_proposal"], grantExpiryDays?: number) {
   const calls: unknown[][] = [];
   const openedUrls: string[] = [];
   let frontendUrl = "https://app.example.test";
@@ -22,6 +22,7 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
   const gate = deferred<void>();
   const data = {
     execution_proposal,
+    grant_expiry_days: grantExpiryDays,
     id: "request-1",
     title: "GitHub",
     action: "Write",
@@ -143,7 +144,7 @@ test("the native approval detail page preserves grant duration and blocks Back d
   assert.equal(e.pair().props.disabled, false);
   const request = e.pair().props.onApprove();
   e.h.flush();
-  assert.deepEqual(e.calls, [["request-1", "APPROVE", 7 * 86400]]);
+  assert.deepEqual(e.calls, [["request-1", "APPROVE"]]);
   assert.equal(e.guard().disabled, true);
   assert.equal(e.pair().props.disabled, true);
   e.gate.resolve();
@@ -156,7 +157,7 @@ test("the native approval detail page preserves grant duration and blocks Back d
 test("denial on the native detail page sends no reusable grant duration", async () => {
   const e = setup();
   const request = e.pair().props.onDeny();
-  assert.deepEqual(e.calls, [["request-1", "DENY", undefined]]);
+  assert.deepEqual(e.calls, [["request-1", "DENY"]]);
   e.gate.resolve();
   await request;
   e.h.unmount();
@@ -197,5 +198,11 @@ test("execution proposal detail retains the redesigned groups and has only a web
     "https://selected.example.test/assistant/approvals",
   ]);
   assert.deepEqual(e.calls, []);
+  e.h.unmount();
+});
+
+test("the detail displays a request's policy duration ahead of the account setting", () => {
+  const e=setup(undefined,2);
+  assert.equal(e.row("Grant duration").props.value,"2 days");
   e.h.unmount();
 });

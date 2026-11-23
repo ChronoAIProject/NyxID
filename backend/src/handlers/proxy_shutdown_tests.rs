@@ -221,7 +221,23 @@ async fn shutdown_public_catalog_privacy_route(kind: &'static str) {
     }];
     let linked = insert_user_service(&db, &actor, "private-alias", &base, Some(&catalog.id)).await;
     if kind == "uuid_direct" {
-        // Keep the UUID fallback independent of the linked-connection builder.
+        // Keep the UUID fallback on a historical explicit connection.
+        db.collection::<crate::models::user_service_connection::UserServiceConnection>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        ).insert_one(crate::models::user_service_connection::UserServiceConnection {
+            id: Uuid::new_v4().to_string(),
+            user_id: actor.clone(),
+            service_id: catalog.id.clone(),
+            credential_encrypted: None,
+            secret_context_versions: Default::default(),
+            credential_type: None,
+            credential_label: None,
+            metadata: None,
+            is_active: true,
+            state_version: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }).await.unwrap();
         db.collection::<bson::Document>("user_services")
             .delete_one(doc! {"_id":&linked.id})
             .await

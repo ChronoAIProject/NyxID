@@ -19,7 +19,7 @@ use crate::test_utils::{
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -306,8 +306,8 @@ async fn non_api_key_authentication_classes_preserve_inventory_behavior() {
             .count_documents(doc! {"user_id": &f.person, "catalog_service_id": &catalog.id})
             .await
             .unwrap(),
-        1,
-        "delegated listing must retain provisioning"
+        0,
+        "delegated listing must not create a catalog connection"
     );
     let (sa_account, secret) = crate::services::service_account_service::create_service_account(
         &f.state.db,
@@ -573,6 +573,25 @@ async fn restricted_keys_use_effective_auto_connected_scope() {
         )
         .await
         .unwrap();
+    assert!(
+        crate::services::key_service::active_auto_connected_service_ids(&f.state.db, &f.person)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let catalog = f.platform_catalog().await;
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.personal.id},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    crate::test_utils::connect_catalog_fixture_services(&f.state.db, &f.person)
+        .await
+        .unwrap();
     let key = f.key(&f.person, Some(&[]), true).await;
     assert!(key.allowed_service_ids.is_empty());
     for path in f.read_paths() {
@@ -804,7 +823,7 @@ async fn api_key_listing_neither_provisions_nor_reconciles_inventory() {
             .count_documents(doc! {"user_id": &f.person, "catalog_service_id": &catalog.id})
             .await
             .unwrap(),
-        1
+        0
     );
     assert!(
         f.state
@@ -813,7 +832,7 @@ async fn api_key_listing_neither_provisions_nor_reconciles_inventory() {
             .find_one(doc! {"_id": &f.personal.id})
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     f.state.db.drop().await.unwrap();
 }

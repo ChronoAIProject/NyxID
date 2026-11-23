@@ -148,6 +148,23 @@ async fn grant_services_personal_list_create_save_round_trip_includes_unpublishe
         )
         .await
         .unwrap();
+    let before = db
+        .collection::<Document>("user_services")
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    let _ = inventory(&f, &f.admin, None).await;
+    assert_eq!(
+        before,
+        db.collection::<Document>("user_services")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        "grant listing must not establish a connection"
+    );
+    crate::test_utils::connect_catalog_fixture_services(db, &f.admin)
+        .await
+        .unwrap();
     let list = inventory(&f, &f.admin, None).await;
     assert_eq!(list.as_array().unwrap().len(), 5, "{list}");
     let public_metadata = list
@@ -201,14 +218,14 @@ async fn grant_services_personal_list_create_save_round_trip_includes_unpublishe
     let key = f.key(&thread).await;
     assert!(!key.allow_all_services && !key.allow_auto_connected_services);
     assert_eq!(key.allowed_service_ids.len(), 5);
-    // It is the personal auto-connected row, not an unbound catalog grant.
+    // It is the explicitly opted-in personal row, not an unbound catalog grant.
     let connection = db
         .collection::<crate::models::user_service::UserService>("user_services")
         .find_one(doc! {"user_id":&f.admin,"catalog_service_id":&public.id})
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(connection.source.as_deref(), Some("auto_provision"));
+    assert_eq!(connection.source.as_deref(), Some("catalog_opt_in"));
     assert!(key.allowed_service_ids.contains(&connection.id));
     assert_eq!(
         db.collection::<Document>("user_services")
@@ -294,7 +311,7 @@ async fn grant_services_personal_list_create_save_round_trip_includes_unpublishe
 }
 
 #[tokio::test]
-async fn grant_services_org_round_trip_public_explicit_restricted_auto_and_live_acl() {
+async fn grant_services_org_round_trip_explicit_platforms_and_live_acl() {
     let f = fixture("grant_services_org_roundtrip").await;
     let db = &f.state.db;
     let public = catalog(
@@ -304,7 +321,7 @@ async fn grant_services_org_round_trip_public_explicit_restricted_auto_and_live_
         vec![],
     )
     .await;
-    catalog(
+    let restricted = catalog(
         &f,
         "restricted-org",
         Some(PlatformKeyAudience::Restricted),
@@ -329,6 +346,18 @@ async fn grant_services_org_round_trip_public_explicit_restricted_auto_and_live_
         )
         .await
         .unwrap();
+    crate::services::unified_key_service::create_platform_key(
+        db,
+        &f.org,
+        &f.admin,
+        &restricted.slug,
+        &restricted.name,
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     let list = inventory(&f, &f.admin, Some(&f.org)).await;
     assert_eq!(list.as_array().unwrap().len(), 3, "{list}");
     let metadata = list
@@ -510,6 +539,9 @@ async fn grant_services_saved_public_inference_executes_with_the_person_as_platf
         .unwrap();
     let org_connection = f.service(&f.org, "org-inference").await;
     db.collection::<Document>("user_services").update_one(doc!{"_id":&org_connection}, doc!{"$set":{"catalog_service_id":&model.id,"credential_binding":"platform","auth_method":"bearer"}}).await.unwrap();
+    crate::test_utils::connect_catalog_fixture_services(db, &f.admin)
+        .await
+        .unwrap();
     for org in [None, Some(f.org.as_str())] {
         let inventory = inventory(&f, &f.admin, org).await;
         let connection = inventory
@@ -635,6 +667,32 @@ async fn grant_services_catalog_id_remains_supported_before_personal_provisionin
         vec![],
     )
     .await;
+    // Historical catalog grants retain their identity through an explicit
+    // legacy connection, even before a personal UserService has been created.
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::user_service_connection::UserServiceConnection>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::user_service_connection::UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.admin.clone(),
+                service_id: catalog.id.clone(),
+                credential_encrypted: None,
+                secret_context_versions: Default::default(),
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 1,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
     let created = create(&f, None, "catalog-id", json!([catalog.id])).await;
     let agent = team::agent(&f.state.db, &f.admin, created["id"].as_str().unwrap())
         .await
@@ -661,6 +719,18 @@ async fn grant_services_catalog_id_remains_supported_before_personal_provisionin
         0,
         "resolving grants does not provision connections"
     );
+    assert_eq!(
+        inventory(&f, &f.admin, None)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "the explicit legacy connection is already available",
+    );
+    crate::test_utils::connect_catalog_fixture_services(&f.state.db, &f.admin)
+        .await
+        .unwrap();
     let list = inventory(&f, &f.admin, None).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     let _ = save(&f, &f.admin, &agent.id, json!([list[0]["id"]]))

@@ -3367,6 +3367,42 @@ pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, 
     );
 }
 
+/// Explicitly opt a test owner into eligible catalog fixtures. Production
+/// inventory/login never invokes this fixture helper.
+pub async fn connect_catalog_fixture_services(
+    db: &mongodb::Database,
+    owner: &str,
+) -> crate::errors::AppResult<()> {
+    crate::services::role_service::seed_system_roles(db).await?;
+    db.collection::<User>(crate::models::user::COLLECTION_NAME).update_one(bson::doc! {"_id":owner},bson::doc! {"$setOnInsert":bson::to_document(&test_user(owner,UserType::Person)).unwrap()}).upsert(true).await?;
+    crate::services::security_readiness_service::ready_test_replica(db).await;
+    let catalogs: Vec<crate::models::downstream_service::DownstreamService> = db
+        .collection(crate::models::downstream_service::COLLECTION_NAME)
+        .find(bson::doc! {"is_active":true})
+        .await?
+        .try_collect()
+        .await?;
+    for catalog in catalogs {
+        match crate::services::unified_key_service::connect_catalog_service(
+            db,
+            owner,
+            owner,
+            &catalog.slug,
+        )
+        .await
+        {
+            Ok(_)
+            | Err(
+                crate::errors::AppError::NotFound(_)
+                | crate::errors::AppError::BadRequest(_)
+                | crate::errors::AppError::Forbidden(_),
+            ) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// A valid unencrypted one-page PDF shared by media ingestion and Base wire tests.
 pub fn test_pdf() -> Vec<u8> {
     use lopdf::{Document, Object, dictionary};

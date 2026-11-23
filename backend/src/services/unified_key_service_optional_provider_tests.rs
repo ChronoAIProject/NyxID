@@ -28,7 +28,7 @@ async fn insert_requirement(db: &mongodb::Database, catalog_id: &str, required: 
     requirement.id
 }
 
-async fn automatic_service(db: &mongodb::Database, owner: &str, catalog: &str) -> UserService {
+async fn opted_in_service(db: &mongodb::Database, owner: &str, catalog: &str) -> UserService {
     let rows: Vec<UserService> = db
         .collection::<UserService>(USER_SERVICES)
         .find(doc! { "user_id": owner, "catalog_service_id": catalog })
@@ -37,9 +37,9 @@ async fn automatic_service(db: &mongodb::Database, owner: &str, catalog: &str) -
         .try_collect()
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1, "exactly one automatic connection must exist");
+    assert_eq!(rows.len(), 1, "exactly one explicit connection must exist");
     let service = rows.into_iter().next().unwrap();
-    assert_eq!(service.source.as_deref(), Some(AUTO_PROVISION_SOURCE));
+    assert_eq!(service.source.as_deref(), Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE));
     assert!(service.api_key_id.is_none());
     assert!(service.is_active);
     service
@@ -65,7 +65,7 @@ async fn assert_endpoint_count(db: &mongodb::Database, owner: &str, expected: u6
 }
 
 #[tokio::test]
-async fn optional_only_provisions_once_without_credentials() {
+async fn optional_only_connects_once_without_credentials() {
     let db = connect_test_database("optional_provision").await.unwrap();
     let owner = uuid::Uuid::new_v4().to_string();
     let catalog = no_auth_catalog();
@@ -75,12 +75,12 @@ async fn optional_only_provisions_once_without_credentials() {
         .unwrap();
     insert_requirement(&db, &catalog.id, false).await;
 
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let first = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let first = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(first.auth_method, "none");
     assert_endpoint_count(&db, &owner, 1).await;
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let second = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let second = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(first.id, second.id);
     assert_eq!(first.endpoint_id, second.endpoint_id);
     assert_endpoint_count(&db, &owner, 1).await;
@@ -95,19 +95,19 @@ async fn optional_requirement_preserves_existing_connection_and_endpoint() {
         .insert_one(&catalog)
         .await
         .unwrap();
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let first = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let first = opted_in_service(&db, &owner, &catalog.id).await;
 
     insert_requirement(&db, &catalog.id, false).await;
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let second = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let second = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(first.id, second.id);
     assert_eq!(first.endpoint_id, second.endpoint_id);
     assert_endpoint_count(&db, &owner, 1).await;
 }
 
 #[tokio::test]
-async fn legacy_master_optional_requirement_rejects_and_removes_automatic_connection() {
+async fn legacy_master_optional_requirement_suspends_explicit_connection_without_removal() {
     let db = connect_test_database("optional_legacy_master")
         .await
         .unwrap();
@@ -127,8 +127,8 @@ async fn legacy_master_optional_requirement_rejects_and_removes_automatic_connec
         .await
         .unwrap();
 
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let service = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let service = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(service.auth_method, "bearer");
     assert_eq!(service.auth_key_name, "Authorization");
     let endpoint = db
@@ -152,24 +152,23 @@ async fn legacy_master_optional_requirement_rejects_and_removes_automatic_connec
         verify_auto_provision_eligibility(&db, &service, &owner).await,
         Err(AppError::NotFound(_))
     ));
-    // The held row is rejected before listing reconciles it away.
-    let held = automatic_service(&db, &owner, &catalog.id).await;
+    // Live eligibility rejects use while preserving the explicit connection.
+    let held = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(held.id, service.id);
     assert_eq!(held.endpoint_id, endpoint.id);
     assert_endpoint_count(&db, &owner, 1).await;
 
-    // Reconciliation removes the automatic route so legacy delegation is retained;
-    // provisioning must not recreate it on either listing.
+    // Retrying Connect cannot erase the suspended connection or create an orphan.
     for _ in 0..2 {
-        auto_provision_no_auth_services(&db, &owner).await.unwrap();
+        crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
         assert_eq!(
             db.collection::<UserService>(USER_SERVICES)
                 .count_documents(doc! { "user_id": &owner, "catalog_service_id": &catalog.id })
                 .await
                 .unwrap(),
-            0
+            1
         );
-        assert_endpoint_count(&db, &owner, 0).await;
+        assert_endpoint_count(&db, &owner, 1).await;
     }
 }
 
@@ -182,8 +181,8 @@ async fn optional_runtime_eligibility_rejects_new_required_requirement_immediate
         .insert_one(&catalog)
         .await
         .unwrap();
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let service = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let service = opted_in_service(&db, &owner, &catalog.id).await;
     let requirement = insert_requirement(&db, &catalog.id, false).await;
     verify_auto_provision_eligibility(&db, &service, &owner)
         .await
@@ -205,7 +204,7 @@ async fn optional_runtime_eligibility_rejects_new_required_requirement_immediate
 }
 
 #[tokio::test]
-async fn optional_to_required_reconciles_and_optional_again_reprovisions_once() {
+async fn optional_to_required_suspends_and_optional_again_preserves_explicit_identity() {
     let db = connect_test_database("optional_transition").await.unwrap();
     let owner = uuid::Uuid::new_v4().to_string();
     let catalog = no_auth_catalog();
@@ -215,8 +214,8 @@ async fn optional_to_required_reconciles_and_optional_again_reprovisions_once() 
         .unwrap();
     insert_requirement(&db, &catalog.id, false).await;
     let requirement = insert_requirement(&db, &catalog.id, false).await;
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let first = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let first = opted_in_service(&db, &owner, &catalog.id).await;
 
     db.collection::<ServiceProviderRequirement>(REQUIREMENTS)
         .update_one(
@@ -225,17 +224,17 @@ async fn optional_to_required_reconciles_and_optional_again_reprovisions_once() 
         )
         .await
         .unwrap();
-    // A mixed optional/required set must block both reconciliation and provisioning.
+    // A mixed optional/required set suspends use without erasing explicit consent.
     for _ in 0..2 {
-        auto_provision_no_auth_services(&db, &owner).await.unwrap();
+        crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
         assert_eq!(
             db.collection::<UserService>(USER_SERVICES)
                 .count_documents(doc! { "user_id": &owner })
                 .await
                 .unwrap(),
-            0
+            1
         );
-        assert_endpoint_count(&db, &owner, 0).await;
+        assert_endpoint_count(&db, &owner, 1).await;
     }
     db.collection::<ServiceProviderRequirement>(REQUIREMENTS)
         .update_one(
@@ -244,12 +243,12 @@ async fn optional_to_required_reconciles_and_optional_again_reprovisions_once() 
         )
         .await
         .unwrap();
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let replacement = automatic_service(&db, &owner, &catalog.id).await;
-    assert_ne!(first.id, replacement.id);
-    assert_ne!(first.endpoint_id, replacement.endpoint_id);
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let repeated = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let replacement = opted_in_service(&db, &owner, &catalog.id).await;
+    assert_eq!(first.id, replacement.id);
+    assert_eq!(first.endpoint_id, replacement.endpoint_id);
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let repeated = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(replacement.id, repeated.id);
     assert_eq!(replacement.endpoint_id, repeated.endpoint_id);
     assert_endpoint_count(&db, &owner, 1).await;
@@ -283,7 +282,7 @@ async fn optional_provider_does_not_relax_other_eligibility_guards() {
             .unwrap();
         insert_requirement(&db, &catalog.id, false).await;
     }
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
     assert_eq!(
         db.collection::<UserService>(USER_SERVICES)
             .count_documents(doc! { "user_id": &owner })
@@ -303,8 +302,8 @@ async fn optional_requirement_missing_required_flag_fails_closed() {
         .insert_one(&catalog)
         .await
         .unwrap();
-    auto_provision_no_auth_services(&db, &owner).await.unwrap();
-    let service = automatic_service(&db, &owner, &catalog.id).await;
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
+    let service = opted_in_service(&db, &owner, &catalog.id).await;
     let requirement = insert_requirement(&db, &catalog.id, false).await;
     db.collection::<bson::Document>(REQUIREMENTS)
         .update_one(
@@ -318,10 +317,10 @@ async fn optional_requirement_missing_required_flag_fails_closed() {
             .await
             .is_err()
     );
-    assert!(auto_provision_no_auth_services(&db, &owner).await.is_err());
+    assert!(crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.is_err());
     // Reconciliation cannot determine eligibility from malformed policy and
     // must retain the existing row rather than destructively guessing.
-    let retained = automatic_service(&db, &owner, &catalog.id).await;
+    let retained = opted_in_service(&db, &owner, &catalog.id).await;
     assert_eq!(retained.id, service.id);
     assert_eq!(retained.endpoint_id, service.endpoint_id);
 }

@@ -1,3 +1,7 @@
+mod catalog_opt_in;
+pub use catalog_opt_in::{
+    CATALOG_OPT_IN_READINESS, CATALOG_OPT_IN_SOURCE, connect_catalog_service,
+};
 mod platform;
 pub use platform::set_platform_connection_active;
 pub use platform::{
@@ -302,10 +306,6 @@ async fn resolve_unique_slug(
 
 fn exact_slug_conflict(slug: &str) -> AppError {
     AppError::Conflict(format!("Service slug '{slug}' is already in use"))
-}
-
-fn auto_provision_source_id(user_id: &str, catalog_service_id: &str) -> String {
-    format!("{user_id}:{catalog_service_id}")
 }
 
 fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
@@ -1830,353 +1830,6 @@ async fn cleanup_auto_provision_endpoint(db: &mongodb::Database, user_id: &str, 
     }
 }
 
-/// Auto-provision UserEndpoint + UserService for catalog services that are
-/// callable without a user-owned credential.
-/// Called lazily on list_keys. Idempotent: skips services already provisioned.
-///
-/// Eligible platform-managed services are:
-/// - Truly no-auth services: `auth_method == "none"` on the DownstreamService
-///   AND no required `ServiceProviderRequirement` exists.
-/// - Public internal services with a catalog master credential:
-///   `visibility == "public"`, `service_category == "internal"`,
-///   `auth_method != "none"`, and no per-user credential requirement.
-///   Legacy rows without `platform_key` also require no `ServiceProviderRequirement`.
-///
-/// Visibility rules:
-/// - Public eligible services: auto-provision for all users.
-/// - Private services with `developer_app_ids`: only auto-provision if the user
-///   has an active consent for at least one of those OAuth clients (developer apps).
-///   The matched app ID is stored as `source_app_id` on the UserService.
-/// - Private services without `developer_app_ids`: never auto-provision.
-///
-/// Reconciliation runs first: any previously auto-provisioned services whose
-/// catalog entry is no longer eligible are deleted (not deactivated). Deletion
-/// allows re-provisioning if the user becomes eligible again later. Users
-/// cannot deactivate auto-connected services themselves (the handler rejects
-/// PUT/DELETE on auto-connected keys), so existing rows for a given
-/// `(user_id, catalog_service_id)` pair are always either active (valid) or
-/// absent (deleted by reconciliation / never created).
-pub async fn auto_provision_no_auth_services(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<()> {
-    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
-    let providers = platform_key_service::load_providers(db).await?;
-    auto_provision_with_grants(db, user_id, &grants, &providers).await
-}
-
-pub(crate) async fn auto_provision_with_grants(
-    db: &mongodb::Database,
-    user_id: &str,
-    grants: &OwnerGrants,
-    providers: &HashMap<String, ProviderConfig>,
-) -> AppResult<()> {
-    crate::services::service_history::context::scope(
-        crate::services::service_history::context::system("automatic_service_provisioning"),
-        async {
-            Box::pin(auto_provision_owner_services(
-                db, user_id, false, grants, providers,
-            ))
-            .await?;
-            for membership in grants.memberships().iter().filter(|m| m.role.can_proxy()) {
-                Box::pin(auto_provision_owner_services(
-                    db,
-                    &membership.org_user_id,
-                    true,
-                    grants,
-                    providers,
-                ))
-                .await?;
-            }
-            Ok(())
-        },
-    )
-    .await
-}
-
-async fn auto_provision_owner_services(
-    db: &mongodb::Database,
-    user_id: &str,
-    explicit_platform_only: bool,
-    grants: &OwnerGrants,
-    providers: &HashMap<String, ProviderConfig>,
-) -> AppResult<()> {
-    use crate::models::service_provider_requirement::{
-        COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
-    };
-
-    // Reconcile first: delete any previously auto-provisioned services whose
-    // catalog entry is no longer eligible (deleted, deactivated, changed auth
-    // method, gained a blocking SPR, went private without consent, etc). This is
-    // fully independent of the provisioning pipeline below.
-    reconcile_stale_auto_provisions(db, user_id, grants, providers).await;
-    super::catalog_endpoint_service::reconcile_owner(db, user_id).await;
-
-    // Find all active catalog services that could be user-callable without a
-    // user-owned credential. The finer auth/provider-requirement predicate is
-    // applied in memory below.
-    let all_candidates: Vec<DownstreamService> = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! { "is_active": true, "service_type": "http" })
-        .await?
-        .try_collect()
-        .await?;
-    let mut candidates = Vec::new();
-    for candidate in all_candidates {
-        // Inherited org traversal is new; preserve legacy personal-only provisioning.
-        if explicit_platform_only && candidate.platform_key.is_none() {
-            continue;
-        }
-        if candidate.platform_key.is_some() {
-            let provider = candidate
-                .provider_config_id
-                .as_ref()
-                .and_then(|id| providers.get(id));
-            if !platform_key_service::auto_provisionable_with_grants(
-                &candidate, provider, user_id, grants,
-            ) {
-                continue;
-            }
-        }
-        candidates.push(candidate);
-    }
-
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    // No-auth connections are blocked only by required SPRs; implicit legacy
-    // master-credential connections retain their any-SPR blocker.
-    let candidate_ids: Vec<&str> = candidates.iter().map(|s| s.id.as_str()).collect();
-    let sprs: Vec<ServiceProviderRequirement> = db
-        .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-        .find(doc! { "service_id": { "$in": &candidate_ids } })
-        .await?
-        .try_collect()
-        .await?;
-    let has_any_spr: std::collections::HashSet<&str> =
-        sprs.iter().map(|r| r.service_id.as_str()).collect();
-    let has_required_spr: std::collections::HashSet<&str> = sprs
-        .iter()
-        .filter(|r| r.required)
-        .map(|r| r.service_id.as_str())
-        .collect();
-
-    let provisionable_services: Vec<&DownstreamService> = candidates
-        .iter()
-        .filter(|s| {
-            is_auto_provisionable_catalog_service(
-                s,
-                has_any_spr.contains(s.id.as_str()),
-                has_required_spr.contains(s.id.as_str()),
-            )
-        })
-        .collect();
-
-    if provisionable_services.is_empty() {
-        return Ok(());
-    }
-
-    // Collect all developer_app_ids from private services to batch-check consents
-    let all_app_ids: Vec<&str> = provisionable_services
-        .iter()
-        .filter(|s| s.visibility == "private")
-        .filter_map(|s| s.developer_app_ids.as_ref())
-        .flat_map(|ids| ids.iter().map(|id| id.as_str()))
-        .collect();
-
-    // Load user's consents for the referenced developer apps (if any).
-    // Only non-expired consents for active OAuth clients count.
-    let consented_app_ids: std::collections::HashSet<String> = if all_app_ids.is_empty() {
-        std::collections::HashSet::new()
-    } else {
-        load_valid_app_consents(db, user_id, &all_app_ids).await?
-    };
-
-    // Build the eligible list: (service, matched_app_id)
-    // - Public: always eligible, no app context
-    // - Private with developer_app_ids: eligible only if user consented to >= 1 app
-    // - Private without developer_app_ids: never eligible
-    let eligible: Vec<(&DownstreamService, Option<&str>)> = provisionable_services
-        .iter()
-        .filter_map(|svc| {
-            if svc.platform_key.is_some() || svc.visibility != "private" {
-                // Public (or legacy without visibility) -- always eligible
-                Some((*svc, None))
-            } else if let Some(ref app_ids) = svc.developer_app_ids {
-                // Private with developer_app_ids -- find first consented app
-                let matched = app_ids
-                    .iter()
-                    .find(|id| consented_app_ids.contains(id.as_str()));
-                matched.map(|app_id| (*svc, Some(app_id.as_str())))
-            } else {
-                // Private without developer_app_ids -- skip
-                None
-            }
-        })
-        .collect();
-
-    if eligible.is_empty() {
-        return Ok(());
-    }
-
-    // Active connections and user-disabled connections block auto-provisioning.
-    // Delete leaves an inactive tombstone without an endpoint; only those
-    // non-auto rows may be replaced. Keep disabled rows enableable on their slug.
-    let catalog_ids: Vec<&str> = eligible.iter().map(|(s, _)| s.id.as_str()).collect();
-    let existing: Vec<crate::models::user_service::UserService> =
-        crate::services::service_history::collection::<crate::models::user_service::UserService>(
-            db,
-            crate::models::user_service::COLLECTION_NAME,
-        )
-        .find(doc! {
-            "user_id": user_id,
-            "catalog_service_id": { "$in": &catalog_ids },
-        })
-        .await?
-        .try_collect()
-        .await?;
-
-    let inactive_endpoint_ids: Vec<&str> = existing
-        .iter()
-        .filter(|s| !s.is_active && s.source.as_deref() != Some(AUTO_PROVISION_SOURCE))
-        .map(|s| s.endpoint_id.as_str())
-        .collect();
-    let retained_endpoint_ids: HashSet<String> = if inactive_endpoint_ids.is_empty() {
-        HashSet::new()
-    } else {
-        db.collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
-            .distinct("_id", doc! { "_id": { "$in": inactive_endpoint_ids } })
-            .await?
-            .into_iter()
-            .filter_map(|id| id.as_str().map(str::to_owned))
-            .collect()
-    };
-
-    let existing_catalog_ids: std::collections::HashSet<&str> = existing
-        .iter()
-        .filter(|s| {
-            s.is_active
-                || (s.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
-                    && retained_endpoint_ids.contains(&s.endpoint_id))
-        })
-        .filter_map(|s| s.catalog_service_id.as_deref())
-        .collect();
-
-    for (svc, source_app_id) in &eligible {
-        if existing_catalog_ids.contains(svc.id.as_str()) {
-            continue;
-        }
-
-        let unique_slug = match resolve_unique_slug(
-            db,
-            user_id,
-            &svc.slug,
-            SlugCollisionStrategy::AutoDisambiguate,
-        )
-        .await
-        {
-            Ok(slug) => slug,
-            Err(e) => {
-                tracing::warn!(
-                    service = %svc.slug,
-                    error = %e,
-                    "Failed to resolve slug for auto-provision"
-                );
-                continue;
-            }
-        };
-
-        let endpoint = match user_endpoint_service::create_endpoint(
-            db,
-            user_id,
-            &svc.name,
-            &svc.base_url,
-            Some(&svc.id),
-            svc.openapi_spec_url.as_deref(),
-        )
-        .await
-        {
-            Ok(ep) => ep,
-            Err(e) => {
-                tracing::warn!(
-                    service = %svc.slug,
-                    error = %e,
-                    "Failed to create endpoint for auto-provision"
-                );
-                continue;
-            }
-        };
-
-        let source_id = auto_provision_source_id(user_id, &svc.id);
-        let catalog_identity = identity_config_from_downstream_service(svc);
-        let platform_auth = if svc.platform_key.is_some() {
-            Some(super::platform_key_service::effective_auth(db, svc).await?)
-        } else {
-            None
-        };
-        let (auth_method, auth_key_name) = platform_auth
-            .as_ref()
-            .map(|(method, key)| (method.as_str(), key.as_str()))
-            .unwrap_or_else(|| auto_provision_auth_snapshot(svc));
-        // Auto-provision uses server transport (node_id = None) and creates
-        // the service directly under its eligible personal or org owner.
-        match user_service_service::create_user_service(
-            db,
-            user_id,
-            user_id,
-            &unique_slug,
-            &endpoint.id,
-            None, // platform-managed services do not have a user API key
-            auth_method,
-            auth_key_name,
-            Some(&svc.id),
-            None,
-            0,
-            "http",
-            SshAuthMode::ProxyOnly,
-            Some(AUTO_PROVISION_SOURCE),
-            Some(&source_id),
-            *source_app_id,
-            &catalog_identity,
-            None,
-            false,
-        )
-        .await
-        {
-            Ok(service) => {
-                if svc.platform_key.is_some() {
-                    crate::services::service_history::collection::<UserService>(
-                        db,
-                        crate::models::user_service::COLLECTION_NAME,
-                    )
-                    .update_one(
-                        doc! { "_id": &service.id },
-                        doc! { "$set": { "credential_binding": "platform" } },
-                    )
-                    .await?;
-                }
-            }
-            Err(AppError::Conflict(_)) => {
-                cleanup_auto_provision_endpoint(db, user_id, &endpoint.id).await;
-            }
-            Err(AppError::DatabaseError(error)) if is_duplicate_key_error(&error) => {
-                cleanup_auto_provision_endpoint(db, user_id, &endpoint.id).await;
-            }
-            Err(e) => {
-                cleanup_auto_provision_endpoint(db, user_id, &endpoint.id).await;
-                tracing::warn!(
-                    service = %svc.slug,
-                    error = %e,
-                    "Failed to create user service for auto-provision"
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Load valid (non-expired, active-client) app consents for a user.
 /// Shared between the provisioning pipeline and reconciliation.
 pub async fn load_valid_app_consents(
@@ -2226,288 +1879,7 @@ pub async fn load_valid_app_consents(
     Ok(consents.into_iter().map(|c| c.client_id).collect())
 }
 
-/// Delete stale auto-provisioned UserServices that the user is no longer
-/// eligible for. Fully self-contained: loads the user's
-/// auto-provisioned services, their catalog entries, SPRs, and consents,
-/// then applies the complete auto-provision eligibility predicate.
-///
-/// A service is stale if its catalog entry:
-/// - No longer exists or is inactive
-/// - No longer satisfies the auto-provision predicate (auth_method changed,
-///   gained a required SPR for a no-auth row or any SPR for a legacy master row,
-///   changed to SSH, changed category, now requires user credential, etc.)
-/// - Is now private without `developer_app_ids`
-/// - Is now private with `developer_app_ids` but the user has no valid consent
-async fn reconcile_stale_auto_provisions(
-    db: &mongodb::Database,
-    user_id: &str,
-    grants: &OwnerGrants,
-    providers: &HashMap<String, ProviderConfig>,
-) {
-    use crate::models::service_provider_requirement::{
-        COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
-    };
-
-    // Include inactive automatic rows so reconciliation releases their source IDs.
-    let auto_services: Vec<crate::models::user_service::UserService> = match crate::services::service_history::collection::<crate::models::user_service::UserService>(db, crate::models::user_service::COLLECTION_NAME)
-        .find(doc! {
-            "user_id": user_id,
-            "source": AUTO_PROVISION_SOURCE,
-        })
-        .await
-    {
-        Ok(cursor) => match cursor.try_collect().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "reconcile: failed to load auto-provisioned services");
-                return;
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "reconcile: failed to query auto-provisioned services");
-            return;
-        }
-    };
-
-    if auto_services.is_empty() {
-        return;
-    }
-
-    // Batch-load catalog entries
-    let catalog_ids: Vec<&str> = auto_services
-        .iter()
-        .filter_map(|s| s.catalog_service_id.as_deref())
-        .collect();
-    let catalog_map: std::collections::HashMap<String, DownstreamService> =
-        if catalog_ids.is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            match db
-                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                .find(doc! { "_id": { "$in": &catalog_ids } })
-                .await
-            {
-                Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
-                    Ok(svcs) => svcs.into_iter().map(|s| (s.id.clone(), s)).collect(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "reconcile: failed to load catalog services");
-                        return;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "reconcile: failed to query catalog services");
-                    return;
-                }
-            }
-        };
-
-    // Load SPRs for the catalog entries to check the auto-provision predicate.
-    let sprs: Vec<ServiceProviderRequirement> = if catalog_ids.is_empty() {
-        Vec::new()
-    } else {
-        match db
-            .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-            .find(doc! { "service_id": { "$in": &catalog_ids } })
-            .await
-        {
-            Ok(cursor) => match cursor
-                .try_collect::<Vec<ServiceProviderRequirement>>()
-                .await
-            {
-                Ok(sprs) => sprs,
-                Err(e) => {
-                    tracing::warn!(error = %e, "reconcile: failed to load SPRs");
-                    return;
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "reconcile: failed to query SPRs");
-                return;
-            }
-        }
-    };
-    let has_any_spr: std::collections::HashSet<&str> =
-        sprs.iter().map(|r| r.service_id.as_str()).collect();
-    let has_required_spr: std::collections::HashSet<&str> = sprs
-        .iter()
-        .filter(|r| r.required)
-        .map(|r| r.service_id.as_str())
-        .collect();
-
-    // Collect all developer_app_ids from private catalog entries to load consents
-    let all_app_ids: Vec<&str> = catalog_map
-        .values()
-        .filter(|ds| ds.visibility == "private")
-        .filter_map(|ds| ds.developer_app_ids.as_ref())
-        .flat_map(|ids| ids.iter().map(|id| id.as_str()))
-        .collect();
-
-    let consented_app_ids = match load_valid_app_consents(db, user_id, &all_app_ids).await {
-        Ok(set) => set,
-        Err(e) => {
-            tracing::warn!(error = %e, "reconcile: failed to load consents");
-            return;
-        }
-    };
-
-    let platform_valid: HashSet<&str> = catalog_map
-        .values()
-        .filter(|catalog| {
-            platform_key_service::auto_provisionable_with_grants(
-                catalog,
-                catalog
-                    .provider_config_id
-                    .as_ref()
-                    .and_then(|id| providers.get(id)),
-                user_id,
-                grants,
-            )
-        })
-        .map(|catalog| catalog.id.as_str())
-        .collect();
-
-    // Determine which auto-provisioned services are now stale.
-    // A service is valid only if its catalog entry still satisfies the full
-    // auto-provision predicate AND the visibility/consent rules.
-    let stale: Vec<&crate::models::user_service::UserService> = auto_services
-        .iter()
-        .filter(|us| {
-            // Inactive automatic rows must release the unique source identity
-            // before a replacement can be created, even if the grant is valid.
-            if !us.is_active {
-                return true;
-            }
-            let catalog = us
-                .catalog_service_id
-                .as_deref()
-                .and_then(|id| catalog_map.get(id));
-
-            match catalog {
-                None => true, // catalog entry deleted
-                Some(ds) => {
-                    if ds.platform_key.is_some() {
-                        return !platform_valid.contains(ds.id.as_str());
-                    }
-                    if !is_auto_provisionable_catalog_service(
-                        ds,
-                        has_any_spr.contains(ds.id.as_str()),
-                        has_required_spr.contains(ds.id.as_str()),
-                    ) {
-                        return true; // catalog changed -- stale
-                    }
-
-                    let (auth_method, auth_key_name) = auto_provision_auth_snapshot(ds);
-                    if us.auth_method != auth_method || us.auth_key_name != auth_key_name {
-                        return true; // auth snapshot changed -- recreate
-                    }
-
-                    // Check visibility/consent rules
-                    if ds.visibility == "private" {
-                        match ds.developer_app_ids.as_ref() {
-                            Some(app_ids) if !app_ids.is_empty() => {
-                                // Stale if no consent matches
-                                !app_ids
-                                    .iter()
-                                    .any(|id| consented_app_ids.contains(id.as_str()))
-                            }
-                            _ => true, // private without app_ids -- stale
-                        }
-                    } else {
-                        false // public + truly-no-auth -- still valid
-                    }
-                }
-            }
-        })
-        .collect();
-
-    if stale.is_empty() {
-        return;
-    }
-
-    let stale_service_ids: Vec<&str> = stale.iter().map(|us| us.id.as_str()).collect();
-    let stale_endpoint_ids: Vec<&str> = stale.iter().map(|us| us.endpoint_id.as_str()).collect();
-
-    // Delete stale UserService rows (not deactivate). Deletion lets the
-    // provisioning path re-create the service when the user becomes
-    // eligible again (e.g., re-consents to a developer app). Deactivation
-    // would retain the unique (source, source_id) and block recreation.
-    //
-    // Note: users cannot deactivate auto-connected services themselves --
-    // DELETE /keys/:id and PUT /keys/:id both reject auto-connected rows.
-    // So all inactive auto-provisioned rows are from reconciliation, and
-    // deleting here is always correct.
-    match crate::services::service_history::collection::<crate::models::user_service::UserService>(
-        db,
-        crate::models::user_service::COLLECTION_NAME,
-    )
-    .delete_many(doc! { "_id": { "$in": &stale_service_ids } })
-    .await
-    {
-        Ok(result) => {
-            if result.deleted_count > 0 {
-                tracing::info!(
-                    user_id = %user_id,
-                    count = result.deleted_count,
-                    "Deleted stale auto-provisioned services"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id = %user_id,
-                count = stale_service_ids.len(),
-                error = %e,
-                "Failed to delete stale auto-provisioned services"
-            );
-            return; // don't clean up endpoints if services weren't deleted
-        }
-    }
-
-    // Clean up orphaned auto-provisioned endpoints. Only delete endpoints
-    // that are not referenced by any remaining UserService.
-    if !stale_endpoint_ids.is_empty() {
-        // Find which of these endpoints are still referenced by other services
-        let still_referenced: std::collections::HashSet<String> =
-            match crate::services::service_history::collection::<
-                crate::models::user_service::UserService,
-            >(db, crate::models::user_service::COLLECTION_NAME)
-            .find(doc! {
-                "user_id": user_id,
-                "endpoint_id": { "$in": &stale_endpoint_ids },
-            })
-            .await
-            {
-                Ok(cursor) => match cursor
-                    .try_collect::<Vec<crate::models::user_service::UserService>>()
-                    .await
-                {
-                    Ok(svcs) => svcs.into_iter().map(|s| s.endpoint_id).collect(),
-                    Err(_) => return,
-                },
-                Err(_) => return,
-            };
-
-        let orphaned: Vec<&str> = stale_endpoint_ids
-            .iter()
-            .filter(|id| !still_referenced.contains(**id))
-            .copied()
-            .collect();
-
-        if !orphaned.is_empty() {
-            let _ = crate::services::service_history::collection::<mongodb::bson::Document>(
-                db,
-                crate::models::user_endpoint::COLLECTION_NAME,
-            )
-            .delete_many(doc! {
-                "_id": { "$in": &orphaned },
-                "user_id": user_id,
-            })
-            .await;
-        }
-    }
-}
-
-/// GET /api/v1/keys -- list all keys (personal + org-inherited) as combined views.
+/// List persisted user connections and inherited organization connections.
 ///
 /// Each returned `KeyView` carries a `credential_source` tag matching the
 /// `/user-services` endpoint. Org-inherited services appear after the user's
@@ -2533,7 +1905,6 @@ pub async fn list_keys_with_grants(
     grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
-    auto_provision_with_grants(db, user_id, grants, providers).await?;
     list_keys_read_only_with_grants(db, encryption_keys, user_id, grants, providers).await
 }
 
@@ -2679,7 +2050,28 @@ pub async fn list_keys_read_only_with_tool_bindings(
             {
                 return None;
             }
-            let ep = ep_map.get(t.service.endpoint_id.as_str())?;
+            let mut ep = (*ep_map.get(t.service.endpoint_id.as_str())?).clone();
+            if let Some(catalog) = t
+                .service
+                .catalog_service_id
+                .as_deref()
+                .and_then(|id| cat_map.get(id))
+            {
+                let catalog_owns_url = catalog.provider_config_id.as_ref().is_none_or(|id| {
+                    providers
+                        .get(id)
+                        .is_some_and(|provider| !provider.requires_gateway_url)
+                });
+                if catalog_owns_url {
+                    super::catalog_endpoint_service::apply_live_target(
+                        &t.service,
+                        &mut ep,
+                        &catalog.id,
+                        &catalog.base_url,
+                        &catalog.openapi_spec_url,
+                    );
+                }
+            }
             let ak = t
                 .service
                 .api_key_id
@@ -2687,7 +2079,7 @@ pub async fn list_keys_read_only_with_tool_bindings(
                 .and_then(|id| ak_map.get(id).copied());
             Some(build_key_view(
                 &t.service,
-                ep,
+                &ep,
                 ak,
                 &cat_map,
                 &app_name_map,
@@ -2826,6 +2218,22 @@ pub async fn get_key(
         } else {
             None
         };
+        if catalog.provider_config_id.is_none()
+            || provider
+                .as_ref()
+                .is_some_and(|provider| !provider.requires_gateway_url)
+        {
+            let mut live_endpoint = ep.clone();
+            super::catalog_endpoint_service::apply_live_target(
+                &svc,
+                &mut live_endpoint,
+                &catalog.id,
+                &catalog.base_url,
+                &catalog.openapi_spec_url,
+            );
+            view.endpoint_url = live_endpoint.url;
+            view.openapi_spec_url = live_endpoint.openapi_spec_url;
+        }
         view.catalog_icon_url =
             super::catalog_service::catalog_icon_url(catalog, provider.as_ref());
         view.platform_key_available = super::platform_key_service::available_with_provider(
@@ -5321,9 +4729,8 @@ mod tests {
     use super::{
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
         OpenApiSpecUrlInput, OwnerGrants, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy,
-        SshCreateParams, UpdateCredentialAction, auto_provision_no_auth_services,
-        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
-        derive_effective_auth, direct_credential_type_for_service,
+        SshCreateParams, UpdateCredentialAction, build_key_view, classify_update_credential_action,
+        create_key, derive_effective_auth, direct_credential_type_for_service,
         direct_credential_type_from_auth_method, ensure_user_api_key_for_update,
         exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
@@ -6185,7 +5592,9 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &actor).await.unwrap();
+        crate::services::security_readiness_service::ready_test_replica(&db).await;
+        let opt_in = super::connect_catalog_service(&db, &actor, &actor, &catalog.slug).await;
+        assert!(matches!(opt_in, Err(AppError::NotFound(_))));
         let connections = db.collection::<UserService>(USER_SERVICES);
         assert_eq!(
             connections
@@ -7199,14 +6608,6 @@ mod tests {
 
         assert!(!view.credential_missing);
         assert_eq!(view.credential_type, "none");
-    }
-
-    #[test]
-    fn auto_provision_source_id_is_user_scoped() {
-        assert_ne!(
-            auto_provision_source_id("user-1", "svc-1"),
-            auto_provision_source_id("user-2", "svc-1")
-        );
     }
 
     #[test]
@@ -9922,17 +9323,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_provision_source_id_deterministic() {
-        let a = auto_provision_source_id("user-1", "cat-1");
-        let b = auto_provision_source_id("user-1", "cat-1");
-        assert_eq!(a, b);
-        let c = auto_provision_source_id("user-2", "cat-1");
-        assert_ne!(a, c);
-    }
-
-    // ── slug_candidate_with_suffix tests ────────────────────────────
-
-    #[test]
     fn slug_candidate_with_suffix_basic() {
         let result = slug_candidate_with_suffix("my-service", "2");
         assert_eq!(result, "my-service-2");
@@ -10024,14 +9414,6 @@ mod tests {
     }
 
     // ── auto_provision_source_id format tests ───────────────────────
-
-    #[test]
-    fn auto_provision_source_id_format() {
-        let id = auto_provision_source_id("user-abc", "svc-xyz");
-        assert_eq!(id, "user-abc:svc-xyz");
-    }
-
-    // ── is_duplicate_key_error / is_duplicate_slug_app_error ────────
 
     #[test]
     fn is_duplicate_slug_app_error_false_for_non_db_errors() {
@@ -10973,10 +10355,10 @@ mod tests {
         let _ = first; // suppress unused warning
     }
 
-    // ── auto_provision_no_auth_services ──────────────────────────────
+    // ── explicit catalog opt-in ─────────────────────────────────────
 
     #[tokio::test]
-    async fn auto_provision_creates_services_for_public_no_auth_catalog() {
+    async fn catalog_opt_in_creates_public_no_auth_connection() {
         let Some(db) = connect_test_database("uks_auto_provision").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -10997,7 +10379,7 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
 
@@ -11012,12 +10394,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(services.len(), 1);
-        assert_eq!(services[0].source.as_deref(), Some(AUTO_PROVISION_SOURCE));
+        assert_eq!(
+            services[0].source.as_deref(),
+            Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
+        );
         assert!(services[0].api_key_id.is_none());
     }
 
     #[tokio::test]
-    async fn auto_provision_creates_services_for_public_internal_master_credential_catalog() {
+    async fn catalog_opt_in_creates_public_internal_master_connection() {
         let Some(db) = connect_test_database("uks_auto_provision_master_credential").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -11039,7 +10424,7 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
 
@@ -11053,14 +10438,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(services.len(), 1);
-        assert_eq!(services[0].source.as_deref(), Some(AUTO_PROVISION_SOURCE));
+        assert_eq!(
+            services[0].source.as_deref(),
+            Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
+        );
         assert!(services[0].api_key_id.is_none());
         assert_eq!(services[0].auth_method, "bearer");
         assert_eq!(services[0].auth_key_name, "Authorization");
     }
 
     #[tokio::test]
-    async fn auto_provision_is_idempotent() {
+    async fn catalog_opt_in_is_idempotent() {
         let Some(db) = connect_test_database("uks_auto_provision_idem").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -11081,10 +10469,10 @@ mod tests {
             .unwrap();
 
         // Run twice
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
 
@@ -11098,7 +10486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_provision_skips_services_with_spr() {
+    async fn catalog_opt_in_refuses_required_provider_service() {
         let Some(db) = connect_test_database("uks_auto_provision_spr").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -11139,7 +10527,7 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
 
@@ -11153,7 +10541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_provision_skips_private_without_app_ids() {
+    async fn catalog_opt_in_refuses_unrelated_private_service() {
         let Some(db) = connect_test_database("uks_auto_provision_private").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -11174,7 +10562,7 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
 
@@ -12271,168 +11659,10 @@ mod tests {
         assert!(!svc.is_active);
     }
 
-    // ── reconcile_stale_auto_provisions (via auto_provision) ────────
+    // ── catalog opt-in runtime eligibility ────────────────────────
 
     #[tokio::test]
-    async fn auto_provision_reconciles_stale_when_catalog_deactivated() {
-        let Some(db) = connect_test_database("uks_reconcile_stale").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let user_id = uuid::Uuid::new_v4().to_string();
-
-        // Create a public no-auth service
-        let mut catalog = sample_catalog_service();
-        catalog.id = uuid::Uuid::new_v4().to_string();
-        catalog.slug = format!("stale-{}", uuid::Uuid::new_v4());
-        catalog.auth_method = "none".to_string();
-        catalog.requires_user_credential = false;
-        catalog.visibility = "public".to_string();
-        catalog.service_category = "connection".to_string();
-
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(&catalog)
-            .await
-            .unwrap();
-
-        // Auto-provision
-        auto_provision_no_auth_services(&db, &user_id)
-            .await
-            .unwrap();
-
-        let count = db
-            .collection::<UserService>(USER_SERVICES)
-            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
-        let original = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "user_id": &user_id })
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            original.created_by.as_ref().unwrap().actor.kind,
-            crate::models::service_change_event::HistoryActorKind::System
-        );
-
-        // Deactivate the catalog entry
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .update_one(
-                doc! { "_id": &catalog.id },
-                doc! { "$set": { "is_active": false } },
-            )
-            .await
-            .unwrap();
-
-        // Re-run auto-provision -- reconciliation should delete the stale service
-        auto_provision_no_auth_services(&db, &user_id)
-            .await
-            .unwrap();
-
-        let count = db
-            .collection::<UserService>(USER_SERVICES)
-            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
-            .await
-            .unwrap();
-        assert_eq!(count, 0, "stale auto-provisioned service should be deleted");
-        use crate::models::service_change_event::{
-            COLLECTION_NAME, HistoryActorKind, ServiceChangeEvent,
-        };
-        let rows: Vec<ServiceChangeEvent> = db
-            .collection(COLLECTION_NAME)
-            .find(doc! { "service_id": &original.id })
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap();
-        assert!(rows.iter().any(|e| e.action == "service.deleted"));
-        assert!(
-            rows.iter()
-                .all(|e| e.actor.kind == HistoryActorKind::System)
-        );
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .update_one(
-                doc! { "_id": &catalog.id },
-                doc! { "$set": { "is_active": true } },
-            )
-            .await
-            .unwrap();
-        auto_provision_no_auth_services(&db, &user_id)
-            .await
-            .unwrap();
-        let replacement = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "user_id": &user_id })
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(original.id, replacement.id);
-        assert_eq!(original.slug, replacement.slug);
-        assert_eq!(
-            db.collection::<ServiceChangeEvent>(COLLECTION_NAME)
-                .count_documents(
-                    doc! { "service_id": &replacement.id, "action": "service.created" }
-                )
-                .await
-                .unwrap(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_provision_reconciles_stale_when_auth_method_changed() {
-        let Some(db) = connect_test_database("uks_reconcile_auth_change").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let user_id = uuid::Uuid::new_v4().to_string();
-
-        let mut catalog = sample_catalog_service();
-        catalog.id = uuid::Uuid::new_v4().to_string();
-        catalog.slug = format!("auth-change-{}", uuid::Uuid::new_v4());
-        catalog.auth_method = "none".to_string();
-        catalog.requires_user_credential = false;
-        catalog.visibility = "public".to_string();
-        catalog.service_category = "connection".to_string();
-
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(&catalog)
-            .await
-            .unwrap();
-
-        auto_provision_no_auth_services(&db, &user_id)
-            .await
-            .unwrap();
-
-        // Change auth_method to bearer (no longer truly no-auth)
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .update_one(
-                doc! { "_id": &catalog.id },
-                doc! { "$set": { "auth_method": "bearer" } },
-            )
-            .await
-            .unwrap();
-
-        auto_provision_no_auth_services(&db, &user_id)
-            .await
-            .unwrap();
-
-        let count = db
-            .collection::<UserService>(USER_SERVICES)
-            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
-            .await
-            .unwrap();
-        assert_eq!(
-            count, 0,
-            "service should be deleted after auth_method changed"
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_provision_keeps_public_internal_master_credential_catalog() {
+    async fn catalog_opt_in_keeps_public_internal_master_connection() {
         let Some(db) = connect_test_database("uks_reconcile_keeps_master_credential").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -12454,10 +11684,10 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
-        auto_provision_no_auth_services(&db, &user_id)
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
 

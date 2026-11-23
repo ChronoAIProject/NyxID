@@ -1382,28 +1382,28 @@ async fn load_user_tools_with_grants(
         .map(|service_id| service_id.as_str())
         .collect();
 
-    let connected_ids: Vec<&str> = connections
+    let mut connected_ids: Vec<String> = connections
         .iter()
-        .filter(|c| c.is_active)
-        .map(|c| c.service_id.as_str())
+        .filter(|connection| connection.is_active)
+        .map(|connection| connection.service_id.clone())
         .collect();
-
-    let mut auto_services_filter = doc! {
-        "is_active": true,
-        "requires_user_credential": false,
-        "service_category": { "$ne": "provider" },
-        "$nor": [
-            { "service_category": "internal", "slug": { "$regex": "^platform-" } },
-        ],
-    };
-    auto_services_filter.extend(legacy_http_service_type_filter());
-
-    let auto_services: Vec<DownstreamService> = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(auto_services_filter)
-        .await?
-        .try_collect()
+    let bindings = db
+        .collection::<bson::Document>(crate::models::node_service_binding::COLLECTION_NAME)
+        .distinct("service_id", doc! {"user_id":user_id,"is_active":true})
         .await?;
+    for id in bindings
+        .into_iter()
+        .filter_map(|id| id.as_str().map(str::to_owned))
+    {
+        if conn_map
+            .get(id.as_str())
+            .is_none_or(|connection| connection.is_active)
+        {
+            connected_ids.push(id);
+        }
+    }
+    connected_ids.sort();
+    connected_ids.dedup();
 
     let connected_services: Vec<DownstreamService> = if connected_ids.is_empty() {
         vec![]
@@ -1422,7 +1422,6 @@ async fn load_user_tools_with_grants(
     let private_app_ids: Vec<&str> = if options.authorization_targets.is_some() {
         connected_services
             .iter()
-            .chain(&auto_services)
             .filter(|service| {
                 !service.requires_user_credential
                     && service.platform_key.is_none()
@@ -1505,23 +1504,6 @@ async fn load_user_tools_with_grants(
         }
     }
 
-    for svc in &auto_services {
-        if seen_ids.contains(&svc.id) || crate::services::platform_key_service::model_only(svc) {
-            continue;
-        }
-        if !authorizable_platform(svc) {
-            continue;
-        }
-        if let Some(conn) = conn_map.get(svc.id.as_str())
-            && !conn.is_active
-        {
-            continue;
-        }
-        if seen_ids.insert(svc.id.clone()) {
-            valid_platform_services.push((svc, true));
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Phase 2: Load UserService tools (personal + org-shared)
     // -----------------------------------------------------------------------
@@ -1588,7 +1570,11 @@ async fn load_user_tools_with_grants(
                 .try_collect::<Vec<_>>()
                 .await?
                 .into_iter()
-                .filter(|service| service_scope.allows_user_service(service))
+                .filter(|service| {
+                    service.source.as_deref()
+                        != Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+                        && service_scope.allows_user_service(service)
+                })
                 .collect()
         };
     for svc in &personal_pinned {
@@ -1737,18 +1723,30 @@ async fn load_user_tools_with_grants(
     let mut result: Vec<McpToolService> = Vec::new();
 
     // Catalog recommended_skills by service id, for instance fallback.
-    let catalog_skills_by_id: HashMap<&str, &Vec<String>> = valid_platform_services
+    let catalog_skills_by_id: HashMap<&str, &Vec<String>> = catalog_policy_services
         .iter()
-        .filter_map(|(svc, _)| {
+        .filter(|svc| {
+            !svc.requires_user_credential
+                || valid_platform_services
+                    .iter()
+                    .any(|(connected, _)| connected.id == svc.id)
+        })
+        .filter_map(|svc| {
             svc.recommended_skills
                 .as_ref()
                 .map(|skills| (svc.id.as_str(), skills))
         })
         .collect();
 
-    let catalog_refs_by_id: HashMap<_, _> = valid_platform_services
+    let catalog_refs_by_id: HashMap<_, _> = catalog_policy_services
         .iter()
-        .map(|(svc, _)| {
+        .filter(|svc| {
+            !svc.requires_user_credential
+                || valid_platform_services
+                    .iter()
+                    .any(|(connected, _)| connected.id == svc.id)
+        })
+        .map(|svc| {
             (
                 svc.id.as_str(),
                 (svc.recommended_skill_refs.clone(), svc.skills_revision),
@@ -2318,7 +2316,11 @@ async fn load_callable_user_services(
                 .try_collect::<Vec<_>>()
                 .await?
                 .into_iter()
-                .filter(|service| service_scope.allows_user_service(service))
+                .filter(|service| {
+                    service.source.as_deref()
+                        != Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+                        && service_scope.allows_user_service(service)
+                })
                 .collect()
         };
 
@@ -2347,7 +2349,9 @@ async fn load_callable_user_services(
                 .await?
         };
         for svc in org_svcs {
-            if access.allows_service(&svc) {
+            if svc.source.as_deref() != Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+                && access.allows_service(&svc)
+            {
                 if let Some(ak_id) = &svc.api_key_id {
                     all_api_key_ids.push(ak_id.clone());
                 }
@@ -2376,6 +2380,10 @@ async fn load_callable_user_services(
                     .await?;
 
             for svc in org_svcs {
+                if svc.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+                {
+                    continue;
+                }
                 if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
                     continue;
                 }
@@ -8392,10 +8400,6 @@ pub async fn discover_services_with_scope(
         .filter(|connection| connection.is_active)
         .map(|connection| connection.service_id.as_str())
         .collect();
-    let connection_ids: HashSet<&str> = connections
-        .iter()
-        .map(|connection| connection.service_id.as_str())
-        .collect();
 
     let grants =
         crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
@@ -8418,10 +8422,18 @@ pub async fn discover_services_with_scope(
 
     let user_service_catalog_ids: HashSet<&str> = user_services
         .iter()
+        .filter(|us| {
+            us.source.as_deref() != Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+        })
         .filter_map(|us| us.catalog_service_id.as_deref())
         .collect();
-    let user_service_slugs: HashSet<&str> =
-        user_services.iter().map(|us| us.slug.as_str()).collect();
+    let user_service_slugs: HashSet<&str> = user_services
+        .iter()
+        .filter(|us| {
+            us.source.as_deref() != Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+        })
+        .map(|us| us.slug.as_str())
+        .collect();
 
     let mut filter = doc! {
         "is_active": true,
@@ -8458,11 +8470,6 @@ pub async fn discover_services_with_scope(
         .filter(|svc| {
             // Already connected via old model
             if connected_ids.contains(svc.id.as_str()) {
-                return false;
-            }
-            // Credential-free services are auto-connected unless an inactive
-            // connection row records an explicit disconnect.
-            if !svc.requires_user_credential && !connection_ids.contains(svc.id.as_str()) {
                 return false;
             }
             // Already provisioned as a UserService (by catalog ID or slug match)
@@ -9173,6 +9180,9 @@ mod tests {
                 .insert_one(&catalog)
                 .await
                 .unwrap();
+            crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
+                .await
+                .unwrap();
             for raw in [path.clone(), path.replace(':', "%3A")] {
                 let request = Request::builder()
                     .method("POST")
@@ -9193,6 +9203,20 @@ mod tests {
             }
             let mut service = make_service(&catalog.id, slug, slug, vec![]);
             service.proxy_operation_policy = catalog.proxy_operation_policy.clone();
+            let connection = db
+                .collection::<UserService>(USER_SERVICES)
+                .find_one(doc! {"user_id": &user_id, "catalog_service_id": &catalog.id})
+                .await
+                .unwrap()
+                .unwrap();
+            service.service_id = connection.id.clone();
+            service.source = McpToolSource::UserManaged {
+                user_service_id: connection.id,
+                catalog_service_id: Some(catalog.id.clone()),
+                effective_owner_id: user_id.clone(),
+                node_id: None,
+                has_server_credential: true,
+            };
             for generic in [false, true] {
                 service.is_generic_proxy = generic;
                 let generic_endpoint = build_generic_proxy_endpoint(slug);
@@ -9314,6 +9338,9 @@ mod tests {
         assert!(legacy.proxy_operation_policy.is_none());
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&legacy)
+            .await
+            .unwrap();
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
             .await
             .unwrap();
         let response = router
@@ -12304,6 +12331,23 @@ mod tests {
             .await
             .expect("insert unavailable user service");
 
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: platform_id.clone(),
+                credential_encrypted: None,
+                secret_context_versions: Default::default(),
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 1,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
         let catalog = load_operation_catalog(
             &db,
             &NodeWsManager::new(30, 100),
@@ -12726,12 +12770,17 @@ mod tests {
         let connected_ids = service_ids(&connected);
         let discover_ids = service_ids(&discover);
 
-        assert_eq!(connected_ids, HashSet::from([auto_connected_id]));
+        assert!(connected_ids.is_empty());
         assert_eq!(
             discover_ids,
-            HashSet::from([auto_disconnected_id, credential_required_id])
+            HashSet::from([
+                auto_connected_id,
+                auto_disconnected_id,
+                credential_required_id,
+            ])
         );
         assert!(connected_ids.is_disjoint(&discover_ids));
+        db.drop().await.unwrap();
     }
 
     #[test]
@@ -12883,7 +12932,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_services_excludes_auto_provisioned_user_service() {
+    async fn discover_services_offers_automatic_row_until_explicit_opt_in() {
         let Some(db) = connect_test_database("mcp_discover_auto_user_service").await else {
             eprintln!("skipping MCP auto-provision discovery test: no local MongoDB available");
             return;
@@ -12937,8 +12986,22 @@ mod tests {
             .iter()
             .filter_map(|service| service["service_id"].as_str())
             .collect();
-        assert!(!discovered_ids.contains(&catalog_id.as_str()));
+        assert!(discovered_ids.contains(&catalog_id.as_str()));
         assert!(!discovered_ids.contains(&user_service_id.as_str()));
+        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
+            .await
+            .unwrap();
+        let after = discover_services(&db, &user_id, None, Some("connection"))
+            .await
+            .unwrap();
+        assert!(
+            !after["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|service| service["service_id"] == catalog_id)
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

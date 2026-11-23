@@ -735,6 +735,19 @@ async fn apply_update_in_session(
     auth_method: Option<&str>,
     auth_key_name: Option<&str>,
 ) -> AppResult<()> {
+    let current = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+        .find_one(doc! {"_id": service_id, "user_id": owner_id})
+        .session(&mut **session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".into()))?;
+    user_service_service::ensure_service_fields_editable(
+        &current,
+        &[
+            ("endpoint_url", endpoint_url.is_some()),
+            ("auth_method", auth_method.is_some()),
+            ("auth_key_name", auth_key_name.is_some()),
+        ],
+    )?;
     if endpoint_url.is_some() || name.is_some() {
         user_endpoint_service::update_endpoint_in_session(
             db,

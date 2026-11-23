@@ -41,6 +41,8 @@ const { mockNavigate, mockPoolOwner, state } = vi.hoisted(() => ({
     keysFetching: false,
     preferenceFetching: false,
     keysError: null as unknown,
+    catalogError: null as unknown,
+    retryCatalog: vi.fn(),
     userServices: [] as unknown[],
     routingPools: [] as ServicePool[],
     nodes: [] as { id: string; name: string }[],
@@ -72,7 +74,11 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
-  useCatalog: () => ({ data: [], refetch: vi.fn() }),
+  useCatalog: () => ({
+    data: [],
+    error: state.catalogError,
+    refetch: state.retryCatalog,
+  }),
   useKeys: () => ({
     data: state.keys,
     isLoading: state.keysLoading,
@@ -273,9 +279,26 @@ describe("KeysPage", () => {
     state.keysFetching = false;
     state.preferenceFetching = false;
     state.keysError = null;
+    state.catalogError = null;
     state.userServices = [];
     state.nodes = [];
     state.routingPools = [];
+  });
+
+  it("retries the independent available-services catalog without hiding saved connections", async () => {
+    state.keys = [makeKey()];
+    state.catalogError = new Error("catalog unavailable");
+    render(<KeysPage />);
+    const available = screen.getByRole("region", {
+      name: "Available services",
+    });
+    expect(
+      within(available).getByText("Failed to load services. Please try again."),
+    ).toBeVisible();
+    await userEvent.click(
+      within(available).getByRole("button", { name: "Retry" }),
+    );
+    expect(state.retryCatalog).toHaveBeenCalledOnce();
   });
 
   it.each(["keysFetching", "preferenceFetching"] as const)(
@@ -297,16 +320,45 @@ describe("KeysPage", () => {
   );
 
   it("keeps accessible ranks scoped to the actual row service in a mixed table", async () => {
-    state.keys = [makeKey({id:"alpha",label:"Alpha",preference_rank:2}),makeKey({id:"slack",label:"Slack",catalog_service_id:"slack",catalog_service_name:"Slack",catalog_service_slug:"api-slack",preference_rank:1}),makeKey({id:"disabled",is_active:false,preference_rank:null,preference_position:4})];
+    state.keys = [
+      makeKey({ id: "alpha", label: "Alpha", preference_rank: 2 }),
+      makeKey({
+        id: "slack",
+        label: "Slack",
+        catalog_service_id: "slack",
+        catalog_service_name: "Slack",
+        catalog_service_slug: "api-slack",
+        preference_rank: 1,
+      }),
+      makeKey({
+        id: "disabled",
+        is_active: false,
+        preference_rank: null,
+        preference_position: 4,
+      }),
+    ];
     render(<KeysPage />);
-    await userEvent.click(screen.getByRole("button",{name:/table view/i}));
-    expect(screen.getByLabelText("Discovery preference 2 for OpenAI")).toHaveTextContent("Discovery #2");
-    expect(screen.getByLabelText("Discovery preference 1 for Slack")).toHaveTextContent("Discovery #1");
-    expect(screen.getByLabelText("Saved order position 4; disabled connections are not listed to agents")).toHaveTextContent("Saved #4");
+    await userEvent.click(screen.getByRole("button", { name: /table view/i }));
+    expect(
+      screen.getByLabelText("Discovery preference 2 for OpenAI"),
+    ).toHaveTextContent("Discovery #2");
+    expect(
+      screen.getByLabelText("Discovery preference 1 for Slack"),
+    ).toHaveTextContent("Discovery #1");
+    expect(
+      screen.getByLabelText(
+        "Saved order position 4; disabled connections are not listed to agents",
+      ),
+    ).toHaveTextContent("Saved #4");
   });
   it("shows connection preference pills in grouped and standalone tables without renumbering hidden rows", async () => {
     state.keys = [
-      makeKey({ id: "gamma", label: "Gamma", preference_rank: 3, preference_position: 3 }),
+      makeKey({
+        id: "gamma",
+        label: "Gamma",
+        preference_rank: 3,
+        preference_position: 3,
+      }),
       makeKey({ id: "alpha", label: "Alpha", preference_rank: 2 }),
       makeKey({
         id: "auto",
@@ -358,7 +410,9 @@ describe("KeysPage", () => {
     ).toBeTruthy();
     expect(
       within(
-        document.querySelector('[data-service-connection-pools="alpha"]') as HTMLElement,
+        document.querySelector(
+          '[data-service-connection-pools="alpha"]',
+        ) as HTMLElement,
       ).getByText("Example route · Priority 7"),
     ).toBeVisible();
     const alphaCell = within(alpha.closest("td")!);

@@ -834,7 +834,11 @@ async fn build_base_scope_plan(
         let rows = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find(doc! {
                 "user_id": &owner.id,
-                "source": crate::models::user_service::AUTO_PROVISION_SOURCE,
+                "source": {"$ne": crate::models::user_service::AUTO_PROVISION_SOURCE},
+                "$or": [
+                    {"source": crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE},
+                    {"credential_binding": "platform"},
+                ],
                 "is_active": true,
             })
             .await?
@@ -866,7 +870,8 @@ async fn build_base_scope_plan(
             user_service_id: service.id,
             resource_owner,
             auto_connected: service.source.as_deref()
-                == Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
+                == Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
+                || service.credential_binding.as_deref() == Some("platform"),
             node_grant: if configured_node_ids.is_empty() {
                 ScopePlanNodeGrant::NotRequired
             } else {
@@ -1198,17 +1203,34 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database("auto_connected_plan").await;
         let actor = Uuid::new_v4().to_string();
         insert_user(&db, &actor, UserType::Person).await;
+        let catalog = crate::test_utils::test_auto_connected_catalog_service();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
         let mut service = test_user_service(
             &Uuid::new_v4().to_string(),
             &actor,
             "platform",
             "ep",
-            None,
+            Some(&catalog.id),
             None,
         );
         service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.into());
         db.collection::<UserService>(USER_SERVICES)
             .insert_one(&service)
+            .await
+            .unwrap();
+        let before = build_scope_plan(&db, &actor, None, &[], true)
+            .await
+            .unwrap();
+        assert!(
+            before.services.is_empty(),
+            "automatic rows cannot imply key scope before opt-in"
+        );
+        crate::test_utils::connect_catalog_fixture_services(&db, &actor)
             .await
             .unwrap();
         let plan = build_scope_plan(&db, &actor, None, &[], true)

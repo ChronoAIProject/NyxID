@@ -218,11 +218,7 @@ export function ActivityScreen() {
       decision: "APPROVE" | "DENY";
       approvalMode: ApprovalMode;
     }) => {
-      const durationSec =
-        decision === "APPROVE"
-          ? (settingsQuery.data?.grant_expiry_days ?? 30) * 86400
-          : undefined;
-      return mobileApi.submitDecision(id, decision, durationSec);
+      return mobileApi.submitDecision(id, decision);
     },
     onMutate: ({ id }) => {
       // Inline decisions measure from the pending inbox becoming visible.

@@ -381,6 +381,24 @@ async fn restricted_and_auto_connected_scopes_match_mcp_without_provisioning() {
         )
         .await
         .unwrap();
+    assert!(
+        !crate::services::key_service::active_auto_connected_service_ids(&f.state.db, &f.owner)
+            .await
+            .unwrap()
+            .contains(&auto.id)
+    );
+    f.state
+        .db
+        .collection::<Document>(CATALOG)
+        .update_one(
+            doc! {"_id": auto.catalog_service_id.as_ref().unwrap()},
+            doc! {"$set": {"requires_user_credential": false}},
+        )
+        .await
+        .unwrap();
+    crate::test_utils::connect_catalog_fixture_services(&f.state.db, &f.owner)
+        .await
+        .unwrap();
     for allow_auto in [false, true] {
         f.state
             .db
@@ -659,6 +677,9 @@ async fn chat_catalog_matches_mcp_before_and_after_acknowledgement() {
         "name": "platform_op", "method": "GET", "path": "/platform",
         "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).await.unwrap();
+    crate::test_utils::connect_catalog_fixture_services(&f.state.db, &f.owner)
+        .await
+        .unwrap();
     let headers = key_headers(&key.raw_key);
     let mut previous_digest = Value::Null;
     for acknowledged in [false, true] {

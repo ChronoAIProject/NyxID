@@ -2901,17 +2901,20 @@ pub(super) async fn preflight_llm_deny_before_resolution(
     // before approvals, billing and dispatch. Checking here would use the
     // catalog-only identity and intersect sibling connections' scopes.
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    let denied = approval_service::evaluate_deny_only(
+    // Every admitted effect below passes the full approval evaluator. This
+    // preflight may reject Deny, but must let an explicit Ask reach that gate.
+    let policy = approval_service::resolve_org_aware_approval(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,
         &hint.service_id,
         &operation,
         hint.is_auto_connected,
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
 
-    if denied {
+    if policy.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
         crate::services::assistant_model_observer::denied_before_resolution(
             state,
             auth_user,
@@ -2996,6 +2999,7 @@ pub(super) async fn check_llm_approval_descriptor(
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
         is_auto_connected,
         auth_user.assistant_chat.as_deref(),
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
 
@@ -3037,6 +3041,8 @@ pub(super) async fn check_llm_approval_descriptor(
         &operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.fresh_decision = pending.resolution.fresh_decision;
+    request_operation.caller_api_key_id = auth_user.api_key_id.clone();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth_user.assistant_group_id.as_deref(),
@@ -3077,6 +3083,17 @@ pub(super) async fn check_llm_approval_descriptor(
                 &state.config.frontend_url,
             )
         })?;
+    approval_service::recheck_after_decision(
+        &state.db,
+        &approval_owner_user_id,
+        owner_for_resolution,
+        service_id,
+        &operation,
+        is_auto_connected,
+        auth_user.api_key_id.as_deref(),
+        &approval_request.approval_mode,
+    )
+    .await?;
     if let Some(chat) = auth_user.assistant_chat.as_deref() {
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
             .await?;

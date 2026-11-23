@@ -191,6 +191,7 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
     added: false,
     connectSlug: entry.service_type === "ssh" ? undefined : entry.slug,
     advancedSetupSlug: entry.service_type === "ssh" ? entry.slug : undefined,
+    connectOwnSlug: entry.requires_credential && entry.platform_key?.available ? entry.slug : undefined,
   };
 }
 
@@ -199,7 +200,7 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
  * credentials for the same service dedupe into a single card with a
  * connection count; custom services with no catalog slug get one card per
  * key) and Available to add (catalog entries with no connection). Automatic
- * connections are hidden from both sections and excluded from management.
+ * rows await explicit opt-in and remain available to connect.
  * The join key is `catalog_service_slug` — never `KeyInfo.slug`, which is the
  * user-facing proxy path and can diverge from the catalog entry (custom
  * labels, auto-suffixing).
@@ -210,12 +211,12 @@ export function deriveConnectorItems(
 ): ConnectorItems {
   const catalogBySlug = new Map(catalog.map((entry) => [entry.slug, entry]));
   const connectedSlugs = new Set(
-    keys.flatMap((key) => key.catalog_service_slug ? [key.catalog_service_slug] : []),
+    keys.flatMap((key) => !key.auto_connected && key.catalog_service_slug ? [key.catalog_service_slug] : []),
   );
   const bySlug = new Map<string, KeyInfo[]>();
   const custom: KeyInfo[] = [];
   for (const key of keys) {
-    if (key.auto_connected || key.credential_binding === "platform") continue;
+    if (key.auto_connected || key.offering_kind === "tool") continue;
     if (key.catalog_service_slug) {
       const group = bySlug.get(key.catalog_service_slug) ?? [];
       group.push(key);
@@ -232,9 +233,9 @@ export function deriveConnectorItems(
       ...custom.map(addedCustomItem),
     ],
     available: catalog
-      .filter((entry) => !connectedSlugs.has(entry.slug) && !entry.inference && entry.slug !== "chrono-llm" && !entry.platform_key?.available)
+      .filter((entry) => entry.offering_kind !== "tool" && !connectedSlugs.has(entry.slug) && !entry.inference && entry.slug !== "chrono-llm")
       .map(availableItem),
-    models: catalog.filter((entry) => entry.inference || entry.slug === "chrono-llm").map(availableItem),
+    models: catalog.filter((entry) => entry.offering_kind !== "tool" && (entry.inference || entry.slug === "chrono-llm")).map(availableItem),
   };
 }
 

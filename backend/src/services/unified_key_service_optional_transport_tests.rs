@@ -96,15 +96,15 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let state = test_app_state(db.clone());
-    // Exercise the listing side effect that switches execution from legacy
-    // catalog resolution to the automatic UserService route.
+    // Opt in explicitly, then exercise read-only listing and all transports.
+    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
     let listed = Box::pin(crate::handlers::keys::list_keys(
         State(state.clone()),
         test_auth_user(&owner),
     ))
     .await
     .unwrap();
-    let connection = automatic_service(&db, &owner, &catalog.id).await;
+    let connection = opted_in_service(&db, &owner, &catalog.id).await;
     assert!(listed.0.keys.iter().any(|key| key.id == connection.id));
     Fixture {
         state,
@@ -295,7 +295,7 @@ async fn llm_echo_as(
 }
 
 #[tokio::test]
-async fn optional_header_reaches_rest_and_mcp_after_listing() {
+async fn optional_header_reaches_rest_and_mcp_after_opt_in() {
     let f = fixture().await;
     let mut unrelated_key = sample_api_key("api_key");
     unrelated_key.id = uuid::Uuid::new_v4().to_string();
@@ -358,7 +358,7 @@ async fn optional_header_reaches_rest_and_mcp_after_listing() {
 }
 
 #[tokio::test]
-async fn optional_header_reaches_both_llm_routes_after_listing() {
+async fn optional_header_reaches_both_llm_routes_after_opt_in() {
     let f = fixture().await;
     for gateway in [false, true] {
         assert!(llm_echo(&f, gateway).await["github"].is_null());
@@ -432,7 +432,7 @@ async fn no_requirements_follow_catalog_move_preserving_ids_without_forwarding_t
         .await
         .unwrap();
     // No reconciliation has run: exercise the stale stored snapshot on every
-    // ingress before listing repairs it. No SPR means no token inheritance,
+    // ingress before catalog maintenance repairs it. No SPR means no token inheritance,
     // even though the owner has a usable legacy token.
     assert_eq!(stored_endpoint(&f).await.url, f.catalog.base_url);
     assert_moved_transports(&f, None).await;
@@ -447,7 +447,9 @@ async fn no_requirements_follow_catalog_move_preserving_ids_without_forwarding_t
         key.id == f.connection.id
             && key.catalog_service_id.as_deref() == Some(f.catalog.id.as_str())
     }));
-    let retained = automatic_service(&f.state.db, &f.owner, &f.catalog.id).await;
+    assert_eq!(stored_endpoint(&f).await.url, f.catalog.base_url, "listing performs no repair writes");
+    crate::services::catalog_endpoint_service::reconcile(&f.state.db, Some(&f.owner), Some(&f.catalog.id)).await.unwrap();
+    let retained = opted_in_service(&f.state.db, &f.owner, &f.catalog.id).await;
     assert_eq!(retained.id, f.connection.id);
     assert_eq!(retained.endpoint_id, f.connection.endpoint_id);
     let endpoint = stored_endpoint(&f).await;
@@ -500,7 +502,9 @@ async fn optional_tokens_require_repaired_destination_then_follow_authorized_cat
     .await
     .unwrap();
     assert!(listed.0.keys.iter().any(|key| key.id == f.connection.id));
-    let retained = automatic_service(&f.state.db, &f.owner, &f.catalog.id).await;
+    assert_eq!(stored_endpoint(&f).await.url, f.catalog.base_url, "listing performs no repair writes");
+    crate::services::catalog_endpoint_service::reconcile(&f.state.db, Some(&f.owner), Some(&f.catalog.id)).await.unwrap();
+    let retained = opted_in_service(&f.state.db, &f.owner, &f.catalog.id).await;
     assert_eq!(retained.id, f.connection.id);
     assert_eq!(retained.endpoint_id, f.connection.endpoint_id);
     assert_eq!(stored_endpoint(&f).await.url, moved.uri());

@@ -3333,17 +3333,20 @@ async fn preflight_proxy_deny_before_resolution(
     }
 
     let operation = operation_descriptor::build_http_descriptor(method, path, None);
-    let denied = approval_service::evaluate_deny_only(
+    // Every admitted effect below passes the full approval evaluator. This
+    // preflight may reject Deny, but must let an explicit Ask reach that gate.
+    let policy = approval_service::resolve_org_aware_approval(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,
         &hint.service_id,
         &operation,
         hint.is_auto_connected,
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
 
-    if denied {
+    if policy.effect == crate::models::service_approval_config::ApprovalEffect::Deny {
         crate::services::assistant_model_observer::denied_before_resolution(
             state,
             auth_user,
@@ -5161,6 +5164,7 @@ async fn execute_resolved_proxy_inner<'a>(
             auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
             is_auto_connected_for_approval,
             auth_user.assistant_chat.as_deref(),
+            auth_user.api_key_id.as_deref(),
         )
     })
     .await?;
@@ -5184,6 +5188,14 @@ async fn execute_resolved_proxy_inner<'a>(
         operation_guest,
         &approval_outcome,
     )?;
+    if scheduled_api_key_id.is_some()
+        && matches!(&approval_outcome,approval_service::ApprovalOutcome::NeedsApproval(pending) if pending.resolution.fresh_decision)
+    {
+        request_audit.denied(403);
+        return Err(AppError::Forbidden(
+            "This operation requires a fresh human approval".into(),
+        ));
+    }
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -5265,6 +5277,8 @@ async fn execute_resolved_proxy_inner<'a>(
                 &operation,
                 pending.resolution.grant_scope.clone(),
             );
+            request_operation.fresh_decision = pending.resolution.fresh_decision;
+            request_operation.caller_api_key_id = auth_user.api_key_id.clone();
             request_operation.assistant_group =
                 crate::services::org_group_service::approval_binding(
                     &state.db,
@@ -5326,6 +5340,17 @@ async fn execute_resolved_proxy_inner<'a>(
                         &state.config.frontend_url,
                     )
                 })?;
+            approval_service::recheck_after_decision(
+                &state.db,
+                &approval_owner_user_id,
+                service_owner_for_approval,
+                service_id,
+                &operation,
+                is_auto_connected_for_approval,
+                auth_user.api_key_id.as_deref(),
+                &approval_request.approval_mode,
+            )
+            .await?;
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
                 crate::services::assistant_activity_decision::approval(
                     &state.db,
@@ -13315,6 +13340,8 @@ mod proxy_resolution_integration_tests {
     fn approval_config(owner_user_id: &str, service_id: &str) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            disabled: false,
+            grant_expiry_days: None,
             id: Uuid::new_v4().to_string(),
             user_id: owner_user_id.to_string(),
             service_id: service_id.to_string(),
@@ -15580,6 +15607,129 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
+    async fn interactive_preflights_preserve_fresh_keyed_ask_for_the_full_approval_gate() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("interactive_keyed_ask").await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let connection =
+            insert_user_service(&db, &owner, "interactive-ask", "https://example.com", None).await;
+        let state = test_app_state(db.clone());
+        let configs = db.collection::<bson::Document>("service_approval_configs");
+        configs.insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": &owner,
+            "service_id": &connection.id, "service_name": "Interactive",
+            "approval_required": false, "approval_mode": "per_request",
+            "rules": [{"resource_pattern": "*", "effect": "require_approval", "api_key_ids": ["key-a"]}],
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        }).await.unwrap();
+        for key in ["key-a", "key-b"] {
+            let mut auth = access_token_auth(&owner);
+            auth.auth_method = AuthMethod::ApiKey;
+            auth.api_key_id = Some(key.into());
+            super::preflight_proxy_deny_before_resolution(
+                &state,
+                &auth,
+                Some(&connection.id),
+                None,
+                None,
+                "/mutate",
+                "POST",
+            )
+            .await
+            .unwrap();
+            crate::handlers::llm_gateway::preflight_llm_deny_before_resolution(
+                &state,
+                &auth,
+                &connection.id,
+                "/mutate",
+                "POST",
+                None,
+            )
+            .await
+            .unwrap();
+            let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+                "POST", "/mutate", None,
+            );
+            let (outcome, _) = crate::services::approval_service::evaluate_for_chat(
+                &db,
+                &owner,
+                &owner,
+                &connection.id,
+                &descriptor,
+                Some("api_key"),
+                &owner,
+                false,
+                false,
+                None,
+                Some(key),
+            )
+            .await
+            .unwrap();
+            if key == "key-a" {
+                assert!(
+                    matches!(outcome, crate::services::approval_service::ApprovalOutcome::NeedsApproval(pending) if pending.resolution.fresh_decision)
+                );
+                assert!(matches!(
+                    crate::services::approval_service::evaluate_deny_only(
+                        &db,
+                        &owner,
+                        &owner,
+                        &connection.id,
+                        &descriptor,
+                        false,
+                        Some(key)
+                    )
+                    .await,
+                    Err(AppError::ApprovalUnsupported)
+                ));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    crate::services::approval_service::ApprovalOutcome::Allowed { required: false }
+                ));
+            }
+        }
+        configs
+            .update_one(doc! {}, doc! {"$set": {"rules.0.effect": "deny"}})
+            .await
+            .unwrap();
+        let mut auth = access_token_auth(&owner);
+        auth.auth_method = AuthMethod::ApiKey;
+        auth.api_key_id = Some("key-a".into());
+        assert!(matches!(
+            super::preflight_proxy_deny_before_resolution(
+                &state,
+                &auth,
+                Some(&connection.id),
+                None,
+                None,
+                "/mutate",
+                "POST"
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(matches!(
+            crate::handlers::llm_gateway::preflight_llm_deny_before_resolution(
+                &state,
+                &auth,
+                &connection.id,
+                "/mutate",
+                "POST",
+                None
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn auto_connected_proxy_scope_tracks_live_flag_through_both_auth_headers() {
         use axum::extract::FromRequestParts;
         let db = crate::test_utils::connect_transaction_test_database("auto_connected_proxy").await;
@@ -15624,6 +15774,15 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .unwrap();
+        assert!(
+            !crate::services::key_service::active_auto_connected_service_ids(&db, &owner)
+                .await
+                .unwrap()
+                .contains(&service.id)
+        );
+        crate::test_utils::connect_catalog_fixture_services(&db, &owner)
+            .await
+            .unwrap();
         let state = test_app_state(db.clone());
         for (flag, header) in [
             (false, "x-api-key"),

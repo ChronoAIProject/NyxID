@@ -498,7 +498,7 @@ General API keys can GET `/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/auth
 `/api-keys/external/{id}/authorization` under `/api/v1`, without an extra scope.
 API-key reads never auto-provision or reconcile services and never lazily reconcile
 pending OAuth placeholders. Sessions, access JWTs, and delegated `account:read`
-tokens retain their existing behavior, including provisioning and reconciliation.
+tokens read persisted connections; inventory, authentication and grant listing do not provision catalog connections.
 
 Restricted keys see only their effective `UserService` allowlist, including the
 existing auto-connected expansion. Endpoint and external-credential reads require
@@ -546,59 +546,48 @@ Because a disabled row keeps its slug while a new active service may reuse it,
 this listing can contain two rows with the same slug. Consumers that resolve by
 slug should prefer the active row.
 
-Automatic catalog provisioning checks active rows and user-disabled rows whose
-endpoint still exists, for both personal and org owners. Disabled connections
-continue to block provisioning, preserving the user's choice and allowing Enable
-on the original slug. A deleted tombstone (inactive non-auto row with its endpoint
-gone) does not block a fresh automatic connection; the active-only slug lookup and
-partial `(user_id, slug)` index let it reuse the catalog slug. We retain non-auto
-tombstones rather than reviving deleted endpoints or changing a user's binding.
-Inactive automatic rows are reconciled away to release their unique
-`(source, source_id)` before recreation.
+### Explicit catalog connections
 
-### Automatic no-auth connections and optional providers
+NyxBot Plugins and Studio AI Services (`/keys`) share the human-only
+`POST /api/v1/catalog/{slug}/connect` action. It creates one personal
+`UserService` and its endpoint transactionally, or adopts a legacy
+`source=auto_provision` row in place. New consent is recorded as
+`source=catalog_opt_in`. Existing explicit connections remain explicit.
+Catalog browsing, inventory, login, onboarding and grant listing never create
+connections. A catalog entry alone is insufficient for ordinary HTTP or MCP
+execution; legacy automatic rows require this explicit opt-in before execution.
+Server-selected model transports retain their dedicated authority path.
 
-When a listing is allowed to provision, active HTTP catalog services with
-`auth_method = "none"`, no required user credential, and category `connection`
-or `internal` may auto-connect under the existing visibility and consent rules.
-Optional `ServiceProviderRequirement` (SPR) rows do not block these connections;
-any required SPR does. Repeated listing and adding optional SPRs preserve an
-eligible automatic `UserService` and `UserEndpoint`, including their IDs.
+The action checks the active personal owner, live catalog visibility and platform
+ACL. It is personal-only: organization connections continue through their
+existing admin-authorized workflows. Valid developer-app consent makes only the
+previously eligible private no-auth HTTP service class discoverable. It does not
+expose private SSH or credential-required services. Optional provider requirements
+remain optional; a required or malformed requirement fails closed.
 
-Making an SPR required immediately makes the held automatic route ineligible
-at execution. The next provisioning/reconciliation pass removes its automatic
-row and orphan endpoint without recreating them. Making it optional again can
-provision a new pair of IDs. Missing or malformed requirement policy fails closed.
-The implicit legacy public/internal master-credential fallback still blocks on
-**any** SPR; explicit catalog `platform_key` eligibility and grants are unchanged.
+Retries and concurrent Connect actions return one connection identity. Connect
+returns a disabled existing row without enabling it. Both surfaces offer explicit
+Enable and Disable against each saved connection ID, including platform bindings
+and multiple accounts for one catalog. Adopting an automatic row refreshes its
+catalog-owned authentication and endpoint snapshot; a shared or foreign endpoint
+is not rewritten. Missing or deleted opt-in endpoints can be repaired without
+replacing the connection, granting credentials or changing its enabled state.
+Deleting and reconnecting creates a new identity while retaining the old history;
+its source uniqueness claim is released within the reconnect transaction.
+Deleted rows cannot be revived by Enable. Slug collisions return a conflict.
 
-REST, MCP, both LLM gateway routes, and utility inference share a narrow optional
-inheritance path for automatic, no-auth, credentialless connections. It verifies
-the persisted row and binds its authorized effective owner, catalog, endpoint,
-and resolved destination before selecting that owner's legacy `UserProviderToken`.
-An absent token permits execution without its optional injection. It never picks
-an arbitrary modern `UserApiKey` by provider or uses the billing payer as owner.
-Explicit credentials, manual connections, node-managed or platform-bound routes,
-and explicit multi-account connection/target selection keep their existing paths.
+Live execution rechecks catalog activity, owner access, platform grants, private
+consent and provider requirements. Metadata changes suspend an explicit
+connection without deleting its identity. Catalog-owned endpoints continue to
+follow catalog changes. Optional credential inheritance remains limited to this
+verified, credential-free opt-in class, using the exact effective owner and
+catalog destination. Explicit credentials, node routes and account/target
+selection retain their existing authority paths.
 
-Catalog-owned automatic endpoints follow catalog URL changes without changing
-connection or endpoint IDs. With no SPRs, no provider token is inherited even if
-the owner has one. Optional inheritance keeps its stricter destination fence:
-until the stored endpoint has been reconciled to the live catalog, it refuses
-before materializing tokens. After repair, the owner's legacy token may reach the
-new admin-configured catalog destination under the existing optional SPR policy.
-A held target for the old host remains refused, including after repair. Manual,
-custom, gateway-URL and node-routed destinations retain their existing rules.
-
-### Known gaps
-
-1. Creating a service on a disabled row's slug is accepted, then re-enabling the
-   old row fails with a raw `E11000` surfaced as a 500. Should be a clean 409 at
-   create time.
-2. A deleted tombstone can be flipped back to `is_active = true` via
-   `PUT /user-services/{id}`, which does not check for the hard-deleted endpoint
-   and credential. The result is a zombie: listed in `/user-services`, absent
-   from `/keys`, 500 at the proxy.
+The implicit global approval exemption for credential-free catalog connections
+survives opt-in; explicit personal and organization policies remain authoritative.
+The UI's `auto_connected` flag continues to identify legacy rows awaiting opt-in,
+so it does not hide management controls on explicitly opted-in connections.
 
 ## Proxy Request Flow
 
