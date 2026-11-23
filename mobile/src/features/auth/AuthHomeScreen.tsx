@@ -475,7 +475,7 @@ export function AuthHomeScreen({ navigation }: Props) {
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
       >
         {/* Hero: the portal mark on a faint halo, rising in on arrival. */}
         <RiseIn>
