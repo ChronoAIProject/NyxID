@@ -323,6 +323,8 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<super::assistant_upload::PdfCoverage>,
     #[serde(default, flatten)]
     pub artifact: super::generated_artifact::Metadata,
 

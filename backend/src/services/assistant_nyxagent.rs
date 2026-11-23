@@ -3071,6 +3071,15 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     let reclaimed = row.active_turn.clone();
     if let Some(old) = &reclaimed {
+        Box::pin(
+            super::assistant_upload_service::pdf_vision::failed_in_session(
+                db,
+                session,
+                &row,
+                "turn_failed",
+            ),
+        )
+        .await?;
         Box::pin(super::assistant_channel_media::finalize_in_session(
             db,
             session,
@@ -5137,6 +5146,10 @@ artifact_recovery_target: None,
                     || error.clone(),
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
+                if let Some(failure) = &error {
+                    Box::pin(super::assistant_upload_service::pdf_vision::failed_in_session(&db, session, &current,
+                        if failure.code == "cancelled" { "stopped" } else { "turn_failed" })).await?;
+                }
                 super::generated_artifacts::prepare_settlement_in_session(&db, &mut current, session).await?;
                 let artifact_outcome = super::generated_artifacts::settled_outcome_in_session(&db, &current, session).await?;
                 let turn = current.active_turn.as_ref().expect("matched turn");
@@ -5955,6 +5968,7 @@ pub async fn attach_routed_image(
         chat_delivery: Some(chat_delivery),
         image_input: None,
         image_input_reason: None,
+        pdf: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,
@@ -6065,6 +6079,7 @@ pub(crate) async fn attach_resource_image(
         content_type: media.content_type.clone(),
         size: media.bytes.len() as i64,
         chat_delivery: Some(output == Output::Attach),
+        pdf: None,
         image_inspection: Some(output == Output::Inspect),
         image_input: None,
         image_input_reason: None,

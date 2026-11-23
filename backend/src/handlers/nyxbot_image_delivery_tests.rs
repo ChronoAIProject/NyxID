@@ -165,6 +165,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         });
     }
@@ -386,6 +387,7 @@ async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
             size: 100,
             pages: None,
             chat_delivery: delivery,
+            pdf: None,
             image_input: None,
             image_inspection: None,
         })

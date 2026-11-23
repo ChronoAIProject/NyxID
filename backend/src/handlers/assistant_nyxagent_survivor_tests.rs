@@ -244,14 +244,36 @@ async fn resumed_intermediate_continuation_and_image_windows_preserve_the_answer
     }
 }
 
+#[tokio::test]
+async fn pdf_rejection_is_request_scoped_in_reconnect_and_restart_windows() {
+    for script in [
+        vec!["lookup_pdf_rejected", ""],
+        vec!["held_pdf_rejected", ""],
+        vec!["", "lookup_pdf_rejected"],
+        vec!["", "held_pdf_rejected"],
+    ] {
+        let (_, reply, keys) = scripted_windows_with_limit(script, 1, 0).await;
+        assert_eq!(reply.status, "completed");
+        assert_eq!(keys.len(), 2);
+    }
+}
+
 async fn scripted_windows_with_limit(
     failures: Vec<&'static str>,
     images: usize,
     maximum: i32,
 ) -> (AssistantConversation, AssistantMessage, Vec<String>) {
+    let pdf_rejection = failures
+        .iter()
+        .position(|name| name.ends_with("pdf_rejected"));
+    let _budget = if pdf_rejection.is_some() {
+        Some(crate::services::assistant_upload_service::byte_budget::test_guard().await)
+    } else {
+        None
+    };
     let held = failures
         .iter()
-        .position(|kind| matches!(*kind, "held_success" | "held_budget"));
+        .position(|kind| matches!(*kind, "held_success" | "held_budget" | "held_pdf_rejected"));
     let capacity = failures.iter().position(|kind| *kind == "http_capacity");
     let (state, calls, server) = setup_options_with_tools(
         None,
@@ -265,8 +287,44 @@ async fn scripted_windows_with_limit(
     let service = assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG)
         .await
         .unwrap();
-    let request: engine::TurnRequest =
+    let mut request: engine::TurnRequest =
         serde_json::from_value(json!({"text":"view image"})).unwrap();
+    let pdf_id = if pdf_rejection.is_some() {
+        let uploads = &crate::handlers::assistant_uploads::draft(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Json(crate::handlers::assistant_uploads::Draft { agent_id: None }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id = uploads["id"].as_str().unwrap();
+        crate::services::assistant_upload_service::pdf_vision::ensure_indexes(&state.db)
+            .await
+            .unwrap();
+        state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
+            "_id":Uuid::new_v4().to_string(), "flag_key":"assistant:pdf-vision", "enabled":true,
+            "target_kind":"global", "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+            "updated_by":OWNER,
+        }).await.unwrap();
+        let item = crate::services::assistant_upload_service::upload(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            id,
+            "survivor.pdf",
+            crate::services::attachment_extraction::pdf_fixture(&[None, None], 0),
+        )
+        .await
+        .unwrap();
+        request = serde_json::from_value(
+            json!({"text":"view image","conversation_id":id,"attachment_ids":[item.id]}),
+        )
+        .unwrap();
+        Some(item.id)
+    } else {
+        None
+    };
     let mut start = engine::TurnStart::from(&request);
     start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
     let permit = state.direct_chat_limiter.admit(OWNER).await.unwrap();
@@ -395,6 +453,48 @@ async fn scripted_windows_with_limit(
                 .duration_since(calls[index].received_at)
                 >= Duration::from_secs(1)
         );
+    }
+    if let (Some(rejection), Some(pdf_id)) = (pdf_rejection, pdf_id) {
+        let messages = engine::messages(&state.db, OWNER, &saved.id, 10, None)
+            .await
+            .unwrap();
+        let pdf = messages
+            .iter()
+            .flat_map(|message| &message.attachments)
+            .find(|attachment| attachment.id == pdf_id)
+            .unwrap()
+            .pdf
+            .as_ref()
+            .unwrap();
+        let first = calls[0].body["input"][0]["content"].as_array().unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .filter(|part| part["type"] == "input_image")
+                .count(),
+            2
+        );
+        let follow_up = calls[1].body["input"].to_string();
+        assert!(
+            follow_up.contains(r#"image_pages_in_this_request\":[]"#),
+            "{follow_up}"
+        );
+        if rejection == 0 {
+            assert!(pdf.image_pages.is_empty());
+            assert_eq!(pdf.unread_pages, [1, 2]);
+            assert_eq!(pdf.reason.as_deref(), Some("image_input_unsupported"));
+            assert!(
+                follow_up.contains(r#"unavailable_pages\":[1,2]"#),
+                "{follow_up}"
+            );
+        } else {
+            assert_eq!(pdf.image_pages, [1, 2]);
+            assert!(pdf.unread_pages.is_empty());
+            assert!(
+                follow_up.contains(r#"image_pages_accepted_in_prior_requests\":[1,2]"#),
+                "{follow_up}"
+            );
+        }
     }
     let keys = calls
         .iter()

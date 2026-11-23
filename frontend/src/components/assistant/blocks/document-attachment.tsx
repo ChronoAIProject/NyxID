@@ -51,6 +51,15 @@ export function DocumentAttachment({
           aria-label={busy ? translateUi("Downloading") : translateUi("Download")}
         />
       </button>
+      {attachment.pdf && (
+        <p role="status" className="text-13 text-muted-foreground">
+          {translateUi("PDF pages with text: {{pages}}", { pages: attachment.pdf.text_pages.join(", ") || "—" })}
+          {" · "}{translateUi("Pages sent as images: {{pages}}", { pages: attachment.pdf.image_pages.join(", ") || "—" })}
+          {attachment.pdf.unread_pages.length > 0 && <>
+            {" · "}{translateUi("Pages without text or confirmed image delivery: {{pages}}", { pages: attachment.pdf.unread_pages.join(", ") })}
+          </>}
+        </p>
+      )}
       {error && (
         <p role="status" className="text-13 text-muted-foreground">
           {expired ? translateUi("Attachment expired per retention policy. Upload it again to continue.") : translateUi("Attachment unavailable or expired. Upload it again.")}
