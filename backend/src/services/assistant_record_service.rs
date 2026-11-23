@@ -317,9 +317,20 @@ async fn attachment_identity(
 ) -> AppResult<AttachmentIdentity> {
     let id = source.get_str("_id").map_err(|_| invalid())?.to_owned();
     let owner = source.get_str("user_id").map_err(|_| invalid())?.to_owned();
-    let (field, path, expected_size, text_content_type, preview) = if source
-        .contains_key("parent_attachment_id")
+    let (field, path, expected_size, text_content_type, preview) = if source.get_str("origin").ok()
+        == Some(super::assistant_upload_service::pdf_vision::ORIGIN)
     {
+        let page: crate::models::assistant_upload::PdfPage =
+            bson::from_document(source.clone()).map_err(|_| invalid())?;
+        super::assistant_upload_service::pdf_vision::validate_parent(db, &page).await?;
+        (
+            "data_encrypted",
+            super::assistant_upload_service::pdf_vision::path(&page),
+            Some(page.size as usize),
+            None,
+            false,
+        )
+    } else if source.contains_key("parent_attachment_id") {
         let root_id = source
             .get_str("parent_attachment_id")
             .map_err(|_| invalid())?;

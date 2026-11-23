@@ -732,6 +732,14 @@ async fn handle_webhook_inner_impl(
         },
     )?;
 
+    #[cfg(test)]
+    let adapter = crate::services::assistant_channel_media::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(bot_id)
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::from(adapter));
+
     let snapshot = if adapter.records_verification_result() {
         crate::services::channel_verification_service::CredentialSnapshot::load(
             state.db,

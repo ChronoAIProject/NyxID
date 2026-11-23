@@ -57,4 +57,4 @@ apt_options=(
 )
 
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y libdbus-1-dev pkg-config ripgrep
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y libdbus-1-dev pkg-config ripgrep poppler-utils

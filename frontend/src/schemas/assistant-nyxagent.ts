@@ -38,6 +38,13 @@ export const nyxAgentAttachmentSchema = z.object({
   origin: z.string().optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
+  pdf: z.object({
+    classification: z.enum(["no_text", "mixed", "text", "unknown"]),
+    text_pages: z.array(z.number().int().positive()).max(200),
+    image_pages: z.array(z.number().int().positive()).max(200),
+    unread_pages: z.array(z.number().int().positive()).max(200),
+    reason: z.string().max(64).nullish(),
+  }).nullish().catch(undefined),
   image_input: historyEnum(["sent", "unavailable"]).nullable().optional(),
   image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported", "guest_media_unavailable"]).nullish().catch(undefined),
   size: z.number().int().nonnegative(),
