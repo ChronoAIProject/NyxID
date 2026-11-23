@@ -11,6 +11,10 @@ use crate::{
     errors::{AppError, AppResult},
 };
 
+mod previous_labels;
+
+type FieldLabels = (&'static str, &'static [&'static str]);
+
 const RUNS: &str = "encrypted_record_migration_runs";
 const FINDINGS: &str = "encrypted_record_migration_findings";
 const RUN_ID: &str = "contextual-records-v1";
@@ -196,7 +200,11 @@ const REGISTRY: &[Entry] = &[
     Entry {
         collection: "auth_device_codes_v2",
         adapter: Adapter::Pending,
-        fields: &["delivery_credential_encrypted"],
+        fields: &[
+            "agent_key_grant.delivery_credential_encrypted",
+            "delivery_access_token_encrypted",
+            "delivery_refresh_token_encrypted",
+        ],
     },
     Entry {
         collection: "device_codes",
@@ -246,12 +254,16 @@ const REGISTRY: &[Entry] = &[
     Entry {
         collection: "nyxbot_events",
         adapter: Adapter::Pending,
-        fields: &["event_ref_ciphertext", "event_context_ciphertext"],
+        fields: &[
+            "delivery.target_ciphertext",
+            "event_context_ciphertext",
+            "guest_setup_payload",
+        ],
     },
     Entry {
-        collection: "nyxbot_watches",
+        collection: "mobile_social_deliveries",
         adapter: Adapter::Pending,
-        fields: &["target_ciphertext"],
+        fields: &["ciphertext"],
     },
     Entry {
         collection: "oauth_broker_bindings",
@@ -311,6 +323,50 @@ const REGISTRY: &[Entry] = &[
         adapter: Adapter::GeneratedArtifact,
         fields: &["data_encrypted"],
     },
+    Entry {
+        collection: "assistant_cma_sandboxes",
+        adapter: Adapter::Pending,
+        fields: &["request_ciphertext"],
+    },
+    Entry {
+        collection: "assistant_cma_creations",
+        adapter: Adapter::Pending,
+        fields: &["request_ciphertext"],
+    },
+    Entry {
+        collection: "nyxbot_event_bindings",
+        adapter: Adapter::Pending,
+        fields: &["provider_key_ciphertext", "producer_secret_ciphertext"],
+    },
+    Entry {
+        collection: "nyxbot_gateway_responses",
+        adapter: Adapter::Pending,
+        fields: &["payload_ciphertext"],
+    },
+    Entry {
+        collection: "channel_whatsapp_native",
+        adapter: Adapter::Pending,
+        fields: &["native_verify_token_encrypted"],
+    },
+    Entry {
+        collection: "assistant_conversations",
+        adapter: Adapter::Pending,
+        fields: &["active_turn.restart_admission.window.input"],
+    },
+    Entry {
+        collection: "approval_requests",
+        adapter: Adapter::Pending,
+        fields: &[
+            "execution_proposal.v1.payload",
+            "execution_proposal.v1.result",
+            "execution_proposal.v2.payload",
+            "execution_proposal.v2.result",
+            "execution_proposal.v3.payload",
+            "execution_proposal.v3.result",
+            "execution_proposal.v4.payload",
+            "execution_proposal.v4.result",
+        ],
+    },
 ];
 
 /// Safe control-plane report: no database cursors, record IDs, ciphertext,
@@ -341,36 +397,33 @@ pub struct FieldOutcome {
     pub verification_blocked: i64,
 }
 
-fn field_outcomes(row: &Document) -> Vec<FieldOutcome> {
+fn project_labels(
+    row: &Document,
+    labels: impl Iterator<Item = FieldLabels>,
+) -> AppResult<(Option<&'static str>, Vec<FieldOutcome>)> {
+    let cursor = usize::try_from(row.get_i32("entry").map_err(|_| invalid())?).ok();
     let summaries = row.get_document("field_outcomes").ok();
-    REGISTRY
-        .iter()
-        .enumerate()
-        .flat_map(|(index, entry)| {
-            entry
-                .fields
-                .iter()
-                .enumerate()
-                .map(move |(field_index, field)| {
-                    let summary = summaries
-                        .and_then(|values| values.get_document(index.to_string()).ok())
-                        .and_then(|values| values.get_document(field_index.to_string()).ok());
-                    let count = |kind| {
-                        summary
-                            .and_then(|value| value.get_i64(kind).ok())
-                            .unwrap_or(0)
-                    };
-                    FieldOutcome {
-                        collection: entry.collection,
-                        field,
-                        authenticated_current: count("authenticated_current"),
-                        no_material_observed: count("no_material_observed"),
-                        source_removed_observed: count("source_removed_observed"),
-                        verification_blocked: count("verification_blocked"),
-                    }
-                })
-        })
-        .collect()
+    let mut current_collection = None;
+    let mut outcomes = Vec::new();
+    for (index, (collection, fields)) in labels.enumerate() {
+        if cursor == Some(index) {
+            current_collection = Some(collection);
+        }
+        let entry = summaries.and_then(|s| s.get_document(index.to_string()).ok());
+        for (field_index, field) in fields.iter().enumerate() {
+            let summary = entry.and_then(|s| s.get_document(field_index.to_string()).ok());
+            let count = |kind| summary.and_then(|s| s.get_i64(kind).ok()).unwrap_or(0);
+            outcomes.push(FieldOutcome {
+                collection,
+                field,
+                authenticated_current: count("authenticated_current"),
+                no_material_observed: count("no_material_observed"),
+                source_removed_observed: count("source_removed_observed"),
+                verification_blocked: count("verification_blocked"),
+            });
+        }
+    }
+    Ok((current_collection, outcomes))
 }
 
 fn invalid() -> AppError {
@@ -505,20 +558,28 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
     }
     let mode: Mode =
         bson::from_bson(row.get("mode").cloned().ok_or_else(invalid)?).map_err(|_| invalid())?;
-    let index = row.get_i32("entry").map_err(|_| invalid())?;
+    let (collection, field_outcomes) = match row.get_str("registry_digest").ok() {
+        Some(digest) if digest == registry_digest() => project_labels(
+            &row,
+            REGISTRY
+                .iter()
+                .map(|entry| (entry.collection, entry.fields)),
+        )?,
+        Some(previous_labels::DIGEST) => {
+            project_labels(&row, previous_labels::LABELS.iter().copied())?
+        }
+        _ => (None, Vec::new()),
+    };
     Ok(Some(Report {
         generation: row.get_str("generation").map_err(|_| invalid())?.into(),
         mode,
         phase,
-        collection: usize::try_from(index)
-            .ok()
-            .and_then(|index| REGISTRY.get(index))
-            .map(|entry| entry.collection),
+        collection,
         scanned: row.get_i64("scanned").map_err(|_| invalid())?,
         rewritten: row.get_i64("rewritten").map_err(|_| invalid())?,
         unresolved,
         blockers,
-        field_outcomes: field_outcomes(&row),
+        field_outcomes,
     }))
 }
 
@@ -1310,6 +1371,8 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    mod registry;
+
     use super::*;
     use crate::crypto::{
         key_provider::{KeyProvider, WrappedKey},
