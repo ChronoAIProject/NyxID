@@ -4,13 +4,15 @@ import { AssistantAccountPanel } from "./assistant-account-panel";
 import { useAssistantViewport } from "@/hooks/use-assistant-viewport";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { ThreadTitle } from "@/components/assistant/thread-title";
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
 import { ASSISTANT_OVERLAY_BASE } from "@/lib/overlay-layer";
 import { Link, useRouter } from "@tanstack/react-router";
 import { Menu, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { SidebarRailContext } from "./sidebar-rail-context";
+import { AssistantThreadsContext } from "./assistant-threads-context";
+import "./assistant-navigation.css";
 import { useAssistantLayoutStore } from "@/stores/assistant-layout-store";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { AssistantDrawerDismissContext } from "@/components/assistant/assistant-drawer-context";
@@ -73,6 +75,8 @@ function AssistantShellLayout({
 }: AssistantShellProps & { readonly cmaCards: ReactNode }) {
   useUiTranslation();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [threadsSlot, setThreadsSlot] = useState<HTMLElement | null>(null);
+  const threadsId = useId();
   const desktop = useMediaQuery("(min-width: 768px)");
   const wideScreen = useMediaQuery("(min-width: 1024px)");
   const savedPreviewPercent = useMachinePaneStore((state) => state.percent);
@@ -130,6 +134,7 @@ function AssistantShellLayout({
   }, [mobileSidebarOpen]);
 
   return (
+    <AssistantThreadsContext value={wideScreen ? threadsSlot : null}>
     <AssistantDrawerDismissContext value={dismissDrawer}>
       <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}>
         <div
@@ -217,6 +222,7 @@ function AssistantShellLayout({
                 />
               </aside>
             )}
+            <aside id={threadsId} ref={setThreadsSlot} aria-label={translateUi("Threads")} className="assistant-threads-column" />
             {/* The slab is glued to the window's right edge: no gap, and only
                 its sidebar-facing corners are rounded. */}
             <div className="relative flex min-h-0 min-w-0 flex-1 md:mt-3 md:mb-2">
@@ -324,6 +330,7 @@ function AssistantShellLayout({
         <AssistantAccountPanel />
       </OverlayLayer>
     </AssistantDrawerDismissContext>
+    </AssistantThreadsContext>
   );
 }
 
