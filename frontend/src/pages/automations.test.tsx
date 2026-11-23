@@ -1,5 +1,6 @@
 import { formatAutomationTime } from "@/lib/automation-time";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   fireEvent,
@@ -22,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   remove: vi.fn(),
   run: vi.fn(),
   cancel: vi.fn(),
+  cancelHook: vi.fn(),
   history: vi.fn(),
   older: vi.fn(),
 }));
@@ -56,7 +58,8 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotSettings: mocks.settings,
   useUpdateNyxBotSettings: () => ({ mutateAsync: mocks.saveSettings }),
 }));
-vi.mock("@/hooks/use-automations", () => ({
+vi.mock("@/hooks/use-automations", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/use-automations")>()),
   useAutomationSetup: mocks.setup,
   useSchedulePreview: mocks.preview,
   useAutomationChats: () => ({
@@ -64,7 +67,7 @@ vi.mock("@/hooks/use-automations", () => ({
   }),
   useRunAutomation: () => ({ mutateAsync: mocks.run }),
   useAutomationRuns: mocks.history,
-  useCancelAutomationRun: () => ({ mutate: mocks.cancel, isPending: false }),
+  useCancelAutomationRun: mocks.cancelHook,
 }));
 import { AutomationEditor, AutomationsPage } from "./automations";
 import { AutomationPreferences } from "@/components/assistant/automation-preferences";
@@ -99,7 +102,9 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/automations");
   mocks.settings.mockReturnValue({ data: { timezone: "Asia/Singapore" } });
   mocks.triggers.mockReturnValue({ data: { triggers: [] } });
-  mocks.history.mockReturnValue({ data: { pages: [] } });
+  mocks.history.mockReset().mockReturnValue({ data: { pages: [{ runs: [] }] } });
+  mocks.cancelHook.mockReset().mockReturnValue({ mutate: mocks.cancel, isPending: false });
+  mocks.older.mockResolvedValue({ isFetchNextPageError: false });
   mocks.update.mockResolvedValue({ trigger });
   mocks.remove.mockResolvedValue({});
   mocks.run.mockResolvedValue({});
@@ -118,6 +123,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function chooseOption(label: string, name: string) {
@@ -788,41 +794,144 @@ it("locates the blocking run and uses its existing recovery controls", async () 
   expect(mocks.cancel).toHaveBeenCalledWith({ triggerId: trigger.id, runId: "blocking" });
 });
 
-it("finds a blocking run after the owner loads older history", async () => {
+const historyPath = `/api/v1/triggers/${trigger.id}/runs`;
+const historyKey = ["triggers", trigger.id, "runs"];
+const cursor = { before: trigger.created_at, before_id: "loaded-blocker" };
+const runFields = {
+  scheduled_at: trigger.created_at,
+  started_at: null,
+  finished_at: null,
+  duration_ms: null,
+  thread_id: null,
+};
+const loadedBlocker = {
+  ...runFields,
+  id: "loaded-blocker",
+  outcome: "waiting",
+  reason: "coordinator_pending",
+  wait_kind: "coordinator",
+  can_cancel: true,
+  thread_id: "loaded-thread",
+};
+
+async function openHistory(transport: typeof fetch) {
+  const actual = await vi.importActual<typeof import("@/hooks/use-automations")>("@/hooks/use-automations");
+  mocks.history.mockImplementation(actual.useAutomationRuns);
+  mocks.cancelHook.mockImplementation(actual.useCancelAutomationRun);
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  vi.stubGlobal("fetch", transport);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const user = userEvent.setup();
+  render(<QueryClientProvider client={client}><AutomationsPage /></QueryClientProvider>);
+  await user.click(screen.getAllByRole("button", { name: trigger.label })[0]!);
+  return { client, user };
+}
+
+it("keeps loaded controls and retries the older cursor after paging and refresh failures", async () => {
   const recent = {
     runs: [
-      { id: "skip", outcome: "skipped", reason: "overlap_skip", scheduled_at: trigger.created_at,
-        duration_ms: null, blocking_run_id: "older-run" },
-      { id: "skip-missing", outcome: "skipped", reason: "overlap_skip", scheduled_at: trigger.created_at,
-        duration_ms: null, blocking_run_id: "expired-run" },
+      { ...runFields, id: "skip", outcome: "skipped", reason: "overlap_skip", blocking_run_id: "older-run" },
+      { ...runFields, id: "skip-missing", outcome: "skipped", reason: "overlap_skip", blocking_run_id: "expired-run" },
+      { ...runFields, id: "legacy", outcome: "skipped", reason: "overlap" },
+      loadedBlocker,
     ],
+    next_cursor: cursor,
   };
-  const older = {
-    runs: [
-      { id: "older-run", outcome: "waiting", wait_kind: "coordinator", reason: "coordinator_pending",
-        scheduled_at: "2026-09-30T23:00:00Z", duration_ms: null, can_cancel: true },
-    ],
+  const olderBlocker = {
+    ...loadedBlocker,
+    id: "older-run",
+    scheduled_at: "2026-09-30T23:00:00Z",
+    thread_id: "older-thread",
   };
-  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
-  mocks.history.mockReturnValue({
-    data: { pages: [recent] },
-    hasNextPage: true,
-    fetchNextPage: mocks.older,
-  });
-  const { rerender } = render(<AutomationsPage />);
-  await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
-  expect(screen.getByText("Skipped because of run older-run. Load older runs to look for it.")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Load older runs" }));
-  expect(mocks.older).toHaveBeenCalledTimes(1);
+  const older = { runs: [olderBlocker], next_cursor: null };
+  const olderPath = `${historyPath}?${new URLSearchParams(cursor)}`;
+  const transport = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json(recent))
+    .mockRejectedValueOnce(new TypeError("Network failure"))
+    .mockResolvedValueOnce(Response.json({}, { status: 503 }))
+    .mockResolvedValueOnce(Response.json(recent))
+    .mockResolvedValueOnce(Response.json(older));
+  const { client, user } = await openHistory(transport);
 
-  mocks.history.mockReturnValue({ data: { pages: [recent, older] }, hasNextPage: false });
-  rerender(<AutomationsPage />);
-  const blocker = screen.getByRole("region", { name: "waiting" });
+  expect(await screen.findByText("Skipped because of run older-run. Load older runs to look for it.")).toBeInTheDocument();
+  const loaded = screen.getByRole("region", { name: "waiting" });
+  await user.click(screen.getByRole("button", { name: "Load older runs" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load older runs.");
+  expect(screen.getByText("Skipped because of run older-run. Retry loading older runs to look for it.")).toBeInTheDocument();
+  expect(screen.queryByText(/Load older runs to look for it/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/That run is unavailable/)).not.toBeInTheDocument();
+  expect(within(loaded).getByRole("button", { name: "Cancel run" })).toBeEnabled();
+  expect(within(loaded).getByRole("link", { name: "Open thread" })).toHaveAttribute("href", "/assistant?c=loaded-thread");
+
+  await act(() => client.refetchQueries({ queryKey: historyKey }));
+  expect(await screen.findByText("Could not refresh run history.")).toBeInTheDocument();
+  expect(within(loaded).getByRole("button", { name: "Cancel run" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.queryByText("Could not refresh run history.")).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "Retry loading older runs" })).toBeEnabled();
+  expect(screen.getByText("Skipped because of run older-run. Retry loading older runs to look for it.")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Retry loading older runs" }));
+
+  const skipped = await screen.findByRole("button", { name: /Skipped because of the run scheduled for/ });
+  const blocker = screen.getAllByRole("region", { name: "waiting" })[1]!;
   Object.defineProperty(blocker, "scrollIntoView", { value: vi.fn() });
-  await user.click(screen.getByRole("button", { name: /Skipped because of the run scheduled for/ }));
+  await user.click(skipped);
   expect(blocker).toHaveFocus();
-  expect(within(blocker).getByRole("button", { name: "Cancel run" })).toBeEnabled();
   expect(screen.getByText("Skipped because of run expired-run. That run is unavailable in history.")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Load older runs" })).not.toBeInTheDocument();
+  expect(screen.getByText("Skipped because another run was in progress. The blocking run was not recorded.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /loading older runs|load older runs/i })).not.toBeInTheDocument();
+  expect(transport.mock.calls.map(([path]) => path)).toEqual([
+    historyPath, olderPath, historyPath, historyPath, olderPath,
+  ]);
+
+  const cancelled = { ...olderBlocker, outcome: "failed", reason: "cancelled", can_cancel: false };
+  transport
+    .mockResolvedValueOnce(Response.json(cancelled))
+    .mockResolvedValueOnce(Response.json(recent))
+    .mockResolvedValueOnce(Response.json({ ...older, runs: [cancelled] }));
+  await user.click(within(blocker).getByRole("button", { name: "Cancel run" }));
+  expect(transport).toHaveBeenCalledTimes(5);
+  await user.click(screen.getByRole("button", { name: "Confirm cancellation" }));
+  expect(transport).toHaveBeenNthCalledWith(6, `${historyPath}/older-run/cancel`, expect.objectContaining({
+    method: "POST",
+    credentials: "include",
+  }));
+  const finished = await screen.findByRole("region", { name: "failed" });
+  expect(within(finished).queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
+  expect(within(loaded).getByRole("button", { name: "Cancel run" })).toBeEnabled();
+});
+
+it("shows loading and retries a failed first history request", async () => {
+  let respond!: (response: Response) => void;
+  const initial = new Promise<Response>((resolve) => { respond = resolve; });
+  const transport = vi.fn<typeof fetch>()
+    .mockReturnValueOnce(initial)
+    .mockResolvedValueOnce(Response.json({ runs: [], next_cursor: null }));
+  const { user } = await openHistory(transport);
+  expect(screen.getByLabelText("Loading runs")).toBeInTheDocument();
+  respond(Response.json({}, { status: 503 }));
+  expect(await screen.findByText("NyxID is temporarily unavailable. Try again in a moment.")).toBeInTheDocument();
+  expect(screen.queryByText("No runs yet.")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("No runs yet.")).toBeInTheDocument();
+});
+
+it.each([401, 403, 404])("hides cached history and owner controls after HTTP %s", async (status) => {
+  const transport = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ runs: [loadedBlocker], next_cursor: cursor }))
+    .mockResolvedValueOnce(Response.json({ error: "history_unavailable", message: "History unavailable" }, { status }));
+  if (status === 401) transport.mockResolvedValueOnce(Response.json({}));
+  const { client, user } = await openHistory(transport);
+  expect(await screen.findByRole("button", { name: "Cancel run" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Load older runs" }));
+  expect(await screen.findByText("History unavailable")).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "waiting" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open thread" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /retry|load older runs/i })).not.toBeInTheDocument();
+
+  transport.mockResolvedValueOnce(Response.json({}, { status: 503 }));
+  await act(() => client.refetchQueries({ queryKey: historyKey }));
+  expect(await screen.findByText("NyxID is temporarily unavailable. Try again in a moment.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
 });

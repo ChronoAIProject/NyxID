@@ -776,9 +776,17 @@ async fn deliver_existing(
     if let Err(error) = admitted {
         return match error {
             AppError::TriggerRateLimited => defer(state, job, run, "budget_exhausted").await,
-            AppError::TriggerOverlapSkip { .. } | AppError::Conflict(_) => {
-                defer(state, job, run, "overlap").await
+            AppError::TriggerOverlapSkip { blocking_run_id } => {
+                schedules::finish_overlap_skip(
+                    &state.db,
+                    job,
+                    &run.id,
+                    &blocking_run_id,
+                    &state.config.frontend_url,
+                )
+                .await
             }
+            AppError::Conflict(_) => defer(state, job, run, "overlap").await,
             other => Err(other),
         };
     }

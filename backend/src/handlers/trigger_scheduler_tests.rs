@@ -1745,6 +1745,130 @@ async fn result_transport_responses(
 }
 
 #[tokio::test]
+async fn scheduled_notification_dispatch_honors_overlap_policy() {
+    use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
+
+    let db = connect_transaction_test_database("schedule_notification_overlap").await;
+    schedules::indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let mut state = test_app_state(db);
+    let (client, requests, server) = result_transport().await;
+    state.http_client = client;
+    state.config.telegram_bot_token = Some("fixture-bot".into());
+    let mut channel =
+        crate::services::notification_service::get_or_create_channel(&state.db, OWNER)
+            .await
+            .unwrap();
+    channel.telegram_enabled = true;
+    channel.telegram_chat_id = Some(42);
+    state
+        .db
+        .collection::<NotificationChannel>(CHANNELS)
+        .replace_one(doc! { "_id": &channel.id }, &channel)
+        .await
+        .unwrap();
+    let runs = state.db.collection::<TriggerRun>(RUNS);
+
+    for overlap in [OverlapPolicy::Skip, OverlapPolicy::Queue] {
+        let now = Utc::now();
+        let trigger = trigger_service::create(
+            &state.db,
+            &state.encryption_keys,
+            trigger_service::CreateInput {
+                source: TriggerSource::Schedule,
+                setup_watch_id: None,
+                user_id: OWNER.into(),
+                label: "Scheduled notification".into(),
+                user_service_id: None,
+                overlap,
+                schedule: Some(ScheduleSpec {
+                    timing: ScheduleKind::Every {
+                        amount: 5,
+                        unit: IntervalUnit::Minutes,
+                        anchor: now,
+                    },
+                    start: None,
+                    end: None,
+                    max_runs: None,
+                    grace_seconds: Some(60),
+                }),
+                verification: TriggerVerification::Schedule,
+                delivery: TriggerDelivery::Notification,
+            },
+        )
+        .await
+        .unwrap()
+        .trigger;
+        let pending = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+        assert_eq!(pending.outcome, RunOutcome::Pending);
+        assert!(pending.reason.is_none());
+
+        // An older occurrence becomes active after insertion.
+        let mut blocker = schedules::new_run(&trigger, now - Duration::minutes(1), now);
+        blocker.outcome = RunOutcome::Started;
+        runs.insert_one(&blocker).await.unwrap();
+        let job = schedules::claim(&state.db, &pending.id, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        Box::pin(run_job_once(&state, &job)).await.unwrap();
+
+        let saved = runs
+            .find_one(doc! { "_id": &pending.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.reason.as_deref(), Some("overlap"));
+        assert!(saved.started_at.is_none());
+        assert!(requests.lock().await.is_empty());
+
+        schedules::finish(
+            &state.db,
+            &blocker.id,
+            RunOutcome::Completed,
+            None,
+            &state.config.frontend_url,
+        )
+        .await
+        .unwrap();
+        let retry = schedules::claim(&state.db, &pending.id, Utc::now() + Duration::seconds(2))
+            .await
+            .unwrap();
+
+        match overlap {
+            OverlapPolicy::Skip => {
+                assert_eq!(saved.outcome, RunOutcome::Skipped);
+                assert_eq!(saved.blocking_run_id.as_deref(), Some(blocker.id.as_str()));
+                assert!(saved.finished_at.is_some());
+                assert!(retry.is_none());
+                assert!(requests.lock().await.is_empty());
+            }
+            OverlapPolicy::Queue => {
+                assert_eq!(saved.outcome, RunOutcome::Pending);
+                assert!(saved.blocking_run_id.is_none());
+                Box::pin(run_job_once(&state, &retry.expect("queued retry")))
+                    .await
+                    .unwrap();
+                let delivered = runs
+                    .find_one(doc! { "_id": &pending.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(delivered.outcome, RunOutcome::Completed);
+                let requests = requests.lock().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].0.ends_with("/sendMessage"));
+                assert_eq!(requests[0].1["chat_id"], 42);
+            }
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
     let (mut state, _, agent_server) = setup("schedule_result_transport").await;
     let (client, requests, transport_server) = result_transport().await;
