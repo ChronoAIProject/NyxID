@@ -867,3 +867,217 @@ async fn org_guest_sheets_discovery_and_operations_follow_the_reviewed_binding()
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
+    use crate::billing_integration_tests::{FakeLago, billing_service, create_usage_index};
+    use crate::services::{
+        assistant_agent_credential_service as credentials, destination_routing::tests as google,
+        proxy_service::TARGET_HTTP_CLIENT_BUILDER,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let mut f = Fixture::new("applied_guest_workspace_sheets").await;
+    let db = f.org.state.db.clone();
+    google::seed(&db).await;
+    let workspace = google::connect(&db, &f.org.org, "api-google-workspace").await;
+    google::connect(&db, &f.org.org, "api-google-drive").await;
+    team::set_grants(
+        &db,
+        &f.org.admin,
+        &f.agent.id,
+        GrantChange::Add(AgentGrants {
+            service_ids: vec![workspace.id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    team::set_grants(
+        &db,
+        &f.org.admin,
+        &f.agent.id,
+        GrantChange::Guests([(workspace.id, GuestAccess::Use)].into()),
+    )
+    .await
+    .unwrap();
+    create_usage_index(&db).await;
+    f.org.state.billing = Arc::new(billing_service(&db, Arc::new(FakeLago::default()), 1000));
+    f.org.state.billing.ensure_wallet(&f.org.org).await.unwrap();
+    f.guests(vec![]).await;
+    ready(&mut f).await;
+    adopt(&f).await;
+    reload(&mut f).await;
+    assert!(
+        f.channel
+            .org_specialist
+            .as_ref()
+            .unwrap()
+            .guests
+            .follows_agent_grants
+    );
+    crate::test_utils::set_test_approval_preference(&db, &f.org.org, false).await;
+
+    let origin = f.guest("visitor").await;
+    let row = channel_turn(&f, &origin, "Read the event and record a question").await;
+    let key = credentials::load_for_conversation(
+        &db,
+        &f.org.state.encryption_keys,
+        &row.user_id,
+        &row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(row.guest_turn);
+    let echo = google::Echo::start().await;
+    f.org.state.http_client = echo.client.clone();
+    let (_, router) = crate::routes::build_router_with_state(f.org.state.clone());
+    let router = router.with_state(f.org.state.clone());
+    let request = |method: &'static str, path: String, body: Option<Value>| {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("x-api-key", key.raw_key.as_str());
+        match body {
+            Some(body) => request
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string())),
+            None => request.body(Body::empty()),
+        }
+        .unwrap()
+    };
+    let rpc = |method: &'static str, params: Value| {
+        request(
+            "POST",
+            "/mcp".into(),
+            Some(json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})),
+        )
+    };
+    let exercise_guest_routes = async {
+        let list = Box::pin(router.clone().oneshot(rpc("tools/list", json!({}))))
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = to_bytes(list.into_body(), 1024 * 1024).await.unwrap();
+        let list: Value = serde_json::from_slice(&body).unwrap();
+        let tools = list["result"]["tools"].as_array().unwrap();
+        let append = tools
+            .iter()
+            .find(|tool| tool["name"] == "api-google-workspace__sheets_append_values")
+            .unwrap();
+        assert!(
+            append["description"]
+                .as_str()
+                .unwrap()
+                .contains("insertDataOption=INSERT_ROWS")
+        );
+        assert!(append["inputSchema"]["properties"]["insertDataOption"].is_object());
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "api-google-workspace__sheets_get_values")
+        );
+        assert!(!tools.iter().any(|tool| {
+            tool["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("api-google-drive__")
+        }));
+
+        let sheet = "/api/v1/proxy/s/api-google-workspace/v4/spreadsheets/event/values";
+        let written = json!({"values":[["Guest question"]]});
+        for (method, path, body, status) in [
+            (
+                "GET",
+                format!("{sheet}/Event_Config!A1:B2"),
+                None,
+                StatusCode::OK,
+            ),
+            (
+                "POST",
+                format!(
+                    "{sheet}/Questions!A1:B1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+                ),
+                Some(written.clone()),
+                StatusCode::OK,
+            ),
+            (
+                "POST",
+                format!(
+                    "{sheet}/Questions!A1:B1:append?valueInputOption=RAW&insertDataOption=OVERWRITE"
+                ),
+                Some(written.clone()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "POST",
+                format!("{sheet}/Questions!A1:B1:append?valueInputOption=RAW"),
+                Some(written.clone()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "GET",
+                "/api/v1/proxy/s/api-google-drive/v4/spreadsheets/ungranted/values/A1".into(),
+                None,
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let response = Box::pin(router.clone().oneshot(request(method, path.clone(), body)))
+                .await
+                .unwrap();
+            let actual = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            assert_eq!(
+                actual,
+                status,
+                "{method} {path}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+
+        let args = json!({"spreadsheetId":"event","range":"Questions!A1:B1","valueInputOption":"RAW","insertDataOption":"INSERT_ROWS","body":{"values":[["MCP question"]]}});
+        let call = rpc(
+            "tools/call",
+            json!({"name":"api-google-workspace__sheets_append_values","arguments":args}),
+        );
+        let reply = Box::pin(router.clone().oneshot(call)).await.unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        let body = to_bytes(reply.into_body(), 1024 * 1024).await.unwrap();
+        let reply: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+
+        let calls = echo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call["host"] == "sheets.googleapis.com")
+        );
+        assert!(calls[0]["request"].as_str().unwrap().starts_with("GET "));
+        for (call, body) in calls[1..].iter().zip([written, args["body"].clone()]) {
+            let request = call["request"].as_str().unwrap();
+            assert!(
+                request.starts_with("POST ") && request.contains(":append?"),
+                "{request}"
+            );
+            assert!(
+                request.contains("valueInputOption=RAW")
+                    && request.contains("insertDataOption=INSERT_ROWS"),
+                "{request}"
+            );
+            let received: Value = serde_json::from_str(call["body"].as_str().unwrap()).unwrap();
+            assert_eq!(received, body);
+        }
+    };
+    TARGET_HTTP_CLIENT_BUILDER
+        .scope(echo.client_builder.clone(), exercise_guest_routes)
+        .await;
+    db.drop().await.unwrap();
+}
