@@ -1370,6 +1370,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_resumes_each_erasure_domain_after_lease_expiry() {
+        use crate::services::telemetry_erasure_service;
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let restarted = crate::test_utils::test_app_state(db.clone());
+        let jobs = db.collection::<Document>(JOBS);
+
+        for (index, domain) in DOMAINS.iter().enumerate() {
+            if *domain == "vendor" {
+                telemetry_erasure_service::drain_once(&db, &Default::default())
+                    .await
+                    .unwrap();
+                telemetry_erasure_service::operator_reconcile_empty_inventory(
+                    &db,
+                    &user,
+                    "operator",
+                    "evidence://synthetic-provider-inventory",
+                    "Reviewed the synthetic deployment inventory",
+                )
+                .await
+                .unwrap();
+            }
+            retry_now(&db, &accepted.id).await;
+            let interrupted = claim(&db).await.unwrap().expect("original worker claim");
+            assert_eq!(next_domain_index(&interrupted), Some(index), "{domain}");
+            assert!(
+                !process_one(&restarted).await.unwrap(),
+                "{domain} lease still held"
+            );
+            let expired = jobs
+                .update_one(
+                    doc! {"_id": &accepted.id, "lease_token": &interrupted.lease_token,
+                    "inventory_version": INVENTORY_VERSION},
+                    doc! {"$set": {"lease_expires_at": bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            assert_eq!(expired.modified_count, 1);
+            assert!(
+                !checkpoint(&db, &interrupted, index, Outcome::Complete)
+                    .await
+                    .unwrap(),
+                "{domain} expired worker checkpoint"
+            );
+            for _ in 0..32 {
+                retry_now(&db, &accepted.id).await;
+                assert!(process_one(&restarted).await.unwrap(), "{domain}");
+                let current = super::super::status(&db, &user).await.unwrap().unwrap();
+                if current.domains[index].status == DomainStatus::Complete {
+                    assert_eq!(current.id, accepted.id);
+                    assert_eq!(
+                        bson::to_bson(&current.domains[..index]).unwrap(),
+                        bson::to_bson(&interrupted.domains[..index]).unwrap(),
+                        "{domain} changed an earlier checkpoint"
+                    );
+                    break;
+                }
+                assert_eq!(next_domain_index(&current), Some(index), "{domain}");
+                assert_eq!(current.status, ErasureStatus::Pending, "{domain}");
+            }
+            let current = super::super::status(&db, &user).await.unwrap().unwrap();
+            assert_eq!(
+                current.domains[index].status,
+                DomainStatus::Complete,
+                "{domain}"
+            );
+        }
+        let finished = super::super::status(&db, &user).await.unwrap().unwrap();
+        assert_eq!(finished.status, ErasureStatus::Complete);
+        assert!(finished.completed_at.is_some());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn revision_four_completed_job_erases_crash_reports_without_touching_other_owners() {
         let (db, user) = super::super::tests::fixture().await;
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();

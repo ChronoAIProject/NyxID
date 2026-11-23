@@ -28,8 +28,8 @@ it("starts both pagination streams at the first page after an account route swit
   await user.click(screen.getByRole("button", { name: "Next nodes page" }));
   await waitFor(() => expect(requested.some((url) => url.includes("nodes_after=node-page-two") && url.includes("after=effect-page-two"))).toBe(true));
   view.rerender(<QueryClientProvider client={client}><AccountErasureProgress userId="second-owner" /></QueryClientProvider>);
-  await waitFor(() => expect(requested).toContain("/admin/users/second-owner/erasure?"));
-  expect(requested.filter((url) => url.includes("second-owner"))).toEqual(["/admin/users/second-owner/erasure?"]);
+  await waitFor(() => expect(requested).toContain("/admin/users/second-owner/erasure?include_retained=true"));
+  expect(requested.filter((url) => url.includes("second-owner"))).toEqual(["/admin/users/second-owner/erasure?include_retained=true"]);
   expect(screen.queryByRole("button", { name: "First effects page" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "First nodes page" })).not.toBeInTheDocument();
   view.unmount();
@@ -42,12 +42,16 @@ it("binds an operator retry to the displayed job and domain round", async () => 
   const jobId = "b966a558-bbf1-4baa-a091-0370b6e3d666";
   vi.mocked(api.get).mockResolvedValue({
     erasure: { job_id: jobId, status: "operator_action", accepted_at: "2026-10-19T00:00:00Z", completed_at: null,
+      retained: [{ collection: "audit_log", reason: "hash-chained audit records" }],
       domains: [{ domain: "machine", retry_generation: 3, status: "operator_action", reason: "machine_lifecycle_reconciliation_required", completed_at: null }] },
     effects: [], node_drains: [], next_after: null, next_node_after: null,
   } as never);
   vi.mocked(api.post).mockResolvedValue({} as never);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const view = render(<QueryClientProvider client={client}><AccountErasureProgress userId="owner" /></QueryClientProvider>);
+  await user.click(await screen.findByText("Retained collections"));
+  expect(screen.getByText("audit_log")).toBeVisible();
+  expect(screen.getByText(/hash-chained audit records/)).toBeVisible();
   await user.click(await screen.findByRole("button", { name: "Retry domain" }));
   await waitFor(() => expect(api.post).toHaveBeenCalledWith("/admin/users/owner/erasure/retry", {
     domain: "machine", job_id: jobId, expected_retry_generation: 3, idempotency_key: expect.any(String),

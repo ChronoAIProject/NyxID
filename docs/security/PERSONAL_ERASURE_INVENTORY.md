@@ -342,6 +342,13 @@ after the provider obligations and local inventory have settled. The durable
 job remains available after the user document is gone; overall `complete` also
 requires the remaining domain checkpoints, including vendor erasure, to finish.
 
+Add `?include_retained=true` to the account deletion request or the admin
+erasure progress request to include `retained` on the job response. Each item
+contains a registry collection name and its retention reason. The list
+describes policy and does not indicate that a particular account had rows in
+each collection. The admin console requests this list and displays it
+alongside the job's progress.
+
 ## Ownership and lifecycle rules
 
 Cleanup uses explicit owner and child-join predicates with bounded domain

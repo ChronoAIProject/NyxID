@@ -18,7 +18,12 @@ function AccountErasurePages({ userId }: { readonly userId: string }) {
   const client = useQueryClient();
   const progress = useQuery({
     queryKey: ["admin", "erasure", userId, after, nodesAfter],
-    queryFn: async () => erasureProgressSchema.parse(await api.get<unknown>(`/admin/users/${encodeURIComponent(userId)}/erasure?${new URLSearchParams({...(after ? {after} : {}),...(nodesAfter ? {nodes_after:nodesAfter} : {})}).toString()}`)),
+    queryFn: async () => {
+      const query = new URLSearchParams({ include_retained: "true" });
+      if (after) query.set("after", after);
+      if (nodesAfter) query.set("nodes_after", nodesAfter);
+      return erasureProgressSchema.parse(await api.get<unknown>(`/admin/users/${encodeURIComponent(userId)}/erasure?${query}`));
+    },
     refetchInterval: 5000,
   });
   const retry = useMutation({
@@ -36,6 +41,16 @@ function AccountErasurePages({ userId }: { readonly userId: string }) {
       {domain.domain.replaceAll("_", " ")}: {domain.status.replaceAll("_", " ")}{domain.reason ? ` (${domain.reason.replaceAll("_", " ")})` : ""}
       {domain.status === "operator_action" ? <Button className="ml-2" variant="outline" disabled={retry.isPending || !erasure.job_id || domain.retry_generation === undefined} onClick={() => { if (erasure.job_id && domain.retry_generation !== undefined) retry.mutate({ domain: domain.domain, job_id: erasure.job_id, expected_retry_generation: domain.retry_generation, idempotency_key: crypto.randomUUID() }); }}>{translateUi("Retry domain")}</Button> : null}
     </li>)}</ul> : null}
+    {erasure?.retained?.length ? (
+      <details className="space-y-2 text-14">
+        <summary className="cursor-pointer font-medium">{translateUi("Retained collections")}</summary>
+        <ul className="space-y-1">
+          {erasure.retained.map(({ collection, reason }) => (
+            <li key={collection}><code>{collection}</code> · {reason}</li>
+          ))}
+        </ul>
+      </details>
+    ) : null}
     {retry.error ? <p role="alert">{retry.error instanceof ApiError ? retry.error.message : translateUi("Domain retry failed.")}</p> : null}
     {progress.data.node_drains.length ? <><h4 className="type-row-title">{translateUi("Outstanding node drains")}</h4><ul className="space-y-1 text-14">{progress.data.node_drains.map((node) => <li key={node.node_id}><code>{node.node_id}</code>{translateUi(": awaiting connection close")}{node.fence ? translateUi(" on {{value1}}, generation {{value2}}", { value1: node.fence.instance_name, value2: node.fence.generation_id }) : ""}</li>)}</ul><p className="text-14 text-muted-foreground">{translateUi("Unavailable replicas retain their drain obligation. An operator may reconcile an exact generation only with evidence that the old process has stopped.")}</p></> : null}
     <div className="flex gap-2">{nodesAfter ? <Button variant="outline" onClick={() => setNodesAfter(null)}>{translateUi("First nodes page")}</Button> : null}{progress.data.next_node_after ? <Button variant="outline" onClick={() => setNodesAfter(progress.data.next_node_after)}>{translateUi("Next nodes page")}</Button> : null}</div>
