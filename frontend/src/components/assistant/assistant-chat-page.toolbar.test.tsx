@@ -27,6 +27,8 @@ const state = vi.hoisted(() => ({
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
+  approvalDeadline: "2099-01-01T00:00:00Z",
+  approvalStatus: undefined as "pending" | "approved" | undefined,
   expiredCard: false,
   send: vi.fn(async () => undefined),
   agentLoaded: true,
@@ -53,6 +55,10 @@ const staleCard: NyxAgentAcknowledgement = {
   reason: null, service_slug: null, service_name: null, tool_name: "nyxid__draft_agent_skill",
   created_at: "2026-10-14T00:00:00Z", decided_at: null, expires_at: "2099-10-14T00:15:00Z",
 };
+const approvalMessage = {
+  id: "nyxagent-approval:append", role: "system", content: "Append one row",
+  status: "complete", timestamp: 1,
+};
 vi.mock("@tanstack/react-router", async (original) => ({
   ...await original<typeof import("@tanstack/react-router")>(),
   useNavigate: () => vi.fn(),
@@ -74,11 +80,14 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
 vi.mock("@/hooks/use-nyxbot-groups", () => ({ useNyxBotGroups: () => ({ data: [] }) }));
 vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () => ({
   conversation: state.search.c ? conversation : undefined,
-  session: { title: "Thread", messages: state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
+  session: { title: "Thread", messages: state.approvalStatus ? [approvalMessage] : state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
   interruption: state.interruption,
   error: state.historyError,
-  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: [], conversations: [], threadsLoaded: false,
+  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: state.approvalStatus ? [{
+    id: "append", status: state.approvalStatus, summary: approvalMessage.content, service_name: "Sheets",
+    approval_mode: "per_request", expires_at: state.approvalDeadline,
+  }] : [], conversations: [], threadsLoaded: false,
   send: state.send, stop: vi.fn(), refreshHistory: state.refreshHistory, deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
@@ -103,10 +112,6 @@ vi.mock("@/hooks/use-assistant-onboarding", () => ({
 }));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
 vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));
-vi.mock("./chat-message", () => ({ ChatMessageList: ({ session, renderMessage }: {
-  session?: { messages: { id: string }[] }; renderMessage?: (message: { id: string }) => ReactNode;
-}) => session?.messages.filter((message) => message.id.startsWith("nyxagent-acknowledgement:"))
-  .map((message) => <div key={message.id}>{renderMessage?.(message)}</div>) ?? null }));
 vi.mock("./assistant-link-modals", () => ({ AssistantLinkModalHost: ({ children }: { children: ReactNode }) => children }));
 afterEach(() => vi.unstubAllGlobals());
 beforeEach(() => {
@@ -134,6 +139,8 @@ beforeEach(() => {
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
+  state.approvalStatus = undefined;
+  state.approvalDeadline = "2099-01-01T00:00:00Z";
   state.expiredCard = false;
   state.send.mockReset();
   state.interruption = undefined;
@@ -144,6 +151,24 @@ beforeEach(() => {
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+it("updates the same approval row when history reports a decision mid-turn", () => {
+  state.search = { c: conversation.id };
+  state.streaming = true;
+  state.approvalStatus = "pending";
+  const client = new QueryClient();
+  const thread = () => <QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>;
+  const view = render(thread());
+  expect(screen.getByRole("button", { name: "Approve and send" })).toBeEnabled();
+  state.approvalDeadline = "2000-01-01T00:00:00Z";
+  view.rerender(thread());
+  expect(screen.getByRole("button", { name: "Approve and send" })).toBeDisabled();
+  expect(screen.getByText("Waiting for the server")).toBeVisible();
+  state.approvalStatus = "approved";
+  view.rerender(thread());
+  expect(screen.getByText("Approved")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Approve and send" })).toBeNull();
+});
+
 it.each([
   { search: { draft: true }, desktop: true },
   { search: { c: conversation.id }, desktop: true },

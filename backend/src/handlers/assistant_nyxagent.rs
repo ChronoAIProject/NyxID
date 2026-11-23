@@ -1354,7 +1354,7 @@ pub async fn history(
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approval_history
             .iter()
-            .filter(|row| row.status == "pending")
+            .filter(|row| row.status == "pending" && row.expires_at > Utc::now())
             .cloned()
             .collect(),
         approval_history,

@@ -3023,6 +3023,7 @@ pub(super) async fn check_llm_approval_descriptor(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,

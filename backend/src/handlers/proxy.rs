@@ -13788,6 +13788,8 @@ mod proxy_resolution_integration_tests {
         Disconnect,
         Deadline,
         Approve,
+        ExternalBudget,
+        InvalidBudget,
         NyxbotAt70,
         NyxbotAt85,
     }
@@ -13863,7 +13865,11 @@ mod proxy_resolution_integration_tests {
             .insert_one(approval_config(&owner, &service.id))
             .await
             .unwrap();
-        let ingress = Utc::now();
+        let ingress = if matches!(case, ApprovalWaitCase::ExternalBudget) {
+            Utc::now() - chrono::Duration::seconds(78)
+        } else {
+            Utc::now()
+        };
         let (clock, at) = tokio::sync::watch::channel(ingress + chrono::Duration::seconds(68));
         let proxy = Router::new()
             .route("/proxy/s/{slug}/{*path}", post(ws_proxy_test_route))
@@ -13897,8 +13903,34 @@ mod proxy_resolution_integration_tests {
             .unwrap();
         });
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-        client.write_all(b"POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        let budget_header = match case {
+            ApprovalWaitCase::ExternalBudget => {
+                "X-NyxID-Approval-Wait-Seconds: 80\r\nX-NyxID-Approval-Mode: async\r\n"
+            }
+            ApprovalWaitCase::InvalidBudget => "X-NyxID-Approval-Wait-Seconds: 9\r\n",
+            _ => "",
+        };
+        client.write_all(format!("POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\n{budget_header}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         let requests = db.collection::<ApprovalRequest>(APPROVAL_REQUESTS);
+        if matches!(case, ApprovalWaitCase::InvalidBudget) {
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            assert_eq!(
+                requests
+                    .count_documents(doc! {"user_id":&owner})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            origin.abort();
+            upstream.abort();
+            return;
+        }
         let card = loop {
             if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
                 break row;
@@ -13916,6 +13948,11 @@ mod proxy_resolution_integration_tests {
                 85
             };
             clock.send_replace(ingress + chrono::Duration::seconds(decision_second));
+        } else if matches!(case, ApprovalWaitCase::ExternalBudget) {
+            assert_eq!(
+                card.expires_at.timestamp_millis(),
+                (ingress + chrono::Duration::seconds(80)).timestamp_millis()
+            );
         } else {
             assert_eq!(
                 (card.expires_at - card.created_at).num_seconds(),
@@ -13943,6 +13980,26 @@ mod proxy_resolution_integration_tests {
             }
         };
         match case {
+            ApprovalWaitCase::InvalidBudget => unreachable!("invalid ingress returned above"),
+            ApprovalWaitCase::ExternalBudget => {
+                let mut response = String::new();
+                tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(response.contains("approval_wait_timed_out"), "{response}");
+                assert!(decide().await.is_err());
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id":&card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
             ApprovalWaitCase::Disconnect => {
                 drop(client);
                 // Allow the origin to observe EOF, then decide within the original TTL.
@@ -14077,6 +14134,16 @@ mod proxy_resolution_integration_tests {
     #[tokio::test]
     async fn approval_wait_2705_nyxbot_approval_at_85_seconds_expires_in_chat_and_approvals() {
         exercise_connected_approval(ApprovalWaitCase::NyxbotAt85).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_external_budget_caps_card_and_connected_wait() {
+        exercise_connected_approval(ApprovalWaitCase::ExternalBudget).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_invalid_budget_is_rejected_before_creation() {
+        exercise_connected_approval(ApprovalWaitCase::InvalidBudget).await;
     }
 
     #[tokio::test]

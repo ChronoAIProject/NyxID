@@ -163,6 +163,11 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         crate::services::notification_service::approval_timeout_secs(db, &context.actor).await?
     };
     let mut end = now + Duration::seconds(i64::from(timeout));
+    let wait_budget = crate::services::approval_service::connected_budget_deadline(timeout)
+        .filter(|_| !background_allowed);
+    if let Some(deadline) = wait_budget {
+        end = end.min(deadline);
+    }
     if let Some(t) = &task {
         end = end.min(t.hard_deadline);
     }
@@ -444,7 +449,14 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
     })).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     // Send before the connected waiter starts polling. Failure cannot roll back
     // the committed review; the sweep can claim an unclaimed notification.
-    if delivery::notify_once(state, &committed).await.is_err() {
+    let notice = delivery::notify_once(state, &committed);
+    let notice_failed = if wait_budget.is_some() {
+        let remaining = (end - Utc::now()).to_std().unwrap_or_default();
+        !matches!(tokio::time::timeout(remaining, notice).await, Ok(Ok(_)))
+    } else {
+        notice.await.is_err()
+    };
+    if notice_failed {
         tracing::warn!(
             reason = "execution_notification_failed",
             "Execution permission notification failed"
