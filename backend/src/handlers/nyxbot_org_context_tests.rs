@@ -418,6 +418,7 @@ async fn org_lark_provider_source_alias_resolves_under_the_route_read_authority(
         assert_eq!(channel.bot_owner_id.as_deref(), Some(org_id.as_str()));
         let actor = member(&state, &channel, &org_id).await;
         channel.platform = "lark".into();
+        channel.gateway_bot_id = Some("ou_fixture_bot".into());
         let route = channel.route_id.as_deref().unwrap();
         state
             .db
