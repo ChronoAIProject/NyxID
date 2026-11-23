@@ -468,7 +468,7 @@ mod tests {
             request.signature = nyxid_machine::signing::sign(&request, b"upload-timing");
             let (mut metadata, upload) = uploads
                 .begin(
-                    &serde_json::to_value(request).unwrap(),
+                    serde_json::to_value(request).unwrap(),
                     &runtime.node_id,
                     &hex::encode(b"upload-timing"),
                 )

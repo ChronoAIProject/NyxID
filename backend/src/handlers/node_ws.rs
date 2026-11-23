@@ -3965,7 +3965,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "GET".to_string(),
-                    path: "/stream".into(),
+                    path: "/stream".to_string(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,

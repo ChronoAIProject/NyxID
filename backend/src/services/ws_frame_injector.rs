@@ -16,24 +16,17 @@ pub struct InjectorState {
     pub total_injections_fired: usize,
 }
 
-pub struct IncomingFrame<'a> {
+#[derive(Clone, Debug)]
+pub struct IncomingFrame {
     pub direction: WsFrameDirection,
     pub kind: WsFrameKind,
-    pub payload: &'a [u8],
+    pub payload: Vec<u8>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WsFrame {
     pub kind: WsFrameKind,
-    pub payload: zeroize::Zeroizing<Vec<u8>>,
-}
-
-impl std::fmt::Debug for WsFrame {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WsFrame")
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
-    }
+    pub payload: Vec<u8>,
 }
 
 pub struct InjectionAction<'a> {
@@ -52,14 +45,18 @@ impl InjectionAction<'_> {
         }
         Some(WsFrame {
             kind: self.rule.frame_kind,
-            payload: self.rule.template.as_bytes().to_vec().into(),
+            payload: self.rule.template.as_bytes().to_vec(),
         })
     }
 
     pub fn frame_for_downstream(&self, credential: &str) -> WsFrame {
         WsFrame {
             kind: self.rule.frame_kind,
-            payload: nyxid_crypto::render_credential_frame(&self.rule.template, credential),
+            payload: self
+                .rule
+                .template
+                .replace(CREDENTIAL_PLACEHOLDER, credential)
+                .into_bytes(),
         }
     }
 }
@@ -67,7 +64,7 @@ impl InjectionAction<'_> {
 pub fn evaluate<'a>(
     rules: &'a [WsFrameInjection],
     state: &mut InjectorState,
-    frame: &IncomingFrame<'_>,
+    frame: &IncomingFrame,
 ) -> Option<InjectionAction<'a>> {
     let frame_index_in = match frame.direction {
         WsFrameDirection::Downstream => {
@@ -147,7 +144,7 @@ pub fn credential_hash_prefix(credential: &str) -> String {
 
 fn trigger_matches(
     trigger: &WsFrameTrigger,
-    frame: &IncomingFrame<'_>,
+    frame: &IncomingFrame,
     frame_index_in: usize,
 ) -> Option<&'static str> {
     match trigger {
@@ -163,9 +160,9 @@ fn trigger_matches(
             if frame.kind != WsFrameKind::Text {
                 return None;
             }
-            let json: nyxid_crypto::secret_json::WireJson =
-                serde_json::from_slice(frame.payload).ok()?;
-            let actual = get_json_path_value(&json.0, path)?;
+            let text = std::str::from_utf8(&frame.payload).ok()?;
+            let json: serde_json::Value = serde_json::from_str(text).ok()?;
+            let actual = get_json_path_value(&json, path)?;
             (actual == value).then_some("json_field_equals")
         }
     }
@@ -241,11 +238,11 @@ mod tests {
         }
     }
 
-    fn text_downstream(payload: &str) -> IncomingFrame<'_> {
+    fn text_downstream(payload: &str) -> IncomingFrame {
         IncomingFrame {
             direction: WsFrameDirection::Downstream,
             kind: WsFrameKind::Text,
-            payload: payload.as_bytes(),
+            payload: payload.as_bytes().to_vec(),
         }
     }
 
@@ -322,7 +319,7 @@ mod tests {
         let frame = IncomingFrame {
             direction: WsFrameDirection::Downstream,
             kind: WsFrameKind::Binary,
-            payload: br#"{"type":"auth_required"}"#,
+            payload: br#"{"type":"auth_required"}"#.to_vec(),
         };
 
         assert!(evaluate(&rules, &mut state, &frame).is_none());
@@ -339,10 +336,8 @@ mod tests {
             &text_downstream(r#"{"type":"auth_required"}"#),
         )
         .expect("match");
-        let frame = action.frame_for_downstream("TEST_CRED");
-        assert!(!format!("{frame:?} {frame:#?}").contains("TEST_CRED"));
         assert_eq!(
-            std::str::from_utf8(&frame.payload).expect("utf8"),
+            String::from_utf8(action.frame_for_downstream("TEST_CRED").payload).expect("utf8"),
             r#"{"type":"auth","access_token":"TEST_CRED"}"#
         );
     }
@@ -605,7 +600,7 @@ mod tests {
         let upstream = IncomingFrame {
             direction: WsFrameDirection::Upstream,
             kind: WsFrameKind::Text,
-            payload: b"upstream data",
+            payload: b"upstream data".to_vec(),
         };
         assert!(evaluate(&rules, &mut state, &upstream).is_none());
         assert_eq!(state.upstream_frame_index, 1);
@@ -739,7 +734,7 @@ mod tests {
         )
         .expect("match");
         assert_eq!(
-            std::str::from_utf8(&action.frame_for_downstream("C").payload).unwrap(),
+            String::from_utf8(action.frame_for_downstream("C").payload).unwrap(),
             "FIRST C"
         );
     }
@@ -754,7 +749,7 @@ mod tests {
         let frame = IncomingFrame {
             direction: WsFrameDirection::Downstream,
             kind: WsFrameKind::Text,
-            payload: &[0xFF, 0xFE, 0xFD],
+            payload: vec![0xFF, 0xFE, 0xFD],
         };
         assert!(evaluate(&rules, &mut state, &frame).is_none());
     }

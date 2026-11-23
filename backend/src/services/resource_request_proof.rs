@@ -161,7 +161,7 @@ pub(crate) async fn prepare_admitted<'a>(
     let mut url = format!(
         "{}/{}",
         target.base_url.trim_end_matches('/'),
-        prepared.path.as_str()
+        prepared.path
     );
     if let Some(query) = prepared.query {
         url.push('?');
