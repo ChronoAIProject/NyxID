@@ -73,7 +73,7 @@ export type WorkspaceContentParamList = Omit<
 > & {
   AssistantContext: AssistantParams | undefined;
   GroupChat: { groupId: string };
-  AssistantDetails: { agentId?: string; conversationId?: string };
+  AssistantDetails: { agentId?: string; conversationId?: string; draftKey?: string; draftEpoch?: number };
   AssistantTitleEdit: { conversationId: string; agentId?: string };
   AssistantHistory: { agentId?: string } | undefined;
   AssistantWorkingContext: { conversationId: string };

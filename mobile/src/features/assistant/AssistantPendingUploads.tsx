@@ -9,7 +9,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { FileText, X } from "lucide-react-native";
-import { Label } from "../../components/workspace/WorkspaceUI";
+import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
@@ -22,38 +22,85 @@ export function AssistantPendingUploads({
   remove,
   disabled,
   showMentionHandles = true,
+  reselect,
+  choose,
+  dismiss,
+  resume,
+  canResume,
+  retryDiscard,
 }: {
   files: PendingAssistantUpload[];
   remove: (key: string) => void;
   disabled: boolean;
   showMentionHandles?: boolean;
+  reselect: boolean;
+  choose: () => void;
+  dismiss: () => void;
+  resume: () => void;
+  canResume: boolean;
+  retryDiscard?: () => void;
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
-  const { fontScale } = useWindowDimensions();
+  const { fontScale, height } = useWindowDimensions();
   const chipHeight = Math.max(
     56,
     12 + (showMentionHandles ? 62 : 48) * fontScale,
+  );
+  const maxListHeight = Math.max(
+    chipHeight + 8,
+    Math.min(height * 0.3, chipHeight * 2.5 + 16),
   );
   const [preview, setPreview] = useState<PendingAssistantUpload>();
   useEffect(() => {
     if (preview && !files.some((row) => row === preview)) setPreview(undefined);
   }, [files, preview]);
+  if (retryDiscard)
+    return <ActionButton label={t("Retry discard")} onPress={retryDiscard} variant="secondary" />;
   return (
     <>
+      {reselect && (
+        <View style={styles.content}>
+          <Label>
+            {t(
+              "An attachment selection was interrupted. Choose the file again.",
+            )}
+          </Label>
+          <ActionButton
+            label={t("Choose files")}
+            onPress={choose}
+            disabled={!canResume}
+            variant="secondary"
+          />
+          <ActionButton
+            label={t("Dismiss")}
+            onPress={dismiss}
+            variant="secondary"
+          />
+        </View>
+      )}
+      {files.some((row) => row.resumable) && (
+        <ActionButton
+          label={t("Resume attachment uploads")}
+          onPress={resume}
+          disabled={!canResume}
+          variant="secondary"
+        />
+      )}
       {files.length ? (
         <OverflowScrollView
           fadeColor={colors.card}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.list}
+          nestedScrollEnabled
+          persistentScrollbar
+          style={[styles.list, { maxHeight: maxListHeight }]}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[styles.content, styles.grid]}
         >
           {files.map((row) => {
             // Some native document providers omit MIME metadata. Preserve the
             // image preview without changing an already assigned handle.
             const image =
+              !!row.file.uri &&
               !row.error &&
               (row.kind === "image" ||
                 /\.(png|jpe?g|gif|webp)$/i.test(row.file.name));
@@ -117,8 +164,8 @@ export function AssistantPendingUploads({
                   accessibilityLabel={t("Remove {{name}}", {
                     name: row.file.name,
                   })}
-                  accessibilityState={{ disabled }}
-                  disabled={disabled}
+                  accessibilityState={{ disabled: disabled || !!row.removing, busy: !!row.removing }}
+                  disabled={disabled || row.removing}
                   onPress={() => remove(row.key)}
                   style={styles.close}
                 >
@@ -141,10 +188,13 @@ export function AssistantPendingUploads({
 }
 const styles = StyleSheet.create({
   fill: { flex: 1, minWidth: 0 },
-  list: { flexGrow: 0 },
+  list: { flexGrow: 0, alignSelf: "stretch" },
+  grid: { flexDirection: "row", flexWrap: "wrap" },
   content: { gap: 8, padding: 4 },
   card: {
     width: 260,
+    maxWidth: "100%",
+    flexGrow: 1,
     overflow: "hidden",
     flexDirection: "row",
     alignItems: "center",

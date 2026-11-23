@@ -14,20 +14,29 @@ function elements(root: Element): Element[] {
   )];
 }
 
-function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true }:
+function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true, platform = "ios" }:
   { inSheet?: boolean; scanner?: boolean; reduced?: boolean; authenticated?: boolean; userCode?: string; canGoBack?: boolean;
     previewRequest?: (code: string) => Promise<unknown>;
-    decisionRequest?: () => Promise<void> } = {}) {
+    decisionRequest?: () => Promise<void>; platform?: "ios" | "android" } = {}) {
   let reducedMotion = reduced;
   let linkedCode = userCode;
   let language: Language = "en";
   const navigationCalls: unknown[] = [];
   const previews: { code: string }[] = [];
   const decisions: string[] = [];
+  let keyboardVisible = false;
+  let keyboardDismissals = 0;
+  let readingModalInsets = false;
+  const modalInsets = { top: 45, bottom: 34 };
   // Render the local ManualCodeModal with the actual screen; native boundaries
   // remain inert elements, so its hook and visible/animation props are exercised.
-  const jsx = (type: any, props: Record<string, unknown>): Element =>
-    typeof type === "function" ? type(props) : { type, props };
+  const jsx = (type: any, props: Record<string, unknown>): Element => {
+    if (typeof type !== "function") return { type, props };
+    // JSX forms child elements before a provider is rendered. Defer the
+    // content under the native provider so its hooks see that provider.
+    if (type.name === "ManualCodeContent") return { type, props };
+    return type(props);
+  };
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "@react-navigation/routers": { StackActions },
@@ -37,13 +46,32 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
         "View", "Text", "TextInput", "Pressable", "ScrollView", "Modal",
         "KeyboardAvoidingView", "ActivityIndicator",
       ].map((name) => [name, name])),
-      Platform: { OS: "ios" },
+      Platform: { OS: platform },
+      Keyboard: {
+        isVisible: () => keyboardVisible,
+        dismiss: () => { keyboardDismissals++; keyboardVisible = false; },
+      },
     },
-    "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) },
+    "react-native-safe-area-context": {
+      SafeAreaProvider: (props: any) => {
+        const context = props.children;
+        assert.equal(context.type, "WorkspaceSheetProvider");
+        assert.equal(context.props.value, null);
+        const content = context.props.children;
+        readingModalInsets = true;
+        try {
+          return { type: "SafeAreaProvider", props: { children: content.type(content.props) } };
+        } finally {
+          readingModalInsets = false;
+        }
+      },
+      useSafeAreaInsets: () => readingModalInsets ? modalInsets : { top: 0, bottom: 0 },
+    },
     "lucide-react-native": Object.fromEntries([
       "ChevronDown", "ChevronLeft", "ChevronUp", "Info", "ScanQrCode", "X",
     ].map((name) => [name, name])),
     "../../app/WorkspaceHeader": {
+      WorkspaceSheetContext: { Provider: "WorkspaceSheetProvider" },
       useWorkspaceSheet: () => inSheet ? {} : null,
       useWorkspaceBack: () => {},
     },
@@ -51,6 +79,7 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
     "./AuthSubmitButton": { AuthSubmitButton: "PrimaryButton" },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
     "../../components/icons/empty-state/MagicKeyIllustration": { MagicKeyIllustration: "MagicKeyIllustration" },
     "../../components/icons/empty-state/RoadBarrierIllustration": { RoadBarrierIllustration: "RoadBarrierIllustration" },
     "../../lib/accessibility/useReducedMotion": { useReducedMotion: () => reducedMotion },
@@ -105,6 +134,8 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
   }
   return {
     harness, find, previews, decisions, navigationCalls,
+    keyboard: (visible: boolean) => { keyboardVisible = visible; },
+    keyboardDismissals: () => keyboardDismissals,
     setLanguage(value: Language) { language = value; harness.render(); },
     setCode(value: string) { linkedCode = value; harness.render(); },
     setReducedMotion(value: boolean) { reducedMotion = value; harness.render(); },
@@ -130,6 +161,29 @@ test("manual code modal follows reduced motion on entry and while open", () => {
     assert.equal(env.find("Modal").props.visible, false);
     env.harness.unmount();
   }
+});
+
+test("Android manual-code Back hides the keyboard before closing and keeps the code", () => {
+  const env = setup({ platform: "android" });
+  env.find("DeviceCodeScanner").props.onManualEntry();
+  env.harness.flush();
+  const input = () => elements(env.harness.value()).find((item) => item.type === "TextInput" && item.props.accessibilityLabel === "Login code")!;
+  input().props.onChangeText("ABCD-EFGH");
+  env.harness.flush();
+  env.keyboard(true);
+  env.find("Modal").props.onRequestClose();
+  env.harness.flush();
+  assert.equal(env.keyboardDismissals(), 1);
+  assert.equal(env.find("Modal").props.visible, true);
+  assert.equal(input().props.value, "ABCD-EFGH");
+  assert.deepEqual(env.navigationCalls, []);
+  const scroller = elements(env.find("KeyboardViewport")).find((item) => item.type === "ScrollView")!;
+  assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
+  assert.equal(scroller.props.automaticallyAdjustKeyboardInsets, false);
+  env.find("Modal").props.onRequestClose();
+  env.harness.flush();
+  assert.equal(env.find("Modal").props.visible, false);
+  env.harness.unmount();
 });
 
 const pendingPreview = (label: string) => ({
@@ -325,3 +379,21 @@ for (const kind of ["browser", "cli", "unknown"] as const) {
     env.harness.unmount();
   });
 }
+
+test("manual code reads full-window safe-area values from its native Modal for both opener contexts", () => {
+  for (const inSheet of [true, false]) {
+    for (const platform of ["android", "ios"] as const) {
+      const env = setup({ inSheet, platform });
+      env.find("DeviceCodeScanner").props.onManualEntry();
+      env.harness.flush();
+      const provider = elements(env.find("Modal")).find((node) => node.type === "SafeAreaProvider")!;
+      const root = elements(provider).find((node) => node.props.accessibilityViewIsModal)!;
+      const scroll = elements(root).find((node) => node.type === "ScrollView")!;
+      assert.equal(root.props.style[1].paddingTop, 45);
+      assert.equal(scroll.props.contentContainerStyle[1].paddingBottom, 34);
+      assert.equal(scroll.props.automaticallyAdjustKeyboardInsets, false);
+      assert.equal(scroll.props.keyboardDismissMode, platform === "ios" ? "interactive" : "none");
+      env.harness.unmount();
+    }
+  }
+});

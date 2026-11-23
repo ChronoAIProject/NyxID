@@ -164,6 +164,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
         },
       },
       "react-native-safe-area-context": {
+        SafeAreaProvider: "SafeAreaProvider",
         useSafeAreaInsets: () => ({ bottom: 0, top: 0 }),
       },
       "lucide-react-native": Object.fromEntries(
@@ -179,6 +180,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
         ].map((n) => [n, n]),
       ),
       "../../app/WorkspaceHeader": {
+        WorkspaceSheetContext: { Provider: "WorkspaceSheetProvider" },
         useWorkspaceSheet: () => ({}),
         useWorkspaceBack: (input: { disabled: boolean }) => {
           navigationDisabled = input.disabled;
@@ -190,6 +192,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
       "../../components/ScreenContainer": {
         ScreenContainer: "ScreenContainer",
       },
+      "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
       "../../lib/accessibility/useReducedMotion": {
         useReducedMotion: () => true,
       },

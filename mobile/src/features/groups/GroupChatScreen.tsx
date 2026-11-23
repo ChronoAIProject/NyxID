@@ -1,3 +1,4 @@
+import { AttachmentSourcePicker } from "../assistant/AttachmentSourcePicker";
 import { useContext } from "react";
 import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
@@ -1180,6 +1181,20 @@ function GroupChat({
               </OverflowScrollView>
               <AssistantPendingUploads
                 files={uploads.files}
+                reselect={uploads.session.reselect}
+                retryDiscard={uploads.session.discardPending ? uploads.retryDiscard : undefined}
+                choose={() => void uploads.pick("files")}
+                dismiss={() => uploads.session.dismissReselection()}
+                resume={() => uploads.session.resume()}
+                canResume={
+                  canParticipate &&
+                  chat.online &&
+                  !chat.isError &&
+                  !chat.recoveryRequired &&
+                  liveMembers.length > 0 &&
+                  !uploads.picking &&
+                  !uploads.session.sending
+                }
                 remove={removeAttachment}
                 disabled={chat.sending || uploads.session.sending}
               />
@@ -1366,6 +1381,7 @@ function GroupChat({
           </View>
         </View>
       </Modal>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }
