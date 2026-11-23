@@ -73,9 +73,9 @@ pub enum DeviceCodePoll {
         interval: u32,
     },
     Approved {
-        api_key: String,
+        api_key: zeroize::Zeroizing<String>,
         node_id: String,
-        refresh_token: String,
+        refresh_token: zeroize::Zeroizing<String>,
         /// Delivery envelope lifetime, not the API key lifetime.
         expires_in: i64,
         api_key_expires_at: Option<String>,

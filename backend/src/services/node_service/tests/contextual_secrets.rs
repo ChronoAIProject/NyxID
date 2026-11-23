@@ -772,7 +772,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
     assert_eq!(
         keys.decrypt(node.signing_secret_encrypted.as_deref().unwrap())
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         signing.as_bytes()
     );
     let (_, rotated) = rotate_auth_token(&db, &keys, &actor, &node.id)
@@ -788,7 +789,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
     assert_eq!(
         keys.decrypt(node.signing_secret_encrypted.as_deref().unwrap())
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         rotated.as_bytes()
     );
     transfer_node_owner(&db, &keys, &actor, &node.id, &org, 10)
@@ -805,7 +807,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
     assert_eq!(
         keys.decrypt(moved.signing_secret_encrypted.as_deref().unwrap())
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         rotated.as_bytes()
     );
     let device = create_for_device(
@@ -867,7 +870,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
     assert_eq!(
         keys.decrypt(managed.signing_secret_encrypted.as_deref().unwrap())
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         material.signing_secret.as_bytes()
     );
     db.drop().await.unwrap();

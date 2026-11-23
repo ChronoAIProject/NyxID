@@ -405,31 +405,28 @@ mod tests {
         assert!(row.delivery_refresh_token_encrypted.is_some());
         assert!(row.refresh_token_hash.is_some());
         let encryption_keys = test_encryption_keys();
-        let decrypted_api_key = String::from_utf8(
-            encryption_keys
-                .decrypt(
-                    row.delivery_api_key_encrypted
-                        .as_deref()
-                        .expect("encrypted api key"),
-                )
-                .await
-                .expect("decrypt api key"),
-        )
-        .expect("api key utf8");
-        let decrypted_refresh_token = String::from_utf8(
-            encryption_keys
-                .decrypt(
-                    row.delivery_refresh_token_encrypted
-                        .as_deref()
-                        .expect("encrypted refresh token"),
-                )
-                .await
-                .expect("decrypt refresh token"),
-        )
-        .expect("refresh token utf8");
+        let decrypted_api_key = encryption_keys
+            .decrypt(
+                row.delivery_api_key_encrypted
+                    .as_deref()
+                    .expect("encrypted api key"),
+            )
+            .await
+            .expect("decrypt api key");
+        let decrypted_api_key = std::str::from_utf8(&decrypted_api_key).expect("api key utf8");
+        let decrypted_refresh_token = encryption_keys
+            .decrypt(
+                row.delivery_refresh_token_encrypted
+                    .as_deref()
+                    .expect("encrypted refresh token"),
+            )
+            .await
+            .expect("decrypt refresh token");
+        let decrypted_refresh_token =
+            std::str::from_utf8(&decrypted_refresh_token).expect("refresh token utf8");
         assert!(decrypted_api_key.starts_with("nyxid_ag_"));
         assert_eq!(
-            hash_token(&decrypted_refresh_token),
+            hash_token(decrypted_refresh_token),
             row.refresh_token_hash.unwrap()
         );
 
@@ -455,9 +452,9 @@ mod tests {
         else {
             panic!("expected approved");
         };
-        assert_eq!(api_key, decrypted_api_key);
+        assert_eq!(api_key.as_str(), decrypted_api_key);
         assert_eq!(node_id, approval.node_id);
-        assert_eq!(refresh_token, decrypted_refresh_token);
+        assert_eq!(refresh_token.as_str(), decrypted_refresh_token);
         assert_eq!(expires_in, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
         assert_eq!(api_key_expires_at, approval.api_key_expires_at);
         assert!(api_key_expires_at.is_some());

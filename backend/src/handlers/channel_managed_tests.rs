@@ -288,7 +288,8 @@ async fn managed_completion_success_encrypts_pin_and_reuses_registration() {
             .encryption_keys
             .decrypt(&bot.bot_token_encrypted)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         b"business-token"
     );
     let pin = state
@@ -327,7 +328,7 @@ async fn managed_completion_success_encrypts_pin_and_reuses_registration() {
         .unwrap()
         .body_json::<Value>()
         .unwrap();
-    assert_eq!(registration["pin"], String::from_utf8(pin).unwrap());
+    assert_eq!(registration["pin"], std::str::from_utf8(&pin).unwrap());
     for request in requests.iter().filter(|r| {
         r.headers
             .get("authorization")
