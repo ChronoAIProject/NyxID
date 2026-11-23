@@ -249,6 +249,27 @@ user's authorization and edit it through the published operations. Drive file
 listing, moving, exporting, and deleting are available alongside the editor operations
 on Drive and Workspace.
 
+## File access for organization channel guests
+
+Grant the specialist a connection authenticated as a dedicated Google account.
+Give that account Editor access to the event workbook so it can read the event
+and append questions. Keep unrelated files, mail, and calendars inaccessible
+to that account, including access inherited through groups or shared drives.
+Select only the OAuth scopes needed by the specialist. With `drive.file` the
+workbook also needs to be created or authorized for the OAuth app. Verify both
+the expected read and append and a Google denial for an unrelated workbook
+through the same connection.
+
+Guest Grants select the connections and operation types guests can use.
+`all_operations: true` applies the guest access level across the operations the
+specialist can use. Guest-only selections accept catalog endpoint IDs and
+reject resource value rules. Ordinary specialist operation scopes can apply
+value limits across the specialist's turns, including organization channel
+guests. For Sheets, select the appropriate endpoint IDs and pin `spreadsheetId`
+and, when needed, `range` with exact or `one_of` input rules. Author those rules
+through the specialist's **operations** API when `assistant:operation-scopes`
+is enabled for the acting administrator. See [Operation scopes](AGENT_OPERATION_SCOPES.md).
+
 ## Mixed-version rollout
 
 Complete the backend rollout before exposing the new editor services to clients,

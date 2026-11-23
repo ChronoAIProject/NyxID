@@ -945,7 +945,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
     .unwrap()
     .unwrap();
     assert!(row.guest_turn);
-    let echo = google::Echo::start().await;
+    let echo = google::Echo::start_with_denied_workbook(Some("unshared-workbook")).await;
     f.org.state.http_client = echo.client.clone();
     let (_, router) = crate::routes::build_router_with_state(f.org.state.clone());
     let router = router.with_state(f.org.state.clone());
@@ -1091,15 +1091,46 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
         let reply: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(reply["result"]["isError"], false, "{reply}");
 
+        let unrelated =
+            "/api/v1/proxy/s/api-google-workspace/v4/spreadsheets/unshared-workbook/values/A1";
+        let refusal = Box::pin(
+            router
+                .clone()
+                .oneshot(request("GET", unrelated.into(), None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(refusal.into_body(), 1024 * 1024).await.unwrap();
+        let refusal: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(refusal["error"]["status"], "PERMISSION_DENIED", "{refusal}");
+        assert_eq!(
+            refusal["error"]["message"],
+            "Fixture account has no access to this workbook"
+        );
+
         let calls = echo.calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 4);
         assert!(
             calls
                 .iter()
                 .all(|call| call["host"] == "sheets.googleapis.com")
         );
         assert!(calls[0]["request"].as_str().unwrap().starts_with("GET "));
-        for (call, body) in calls[1..].iter().zip([written, args["body"].clone()]) {
+        assert!(
+            calls[3]["request"]
+                .as_str()
+                .unwrap()
+                .starts_with("GET /v4/spreadsheets/unshared-workbook/")
+        );
+        assert!(calls.iter().all(|call| {
+            call["headers"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer test-google-token"))
+        }));
+        for (call, body) in calls[1..3].iter().zip([written, args["body"].clone()]) {
             let request = call["request"].as_str().unwrap();
             assert!(
                 request.starts_with("POST ") && request.contains(":append?"),

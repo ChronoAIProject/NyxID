@@ -26,6 +26,10 @@ impl Drop for Echo {
 }
 impl Echo {
     pub async fn start() -> Self {
+        Self::start_with_denied_workbook(None).await
+    }
+
+    pub async fn start_with_denied_workbook(denied_workbook: Option<&'static str>) -> Self {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let key = rcgen::generate_simple_self_signed(vec![
             "docs.googleapis.com".into(),
@@ -102,12 +106,25 @@ impl Echo {
                         .as_str()
                         .unwrap()
                         .contains("service-disabled");
+                    let workbook_denied = host == "sheets.googleapis.com"
+                        && denied_workbook.is_some_and(|id| {
+                            value["request"]
+                                .as_str()
+                                .unwrap()
+                                .split_whitespace()
+                                .nth(1)
+                                .and_then(|path| path.strip_prefix("/v4/spreadsheets/"))
+                                .and_then(|path| path.split('/').next())
+                                == Some(id)
+                        });
                     let body = if disabled {
                         json!({"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"SERVICE_DISABLED","metadata":{"service":"docs.googleapis.com","consumer":"projects/test-project"}}]}}).to_string()
+                    } else if workbook_denied {
+                        json!({"error":{"code":403,"status":"PERMISSION_DENIED","message":"Fixture account has no access to this workbook"}}).to_string()
                     } else {
                         value.to_string()
                     };
-                    let status = if disabled {
+                    let status = if disabled || workbook_denied {
                         "403 Forbidden"
                     } else if redirect {
                         "302 Found\r\nLocation: https://sheets.googleapis.com/redirected"
