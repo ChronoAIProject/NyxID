@@ -135,18 +135,30 @@ export function createUploadDraftRecovery(storage: Storage) {
         guard?.();
         const existing = await read(id);
         guard?.();
-        if (existing?.discardPending && !draft.discardPending)
-          throw new Error("Attachment draft is pending discard");
+        if (existing?.discardPending) {
+          if (!draft.discardPending)
+            throw new Error("Attachment draft is pending discard");
+          // Retained sessions may still hold the original rows on retry.
+          // The stored cleanup record owns the remaining work.
+          return;
+        }
         if (value) await storage.setItem(id, value);
         else await storage.removeItem(id);
       });
     },
-    discard(owner: string, key: string, release: (draft: UploadDraft) => Promise<void>) {
+    discard(
+      owner: string,
+      key: string,
+      guard: () => void,
+      release: (row: UploadDraft["rows"][number], conversationId?: string) => Promise<void>,
+    ) {
       const id = prefix(owner) + key;
       const current = discards.get(id);
       if (current) return current;
       const operation = ordered(owner, async () => {
+        guard();
         const draft = await read(id);
+        guard();
         if (!draft) return;
         const cleanup = {
           conversationId: draft.conversationId,
@@ -154,9 +166,20 @@ export function createUploadDraftRecovery(storage: Storage) {
           reselect: false,
           discardPending: true,
         };
-        if (!draft.discardPending || draft.model || draft.keepConversation)
+        if (!draft.discardPending || draft.model || draft.keepConversation || draft.reselect)
           await storage.setItem(id, JSON.stringify(cleanup));
-        await release(cleanup);
+        for (const [index, row] of cleanup.rows.entries()) {
+          guard();
+          await release(row, cleanup.conversationId);
+          guard();
+          // Keep the storage lane until the checkpoint settles, even if the
+          // account changes during the write. Only a confirmed row is removed.
+          await storage.setItem(id, JSON.stringify({
+            ...cleanup,
+            rows: cleanup.rows.slice(index + 1),
+          }));
+        }
+        guard();
         await storage.removeItem(id);
       }).finally(() => discards.delete(id));
       discards.set(id, operation);

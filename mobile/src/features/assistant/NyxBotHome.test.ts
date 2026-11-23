@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { agentSchema } from "../agents/agentContracts";
+import { transcriptColumnStyle } from "../display/chatLayout";
 import { groupSchema } from "../groups/groupContracts";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
@@ -55,7 +56,7 @@ function setup(widePanel = false, panel = false, cornerWindow = false, width = 3
         id: `nyxg-${"b".repeat(32)}`,
         name: "Launch crew",
         lead_agent_id: "nyxbot",
-        members: [],
+        members: [{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }],
         created_at: "2026-10-28T00:00:00Z",
         working_agent_ids: ["waiting"],
       }),
@@ -189,6 +190,10 @@ function setup(widePanel = false, panel = false, cornerWindow = false, width = 3
   ) => Element;
   const props = {
     widePanel,
+    scrollProps: {
+      contentContainerStyle: transcriptColumnStyle(),
+      onLayout: (event: unknown) => calls.push(["scroll-layout", event]),
+    },
     onChat: (...args: unknown[]) => calls.push(["chat", ...args]),
     onOpenCrew: (id: string) => calls.push(["crew", id]),
     onNewAgent: () => calls.push(["new-agent"]),
@@ -494,26 +499,48 @@ test("P9 ordinary Home greeting retains base uncapped scaling and wrapping", () 
   x.harness.unmount();
 });
 
-test("wide Home rows use their measured host and the wide companion starts compact", () => {
-  for (const [panel, fontScale, initialLines] of [
-    [false, 1, 1],
-    [true, 1, undefined],
-    [false, 3.5, undefined],
-  ] as const) {
-    const home = setup(panel, panel, false, 1200, fontScale);
-    const row = () => home.all().find((node) => node.props.accessibilityLabel === "Open finished's latest work")!;
-    const titleLines = () => row().props.children[1].props.children[0].props.children[0].props.numberOfLines;
-    assert.equal(titleLines(), initialLines);
-    const scroll = home.all().find((node) => node.type === "ScrollView" && node.props.onLayout)!;
-    scroll.props.onLayout({ nativeEvent: { layout: { width: 280 } } });
-    home.harness.flush();
-    assert.equal(titleLines(), undefined);
-    assert.equal(row().props.accessibilityRole, "button");
-    for (const label of ["Chat with finished", ...(!panel ? ["Open crew Launch crew"] : [])]) {
-      const item = home.all().find((node) => node.props.accessibilityLabel === label);
-      assert.ok(item, label);
-      assert.equal(item.props.children[1].props.children[0].props.children[0].props.numberOfLines, undefined);
-    }
-    home.harness.unmount();
+function checkCardRows(home: ReturnType<typeof setup>, compact: boolean, panel: boolean) {
+  const labels = ["Open finished's latest work", "Chat with finished"];
+  if (!panel) labels.push("Open crew Launch crew");
+  for (const label of labels) {
+    const row = home.button(label);
+    assert.equal(row.accessibilityRole, "button");
+    const [title, detail] = row.children[1].props.children;
+    assert.equal(title.props.children[0].props.numberOfLines, compact ? undefined : 1, label);
+    assert.equal(detail.props.numberOfLines, compact ? undefined : 2, label);
   }
+  const update = home.button("Open finished's latest work");
+  assert.equal(update.children[2] === null, compact, "timestamp uses the stacked body");
+}
+
+test("main Home measures the card host inside transcript padding and forwards viewport layout", () => {
+  const home = setup(false, false, false, 375);
+  const layout = (width: number) => ({ nativeEvent: { layout: { width, height: 800 } } });
+  const scroll = home.all().find((node) => node.type === "ScrollView")!;
+  const inner = () => home.all().find((node) => node.type === "View" && node.props.onLayout)!;
+  assert.equal(scroll.props.contentContainerStyle[1].paddingHorizontal, 12);
+  const firstViewport = layout(375);
+  scroll.props.onLayout(firstViewport);
+  assert.deepEqual(home.calls, [["scroll-layout", firstViewport]]);
+  inner().props.onLayout(layout(351));
+  checkCardRows(home, true, false);
+  scroll.props.onLayout(layout(393));
+  inner().props.onLayout(layout(369));
+  checkCardRows(home, false, false);
+  home.harness.unmount();
+});
+
+test("the companion starts compact in a wide window and large text stacks the main cards", () => {
+  const companion = setup(true, true, false, 1200);
+  checkCardRows(companion, true, true);
+  const companionContent = companion.all().find((node) => node.type === "View" && node.props.onLayout)!;
+  companionContent.props.onLayout({ nativeEvent: { layout: { width: 248 } } });
+  checkCardRows(companion, true, true);
+  companion.harness.unmount();
+
+  const largeText = setup(false, false, false, 393, 1.5);
+  const largeTextContent = largeText.all().find((node) => node.type === "View" && node.props.onLayout)!;
+  largeTextContent.props.onLayout({ nativeEvent: { layout: { width: 369 } } });
+  checkCardRows(largeText, true, false);
+  largeText.harness.unmount();
 });

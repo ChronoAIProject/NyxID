@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { buildApiError } from "../../lib/api/responseError";
 import { AssistantUploadSession } from "./AssistantUploadSession";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
+import type { UploadDraft } from "./uploadDraftRecovery";
 
 const key = JSON.stringify(["private", "nyxbot", "first"]);
 const item = { id: "pending-id", label: "one.txt", size: 3, content_type: "text/plain", origin: "user_upload", expired: false };
@@ -16,19 +17,27 @@ const draft = {
   reselect: false,
 };
 
-function setup(cacheRoot = "file:///cache/") {
+function setup(cacheRoot = "file:///cache/", device = {
+  disk: new Map<string, string>(),
+  files: [] as string[],
+}) {
   let account: string | null = "A";
   let epoch = 1;
   const accountListeners = new Set<() => void>();
-  const disk = new Map<string, string>();
-  const files: string[] = [];
+  const { disk, files } = device;
   const calls: { path: string; owner: string; signal: AbortSignal }[] = [];
-  const timer = new Set<() => void>();
+  const timers = new Map<() => void, number>();
+  let now = 0;
+  let beforeWrite: (draft: UploadDraft) => Promise<void> = async () => {};
+  let beforeDelete: (uri: string) => void = () => {};
   let remote: () => Promise<unknown> = async () => {};
   const h = hookHarness({
     "@react-native-async-storage/async-storage": { __esModule: true, default: {
       getItem: async (key: string) => disk.get(key) ?? null,
-      setItem: async (key: string, value: string) => { disk.set(key, value); },
+      setItem: async (key: string, value: string) => {
+        await beforeWrite(JSON.parse(value));
+        disk.set(key, value);
+      },
       removeItem: async (key: string) => { disk.delete(key); },
       getAllKeys: async () => [...disk.keys()],
       multiRemove: async (keys: string[]) => { keys.forEach((key) => disk.delete(key)); },
@@ -46,7 +55,10 @@ function setup(cacheRoot = "file:///cache/") {
       File: class {
         constructor(readonly uri: string) {}
         get exists() { return !files.includes(this.uri); }
-        delete() { files.push(this.uri); }
+        delete() {
+          beforeDelete(this.uri);
+          files.push(this.uri);
+        }
       },
     },
     "./http": {
@@ -59,8 +71,11 @@ function setup(cacheRoot = "file:///cache/") {
       },
     },
   }, {
-    setTimeout: (cb: () => void) => { timer.add(cb); return cb; },
-    clearTimeout: (cb: () => void) => timer.delete(cb),
+    setTimeout: (cb: () => void, delay: number) => {
+      timers.set(cb, now + delay);
+      return cb;
+    },
+    clearTimeout: (cb: () => void) => timers.delete(cb),
   });
   // Run the actual timer, API classifier, AsyncStorage adapter and draft store.
   const operations = h.load(fileURLToPath(new URL("./assistantUploads.ts", import.meta.url)));
@@ -77,8 +92,15 @@ function setup(cacheRoot = "file:///cache/") {
   h.mock("./uploadDraftStorage", storage);
   const store = h.load(fileURLToPath(new URL("./assistantDraftStore.ts", import.meta.url))) as typeof import("./assistantDraftStore");
   return {
-    files, calls, uploadDraftStorage, discardStoredUploadDraft, ...api, ...store,
-    expire: () => Array.from(timer).forEach((callback) => callback()),
+    files, calls, device, uploadDraftStorage, discardStoredUploadDraft, ...api, ...store,
+    advance: (elapsed: number) => {
+      now += elapsed;
+      for (const [callback, dueAt] of [...timers]) {
+        if (dueAt <= now && timers.delete(callback)) callback();
+      }
+    },
+    setBeforeWrite: (handler: typeof beforeWrite) => { beforeWrite = handler; },
+    setBeforeDelete: (handler: typeof beforeDelete) => { beforeDelete = handler; },
     setRemote: (handler: typeof remote) => { remote = handler; },
     switchTo: (owner: string) => {
       account = owner;
@@ -179,7 +201,7 @@ test("a hung live DELETE times out, preserves the receipt, and permits explicit 
   x.assistantDraftStore.set(`uploads:${key}`, session);
   session.remove("1");
   await started.promise;
-  x.expire();
+  x.advance(15_000);
   for (let i = 0; i < 8; i++) await Promise.resolve();
   assert.equal(x.calls[0]?.signal.aborted, true);
   assert.equal(session.entries.get("1")?.removing, false);
@@ -221,4 +243,155 @@ test("preparing discard serializes only the attachment cleanup state", async () 
   assert.equal(saved?.keepConversation, false);
   assert.equal(saved?.conversationId, "nyxa-original");
   assert.equal(saved?.rows[0]?.item?.id, item.id);
+});
+
+const batch = {
+  ...draft,
+  rows: Array.from({ length: 10 }, (_, index) => ({
+    handle: `file-${index}`,
+    kind: "file" as const,
+    file: { name: `file-${index}.txt`, path: `DocumentPicker/file-${index}.txt` },
+    item: { ...item, id: `receipt-${index}` },
+  })),
+};
+
+function receiptIds(rows: UploadDraft["rows"]) {
+  return rows.map((row) => row.item?.id);
+}
+
+function deletedReceipts(calls: ReturnType<typeof setup>["calls"]) {
+  return calls.map(({ path }) => path.split("/").at(-1));
+}
+
+test("all ten healthy DELETEs finish even when the batch takes 20 seconds", async () => {
+  const x = setup();
+  await x.uploadDraftStorage.save("A", key, { ...batch, model: "nyxagent/research" });
+  const checkpoints: number[] = [];
+  x.setBeforeWrite(async (pending) => {
+    assert.equal(pending.discardPending, true);
+    assert.equal(pending.model, undefined);
+    checkpoints.push(pending.rows.length);
+  });
+  x.setRemote(async () => x.advance(2_000));
+  await x.discardUploadDraft("A", key);
+  assert.deepEqual(deletedReceipts(x.calls), receiptIds(batch.rows));
+  assert.deepEqual(checkpoints, [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+  assert.equal(x.files.length, 10);
+  assert.equal(await x.uploadDraftStorage.load("A", key), undefined);
+});
+
+test("a fresh process resumes a timed-out discard at the first remaining receipt", async () => {
+  const x = setup();
+  await x.uploadDraftStorage.save("A", key, batch);
+  const held = deferred<void>();
+  const fourthStarted = deferred<void>();
+  x.setRemote(async () => {
+    if (x.calls.length === 4) {
+      fourthStarted.resolve();
+      await held.promise;
+    }
+  });
+
+  const discard = x.discardUploadDraft("A", key);
+  await fourthStarted.promise;
+  x.advance(15_000);
+  await assert.rejects(discard, /attachment could not be removed/i);
+  assert.equal(x.calls[3]?.signal.aborted, true);
+  assert.deepEqual(deletedReceipts(x.calls), receiptIds(batch.rows.slice(0, 4)));
+
+  const fresh = setup("file:///cache/", x.device);
+  const remaining = await fresh.uploadDraftStorage.load("A", key);
+  assert.equal(remaining?.discardPending, true);
+  assert.deepEqual(receiptIds(remaining!.rows), receiptIds(batch.rows.slice(3)));
+  await fresh.discardUploadDraft("A", key);
+  assert.deepEqual(deletedReceipts(fresh.calls), receiptIds(batch.rows.slice(3)));
+  assert.equal(fresh.files.length, 10);
+  held.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(await fresh.uploadDraftStorage.load("A", key), undefined);
+  assert.equal(x.calls.length, 4);
+});
+
+test("a live retry keeps durable progress when the retained composer holds the original rows", async () => {
+  const x = setup();
+  const session = new AssistantUploadSession({
+    current: () => true,
+    available: () => true,
+    changed: () => {},
+    createDraft: async () => batch.conversationId,
+    fileSize: () => 3,
+    readBytes: async () => new Uint8Array(3),
+    upload: async () => item,
+    remove: async () => {},
+    disposeFile: () => {},
+    saveDraft: (value) => x.uploadDraftStorage.save("A", key, value.snapshot((uri) => uri.replace("file:///cache/", ""))),
+  });
+  session.restore(batch, (path) => "file:///cache/" + path);
+  await session.saveDraft();
+  x.assistantDraftStore.set(`uploads:${key}`, session);
+  x.setBeforeDelete((uri) => {
+    if (uri.endsWith("/file-2.txt")) throw new Error("Cache file busy");
+  });
+
+  await assert.rejects(x.discardUploadDraft("A", key), /Cache file busy/);
+  assert.deepEqual(deletedReceipts(x.calls), receiptIds(batch.rows.slice(0, 2)));
+  assert.equal(session.entries.size, 10);
+  const remaining = await x.uploadDraftStorage.load("A", key);
+  assert.deepEqual(receiptIds(remaining!.rows), receiptIds(batch.rows.slice(2)));
+
+  x.setBeforeDelete(() => {});
+  await x.discardUploadDraft("A", key);
+  assert.deepEqual(deletedReceipts(x.calls), receiptIds(batch.rows));
+  assert.equal(x.files.length, 10);
+  assert.equal(await x.uploadDraftStorage.load("A", key), undefined);
+});
+
+test("a held progress write keeps the owner queue through account switch and retains the failed row", async () => {
+  const x = setup();
+  await x.uploadDraftStorage.save("A", key, batch);
+  await x.uploadDraftStorage.save("B", key, { ...draft, rows: [], model: "nyxagent/research" });
+  const writing = deferred<void>();
+  const write = deferred<void>();
+  x.setBeforeWrite(async ({ rows }) => {
+    if (rows.length === 8) {
+      writing.resolve();
+      await write.promise;
+    }
+  });
+
+  const discard = x.discardUploadDraft("A", key);
+  const failure = assert.rejects(discard, /Progress write failed/);
+  await writing.promise;
+  assert.deepEqual(deletedReceipts(x.calls), ["receipt-0", "receipt-1"]);
+  x.switchTo("B");
+  x.advance(20_000);
+
+  let originalOwnerReadFinished = false;
+  const queuedRead = x.uploadDraftStorage.load("A", key).then((pending) => {
+    originalOwnerReadFinished = true;
+    return pending;
+  });
+  assert.equal((await x.uploadDraftStorage.load("B", key))?.model, "nyxagent/research");
+  assert.equal(originalOwnerReadFinished, false);
+  assert.equal(x.calls.length, 2);
+
+  write.reject(new Error("Progress write failed"));
+  await failure;
+  const remaining = await queuedRead;
+  assert.equal(remaining?.discardPending, true);
+  assert.deepEqual(receiptIds(remaining!.rows), receiptIds(batch.rows.slice(1)));
+
+  x.switchTo("A");
+  x.setBeforeWrite(async () => {});
+  x.setRemote(async () => {
+    if (x.calls.length === 3)
+      throw buildApiError({
+        error: "not_found", error_code: 1003, message: "Not found: Attachment not found or expired",
+      }, 404);
+  });
+  await x.discardUploadDraft("A", key);
+  assert.deepEqual(deletedReceipts(x.calls.slice(2)), receiptIds(batch.rows.slice(1)));
+  assert.ok(x.calls.every((call) => call.owner === "A"));
+  assert.equal(x.files.length, 10);
+  assert.equal(await x.uploadDraftStorage.load("A", key), undefined);
 });
