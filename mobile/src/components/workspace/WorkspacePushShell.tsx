@@ -532,7 +532,16 @@ export function WorkspacePushShell(props: Props) {
             sidebarInteractive ? "auto" : "no-hide-descendants"
           }
           pointerEvents={sidebarInteractive ? "auto" : "none"}
-          style={[styles.sidebar, { width: openWidth }]}
+          style={[
+            styles.sidebar,
+            { width: openWidth },
+            // Android's Tab search includes pressable children of a touch- and
+            // accessibility-hidden View. Hide the parked drawer at the native
+            // view level too, keeping its React state through the next reveal.
+            Platform.OS === "android" && !persistent && !props.presented && !visible
+              ? styles.parkedSidebar
+              : undefined,
+          ]}
         >
           {props.sidebar}
         </View>
@@ -654,6 +663,7 @@ export function WorkspacePushShell(props: Props) {
 }
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: "hidden" },
+  parkedSidebar: { display: "none" },
   edge: {
     position: "absolute",
     left: 0,
