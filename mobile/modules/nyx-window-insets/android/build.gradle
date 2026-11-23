@@ -8,4 +8,8 @@ version = '1.0.0'
 
 android {
   namespace 'dev.nyxid.insets'
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
 }
