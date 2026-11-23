@@ -94,12 +94,12 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
         data-compact={compact}
         style={{ borderRadius: 12 }}
         className={cn(
-          "flex flex-wrap items-center",
+          "flex flex-wrap",
           compact
             // 12px from the top and from the column's edge: level with the
             // machine card's top and mirroring its inset across the divider.
-            ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
-            : "gap-2",
+            ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] items-center gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
+            : "items-start gap-3",
         )}
       >
         {children}
