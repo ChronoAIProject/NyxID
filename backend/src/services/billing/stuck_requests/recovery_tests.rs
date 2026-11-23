@@ -590,6 +590,25 @@ async fn stuck_request_exit_two_publishers_commit_one_decision() {
     f.db.drop().await.unwrap();
 }
 #[tokio::test]
+async fn stuck_request_exit_cancelled_after_commit_resumes_ordinary_settlement() {
+    let f = Fixture::new().await;
+    let _metered = f.open(true).await;
+    dead(&f, false).await;
+    // The recovery pass deadline can fall after publishing the terminal
+    // quantity and before inline settlement. The next ordinary reconciliation
+    // must finish the committed decision without publishing it again.
+    at(Phase::AfterCommit, recovery::recover(&f.db)).await;
+    let row = f.row().await;
+    assert_eq!(row.quantity, Some(0));
+    assert!(!row.released);
+    recovery::recover(&f.db).await.unwrap();
+    finish(&f).await;
+    finish(&f).await;
+    zero(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_durable() {
     let f = Fixture::new().await;
     for _ in 0..52 {
@@ -617,7 +636,7 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
         recovery::recover(&f.db).await.unwrap();
         if f.db
             .collection::<Document>(METERS)
-            .count_documents(doc! {"released":false})
+            .count_documents(doc! {"released":false,"quantity":bson::Bson::Null})
             .await
             .unwrap()
             == 0
@@ -627,7 +646,7 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
     }
     assert_eq!(
         f.db.collection::<Document>(METERS)
-            .count_documents(doc! {"released":false})
+            .count_documents(doc! {"released":false,"quantity":bson::Bson::Null})
             .await
             .unwrap(),
         0
@@ -638,6 +657,18 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
             .await
             .unwrap(),
         52
+    );
+    // A pass can commit its last quantity immediately before its budget
+    // cancels inline settlement. Production's ordinary reconciliation finishes
+    // that durable decision; recovery-only passes deliberately skip it.
+    finish(&f).await;
+    finish(&f).await;
+    assert_eq!(
+        f.db.collection::<Document>(METERS)
+            .count_documents(doc! {"released":false})
+            .await
+            .unwrap(),
+        0
     );
     f.count();
     recovery::recover(&f.db).await.unwrap();
