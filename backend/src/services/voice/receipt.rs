@@ -61,6 +61,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     text.push_str("\n\n");
     text.push_str(&receipt_notice(
         call.end_reason.as_deref(),
+        call.startup_failed,
         call.last_user_at != call.created_at,
         requests.iter().any(super::progress::pending),
     ));
@@ -119,7 +120,17 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     Ok(())
 }
 
-fn receipt_notice(reason: Option<&str>, speech_transcribed: bool, continuing: bool) -> String {
+fn receipt_notice(
+    end_reason: Option<&str>,
+    startup_failed: bool,
+    speech_transcribed: bool,
+    continuing: bool,
+) -> String {
+    let reason = if startup_failed {
+        Some("start_failed")
+    } else {
+        end_reason
+    };
     let mut notice = super::progress::close_notice(reason, continuing);
     if !speech_transcribed && matches!(reason, Some("user_ended" | "idle")) {
         notice.push_str(" No speech was transcribed during this call.");
@@ -217,23 +228,29 @@ mod tests {
     #[test]
     fn voice_receipt_distinguishes_no_transcription_and_start_failure() {
         assert_eq!(
-            receipt_notice(Some("user_ended"), true, false),
+            receipt_notice(Some("user_ended"), false, true, false),
             "The audio call ended."
         );
         assert_eq!(
-            receipt_notice(Some("user_ended"), false, false),
+            receipt_notice(Some("user_ended"), false, false, false),
             "The audio call ended. No speech was transcribed during this call."
         );
         assert_eq!(
-            receipt_notice(Some("idle"), false, false),
+            receipt_notice(Some("idle"), false, false, false),
             "The quiet call ended. No speech was transcribed during this call."
         );
         assert_eq!(
-            receipt_notice(Some("start_failed"), false, false),
+            receipt_notice(Some("start_failed"), false, false, false),
             "The voice call could not start."
         );
+        for reason in ["close_unconfirmed", "recovered"] {
+            assert_eq!(
+                receipt_notice(Some(reason), true, false, false),
+                "The voice call could not start."
+            );
+        }
         assert_eq!(
-            receipt_notice(Some("client_lost"), false, false),
+            receipt_notice(Some("client_lost"), false, false, false),
             "The voice connection ended."
         );
     }

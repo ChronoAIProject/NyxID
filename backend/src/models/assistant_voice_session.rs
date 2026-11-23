@@ -90,6 +90,9 @@ pub struct VoiceSession {
     pub input_muted: bool,
     pub end_requested: bool,
     pub end_reason: Option<String>,
+    /// Preserve this outcome while provider closure is still being confirmed.
+    #[serde(default)]
+    pub startup_failed: bool,
     pub observed_seconds: i64,
     pub reserved_until: i64,
     pub final_usage_confirmed: bool,

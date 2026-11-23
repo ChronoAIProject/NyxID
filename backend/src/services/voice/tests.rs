@@ -1332,6 +1332,7 @@ async fn voice_attach_failure_is_audited_and_recovery_retries_close_without_recr
         assert!(!row.final_usage_confirmed && row.live_slot);
         assert_eq!(row.observed_seconds,0,"Never invent a billed duration");
         assert_eq!(row.end_reason.as_deref(),Some("close_unconfirmed"));
+        assert!(row.startup_failed);
         let audits=state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
         assert_eq!(audits.count_documents(doc!{"event_type":"assistant_voice_start_failed"}).await.unwrap(),1);
         assert_eq!(audits.count_documents(doc!{"event_type":"assistant_voice_close_unconfirmed"}).await.unwrap(),1);
@@ -1340,6 +1341,19 @@ async fn voice_attach_failure_is_audited_and_recovery_retries_close_without_recr
         let provider=openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address);
         assert!(runtime::retry_provider_close(&state,&mut recovered,&provider,"live_fixture").await);
         assert_eq!(recovered.observed_seconds,4);
+        session::close(&state.db, &recovered, "recovered", true)
+            .await
+            .unwrap();
+        let receipt = state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"turn_id": &recovered.id, "via": "voice"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(receipt.text.contains("The voice call could not start."));
         assert_eq!(creates.load(Ordering::SeqCst),1);
         assert_eq!(attempts.load(Ordering::SeqCst),3);
         server.abort();state.db.drop().await.unwrap();
