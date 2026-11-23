@@ -1,95 +1,8 @@
-//! Binary record fields with the historical unbound envelope contract. Services
-//! resolve trusted identities after their existing ACL/lifecycle checks. Bound
-//! legacy formats use their own adapters and must not enter this decoder.
+//! BSON storage and exact-source migration of server-encrypted binary fields.
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{aes::EncryptionKeys, record_field},
     errors::{AppError, AppResult},
 };
-use zeroize::Zeroizing;
-
-pub(crate) async fn encrypt(
-    keys: &EncryptionKeys,
-    collection: &str,
-    id: &str,
-    owner: &str,
-    field: &str,
-    bytes: &[u8],
-) -> AppResult<Vec<u8>> {
-    encrypt_context(
-        keys,
-        &RecordContext::new(collection, id, owner, &[field])?,
-        bytes,
-    )
-    .await
-}
-
-pub(crate) async fn encrypt_context(
-    keys: &EncryptionKeys,
-    context: &RecordContext<'_>,
-    bytes: &[u8],
-) -> AppResult<Vec<u8>> {
-    if keys.contextual_record_writes() {
-        keys.encrypt_record(bytes, context).await
-    } else {
-        keys.encrypt(bytes).await
-    }
-}
-
-pub(crate) async fn decrypt(
-    keys: &EncryptionKeys,
-    collection: &str,
-    id: &str,
-    owner: &str,
-    field: &str,
-    version: Option<u8>,
-    ciphertext: &[u8],
-) -> AppResult<Zeroizing<Vec<u8>>> {
-    decrypt_context(
-        keys,
-        &RecordContext::new(collection, id, owner, &[field])?,
-        version,
-        ciphertext,
-    )
-    .await
-}
-
-pub(crate) async fn decrypt_context(
-    keys: &EncryptionKeys,
-    context: &RecordContext<'_>,
-    version: Option<u8>,
-    ciphertext: &[u8],
-) -> AppResult<Zeroizing<Vec<u8>>> {
-    if version == Some(3) {
-        keys.decrypt_record(ciphertext, context).await
-    } else if version.is_none() && keys.allow_legacy_record_reads() {
-        keys.decrypt(ciphertext).await
-    } else {
-        Err(AppError::Internal(
-            "Record field requires contextual migration".into(),
-        ))
-    }
-}
-
-pub(crate) async fn verify_current(
-    keys: &EncryptionKeys,
-    collection: &str,
-    id: &str,
-    owner: &str,
-    field: &str,
-    version: Option<u8>,
-    ciphertext: &[u8],
-) -> AppResult<()> {
-    if version != Some(3) {
-        return Err(AppError::Internal(
-            "Record field requires contextual migration".into(),
-        ));
-    }
-    keys.authenticate_current_record(
-        ciphertext,
-        &RecordContext::new(collection, id, owner, &[field])?,
-    )
-    .await
-}
 
 /// Exact-source, majority-durable storage conversion for unbound binary fields.
 /// No upsert, replacement or material-authority change is permitted. The caller
@@ -135,7 +48,7 @@ pub(crate) async fn migrate_snapshot(
         let bytes = bson::from_document::<Bytes>(bson::doc! {"bytes":value})
             .map_err(|_| invalid())?
             .bytes;
-        if verify_current(
+        if record_field::verify_current(
             keys,
             collection,
             id,
@@ -149,7 +62,7 @@ pub(crate) async fn migrate_snapshot(
         {
             continue;
         }
-        let plain = decrypt(
+        let plain = record_field::decrypt(
             keys,
             collection,
             id,
@@ -159,8 +72,9 @@ pub(crate) async fn migrate_snapshot(
             &bytes,
         )
         .await?;
-        let encrypted = encrypt(keys, collection, id, owner, field, &plain).await?;
-        verify_current(keys, collection, id, owner, field, Some(3), &encrypted).await?;
+        let encrypted = record_field::encrypt(keys, collection, id, owner, field, &plain).await?;
+        record_field::verify_current(keys, collection, id, owner, field, Some(3), &encrypted)
+            .await?;
         versions.insert((*field).to_owned(), 3);
         set.insert(
             *field,
@@ -213,6 +127,7 @@ pub(crate) fn stored_bytes(value: &bson::Bson) -> AppResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     #[derive(Debug)]
     struct HoldFirstWrap {
@@ -284,10 +199,16 @@ mod tests {
             );
             let writer = async {
                 held.entered.notified().await;
-                let ciphertext =
-                    encrypt(&keys, collection, &id, "owner", "field_b", b"concurrent-b")
-                        .await
-                        .unwrap();
+                let ciphertext = record_field::encrypt(
+                    &keys,
+                    collection,
+                    &id,
+                    "owner",
+                    "field_b",
+                    b"concurrent-b",
+                )
+                .await
+                .unwrap();
                 rows.update_one(
                     doc! {"_id":&id},
                     doc! {"$set":{
@@ -348,120 +269,5 @@ mod tests {
             );
         }
         db.drop().await.unwrap();
-    }
-    #[tokio::test]
-    async fn explicit_dispatch_accepts_authenticated_v0_magic_nonce_and_never_downgrades_v3() {
-        use aes_gcm::{
-            Aes256Gcm, Nonce,
-            aead::{Aead, KeyInit},
-        };
-        let mut keys = crate::test_utils::test_encryption_keys();
-        let nonce = *b"\x03NYXnonce123";
-        let cipher = Aes256Gcm::new_from_slice(&[0x11; 32]).unwrap();
-        let mut legacy = nonce.to_vec();
-        legacy.extend(
-            cipher
-                .encrypt(
-                    Nonce::from_slice(&nonce),
-                    b"distinctive-legacy-material".as_slice(),
-                )
-                .unwrap(),
-        );
-        assert!(legacy.starts_with(b"\x03NYX"));
-        assert_eq!(
-            decrypt(
-                &keys,
-                "assistant_attachments",
-                "record",
-                "owner",
-                "text_encrypted",
-                None,
-                &legacy
-            )
-            .await
-            .unwrap()
-            .as_slice(),
-            b"distinctive-legacy-material"
-        );
-        assert!(
-            decrypt(
-                &keys,
-                "assistant_attachments",
-                "record",
-                "owner",
-                "text_encrypted",
-                Some(3),
-                &legacy
-            )
-            .await
-            .is_err()
-        );
-        let contextual = encrypt(
-            &keys,
-            "assistant_attachments",
-            "record",
-            "owner",
-            "text_encrypted",
-            b"current-material",
-        )
-        .await
-        .unwrap();
-        assert!(
-            decrypt(
-                &keys,
-                "assistant_attachments",
-                "record",
-                "owner",
-                "text_encrypted",
-                Some(9),
-                &contextual
-            )
-            .await
-            .is_err()
-        );
-        let mut corrupt = contextual.clone();
-        *corrupt.last_mut().unwrap() ^= 1;
-        assert!(
-            decrypt(
-                &keys,
-                "assistant_attachments",
-                "record",
-                "owner",
-                "text_encrypted",
-                Some(3),
-                &corrupt
-            )
-            .await
-            .is_err()
-        );
-        keys.set_allow_legacy_record_reads(false);
-        assert!(
-            decrypt(
-                &keys,
-                "assistant_attachments",
-                "record",
-                "owner",
-                "text_encrypted",
-                None,
-                &legacy
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(
-            decrypt(
-                &keys,
-                "assistant_attachments",
-                "record",
-                "owner",
-                "text_encrypted",
-                Some(3),
-                &contextual
-            )
-            .await
-            .unwrap()
-            .as_slice(),
-            b"current-material"
-        );
     }
 }

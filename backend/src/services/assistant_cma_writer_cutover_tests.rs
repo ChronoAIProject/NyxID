@@ -1,4 +1,4 @@
-use crate::services::record_field_service;
+use crate::crypto::record_field;
 
 async fn assert_retained_body(
     f: &Fixture,
@@ -12,7 +12,7 @@ async fn assert_retained_body(
     let ciphertext = row.request_ciphertext.as_deref().unwrap();
     assert!(!ciphertext.windows(body.len()).any(|window| window == body));
     assert_eq!(
-        record_field_service::decrypt_context(
+        record_field::decrypt_context(
             &f.keys,
             &context,
             contextual.then_some(3),

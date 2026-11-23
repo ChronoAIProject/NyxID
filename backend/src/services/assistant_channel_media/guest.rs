@@ -258,7 +258,7 @@ pub async fn input_for_turn(
         };
         if !upload.content_type.starts_with("image/") {
             if upload.extracted_chars.unwrap_or_default() > 0 && remaining > 0 {
-                let clear = match super::super::record_field_service::decrypt(
+                let clear = match crate::crypto::record_field::decrypt(
                     &state.encryption_keys,
                     UPLOADS,
                     &upload.id,

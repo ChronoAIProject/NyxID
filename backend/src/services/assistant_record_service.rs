@@ -1,8 +1,10 @@
 //! Assistant credential and attachment identities, including relationship-based
 //! credential lookup and the independent BSON-literal upload-chunk variant.
-use super::record_field_service as fields;
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
         assistant_agent_credential::AssistantAgentCredential,
@@ -38,7 +40,7 @@ pub(crate) async fn encrypt_credential(
     raw: &[u8],
 ) -> AppResult<Vec<u8>> {
     let path = credential_path(row);
-    fields::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(
             crate::models::assistant_agent_credential::COLLECTION_NAME,
@@ -62,7 +64,7 @@ pub(crate) async fn decrypt_credential(
         return Err(invalid());
     }
     let path = credential_path(row);
-    let bytes = fields::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &RecordContext::new(
             crate::models::assistant_agent_credential::COLLECTION_NAME,
@@ -204,7 +206,7 @@ pub(crate) async fn encrypt_image(
     bytes: &[u8],
 ) -> AppResult<Vec<u8>> {
     let path = image_path(row);
-    fields::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(
             crate::models::assistant_attachment::COLLECTION_NAME,
@@ -221,7 +223,7 @@ pub(crate) async fn decrypt_image(
     row: &AssistantAttachment,
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let path = image_path(row);
-    fields::decrypt_context(
+    record_field::decrypt_context(
         keys,
         &RecordContext::new(
             crate::models::assistant_attachment::COLLECTION_NAME,
@@ -246,7 +248,7 @@ pub(crate) async fn encrypt_chunk(
         return Err(invalid());
     }
     let index = index.to_string();
-    fields::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(
             crate::models::assistant_attachment::COLLECTION_NAME,
@@ -277,7 +279,7 @@ pub(crate) async fn decrypt_chunk(
         return Err(invalid());
     }
     let index = expected_index.to_string();
-    fields::decrypt_context(
+    record_field::decrypt_context(
         keys,
         &RecordContext::new(
             crate::models::assistant_attachment::COLLECTION_NAME,
@@ -433,7 +435,7 @@ async fn attachment_identity(
             row.origin == "machine_preview",
         )
     };
-    let versions = fields::stored_versions(source)?;
+    let versions = super::record_field_service::stored_versions(source)?;
     if versions
         .iter()
         .any(|(name, version)| name != field || *version != 3)
@@ -515,7 +517,8 @@ pub(crate) async fn verify_current_attachment(
     keys.authenticate_current_record(&identity.ciphertext, &context)
         .await?;
     let plain =
-        fields::decrypt_context(keys, &context, identity.version, &identity.ciphertext).await?;
+        record_field::decrypt_context(keys, &context, identity.version, &identity.ciphertext)
+            .await?;
     validate_attachment_plain(&identity, &plain)
 }
 
@@ -542,12 +545,13 @@ pub(crate) async fn migrate_attachment_snapshot(
         &path,
     )?;
     let plain =
-        fields::decrypt_context(keys, &context, identity.version, &identity.ciphertext).await?;
+        record_field::decrypt_context(keys, &context, identity.version, &identity.ciphertext)
+            .await?;
     validate_attachment_plain(&identity, &plain)?;
     let ciphertext = keys.encrypt_record(&plain, &context).await?;
     keys.authenticate_current_record(&ciphertext, &context)
         .await?;
-    let mut versions = fields::stored_versions(source)?;
+    let mut versions = super::record_field_service::stored_versions(source)?;
     versions.insert(identity.field.to_owned(), 3);
     let mut set =
         bson::doc! {"secret_context_versions":bson::to_bson(&versions).map_err(|_|invalid())?};

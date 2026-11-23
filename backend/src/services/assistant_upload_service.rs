@@ -315,7 +315,7 @@ async fn store_authorized(
     };
     let encoded =
         crate::crypto::secret_json::to_secret_string(&extracted).map_err(|_| missing())?;
-    row.text_encrypted = super::record_field_service::encrypt(
+    row.text_encrypted = crate::crypto::record_field::encrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -500,7 +500,7 @@ pub(crate) async fn prepare_channel_upload(
     };
     let encoded =
         crate::crypto::secret_json::to_secret_string(&extracted).map_err(|_| missing())?;
-    row.text_encrypted = super::record_field_service::encrypt(
+    row.text_encrypted = crate::crypto::record_field::encrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -1064,7 +1064,7 @@ pub async fn read(
             "instructions": "Use the image input or nyx__machine_save_attachment; never assume OCR text.",
         }));
     }
-    let bytes = super::record_field_service::decrypt(
+    let bytes = crate::crypto::record_field::decrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -1493,7 +1493,7 @@ pub async fn review_coverage(
                     legacy.get("text_encrypted").ok_or_else(missing)?,
                 )?;
                 let extracted: Extracted = serde_json::from_slice(
-                    &super::record_field_service::decrypt(
+                    &crate::crypto::record_field::decrypt(
                         keys,
                         COLLECTION_NAME,
                         id,
@@ -3912,7 +3912,7 @@ mod channel_upload_tests {
                 .is_err()
             );
         }
-        let text = super::super::record_field_service::decrypt(
+        let text = crate::crypto::record_field::decrypt(
             &keys,
             COLLECTION_NAME,
             &upload.row.id,

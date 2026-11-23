@@ -27,7 +27,7 @@ pub(super) async fn decrypt(
 ) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
     let path = context_path(row);
     let context = RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?;
-    let bytes = super::super::record_field_service::decrypt_context(
+    let bytes = crate::crypto::record_field::decrypt_context(
         keys,
         &context,
         row.secret_context_versions.get("data_encrypted").copied(),

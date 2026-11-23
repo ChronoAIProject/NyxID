@@ -599,7 +599,7 @@ async fn pdf_legacy_coverage_decryption_deadline_uses_authorized_parent_page_cou
     let db = crate::test_utils::connect_transaction_test_database("pdf_legacy_deadline").await;
     let (mut state, row, mut items, chat) = fixture(db, &[2]).await;
     let parent = for_chat(&state.db, &chat, &items[0].id).await.unwrap();
-    let plaintext = super::super::record_field_service::decrypt(
+    let plaintext = crate::crypto::record_field::decrypt(
         &state.encryption_keys,
         COLLECTION_NAME,
         &parent.id,

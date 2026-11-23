@@ -12,6 +12,7 @@ pub mod key_provider;
 pub mod local_key_provider;
 pub mod mtls;
 pub mod password;
+pub(crate) mod record_field;
 pub(crate) mod secret_json;
 pub mod telegram;
 pub mod token;
