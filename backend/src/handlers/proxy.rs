@@ -8584,8 +8584,8 @@ fn audit_ws_frame_auth_injected(
     db: &mongodb::Database,
     user_id: &str,
     service_id: &str,
-    action: &ws_frame_injector::InjectionAction,
-    routed_node_id: Option<&str>,
+    action: &ws_frame_injector::InjectionAction<'_>,
+    skipped: bool,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
     ip_address: Option<String>,
@@ -8596,11 +8596,8 @@ fn audit_ws_frame_auth_injected(
         "trigger_kind": action.trigger_kind,
         "frame_index_in": action.frame_index_in,
     });
-    if let Some(node_id) = routed_node_id
-        && let Some(obj) = data.as_object_mut()
-    {
-        obj.insert("routed_via".to_string(), serde_json::json!("node"));
-        obj.insert("node_id".to_string(), serde_json::json!(node_id));
+    if skipped {
+        data["outcome"] = serde_json::json!("skipped");
     }
 
     audit_service::log_async(
@@ -8756,41 +8753,33 @@ async fn bridge_websockets(
                                         &ws_frame_injections,
                                         &mut injector_state,
                                         &frame,
-                                        &credential,
                                     ) {
-                                        tracing::info!(
-                                            service_id = %service_id,
-                                            trigger_kind = action.trigger_kind,
-                                            frame_index_in = action.frame_index_in,
-                                            credential_sha256_prefix = %action.credential_sha256_prefix,
-                                            "Injected WebSocket auth frame"
-                                        );
+                                        let reply = action.frame_for_caller();
                                         audit_ws_frame_auth_injected(
                                             &db,
                                             &user_id,
                                             &service_id,
                                             &action,
-                                            None,
+                                            reply.is_none(),
                                             api_key_id.clone(),
                                             api_key_name.clone(),
                                             ip_address.clone(),
                                             user_agent.clone(),
                                         );
-                                        // NOTE: `direction` is the trigger direction. The injected
-                                        // frame is sent to the opposite side so a downstream
-                                        // auth challenge can produce an upstream auth response.
-                                        if deadline.expired() {
-                                            break;
-                                        }
-                                        if client_sink
-                                            .send(injection_frame_to_axum(action.send_frame))
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                        if !action.forward_original {
-                                            continue;
+                                        if let Some(reply) = reply {
+                                            tracing::info!(
+                                                service_id = %service_id,
+                                                trigger_kind = action.trigger_kind,
+                                                frame_index_in = action.frame_index_in,
+                                                credential_sha256_prefix = %ws_frame_injector::credential_hash_prefix(&credential),
+                                                "Injected WebSocket auth frame"
+                                            );
+                                            if deadline.expired() || client_sink.send(injection_frame_to_axum(reply)).await.is_err() {
+                                                break;
+                                            }
+                                            if !action.forward_original {
+                                                continue;
+                                            }
                                         }
                                     }
                                 }
@@ -8849,13 +8838,12 @@ async fn bridge_websockets(
                                         &ws_frame_injections,
                                         &mut injector_state,
                                         &frame,
-                                        &credential,
                                     ) {
                                         tracing::info!(
                                             service_id = %service_id,
                                             trigger_kind = action.trigger_kind,
                                             frame_index_in = action.frame_index_in,
-                                            credential_sha256_prefix = %action.credential_sha256_prefix,
+                                            credential_sha256_prefix = %ws_frame_injector::credential_hash_prefix(&credential),
                                             "Injected WebSocket auth frame"
                                         );
                                         audit_ws_frame_auth_injected(
@@ -8863,7 +8851,7 @@ async fn bridge_websockets(
                                             &user_id,
                                             &service_id,
                                             &action,
-                                            None,
+                                            false,
                                             api_key_id.clone(),
                                             api_key_name.clone(),
                                             ip_address.clone(),
@@ -8876,7 +8864,7 @@ async fn bridge_websockets(
                                             break;
                                         }
                                         if downstream_sink
-                                            .send(injection_frame_to_tungstenite(action.send_frame))
+                                            .send(injection_frame_to_tungstenite(action.frame_for_downstream(&credential)))
                                             .await
                                             .is_err()
                                         {
@@ -10776,6 +10764,7 @@ mod tests {
                 >,
             >,
         >,
+        rules: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
         db: mongodb::Database,
     }
 
@@ -10795,16 +10784,7 @@ mod tests {
                 downstream_ws,
                 "svc-ha".to_string(),
                 false,
-                vec![crate::models::ws_frame_injection::WsFrameInjection {
-                    trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
-                        path: "$.type".to_string(),
-                        value: serde_json::json!("auth_required"),
-                    },
-                    template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
-                    frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-                    consume_trigger: true,
-                    direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
-                }],
+                state.rules,
                 "TEST_CRED".to_owned().into(),
                 state.db,
                 "user-1".to_string(),
@@ -10818,6 +10798,103 @@ mod tests {
             )
             .await;
         })
+    }
+
+    async fn connect_test_bridge(
+        state: WsBridgeTestState,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let app = Router::new()
+            .route("/ws", get(ws_bridge_test_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bridge");
+        let bridge_addr = listener.local_addr().expect("bridge addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve bridge");
+        });
+
+        let (client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
+            .await
+            .expect("connect client");
+        (client_ws, server_task)
+    }
+
+    #[tokio::test]
+    async fn stored_caller_rule_skips_reply_and_audits_only_metadata() {
+        use crate::models::audit_log::{AuditLog, COLLECTION_NAME};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let db = crate::test_utils::connect_test_database("ws_recipient_audit")
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let original = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(original, r#"{"type":"forward"}"#);
+            ws.send(Message::Text("forwarded".into())).await.unwrap();
+            ws.next().await;
+        });
+        let (downstream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        // Decode the same BSON representation used by catalog and user-service rows.
+        let rules = ["${credential}", "ready"]
+            .into_iter()
+            .zip(["forward", "status"])
+            .map(|(template, kind)| {
+                bson::from_document(bson::doc! {
+                    "trigger": {"json_field_equals": {"path": "$.type", "value": kind}},
+                    "template": template, "direction": "upstream", "consume_trigger": true
+                })
+                .unwrap()
+            })
+            .collect();
+        let (mut caller, server) = connect_test_bridge(WsBridgeTestState {
+            downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream))),
+            rules,
+            db: db.clone(),
+        })
+        .await;
+        for (message, expected) in [
+            (r#"{"type":"forward"}"#, "forwarded"),
+            (r#"{"type":"status"}"#, "ready"),
+        ] {
+            caller.send(Message::Text(message.into())).await.unwrap();
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(5), caller.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.into_text().unwrap(), expected);
+        }
+        caller.close(None).await.unwrap();
+        peer.await.unwrap();
+        server.abort();
+        crate::services::shutdown::process().idle().await;
+        let skipped = db
+            .collection::<AuditLog>(COLLECTION_NAME)
+            .find_one(
+                bson::doc! {"event_type":"ws_frame_auth_injected","event_data.outcome":"skipped"},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            skipped.event_data,
+            Some(serde_json::json!({
+                "service_id":"svc-ha", "trigger_kind":"json_field_equals", "frame_index_in":0, "outcome":"skipped"
+            }))
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -10872,21 +10949,18 @@ mod tests {
         let state = WsBridgeTestState {
             downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream_ws))),
             db,
+            rules: vec![crate::models::ws_frame_injection::WsFrameInjection {
+                trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
+                    path: "$.type".to_string(),
+                    value: serde_json::json!("auth_required"),
+                },
+                template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
+                frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+                consume_trigger: true,
+                direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
+            }],
         };
-        let app = Router::new()
-            .route("/ws", get(ws_bridge_test_handler))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind bridge");
-        let bridge_addr = listener.local_addr().expect("bridge addr");
-        let server_task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve bridge");
-        });
-
-        let (mut client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
-            .await
-            .expect("connect client");
+        let (mut client_ws, server_task) = connect_test_bridge(state).await;
         let client_msg = client_ws
             .next()
             .await
