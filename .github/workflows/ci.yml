@@ -1099,7 +1099,7 @@ jobs:
       - name: Restore exact base report
         if: steps.coverage-identity.outputs.reusable == 'true'
         id: base-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}

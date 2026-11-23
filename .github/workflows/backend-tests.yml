@@ -404,7 +404,7 @@ jobs:
       - name: Cache reusable base report
         if: inputs.coverage && github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
