@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react-native";
 import { Platform, StyleSheet } from "react-native";
-import { AssistantPendingUploads } from "./AssistantPendingUploads";
+import { AssistantPendingUploads as PendingUploads } from "./AssistantPendingUploads";
+import type { ComponentProps } from "react";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
 
 jest.mock("../../i18n/LanguageProvider", () => ({
@@ -13,8 +14,29 @@ jest.mock("../../theme/ThemeContext", () => ({
   useTheme: () => ({ colors: require("../../theme/mobileTheme").lightColors }),
 }));
 jest.mock("../../components/workspace/WorkspaceUI", () => {
-  const { Text } = require("react-native");
-  return { Label: (props: object) => <Text {...props} /> };
+  const { Text, Pressable } = require("react-native");
+  return {
+    Label: (props: object) => <Text {...props} />,
+    ActionButton: ({
+      label,
+      disabled,
+      onPress,
+    }: {
+      label: string;
+      disabled: boolean;
+      onPress: () => void;
+    }) => (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityState={{ disabled }}
+        disabled={disabled}
+        onPress={onPress}
+      >
+        <Text>{label}</Text>
+      </Pressable>
+    ),
+  };
 });
 jest.mock("expo-linear-gradient", () => {
   const { View } = require("react-native");
@@ -44,6 +66,25 @@ jest.mock("./AssistantUploadProgress", () => {
     ),
   };
 });
+
+type UploadProps = ComponentProps<typeof PendingUploads>;
+type RecoveryProps = "reselect" | "choose" | "dismiss" | "resume" | "canResume";
+
+function AssistantPendingUploads(
+  props: Omit<UploadProps, RecoveryProps> &
+    Partial<Pick<UploadProps, RecoveryProps>>,
+) {
+  return (
+    <PendingUploads
+      reselect={false}
+      choose={() => {}}
+      dismiss={() => {}}
+      resume={() => {}}
+      canResume={false}
+      {...props}
+    />
+  );
+}
 
 function file(
   key: number,
@@ -428,4 +469,50 @@ it("horizontal swipes, resize, removal and additions update/clamp the range and 
   const range = screen.getByText("Attachments 1–3 of 4");
   // The overlay belongs to the viewport; the range is a sibling outside it.
   expect(right()!.parent!.parent).not.toBe(range.parent);
+});
+
+it("restored drafts offer explicit recovery alongside a scrollable attachment strip", async () => {
+  const files = [file(1, "finished.png", "image/png"), file(2, "draft.txt")];
+  files[1]!.item = undefined;
+  files[1]!.resumable = true;
+  const choose = jest.fn();
+  const dismiss = jest.fn();
+  const resume = jest.fn();
+  const remove = jest.fn();
+  const view = await render(
+    <AssistantPendingUploads
+      files={files}
+      disabled={false}
+      remove={remove}
+      reselect
+      choose={choose}
+      dismiss={dismiss}
+      resume={resume}
+      canResume={false}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Choose files" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Resume attachment uploads" })).toBeDisabled();
+  expect(screen.getByTestId("composer-attachments").props.horizontal).toBe(true);
+  expect(screen.getByText("Ready to resume")).toBeTruthy();
+  await view.rerender(
+    <AssistantPendingUploads
+      files={files}
+      disabled={false}
+      remove={remove}
+      reselect
+      choose={choose}
+      dismiss={dismiss}
+      resume={resume}
+      canResume
+    />,
+  );
+  await fireEvent.press(screen.getByRole("button", { name: "Choose files" }));
+  await fireEvent.press(screen.getByRole("button", { name: "Resume attachment uploads" }));
+  await fireEvent.press(screen.getByRole("button", { name: "Dismiss" }));
+  await fireEvent.press(screen.getByRole("button", { name: "Remove draft.txt" }));
+  expect(choose).toHaveBeenCalledTimes(1);
+  expect(resume).toHaveBeenCalledTimes(1);
+  expect(dismiss).toHaveBeenCalledTimes(1);
+  expect(remove).toHaveBeenCalledWith("2");
 });

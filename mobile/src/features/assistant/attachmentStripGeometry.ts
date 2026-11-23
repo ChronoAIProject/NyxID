@@ -1,5 +1,6 @@
 export const ATTACHMENT_GAP = 8;
 export const ATTACHMENT_INSET = 4;
+const MIN_ATTACHMENT_TILE = 64;
 
 /** The viewport is measured inside the composer, never from window width. */
 export function attachmentStripGeometry(
@@ -7,10 +8,12 @@ export function attachmentStripGeometry(
   count: number,
   offset: number,
 ) {
-  const tile = Math.max(
-    0,
-    Math.floor((width - 2 * ATTACHMENT_INSET - 2 * ATTACHMENT_GAP) / 3),
-  );
+  const tile = width > 0
+    ? Math.max(
+        MIN_ATTACHMENT_TILE,
+        Math.floor((width - 2 * ATTACHMENT_INSET - 2 * ATTACHMENT_GAP) / 3),
+      )
+    : 0;
   const stride = tile + ATTACHMENT_GAP;
   const content =
     2 * ATTACHMENT_INSET +
@@ -18,7 +21,7 @@ export function attachmentStripGeometry(
     Math.max(0, count - 1) * ATTACHMENT_GAP;
   const maxOffset = Math.max(0, content - width);
   const x = Math.max(0, Math.min(offset, maxOffset));
-  const overflow = tile > 0 && count > 3 && maxOffset > 2;
+  const overflow = tile > 0 && count > 0 && maxOffset > 2;
   // Include tiles with visible pixels, excluding a gap touching the viewport.
   const start = Math.min(
     count,

@@ -279,7 +279,7 @@ export class AssistantUploadSession {
     const size = await this.deps.fileSize(row.file);
     const error = attachmentFileError(row.file, size);
     if (error) throw new Error(error);
-    if (!this.usable(row)) return;
+    if (!this.usable(row) || row.error) return;
     row.previewReady = true;
     this.notify();
   }

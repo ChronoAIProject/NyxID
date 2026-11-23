@@ -674,3 +674,34 @@ test("attachment allocation skips current group handles case-insensitively and r
   assert.equal(h.session.entries.get("1")?.handle, "file-2");
   h.session.dispose();
 });
+
+test("restored previews validate cache metadata without reading or uploading until Resume", async () => {
+  const stat = deferred<number>();
+  const h = harness({
+    fileSize: ({ name }) => name === "oversize.png" ? MAX_ASSISTANT_ATTACHMENT_BYTES + 1 : stat.promise,
+  });
+  h.session.restore({
+    reselect: false,
+    conversationId: "original-thread",
+    rows: [
+      { file: { name: "pending.png", path: "pending.png", mimeType: "image/png" }, handle: "image-1", kind: "image" },
+      { file: { name: "oversize.png", path: "oversize.png", mimeType: "image/png" }, handle: "image-2", kind: "image", item: accepted("oversize.png") },
+    ],
+  }, (path) => path ? `file:///cache/${path}` : undefined);
+  const [pending, uploaded] = [...h.session.entries.values()];
+  assert.ok(pending?.resumable);
+  assert.ok(uploaded?.item);
+  assert.equal(pending?.previewReady, undefined);
+  stat.resolve(3);
+  await until(() => pending?.previewReady === true);
+  assert.equal(uploaded?.previewReady, undefined);
+  assert.equal(uploaded?.error, undefined);
+  assert.deepEqual(h.reads, []);
+  assert.equal(h.uploads.length, 0);
+  h.session.resume();
+  await until(() => !h.session.blocked);
+  assert.deepEqual(h.reads, ["pending.png"]);
+  assert.equal(h.uploads[0]?.id, "original-thread");
+  assert.equal(pending?.resumable, false);
+  h.session.dispose();
+});

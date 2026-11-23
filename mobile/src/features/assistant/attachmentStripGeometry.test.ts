@@ -62,3 +62,15 @@ test("resize, removal and additions keep ranges within the live selection", () =
   assert.equal(resized.end, 10);
   assert.equal(attachmentStripGeometry(0, 10, 100).overflow, false);
 });
+
+test("compact composers keep tap targets and expose scrolling even with two tiles", () => {
+  const first = attachmentStripGeometry(130, 2, 0);
+  assert.equal(first.tile, 64);
+  assert.equal(first.overflow, true);
+  assert.equal(first.after, true);
+  const last = attachmentStripGeometry(130, 2, Infinity);
+  assert.equal(last.before, true);
+  assert.equal(last.after, false);
+  assert.equal(last.end, 2);
+  assert.ok(last.content - 4 <= last.offset + 130);
+});
