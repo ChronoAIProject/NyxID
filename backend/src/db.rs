@@ -1,4 +1,7 @@
 mod pool_monitor;
+mod session_cursor;
+
+pub(crate) use session_cursor::{next_document, read_documents};
 
 use std::collections::HashSet;
 use std::future::Future;
