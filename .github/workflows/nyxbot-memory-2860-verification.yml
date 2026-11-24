@@ -33,9 +33,9 @@ jobs:
       - name: Prepare backend compile memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Compile the backend test binary
-        run: cargo test --locked -p nyxid --lib --no-run
+        run: cargo test --locked -p nyxid --bin nyxid-server --no-run
       - name: Start the disposable MongoDB replica set
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Run the native memory contract suite
         run: |
-          cargo test --locked -p nyxid --lib 'memory_write_tests::' -- --test-threads=2
+          cargo test --locked -p nyxid --bin nyxid-server 'memory_write_tests::' -- --test-threads=2
