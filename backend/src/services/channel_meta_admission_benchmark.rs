@@ -237,3 +237,159 @@ async fn long_web_turn_requests_cards_with_one_projected_provenance_read_each() 
     crate::services::security_readiness_service::stop_test_replica(&db).await;
     db.drop().await.unwrap();
 }
+
+/// Measure the transaction shared by simultaneous first DMs on one Page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "thread reservation contention benchmark: run alone on a local replica"]
+async fn concurrent_first_dm_reservations_and_owner_presence_on_one_page() {
+    use crate::models::nyxbot_channel::NyxbotChannel;
+    use crate::services::nyxbot_chat_settings_service;
+    const WAVES: usize = 16;
+    const WIDTH: usize = 4;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let counter = starts.clone();
+    let db = connect_transaction_test_database_with_command_handler(
+        "meta_thread_benchmark",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(c) = event
+                && c.command.get_bool("startTransaction") == Ok(true)
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }),
+    )
+    .await;
+    let state = test_app_state(db.clone());
+    ensure_indexes(&db).await.unwrap();
+    let owner = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let bot = fixture::registered_bot(&state, &owner, "messenger").await;
+    let channel: NyxbotChannel = bson::from_document(doc! {
+        "_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"channel_bot_id":&bot.id,
+        "platform":"messenger","bot_label":"Inbox","transport":"direct","status":"active",
+        "route_api_key_id":"fixture","owner_sender_ids":["333"],"created_at":bson::DateTime::now(),
+        "updated_at":bson::DateTime::now()
+    })
+    .unwrap();
+    db.collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .insert_one(&channel)
+        .await
+        .unwrap();
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&db, &owner)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread_for(
+        &db,
+        &state.encryption_keys,
+        &owner,
+        &team,
+    )
+    .await
+    .unwrap();
+    let grant = scopes::reference(&bot).unwrap();
+    let mut samples = Vec::new();
+    let mut attempts = 0;
+    let mut failures = 0;
+    for wave in 0..WAVES {
+        let mut threads = Vec::new();
+        for lane in 0..WIDTH {
+            // Start each sample with one unbound owner thread and three new visitor threads.
+            let sender = if lane == 0 {
+                "333".to_owned()
+            } else {
+                (1000 + wave * WIDTH + lane).to_string()
+            };
+            let source = fixture::inbound_for(
+                &state,
+                &bot,
+                "route",
+                "route-key",
+                &sender,
+                &format!("mid.{wave}.{lane}"),
+            )
+            .await;
+            fixture::admit_original(&state, &source).await;
+            let partition =
+                doc! {"channel_id":&channel.id,"partition":&source.platform_conversation_id};
+            if lane == 0 {
+                db.collection::<bson::Document>(
+                    crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+                )
+                .delete_one(partition.clone())
+                .await
+                .unwrap();
+            }
+            let projection = nyxbot_chat_settings_service::record_update(
+                &channel,
+                true,
+                doc! {
+                    "kind":"private","platform_chat_id":&sender,"last_message_id":&source.id,"last_relay_message_id":&source.id,
+                    "owner_chat":lane==0
+                },
+                bson::DateTime::now(),
+            );
+            threads.push(
+                scopes::record_thread(&db, &bot.id, &source.id, partition, projection)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let before = starts.load(Ordering::Relaxed);
+        let concurrent = threads.iter().enumerate().map(|(lane, thread)| {
+            let (db, channel, grant, home) = (&db, &channel, &grant, &home.id);
+            async move {
+                let now = Instant::now();
+                let work = async {
+                    if lane == 0 {
+                        scopes::observe_thread(
+                            db,
+                            channel,
+                            thread,
+                            doc! {"owner_seen":true,"owner_chat":true},
+                        )
+                        .await?;
+                    }
+                    scopes::bind_thread_conversation(
+                        db,
+                        channel,
+                        grant,
+                        thread,
+                        (lane == 0).then_some(home.as_str()),
+                    )
+                    .await
+                }
+                .await;
+                (now.elapsed(), work)
+            }
+        });
+        for (lane, (latency, result)) in futures::future::join_all(concurrent)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            samples.push(latency);
+            match result {
+                Ok(id) => assert_eq!(id == home.id, lane == 0),
+                Err(error) => {
+                    if failures == 0 {
+                        eprintln!("first reservation failure: {error}");
+                    }
+                    failures += 1;
+                }
+            }
+        }
+        attempts += starts.load(Ordering::Relaxed) - before;
+    }
+    samples.sort_unstable();
+    let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+    eprintln!(
+        "one_page_first_dms={} owner_observations={WAVES} transaction_starts={attempts} failed={failures} p95_ms={:.2}",
+        samples.len(),
+        p95.as_secs_f64() * 1000.0
+    );
+    assert_eq!(failures, 0);
+    db.drop().await.unwrap();
+}
