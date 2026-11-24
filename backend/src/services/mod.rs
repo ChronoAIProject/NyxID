@@ -646,6 +646,7 @@ pub mod nyxbot_response_read;
 
 pub mod channel_meta_service;
 
+pub(crate) mod nyxbot_channel_connection_service;
 pub(crate) mod nyxbot_channel_setup_service;
 
 pub mod channel_meta_management_service;

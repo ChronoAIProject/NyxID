@@ -1610,6 +1610,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "feature_flag_definitions is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
+        collection: "feature_flag_enrollment_fences",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("shared platform enrollment coordination"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "feature_flag_enrollment_fences contains one platform-keyed revision that serializes rollout flag changes with Meta installation and lifecycle commits. It holds no person-owned data and account erasure must retain the shared coordination row.",
+    },
+    Entry {
         collection: "feature_flag_metadata",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),

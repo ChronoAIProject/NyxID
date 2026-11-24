@@ -1446,7 +1446,9 @@ async fn incomplete_subscription_recovers_completed_session_and_completes_only_i
         super::super::channel_bot_service::get_bot(&state.db, installed.bot_id.as_deref().unwrap())
             .await
             .unwrap();
-    set_bot_delivery(&state.db, &pending, false).await.unwrap();
+    set_bot_delivery(&state.db, &pending, &pending.user_id, false)
+        .await
+        .unwrap();
     let held = s
         .finish(&bot.user_id, &started.session_id, "777", true)
         .await
@@ -1459,7 +1461,9 @@ async fn incomplete_subscription_recovers_completed_session_and_completes_only_i
             .status,
         crate::models::channel_connect_link::LinkStatus::Pending
     );
-    set_bot_delivery(&state.db, &held, true).await.unwrap();
+    set_bot_delivery(&state.db, &held, &held.user_id, true)
+        .await
+        .unwrap();
     server.reset().await;
     Mock::given(method("GET"))
         .and(path("/v25.0/me"))
@@ -1658,7 +1662,9 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
 async fn repeated_sweeps_preserve_the_generation_of_a_held_expired_inbox() {
     let (state, _, server, bot) = fixture("instagram").await;
     let service = service(&state, &server);
-    set_bot_delivery(&state.db, &bot, false).await.unwrap();
+    set_bot_delivery(&state.db, &bot, &bot.user_id, false)
+        .await
+        .unwrap();
     let bots = state.db.collection::<ChannelBot>(BOTS);
     bots.update_one(
         doc! {"_id": &bot.id},
@@ -2216,7 +2222,7 @@ async fn platform_suspension_and_transfer_keep_their_recovery_states_on_resume()
     let before = suspended.meta_binding.as_ref().unwrap();
     assert_eq!(before.subscription, "suspended");
     assert!(
-        matches!(set_bot_delivery(&state.db, &suspended, true).await,
+        matches!(set_bot_delivery(&state.db, &suspended, &suspended.user_id, true).await,
         Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:platform_suspended")
     );
     let current = live().await.unwrap();
@@ -2227,7 +2233,9 @@ async fn platform_suspension_and_transfer_keep_their_recovery_states_on_resume()
     set_platform_delivery(&state.db, "messenger", true)
         .await
         .unwrap();
-    set_bot_delivery(&state.db, &current, true).await.unwrap();
+    set_bot_delivery(&state.db, &current, &current.user_id, true)
+        .await
+        .unwrap();
     assert_eq!(
         live().await.unwrap().meta_binding.unwrap().subscription,
         "pending"
@@ -2238,12 +2246,14 @@ async fn platform_suspension_and_transfer_keep_their_recovery_states_on_resume()
         "meta_binding.exclusive_routing_verified": false, "error": "Reauthorize for the new owner"},
     }).await.unwrap();
     let transferred = live().await.unwrap();
-    set_bot_delivery(&state.db, &transferred, false)
+    set_bot_delivery(&state.db, &transferred, &transferred.user_id, false)
         .await
         .unwrap();
     let held = live().await.unwrap();
-    assert!(matches!(set_bot_delivery(&state.db, &held, true).await,
-        Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"));
+    assert!(
+        matches!(set_bot_delivery(&state.db, &held, &held.user_id, true).await,
+        Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required")
+    );
     let current = live().await.unwrap();
     assert_eq!(
         current.meta_binding.unwrap().subscription,
@@ -2286,7 +2296,7 @@ async fn operator_hold_and_deauthorization_preserve_both_repair_states_in_either
             .await
             .unwrap();
         if !suspend_first {
-            set_bot_delivery(&state.db, &live().await.unwrap(), false)
+            set_bot_delivery(&state.db, &live().await.unwrap(), &bot.user_id, false)
                 .await
                 .unwrap();
         }
@@ -2337,12 +2347,18 @@ async fn operator_hold_and_deauthorization_preserve_both_repair_states_in_either
                 .is_err()
         );
         if suspend_first {
-            assert!(set_bot_delivery(&state.db, &repaired, true).await.is_err());
+            assert!(
+                set_bot_delivery(&state.db, &repaired, &repaired.user_id, true)
+                    .await
+                    .is_err()
+            );
             set_platform_delivery(&state.db, "instagram", true)
                 .await
                 .unwrap();
         }
-        set_bot_delivery(&state.db, &repaired, true).await.unwrap();
+        set_bot_delivery(&state.db, &repaired, &repaired.user_id, true)
+            .await
+            .unwrap();
         service.verify(&live().await.unwrap()).await.unwrap();
         meta::require_ingress(&state.db, &live().await.unwrap(), &chat)
             .await
@@ -2408,5 +2424,137 @@ async fn messenger_verify_records_missing_page_authority_and_subscription_drift(
             "expected {expected} after verification: {error:?}"
         );
         assert_eq!(current.meta_binding.unwrap().subscription, expected);
+    }
+}
+
+#[tokio::test]
+async fn ordinary_delivery_handler_fences_org_admin_demotion_for_suspend_and_resume() {
+    use crate::services::{channel_bot_service as bots, org_service};
+    for enabled in [false, true] {
+        let (state, _, _, mut bot) = fixture("instagram").await;
+        let actor = bot.user_id.clone();
+        // Personal and organization writes share the generic authorization service.
+        assert!(
+            bots::resolve_bot_owner_for_write(&state.db, &actor, &bot.id)
+                .await
+                .is_ok()
+        );
+        let org = uuid::Uuid::new_v4().to_string();
+        db_insert_org_admin(&state.db, &org, &actor).await;
+        let other_admin = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &other_admin,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        org_service::create_membership(
+            &state.db,
+            &org,
+            &other_admin,
+            crate::models::org_membership::OrgRole::Admin,
+            crate::models::org_membership::MemberScopeSource::Inherit,
+            None,
+        )
+        .await
+        .unwrap();
+        bot.user_id = org.clone();
+        if enabled {
+            let binding = bot.meta_binding.as_mut().unwrap();
+            binding.operator_suspended = true;
+            binding.subscription = "suspended".into();
+            bot.status = "suspended".into();
+        }
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .replace_one(doc! {"_id": &bot.id}, &bot)
+            .await
+            .unwrap();
+        assert!(
+            bots::resolve_bot_owner_for_write(&state.db, &actor, &bot.id)
+                .await
+                .is_ok()
+        );
+        assert!(
+            crate::handlers::channel_bots::resolve_bot_owner_for_write(&state, &actor, &bot.id)
+                .await
+                .is_ok()
+        );
+        let before = state
+            .db
+            .collection::<bson::Document>(BOTS)
+            .find_one(doc! {"_id": &bot.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let membership = state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            )
+            .find_one(doc! {"org_user_id": &org, "member_user_id": &actor})
+            .await
+            .unwrap()
+            .unwrap();
+        super::super::durable_wake_tests::resume_after(
+            "meta_delivery_before_commit",
+            async {
+                let result = crate::handlers::channel_meta::bot_delivery(
+                    axum::extract::State(state.clone()),
+                    crate::test_utils::test_auth_user(&actor),
+                    axum::extract::Path(bot.id.clone()),
+                    axum::Json(crate::handlers::channel_meta::Delivery { enabled }),
+                )
+                .await;
+                assert!(matches!(result, Err(AppError::Forbidden(_))));
+            },
+            async {
+                org_service::update_membership(
+                    &state.db,
+                    &membership.id,
+                    Some(crate::models::org_membership::OrgRole::Member),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            },
+        )
+        .await;
+        let after = state
+            .db
+            .collection::<bson::Document>(BOTS)
+            .find_one(doc! {"_id": &bot.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.get_document("meta_binding"),
+            before.get_document("meta_binding")
+        );
+        assert_eq!(after.get_str("status"), before.get_str("status"));
+        assert!(matches!(
+            bots::resolve_bot_owner_for_write(&state.db, &actor, &bot.id).await,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+        assert!(matches!(
+            crate::handlers::channel_bots::resolve_bot_owner_for_write(&state, &actor, &bot.id)
+                .await,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+        let outsider = uuid::Uuid::new_v4().to_string();
+        assert!(
+            bots::resolve_bot_owner_for_write(&state.db, &other_admin, &bot.id)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            bots::resolve_bot_owner_for_write(&state.db, &outsider, &bot.id).await,
+            Err(AppError::ChannelBotNotFound(_))
+        ));
     }
 }

@@ -14,6 +14,7 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
         delivery_credential_encrypted: Some(vec![0xa5]),
     };
     let mut sources = vec![
+        (channel_meta::SESSIONS, doc! {"assets_encrypted": &bytes}),
         (
             mobile_social::MobileSocialDelivery::COLLECTION_NAME,
             doc! {"ciphertext": &bytes},

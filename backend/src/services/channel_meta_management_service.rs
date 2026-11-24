@@ -6,7 +6,6 @@ use super::{
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::channel_bot::ChannelBot,
 };
 use bson::doc;
 use serde::Deserialize;
@@ -45,7 +44,8 @@ pub async fn customer_setup(
     };
     use CustomerAction::*;
 
-    let (owner, bot) = resolve_bot_owner_for_write(state, actor, id).await?;
+    let (owner, bot) =
+        super::channel_bot_service::resolve_bot_owner_for_write(&state.db, actor, id).await?;
     channel_meta_service::adapter(&bot.platform)?;
     crate::services::assistant_nyxagent::require_enabled(&state.db, actor).await?;
     let specialist = state
@@ -197,28 +197,11 @@ pub async fn customer_setup(
     })
 }
 
-pub async fn resolve_bot_owner_for_write(
-    state: &AppState,
-    actor: &str,
-    id: &str,
-) -> AppResult<(String, ChannelBot)> {
-    let bot = super::channel_bot_service::get_bot(&state.db, id).await?;
-    let access = super::org_service::resolve_owner_access(&state.db, actor, &bot.user_id).await?;
-    if !access.can_read() {
-        return Err(AppError::ChannelBotNotFound(id.into()));
-    }
-    if !access.can_write() {
-        return Err(AppError::OrgRoleInsufficient(
-            "you do not have permission to modify this channel bot".into(),
-        ));
-    }
-    Ok((bot.user_id.clone(), bot))
-}
-
 pub async fn bot_delivery(state: &AppState, actor: &str, id: &str, enabled: bool) -> AppResult<()> {
-    let (_, bot) = resolve_bot_owner_for_write(state, actor, id).await?;
+    let (_, bot) =
+        super::channel_bot_service::resolve_bot_owner_for_write(&state.db, actor, id).await?;
     channel_meta_service::adapter(&bot.platform)?;
-    channel_meta_service::set_bot_delivery(&state.db, &bot, enabled).await?;
+    channel_meta_service::set_bot_delivery(&state.db, &bot, actor, enabled).await?;
     if enabled {
         let current = super::channel_bot_service::get_bot(&state.db, id).await?;
         MetaService::from(state).verify(&current).await?;

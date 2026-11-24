@@ -11,6 +11,10 @@ pub struct ChannelTextDelivery {
     pub logical_key: String,
     pub user_id: String,
     pub source_id: String,
+    /// New bound Meta plans carry their inbox parent. Legacy plans are joined
+    /// through the owner's source message during erasure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_bot_id: Option<String>,
     pub fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renderer_version: Option<u32>,

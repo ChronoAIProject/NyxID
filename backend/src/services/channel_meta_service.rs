@@ -154,18 +154,24 @@ pub(crate) async fn set_platform_delivery(
 pub(crate) async fn set_bot_delivery(
     db: &mongodb::Database,
     bot: &ChannelBot,
+    actor: &str,
     enabled: bool,
 ) -> AppResult<()> {
+    #[cfg(test)]
+    super::durable_wake_tests::after("meta_delivery_before_commit").await;
     let expected = bot.meta_binding.as_ref().ok_or_else(conflict)?.generation;
     super::transaction_service::run_db_only(
         db,
-        &(db, bot, enabled, expected),
-        |tx, &(db, bot, enabled, expected)| {
+        &(db, bot, actor, enabled, expected),
+        |tx, &(db, bot, actor, enabled, expected)| {
             Box::pin(async move {
-                super::feature_flag_service::fence_meta_enrollment_in_session(
+                MetaService::fence_installation_authority(
                     db,
-                    &bot.platform,
                     tx,
+                    actor,
+                    &bot.user_id,
+                    &bot.platform,
+                    false,
                 )
                 .await?;
                 let bots = db.collection::<ChannelBot>(BOTS);

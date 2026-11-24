@@ -1242,3 +1242,192 @@ async fn meta_erasure_fences_journal_creation_but_disconnect_keeps_an_accepted_r
         0
     );
 }
+
+#[tokio::test]
+async fn saved_meta_reply_journals_erase_legacy_sources_and_fence_late_creation_without_touching_siblings()
+ {
+    use crate::models::channel_text_delivery::{
+        COLLECTION_NAME as PLANS, ChannelTextDelivery, TextPartState,
+    };
+    use crate::services::{channel_reply_delivery, channel_text_delivery as journal};
+    for platform in ["messenger", "instagram"] {
+        let (state, adapter, server, bot) = fixture(platform).await;
+        let source = original(&state, &bot).await;
+        state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(&source)
+            .await
+            .unwrap();
+        if platform == "messenger" {
+            Mock::given(method("GET"))
+                .and(path("/v25.0/222/thread_owner"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": [{"thread_owner": {"app_id": "111"}}]
+                })))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/v25.0/222/messages"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message_id":"saved-provider-id"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let key = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&key, "is_active":true})
+            .await
+            .unwrap();
+        channel_reply_delivery::send_saved_parts(
+            "saved-result",
+            &state.db,
+            &state.http_client,
+            &adapter,
+            &bot,
+            &source,
+            &key,
+            source.platform_conversation_id.as_deref().unwrap(),
+            &BotCredentials::from("fixture-token"),
+            vec![OutboundReply {
+                text: Some("Saved answer".into()),
+                attachments: vec![],
+                metadata: None,
+                reply_to_platform_message_id: None,
+            }],
+        )
+        .await
+        .unwrap();
+        let saved = journal::load(&state.db, "saved-result")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        assert_eq!(
+            saved.parts[0].platform_message_id.as_deref(),
+            Some("saved-provider-id")
+        );
+        let legacy = journal::begin(
+            &state.db,
+            "legacy-result",
+            &bot.user_id,
+            &source.id,
+            "legacy",
+            1,
+        )
+        .await
+        .unwrap();
+        state
+            .db
+            .collection::<ChannelTextDelivery>(PLANS)
+            .update_one(
+                doc! {"_id":&legacy.id},
+                doc! {"$set":{"parts.0.platform_message_id":"legacy-provider-id"}},
+            )
+            .await
+            .unwrap();
+        let mut sibling = bot.clone();
+        sibling.id = uuid::Uuid::new_v4().to_string();
+        sibling.platform_bot_id = "444".into();
+        state
+            .db
+            .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(&sibling)
+            .await
+            .unwrap();
+        journal::begin_bound(
+            &state.db,
+            "sibling-result",
+            &sibling,
+            "sibling-source",
+            "sibling",
+            1,
+        )
+        .await
+        .unwrap();
+        journal::begin(
+            &state.db,
+            "other-owner-result",
+            "another-owner",
+            &source.id,
+            "other",
+            1,
+        )
+        .await
+        .unwrap();
+        crate::services::durable_wake_tests::resume_after(
+            "meta_text_plan_before_fence",
+            async {
+                assert!(
+                    journal::begin_bound(&state.db, "late-result", &bot, &source.id, "late", 1)
+                        .await
+                        .is_err()
+                );
+            },
+            async {
+                state
+                    .db
+                    .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&bot.id},
+                        doc! {"$set":{"is_active":false,"status":"inactive",
+                        "meta_binding.subscription":"removed"}},
+                    )
+                    .await
+                    .unwrap();
+                crate::services::personal_erasure_service::channel::erase_provider_inbox(
+                    &state,
+                    &bot.id,
+                    &bot.meta_binding.as_ref().unwrap().grant_id,
+                )
+                .await
+                .unwrap();
+            },
+        )
+        .await;
+        assert!(
+            journal::finish(
+                &state.db,
+                &saved,
+                0,
+                "late-attempt",
+                TextPartState::Sent,
+                Some("late-provider-id"),
+                None
+            )
+            .await
+            .is_err()
+        );
+        for erased in ["saved-result", "legacy-result", "late-result"] {
+            assert!(
+                journal::load(&state.db, erased).await.unwrap().is_none(),
+                "{erased}"
+            );
+        }
+        for retained in ["sibling-result", "other-owner-result"] {
+            assert!(
+                journal::load(&state.db, retained).await.unwrap().is_some(),
+                "{retained}"
+            );
+        }
+        assert!(
+            crate::services::channel_bot_service::get_bot(&state.db, &sibling.id)
+                .await
+                .unwrap()
+                .is_active
+        );
+        // Erasure retries after source deletion remain idempotent.
+        crate::services::personal_erasure_service::channel::erase_provider_inbox(
+            &state,
+            &bot.id,
+            &bot.meta_binding.as_ref().unwrap().grant_id,
+        )
+        .await
+        .unwrap();
+        server.verify().await;
+    }
+}

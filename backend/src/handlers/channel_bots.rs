@@ -1075,19 +1075,8 @@ pub(crate) async fn resolve_bot_owner_for_write(
     actor: &str,
     bot_id: &str,
 ) -> AppResult<(String, crate::models::channel_bot::ChannelBot)> {
-    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
-    let access = org_service::resolve_owner_access(&state.db, actor, &bot.user_id).await?;
-    if !access.can_read() {
-        return Err(AppError::ChannelBotNotFound(bot_id.to_string()));
-    }
-    if !access.can_write() {
-        return Err(AppError::OrgRoleInsufficient(
-            "you do not have permission to modify this channel bot".to_string(),
-        ));
-    }
-    Ok((bot.user_id.clone(), bot))
+    channel_bot_service::resolve_bot_owner_for_write(&state.db, actor, bot_id).await
 }
-
 /// Resolve the effective owner id for a READ operation on a bot.
 /// Allows any active member of the owning org (including viewers).
 pub(crate) async fn resolve_bot_owner_for_read(

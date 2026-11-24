@@ -105,7 +105,14 @@ pub(crate) async fn erase_provider_inbox(
             .delete_one(doc! {"_id":&channel.id,"status":{"$nin":["active","pending"]}})
             .await?;
     }
+    // Legacy saved-result plans predate the bot parent field. Resolve their
+    // exact owner/source pairs before deleting the inbound message records.
+    erase_legacy_text_plans(&state.db, bot_id).await?;
     for (collection, field) in [
+        (
+            crate::models::channel_text_delivery::COLLECTION_NAME,
+            "channel_bot_id",
+        ),
         (
             crate::models::channel_message::COLLECTION_NAME,
             "channel_bot_id",
@@ -159,6 +166,38 @@ pub(crate) async fn erase_provider_inbox(
         return Err(AppError::Conflict(
             "The inbox changed during erasure; cleanup remains pending".into(),
         ));
+    }
+    Ok(())
+}
+
+async fn erase_legacy_text_plans(db: &Database, bot_id: &str) -> AppResult<()> {
+    use futures::TryStreamExt;
+    let mut messages = db
+        .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find(doc! {"channel_bot_id": bot_id})
+        .projection(doc! {"_id": 1, "user_id": 1})
+        .await?;
+    let plans = db.collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
+    let mut batch = Vec::with_capacity(100);
+    while let Some(message) = messages.try_next().await? {
+        let owner = message.get_str("user_id").map_err(|_| {
+            AppError::Internal("Unable to resolve saved inbox delivery ownership".into())
+        })?;
+        let source = message.get_str("_id").map_err(|_| {
+            AppError::Internal("Unable to resolve saved inbox delivery source".into())
+        })?;
+        batch.push(doc! {"user_id": owner, "source_id": source});
+        if batch.len() == 100 {
+            plans
+                .delete_many(doc! {"channel_bot_id": null, "$or": &batch})
+                .await?;
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        plans
+            .delete_many(doc! {"channel_bot_id": null, "$or": batch})
+            .await?;
     }
     Ok(())
 }

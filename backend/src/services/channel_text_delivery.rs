@@ -18,6 +18,10 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"user_id": 1, "source_id": 1})
                 .build(),
+            IndexModel::builder()
+                .keys(doc! {"channel_bot_id": 1})
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
         ])
         .await?;
     Ok(())
@@ -38,7 +42,30 @@ pub async fn begin(
     fingerprint: &str,
     count: usize,
 ) -> AppResult<ChannelTextDelivery> {
-    begin_versioned(db, key, owner, source, fingerprint, count, None, None).await
+    begin_versioned(db, key, owner, source, fingerprint, count, None, None, None).await
+}
+
+pub(crate) async fn begin_bound(
+    db: &Database,
+    key: &str,
+    bot: &crate::models::channel_bot::ChannelBot,
+    source: &str,
+    fingerprint: &str,
+    count: usize,
+) -> AppResult<ChannelTextDelivery> {
+    let bound = super::channel_adapters::meta::is_meta(&bot.platform).then_some(bot);
+    begin_versioned(
+        db,
+        key,
+        &bot.user_id,
+        source,
+        fingerprint,
+        count,
+        None,
+        None,
+        bound,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -51,6 +78,7 @@ async fn begin_versioned(
     count: usize,
     notice: Option<crate::models::channel_text_delivery::TextDeliveryNotice>,
     renderer_version: Option<u32>,
+    bound_bot: Option<&crate::models::channel_bot::ChannelBot>,
 ) -> AppResult<ChannelTextDelivery> {
     if count == 0 || count > super::channel_reply_delivery::MAX_REPLY_PARTS {
         return Err(AppError::ValidationError("Invalid multipart plan".into()));
@@ -60,6 +88,7 @@ async fn begin_versioned(
         logical_key: key.into(),
         user_id: owner.into(),
         source_id: source.into(),
+        channel_bot_id: bound_bot.map(|bot| bot.id.clone()),
         fingerprint: fingerprint.into(),
         renderer_version,
         notice,
@@ -77,6 +106,60 @@ async fn begin_versioned(
         ],
         created_at: chrono::Utc::now(),
     };
+    if let Some(bot) = bound_bot {
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_text_plan_before_fence").await;
+        return super::transaction_service::run_db_only(
+            db,
+            &(db, bot, &record),
+            |tx, &(db, bot, record)| {
+                Box::pin(async move {
+                    super::channel_relay_service::fence_meta_observation(
+                        db, tx, &bot.id, &bot.platform, true,
+                    )
+                    .await?;
+                    if db
+                        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                        .find_one(doc! {"_id": &bot.id, "user_id": &bot.user_id})
+                        .session(&mut *tx)
+                        .await?
+                        .is_none()
+                    {
+                        return Err(AppError::Conflict("Inbox ownership changed".into()));
+                    }
+                    db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
+                        .update_one(
+                            doc! {"logical_key": &record.logical_key},
+                            doc! {"$setOnInsert": bson::to_document(record).map_err(|_| unconfirmed())?},
+                        )
+                        .upsert(true)
+                        .session(&mut *tx)
+                        .await?;
+                    let stored = db
+                        .collection::<ChannelTextDelivery>(COLLECTION_NAME)
+                        .find_one(doc! {"logical_key": &record.logical_key})
+                        .session(&mut *tx)
+                        .await?
+                        .ok_or_else(unconfirmed)?;
+                    validate_plan(&stored, record)?;
+                    // An existing legacy plan is adopted under the same fence.
+                    if stored.channel_bot_id.is_none() {
+                        db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
+                            .update_one(
+                                doc! {"_id": &stored.id, "channel_bot_id": null},
+                                doc! {"$set": {"channel_bot_id": &bot.id}},
+                            )
+                            .session(&mut *tx)
+                            .await?;
+                    }
+                    let mut stored = stored;
+                    stored.channel_bot_id = Some(bot.id.clone());
+                    Ok(stored)
+                })
+            },
+        )
+        .await;
+    }
     let inserted = db
         .collection::<ChannelTextDelivery>(COLLECTION_NAME)
         .update_one(
@@ -92,14 +175,25 @@ async fn begin_versioned(
         return Err(error.into());
     }
     let stored = load(db, key).await?.ok_or_else(unconfirmed)?;
-    if stored.fingerprint != fingerprint
-        || stored.parts.len() != count
-        || stored.user_id != owner
-        || stored.source_id != source
+    validate_plan(&stored, &record)?;
+    Ok(stored)
+}
+
+fn validate_plan(stored: &ChannelTextDelivery, expected: &ChannelTextDelivery) -> AppResult<()> {
+    if stored.fingerprint != expected.fingerprint
+        || stored.parts.len() != expected.parts.len()
+        || stored.user_id != expected.user_id
+        || stored.source_id != expected.source_id
+        || stored.channel_bot_id.as_ref().is_some_and(|id| {
+            expected
+                .channel_bot_id
+                .as_ref()
+                .is_some_and(|expected| id != expected)
+        })
     {
         return Err(AppError::Conflict("Multipart delivery plan changed".into()));
     }
-    Ok(stored)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -141,6 +235,7 @@ pub async fn assistant_plan(
             parts.len(),
             notice,
             version,
+            None,
         )
         .await
         {

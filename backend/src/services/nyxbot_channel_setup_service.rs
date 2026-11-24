@@ -10,6 +10,10 @@ use crate::{
     },
     services::{assistant_nyxagent as engine, channel_bot_service},
 };
+use crate::{
+    models::nyxbot_gateway_release::ReleaseReason,
+    services::nyxbot_gateway_release_service as releases,
+};
 use mongodb::bson::doc;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -208,8 +212,7 @@ pub(crate) async fn audit(state: &AppState, owner: &str, event: &str, data: Valu
     .await;
 }
 
-/// Direct Meta connections share the normal route, key, retirement and
-/// continuity services. Meta never creates a native gateway installation.
+/// Meta uses the same connection lifecycle as normal and restored connections.
 pub(crate) async fn connect_meta(
     state: &AppState,
     owner: &str,
@@ -218,359 +221,28 @@ pub(crate) async fn connect_meta(
     agent: &crate::models::assistant_agent::AssistantAgent,
     allow_existing: bool,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
-    use crate::models::nyxbot_gateway_release::ReleaseReason;
-    use crate::services::{
-        channel_routing_service, key_service, nyxbot_channel_continuity_service as continuity,
-        nyxbot_gateway_release_service as releases,
+    use super::nyxbot_channel_connection_service::{
+        self as connections, ConnectionRequest, RelayConnection,
     };
-    use chrono::Utc;
-    crate::services::org_channel_service::require_target(&state.db, owner, agent).await?;
-    if agent.destroyed_at.is_some() {
-        return Err(AppError::Conflict("That agent was destroyed".into()));
-    }
-    let bot = accessible_bot(state, owner, bot_id).await?;
-    crate::services::channel_meta_service::adapter(&bot.platform)?;
-    let org_binding =
-        crate::services::org_channel_service::link_target(&state.db, owner, &bot, agent).await?;
-    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
-    if !bot.is_active {
-        return Err(AppError::ValidationError(
-            "That channel bot is not active".into(),
-        ));
-    }
-    let bot_owner_id = bot.user_id.clone();
-    let mut rebuilt_from = None;
-    if let Some(existing) =
-        crate::services::nyxbot_channel_query_service::active_for_bot(&state.db, owner, &bot.id)
-            .await?
-    {
-        if !allow_existing {
-            return Err(AppError::Conflict(
-                "This bot already has a selected agent".into(),
-            ));
-        }
-        if crate::services::nyxbot_channel_query_service::reusable(
-            &state.db,
-            owner,
-            &bot_owner_id,
-            &existing,
-        )
-        .await?
-        {
-            link(state, owner, &existing.id, agent).await?;
-            let code = crate::services::assistant_wake_service::watch::new_link_code();
-            continuity::restore_existing(
-                &state.db,
-                &existing.id,
-                owner,
-                agent.is_nyxbot(),
-                &crate::crypto::token::hash_token(&code),
-            )
-            .await?;
-            let row = load_channel(state, owner, &existing.id).await?;
-            let link = link_instructions(&row, code)?;
-            return Ok((row, link));
-        }
-        let ids = releases::retire_connection(
-            state,
-            &existing,
-            ReleaseReason::Disconnect,
-            "disconnected",
-            None,
-        )
-        .await?;
-        let gateway_released = if ids.is_empty() {
-            existing.transport != "gateway"
-        } else {
-            releases::try_inline(state, &ids).await
-        };
-        audit(
-            state,
-            owner,
-            "nyxbot_channel_disconnected",
-            json!({"channel_agent_id": &existing.id, "gateway_released": gateway_released}),
-        )
-        .await;
-        rebuilt_from = Some(existing);
-    }
-    if channel_routing_service::list_conversations(&state.db, &bot_owner_id, Some(&bot.id))
-        .await?
-        .iter()
-        .any(|row| row.default_agent && row.is_active)
-    {
-        return Err(AppError::Conflict("This bot already routes to another agent. Remove that route first (nyxid__delete_channel_route), then connect NyxBot.".into()));
-    }
-    let id = Uuid::new_v4().to_string();
-    let label = engine::excerpt(&bot.label, 60);
-    let callback = format!(
-        "{}/api/v1/nyxbot/relay/{id}",
-        state.config.base_url.trim_end_matches('/')
-    );
-    let route_key = key_service::create_api_key(
-        &state.db,
-        &bot_owner_id,
-        &format!("NyxBot channel route {}", engine::identifier(&label)),
-        "read proxy",
-        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
-            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
-        ),
-        Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
-        Some(&[]),
-        Some(&[]),
-        Some(false),
-        Some(false),
-        Some(false),
-        None,
-        None,
-        Some("generic"),
-        Some(&callback),
-    )
-    .await?;
-    let now = Utc::now();
-    let platform = bot.platform.clone();
-    let row = NyxbotChannel {
-        notification_epoch: 0,
-        execution_policy_revision: 0,
-        org_specialist: org_binding.clone(),
-        gateway_source: None,
-        gateway_native_phase: None,
-        gateway_native_activation: None,
-        gateway_native_activation_detail: None,
-        gateway_native_activation_operation: None,
-        gateway_native_delivery: None,
-        gateway_intake: None,
-        gateway_bot_mentions: Default::default(),
-        gateway_threads: Default::default(),
-        follow_capacity_revision: 0,
-        follow_binding_generation: 0,
-        id: id.clone(),
-        user_id: owner.into(),
-        channel_bot_id: bot.id.clone(),
-        bot_owner_id: (bot_owner_id != owner).then(|| bot_owner_id.clone()),
-        platform: platform.clone(),
-        bot_label: label.clone(),
-        bot_username: Some(bot.platform_bot_username.clone()).filter(|name| !name.is_empty()),
-        transport: "direct".into(),
-        status: "pending".into(),
-        last_error: None,
-        route_api_key_id: route_key.id.clone(),
-        route_id: None,
-        agent_api_key_id: None,
-        agent_key_ciphertext: None,
-        gateway_channel_id: None,
-        gateway_record_id: None,
-        gateway_setup_release_id: None,
-        continuity_from_channel_id: None,
-        continuity_to_channel_id: None,
-        continuity_restored_at: None,
-        gateway_version: None,
-        gateway_no_progress: false,
-        binding_id: None,
-        gateway_groups: None,
-        gateway_groups_retry_at: None,
-        gateway_bot_id: None,
-        gateway_attempted_at: None,
-        relay_attempted_at: None,
-        gateway_fallback_at: None,
-        pending_agent_api_key_id: None,
-        pending_route_api_key_id: None,
-        // Meta sender identities require an inbox-specific owner challenge.
-        // Continuity activation may carry a verified same-inbox predecessor.
-        owner_sender_ids: Vec::new(),
-        link_code_hash: None,
-        link_code_expires_at: None,
-        source_conversation_id: source_conversation_id.map(str::to_owned),
-        agent_id: Some(agent.id.clone()),
-        private_chats: org_binding.as_ref().map(|_| "everyone".to_owned()),
-        private_chat_posts: None,
-        delivery_status: None,
-        delivery_error: None,
-        delivery_failed_at: None,
-        delivery_seen_at: None,
-        delivery_checked_at: None,
-        delivery_notified_at: None,
-        org_restore_next_attempt_at: None,
-        org_restore_attempts: 0,
-        org_restore_rule_version: 0,
-        org_restore_last_reason: None,
-        org_restore_claim_id: None,
-        org_restore_lease_until: None,
-        org_restored_at: None,
-        created_at: now,
-        updated_at: now,
-    };
-    let insertion = crate::services::transaction_service::run_db_only(
-        &state.db,
-        &(&state.db, &row),
-        |tx, &(db, row)| {
-            Box::pin(async move {
-                crate::services::platform_bot_authority::fence_personal_routes(
-                    db,
-                    &row.channel_bot_id,
-                    row.bot_owner_id.as_deref().unwrap_or(&row.user_id),
-                    tx,
-                )
-                .await?;
-                if db
-                    .collection::<NyxbotChannel>(CHANNELS)
-                    .find_one(doc! {
-                        "channel_bot_id": &row.channel_bot_id,
-                        "status": {"$in": ["pending", "active"]},
-                    })
-                    .session(&mut *tx)
-                    .await?
-                    .is_some()
-                {
-                    return Err(AppError::Conflict(
-                        "This bot already has a selected agent".into(),
-                    ));
-                }
-                db.collection::<NyxbotChannel>(CHANNELS)
-                    .insert_one(row)
-                    .session(&mut *tx)
-                    .await?;
-                if row.org_specialist.is_some() {
-                    crate::services::org_channel_service::fence_management(
-                        db,
-                        tx,
-                        row,
-                        &row.user_id,
-                    )
-                    .await?;
-                    crate::services::org_channel_service::management::restore_in_session(
-                        db, tx, row,
-                    )
-                    .await?;
-                }
-                Ok(())
-            })
-        },
-    )
-    .await;
-    if let Err(error) = insertion {
-        let _ = key_service::delete_api_key(&state.db, &bot_owner_id, &route_key.id).await;
-        return Err(error);
-    }
-    let route = channel_routing_service::create_conversation(
-        &state.db,
-        &bot_owner_id,
-        Some(&bot.id),
-        &bot.platform,
-        "*",
-        "private",
-        None,
-        &route_key.id,
-        true,
-        false,
-    )
-    .await;
-    let route = match route {
-        Ok(route) => route,
-        Err(_) => {
-            let current = load_channel(state, owner, &id).await?;
-            retire_failed_setup(state, &current, "route_create_failed").await?;
-            audit(
-                state,
-                owner,
-                "nyxbot_channel_connect_failed",
-                json!({
-                    "channel_agent_id": id, "platform": platform,
-                    "error_code": "route_create_failed",
-                }),
-            )
-            .await;
-            return Err(AppError::ValidationError(
-                "Could not connect this bot. Try again. (route_create_failed)".into(),
-            ));
-        }
-    };
-    match org_access_with(state, &row, None).await? {
-        crate::services::org_channel_service::OrgAccess::Holds => {}
-        crate::services::org_channel_service::OrgAccess::Lost => {
-            let mut revoked = load_channel(state, owner, &id).await?;
-            revoked.route_id = Some(route.id.clone());
-            let ids = releases::retire_connection(
-                state,
-                &revoked,
-                ReleaseReason::OrgAccessLost,
-                "failed",
-                Some("org_access_lost"),
-            )
-            .await?;
-            releases::try_inline(state, &ids).await;
-            return Err(AppError::Forbidden("org_access_lost".into()));
-        }
-        crate::services::org_channel_service::OrgAccess::Unavailable => {
-            return Err(AppError::SecurityReadinessUnavailable);
-        }
-    }
-    let code = crate::services::assistant_wake_service::watch::new_link_code();
-    let link_hash = crate::crypto::token::hash_token(&code);
-    let activation = continuity::activate(
-        &state.db,
-        owner,
-        &id,
-        &route.id,
-        rebuilt_from.as_ref().map(|row| row.id.as_str()),
-        agent.is_nyxbot(),
-        &link_hash,
-    )
-    .await;
-    // A failed read after an uncertain commit leaves the durable reservation
-    // for recovery; it must not trigger destructive rollback of a live route.
-    let current = load_channel(state, owner, &id).await?;
-    if let Err(error) = activation
-        && (current.status != "active" || current.link_code_hash.as_deref() != Some(&link_hash))
-    {
-        retire_failed_setup(state, &current, "setup_interrupted").await?;
-        return Err(error);
-    }
-    let link = link_instructions(&current, code)?;
-    audit(
+    crate::services::channel_meta_service::adapter(
+        &accessible_bot(state, owner, bot_id).await?.platform,
+    )?;
+    connections::connect(
         state,
-        owner,
-        "nyxbot_channel_connected",
-        json!({
-            "channel_agent_id": id, "channel_bot_id": bot.id,
-            "platform": platform, "transport": "direct",
-        }),
+        ConnectionRequest {
+            owner,
+            source_conversation_id,
+            bot_id,
+            agent,
+            allow_existing,
+            restoration: false,
+            restoration_claim_id: None,
+        },
+        &RelayConnection,
     )
-    .await;
-    Ok((current, link))
+    .await
 }
-
-async fn retire_failed_setup(
-    state: &AppState,
-    row: &NyxbotChannel,
-    code: &'static str,
-) -> AppResult<()> {
-    use crate::models::nyxbot_gateway_release::ReleaseReason;
-    use crate::services::nyxbot_gateway_release_service as releases;
-    let ids =
-        releases::retire_connection(state, row, ReleaseReason::SetupFailed, "failed", Some(code))
-            .await?;
-    releases::try_inline(state, &ids).await;
-    Ok(())
-}
-
-pub(crate) struct LinkInstructions {
-    pub code: zeroize::Zeroizing<String>,
-    pub url: Option<String>,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-fn link_instructions(
-    row: &NyxbotChannel,
-    code: zeroize::Zeroizing<String>,
-) -> AppResult<LinkInstructions> {
-    Ok(LinkInstructions {
-        code,
-        url: None,
-        expires_at: row
-            .link_code_expires_at
-            .ok_or_else(|| AppError::Internal("Owner link unavailable".into()))?,
-    })
-}
+pub use super::nyxbot_channel_connection_service::LinkInstructions;
 
 pub(crate) async fn audience_readiness(
     state: &AppState,
@@ -688,4 +360,41 @@ pub(crate) async fn update_access(
         }
     }
     Ok(result)
+}
+
+pub(crate) async fn release_org_channel(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
+    if row.bot_owner_id.is_none() {
+        return Ok(());
+    }
+    let ids = releases::retire_connection(
+        state,
+        row,
+        ReleaseReason::OrgAccessLost,
+        "failed",
+        Some("org_access_lost"),
+    )
+    .await?;
+    releases::try_inline(state, &ids).await;
+    Ok(())
+}
+
+pub(crate) async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Value> {
+    let row = load_channel(state, owner, id).await?;
+    let ids =
+        releases::retire_connection(state, &row, ReleaseReason::Disconnect, "disconnected", None)
+            .await?;
+    let gateway_released = if ids.is_empty() {
+        row.transport != "gateway"
+    } else {
+        releases::try_inline(state, &ids).await
+    };
+    audit(
+        state,
+        owner,
+        "nyxbot_channel_disconnected",
+        json!({"channel_agent_id": &row.id, "gateway_released": gateway_released}),
+    )
+    .await;
+    Ok(json!({"disconnected": row.id, "platform": row.platform,
+        "gateway_released": gateway_released}))
 }

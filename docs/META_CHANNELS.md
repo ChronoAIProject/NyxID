@@ -284,7 +284,11 @@ a reconnectable management identity. Verified deletion then works even after
 token retirement; it erases the captured grant's retired bot, subject, asset,
 username, OAuth credentials, relay metadata, control rows, journal/receipt IDs,
 setup links and associated guest conversations after cleanup. Existing required
-financial/audit records are retained. A domain-separated keyed revocation
+financial/audit records are retained. Saved-result text plans are included:
+new Meta plans carry the bot ID and are created under the inbox erasure fence;
+legacy plans are removed by exact owner/source-message pairs before their
+inbound records are deleted. Erasing one inbox preserves sibling inbox plans.
+A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire
 second; a delayed callback cannot revoke a grant authorized in a later second.

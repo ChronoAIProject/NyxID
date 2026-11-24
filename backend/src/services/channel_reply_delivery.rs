@@ -427,10 +427,10 @@ pub(crate) async fn send_saved_parts(
     parts: Vec<super::channel_platform::OutboundReply>,
 ) -> AppResult<(ChannelMessage, super::channel_platform::SendOutcome)> {
     use super::{channel_text_delivery as journal, channel_text_preparation as preparation};
-    let plan = journal::begin(
+    let plan = journal::begin_bound(
         db,
         key,
-        &bot.user_id,
+        bot,
         &original.id,
         &super::channel_reply_plan::fingerprint(&parts),
         parts.len(),

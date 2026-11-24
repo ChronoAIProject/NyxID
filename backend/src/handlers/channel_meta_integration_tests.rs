@@ -417,9 +417,14 @@ async fn signed_held_instagram_control_events_project_without_admitting_dms() {
         )
         .await
         .unwrap();
-    crate::services::channel_meta_service::set_bot_delivery(&state.db, &held_bot, true)
-        .await
-        .unwrap();
+    crate::services::channel_meta_service::set_bot_delivery(
+        &state.db,
+        &held_bot,
+        &held_bot.user_id,
+        true,
+    )
+    .await
+    .unwrap();
     let resumed = get_bot().await.unwrap();
     assert!(!resumed.meta_binding.as_ref().unwrap().operator_suspended);
     // Apply the accepted control observation with the pre-resume bot and
@@ -541,7 +546,7 @@ async fn managed_shared_dispatch_preserves_lookup_hold_through_reload() {
     let held = channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
-    crate::services::channel_meta_service::set_bot_delivery(&state.db, &held, true)
+    crate::services::channel_meta_service::set_bot_delivery(&state.db, &held, &held.user_id, true)
         .await
         .unwrap();
     let resumed = channel_bot_service::get_bot(&state.db, &bot.id)

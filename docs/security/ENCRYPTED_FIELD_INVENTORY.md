@@ -75,6 +75,7 @@ A collection may use separate adapters for different fields.
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | — | Pending |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | — | Pending |
+| `channel_meta_oauth_sessions` | `assets_encrypted` | — | Pending |
 
 ### Production storage for Pending fields
 

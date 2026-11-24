@@ -367,6 +367,11 @@ const REGISTRY: &[Entry] = &[
             "execution_proposal.v4.result",
         ],
     },
+    Entry {
+        collection: "channel_meta_oauth_sessions",
+        adapter: Adapter::Pending,
+        fields: &["assets_encrypted"],
+    },
 ];
 
 /// Safe control-plane report: no database cursors, record IDs, ciphertext,

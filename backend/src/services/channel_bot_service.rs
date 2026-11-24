@@ -19,6 +19,24 @@ use crate::services::channel_platform::{
     BotCredentials, BotIdentity, PlatformAdapter, RegistrationDescriptor, RegistrationValues,
 };
 
+pub(crate) async fn resolve_bot_owner_for_write(
+    db: &mongodb::Database,
+    actor: &str,
+    bot_id: &str,
+) -> AppResult<(String, ChannelBot)> {
+    let bot = get_bot(db, bot_id).await?;
+    let access = super::org_service::resolve_owner_access(db, actor, &bot.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::ChannelBotNotFound(bot_id.to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this channel bot".to_string(),
+        ));
+    }
+    Ok((bot.user_id.clone(), bot))
+}
+
 /// A new bot or the owner's existing manager connection. Reused connections
 /// require live verification and never return a webhook secret.
 pub struct CreateBotResult {
