@@ -378,6 +378,12 @@ current grant can remove the live subscription and bot; deleting a superseded
 grant preserves the successor's credentials, assignment, policy and independent
 verification. A thread pointer is cleared only while it still names the erased
 source and grant.
+Current-installation cleanup reuses ordinary retirement's dedicated route and
+agent-key revocation before removing the bot. Superseded-grant cleanup cannot
+retire those shared live keys. Tracked setup links retain their original minimal
+grant reference when associated or completed, under their existing link lifetime;
+cleanup removes only that grant's links (or a managed link's exact retained OAuth
+connection ID). It preserves a link belonging to another consent.
 
 Assistant history carrying grant proof uses this scoped worker even for a
 single consent. Owner DMs and queued message inputs

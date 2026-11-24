@@ -208,6 +208,7 @@ fn build_link(
         flow: None,
         bot_id: None,
         connection_id: None,
+        meta_grant: None,
         telegram_request_id: None,
         claim_id: None,
         claim_until: None,
@@ -510,7 +511,11 @@ pub async fn associate(
     if bot.user_id != claim.link.user_id || bot.platform != claim.link.platform {
         return Err(missing());
     }
-    let result = db.collection::<Link>(LINKS).update_one(doc! {"_id": &claim.link.id, "status": "pending", "claim_id": &claim.id, "claim_until": {"$gt": bson::DateTime::now()}, "bot_id": null}, doc! {"$set": {"bot_id": &bot.id}}).session(session).await?;
+    let mut fields = doc! {"bot_id":&bot.id};
+    if let Some(proof) = meta_link_proof(bot) {
+        fields.insert("meta_grant", proof);
+    }
+    let result = db.collection::<Link>(LINKS).update_one(doc! {"_id": &claim.link.id, "status": "pending", "claim_id": &claim.id, "claim_until": {"$gt": bson::DateTime::now()}, "bot_id": null}, doc! {"$set":fields}).session(session).await?;
     if result.matched_count != 1 {
         return Err(busy());
     }
@@ -571,6 +576,10 @@ pub fn callback_url(link: &Link) -> AppResult<Option<String>> {
     Ok(Some(url.into()))
 }
 
+fn meta_link_proof(bot: &ChannelBot) -> Option<Document> {
+    bot.meta_binding.as_ref().map(|binding|doc! {"bot_id":&bot.id,"grant_id":&binding.grant_id,"generation":binding.generation})
+}
+
 fn terminal_update(link: &Link, status: LinkStatus, bot: Option<&ChannelBot>) -> Document {
     let now = Utc::now();
     let data = doc! {
@@ -582,14 +591,23 @@ fn terminal_update(link: &Link, status: LinkStatus, bot: Option<&ChannelBot>) ->
         "last_error": if status == LinkStatus::Completed { None } else { link.last_error.as_deref() },
         "expires_at": link.expires_at.to_rfc3339(),
     };
-    doc! {"$set": {
+    let mut update = doc! {"$set": {
         "last_error": if status == LinkStatus::Completed { None } else { link.last_error.as_deref() },
         "status": status_name(status), "terminal_at": bson::DateTime::from_chrono(now),
         "claim_id": bson::Bson::Null, "claim_until": bson::Bson::Null,
         "event_id": Uuid::new_v4().to_string(), "event_data": data,
         "delivery_status": if link.receiver.is_some() { "pending" } else { "none" },
         "delivery_after": bson::DateTime::from_chrono(now),
-    }}
+    }};
+    let proof=link.meta_grant.as_ref().map(|proof|doc! {"bot_id":&proof.bot_id,"grant_id":&proof.grant_id,"generation":proof.generation})
+        .or_else(||bot.and_then(meta_link_proof));
+    if let Some(proof) = proof {
+        update
+            .get_document_mut("$set")
+            .expect("terminal fields")
+            .insert("meta_grant", proof);
+    }
+    update
 }
 
 fn ready(link: &Link, bot: &ChannelBot) -> bool {
