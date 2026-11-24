@@ -3388,6 +3388,15 @@ async fn start_chat_turn(
         &row.channel_bot_id,
     )
     .await?;
+    let meta_grant = if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+        Some(
+            crate::services::channel_meta_service::scopes::event_reference(&state.db, event_key)
+                .await?
+                .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?,
+        )
+    } else {
+        None
+    };
     let (declared, media_event_ids, media_sent_at) = Box::pin(
         crate::services::channel_media_events::for_turn(&state.db, row, event_key),
     )
@@ -3484,8 +3493,12 @@ async fn start_chat_turn(
             .await?;
         (id, exists)
     } else if execution.is_some() {
-        crate::services::org_channel_service::transcript::lane(
-            &state.db, &origin, &actor, &agent_id,
+        crate::services::org_channel_service::transcript::lane_for_grant(
+            &state.db,
+            &origin,
+            &actor,
+            &agent_id,
+            meta_grant.as_ref(),
         )
         .await?
     } else {
@@ -3534,6 +3547,7 @@ async fn start_chat_turn(
         sender.truncated_original_bytes.is_some(),
     );
     let source_context = crate::models::assistant_conversation::ChannelTurnContext {
+        meta_grant,
         text_completeness: Some(completeness),
         org_origin: execution.is_some().then(|| Box::new(origin.clone())),
         source_event_id: event_key.to_owned(),
@@ -5174,12 +5188,26 @@ async fn custom_responses(
         created_at: now,
         expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
     };
-    if let Err(error) = state
-        .db
-        .collection::<NyxbotEvent>(EVENTS)
-        .insert_one(&event)
+    let inserted = if crate::services::channel_adapters::meta::is_meta(&destination.platform) {
+        crate::services::channel_media_events::insert_meta_anchored_event(
+            &state.db,
+            &event,
+            &destination.channel_bot_id,
+            destination_thread
+                .last_message_id
+                .as_deref()
+                .expect("checked reply anchor"),
+        )
         .await
-    {
+    } else {
+        state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .insert_one(&event)
+            .await
+            .map(|_| ())
+    };
+    if let Err(error) = inserted {
         if is_duplicate(&error) {
             let existing = state
                 .db
@@ -5607,13 +5635,24 @@ async fn responses_with_producers_impl(
     let mut newly_admitted = true;
     let mut retry_prefix = None;
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
-    if let Err(error) = Box::pin(
-        crate::services::channel_media_events::insert_response_event(
-            &state.db,
-            &admitted,
-            pending_read.as_ref(),
-        ),
-    )
+    if let Err(error) = Box::pin(async {
+        if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+            crate::services::channel_media_events::insert_meta_response_event(
+                &state.db,
+                &admitted,
+                pending_read.as_ref(),
+                &row.channel_bot_id,
+            )
+            .await
+        } else {
+            crate::services::channel_media_events::insert_response_event(
+                &state.db,
+                &admitted,
+                pending_read.as_ref(),
+            )
+            .await
+        }
+    })
     .await
     {
         if !is_duplicate(&error) {
@@ -7063,9 +7102,19 @@ pub async fn relay_callback(
         created_at: now,
         expires_at: now + retention,
     };
-    match Box::pin(crate::services::channel_media_events::insert_event(
-        &state.db, &admitted,
-    ))
+    match Box::pin(async {
+        if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+            crate::services::channel_media_events::insert_meta_response_event(
+                &state.db,
+                &admitted,
+                None,
+                &row.channel_bot_id,
+            )
+            .await
+        } else {
+            crate::services::channel_media_events::insert_event(&state.db, &admitted).await
+        }
+    })
     .await
     {
         Ok(_) => {}

@@ -4865,9 +4865,19 @@ async fn sweep_attributes_rejection_to_the_credential_that_made_the_provider_req
 
 async fn grant_source(state: &crate::AppState, bot: &ChannelBot, id: &str) {
     let binding = bot.meta_binding.as_ref().unwrap();
+    let chat = meta::conversation(&bot.platform, &bot.id, &bot.platform_bot_id, "333");
+    let authority = crate::models::channel_message::MetaMessageAuthority {
+        grant_id: Some(binding.grant_id.clone()),
+        generation: binding.generation,
+        asset_id: bot.platform_bot_id.clone(),
+        sender_id: "333".into(),
+        binding: meta::binding(bot),
+        event_at: Utc::now(),
+        reply_expires_at: Utc::now() + Duration::minutes(30),
+    };
     state.db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME).insert_one(doc! {
         "_id":id,"user_id":&bot.user_id,"channel_bot_id":&bot.id,"platform":&bot.platform,"direction":"inbound",
-        "meta_authority":{"generation":binding.generation,"grant_id":&binding.grant_id},
+        "platform_conversation_id":chat,"meta_authority":bson::to_bson(&authority).unwrap(),
     }).await.unwrap();
 }
 
@@ -5184,13 +5194,17 @@ async fn messenger_transfer_and_reconsent_preserve_public_id_and_capture_both_gr
         .unwrap();
         provider::reconcile_with_service(&state, &s).await.unwrap();
         assert_eq!(
-            request_status(
-                &state.db,
-                "messenger",
-                old_deauth["confirmation_code"].as_str().unwrap()
-            )
-            .await
-            .unwrap()["status"],
+            state
+                .db
+                .collection::<bson::Document>(provider::REQUESTS)
+                .find_one(
+                    doc! {"_id":old_deauth["confirmation_code"].as_str().unwrap(),"erase":false}
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("status")
+                .unwrap(),
             "completed"
         );
         let after_old_deauth = super::super::channel_bot_service::get_bot(&state.db, &b.id)
@@ -5321,13 +5335,17 @@ async fn messenger_transfer_and_reconsent_preserve_public_id_and_capture_both_gr
         .unwrap();
         provider::reconcile_with_service(&state, &s).await.unwrap();
         assert_eq!(
-            request_status(
-                &state.db,
-                "messenger",
-                current_deauth["confirmation_code"].as_str().unwrap()
-            )
-            .await
-            .unwrap()["status"],
+            state
+                .db
+                .collection::<bson::Document>(provider::REQUESTS)
+                .find_one(
+                    doc! {"_id":current_deauth["confirmation_code"].as_str().unwrap(),"erase":false}
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("status")
+                .unwrap(),
             "completed"
         );
         let after_current_deauth = super::super::channel_bot_service::get_bot(&state.db, &b.id)
@@ -5419,82 +5437,99 @@ async fn chronology_repair_outside_signed_cutoff_skips_all_worker_effects() {
 
 #[tokio::test]
 async fn unknown_grant_chronology_repaired_after_signed_cutoff_keeps_real_admission_available() {
-    let (state, _, server, bot) = fixture("instagram").await;
-    configure(&state, &bot).await;
-    let scope = super::super::transaction_service::run_db_only(
-        &state.db,
-        &(&state.db, &bot),
-        |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
-    )
-    .await
-    .unwrap();
-    let rows = state
-        .db
-        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES);
-    rows.update_one(doc! {"_id":&scope.id}, doc! {"$unset":{"authorized_at":""}})
-        .await
-        .unwrap();
-    state
-        .db
-        .collection::<ChannelBot>(BOTS)
-        .update_one(
-            doc! {"_id":&bot.id},
-            doc! {"$unset":{"meta_binding.authorized_at":""}},
+    for old_scope_date in [Some(Utc::now() - Duration::days(1)), None] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        let scope = super::super::transaction_service::run_db_only(
+            &state.db,
+            &(&state.db, &bot),
+            |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
         )
         .await
         .unwrap();
-    let s = service(&state, &server);
-    let issued = Utc::now() - Duration::seconds(30);
-    let response = accept_provider_request(
-        &s,
-        "instagram",
-        &provider_request(json!(900), issued.timestamp()),
-        true,
-    )
-    .await
-    .unwrap();
-    let captured = rows
-        .find_one(doc! {"_id":&scope.id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(captured.get_bool("erasure_requested"), Ok(false));
-    assert!(!captured.contains_key("erasure_cutoff"));
-    let repaired = bson::DateTime::from_chrono(issued + Duration::seconds(5));
-    rows.update_one(
-        doc! {"_id":&scope.id},
-        doc! {"$set":{"authorized_at":repaired}},
-    )
-    .await
-    .unwrap();
-    state
-        .db
-        .collection::<ChannelBot>(BOTS)
-        .update_one(
-            doc! {"_id":&bot.id},
-            doc! {"$set":{"meta_binding.authorized_at":repaired}},
+        let rows = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES);
+        if let Some(at) = old_scope_date {
+            rows.update_one(
+                doc! {"_id":&scope.id},
+                doc! {"$set":{"authorized_at":bson::DateTime::from_chrono(at)}},
+            )
+            .await
+            .unwrap();
+        } else {
+            rows.update_one(doc! {"_id":&scope.id}, doc! {"$unset":{"authorized_at":""}})
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$unset":{"meta_binding.authorized_at":""}},
+            )
+            .await
+            .unwrap();
+        let s = service(&state, &server);
+        let issued = Utc::now() - Duration::seconds(30);
+        let response = accept_provider_request(
+            &s,
+            "instagram",
+            &provider_request(json!(900), issued.timestamp()),
+            true,
         )
         .await
         .unwrap();
-    provider::reconcile_with_service(&state, &s).await.unwrap();
-    let code = response["confirmation_code"].as_str().unwrap();
-    assert_eq!(
-        request_status(&state.db, "instagram", code).await.unwrap()["status"],
-        "completed"
-    );
-    let live = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
-    assert!(live.is_active);
-    assert!(!live.meta_binding.as_ref().unwrap().erasure_requested);
-    let original = crate::services::channel_adapters::meta::tests::original(&state, &live).await;
-    assert!(
-        crate::services::channel_admission_service::store(&state.db, original)
+        let captured = rows
+            .find_one(doc! {"_id":&scope.id})
             .await
             .unwrap()
-            .is_some()
-    );
-    assert!(server.received_requests().await.unwrap().is_empty());
+            .unwrap();
+        assert_eq!(captured.get_bool("erasure_requested"), Ok(false));
+        assert!(!captured.contains_key("erasure_cutoff"));
+        let repaired = bson::DateTime::from_chrono(issued + Duration::seconds(5));
+        if old_scope_date.is_some() {
+            let job = state
+                .db
+                .collection::<bson::Document>(provider::REQUESTS)
+                .find_one(doc! {"_id":response["confirmation_code"].as_str().unwrap()})
+                .await
+                .unwrap()
+                .unwrap();
+            rows.update_one(doc! {"_id":&scope.id},doc! {"$set":{"erasure_requested":true,"erasure_cutoff":job.get("signed_cutoff").cloned()}}).await.unwrap();
+        }
+        // Repair only the live parent; the worker reconciles its scope.
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{"meta_binding.authorized_at":repaired}},
+            )
+            .await
+            .unwrap();
+        provider::reconcile_with_service(&state, &s).await.unwrap();
+        let code = response["confirmation_code"].as_str().unwrap();
+        assert_eq!(
+            request_status(&state.db, "instagram", code).await.unwrap()["status"],
+            "completed"
+        );
+        let live = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert!(live.is_active);
+        assert!(!live.meta_binding.as_ref().unwrap().erasure_requested);
+        let original =
+            crate::services::channel_adapters::meta::tests::original(&state, &live).await;
+        assert!(
+            crate::services::channel_admission_service::store(&state.db, original)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -5569,7 +5604,7 @@ async fn historical_grant_capture_pages_are_bounded_indexed_and_restartable() {
         );
     }
     let mut saw_cursor = false;
-    for _ in 0..32 {
+    for _ in 0..160 {
         provider::reconcile_with_service(&state, &s).await.unwrap();
         let current = jobs.find_one(doc! {"_id":code}).await.unwrap().unwrap();
         if current.get_str("status") == Ok("completed") {
@@ -5588,7 +5623,12 @@ async fn historical_grant_capture_pages_are_bounded_indexed_and_restartable() {
     }
     assert!(saw_cursor);
     assert_eq!(
-        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        jobs.find_one(doc! {"_id":code,"erase":false})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status")
+            .unwrap(),
         "completed"
     );
     assert_eq!(
@@ -5599,4 +5639,800 @@ async fn historical_grant_capture_pages_are_bounded_indexed_and_restartable() {
         1001
     );
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn manual_purge_claim_closes_bound_acknowledgements_before_inventory_and_completion() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let original = crate::services::channel_adapters::meta::tests::original(&state, &bot).await;
+    assert!(
+        crate::services::channel_admission_service::store(&state.db, original.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let stopped = grants::stop_for_delete(&state.db, &bot.user_id, &bot)
+        .await
+        .unwrap();
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    service(&state, &server).disconnect(&stopped).await.unwrap();
+    let grant = &bot.meta_binding.as_ref().unwrap().grant_id;
+    super::super::durable_wake_tests::resume_after(
+        "meta_purge_scope_claimed",
+        async {
+            super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+                .await
+                .unwrap();
+        },
+        async {
+            assert!(
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&original.id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let acknowledgement = super::super::channel_relay_service::store_outbound_message(
+                &state.db,
+                &bot.id,
+                &original.conversation_id,
+                &bot.user_id,
+                &bot.platform,
+                "route-key",
+                Some(&original.id),
+                Some("accepted-before-delete"),
+                original.platform_conversation_id.as_deref(),
+                "text",
+                None,
+            )
+            .await;
+            assert!(acknowledgement.is_err());
+        },
+    )
+    .await;
+    assert!(
+        grants::completion_for(&state.db, &bot.id, grant)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .count_documents(doc! {"channel_bot_id":&bot.id})
+            .await
+            .unwrap(),
+        0
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn retired_grant_acknowledgement_obeys_its_message_owners_personal_erasure_barrier() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure_transfer(&state, &bot).await;
+    let original = crate::services::channel_adapters::meta::tests::original(&state, &bot).await;
+    assert!(
+        crate::services::channel_admission_service::store(&state.db, original.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    use crate::services::ownership_transfer_service as transfer;
+    let recipient = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &recipient,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let preview = transfer::preview(
+        &state.db,
+        &bot.user_id,
+        transfer::ResourceKind::ChannelBot,
+        &bot.id,
+        &recipient,
+        5,
+    )
+    .await
+    .unwrap();
+    transfer::transfer_with_keys(
+        &state.db,
+        Some(&state.encryption_keys),
+        transfer::TransferCommand {
+            actor: &bot.user_id,
+            api_key_id: None,
+            first_party_human: true,
+            kind: transfer::ResourceKind::ChannelBot,
+            resource_id: &bot.id,
+            destination: &recipient,
+            request_id: &uuid::Uuid::new_v4().to_string(),
+            expected_version: &preview.version,
+            capacity: 5,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap()
+            .user_id,
+        recipient
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .update_one(
+            doc! {"bot_id":&bot.id,"grant_id":&bot.meta_binding.as_ref().unwrap().grant_id},
+            doc! {"$set":{"status":"retired"}},
+        )
+        .await
+        .unwrap();
+    let before = super::super::channel_relay_service::store_outbound_message(
+        &state.db,
+        &bot.id,
+        &original.conversation_id,
+        &bot.user_id,
+        &bot.platform,
+        "route-key",
+        Some(&original.id),
+        Some("settled-before-account-erasure"),
+        original.platform_conversation_id.as_deref(),
+        "text",
+        None,
+    )
+    .await
+    .unwrap();
+    let mut accepted = false;
+    for _ in 0..64 {
+        match super::super::personal_erasure_service::accept(
+            &state.db,
+            &bot.user_id,
+            &bot.user_id,
+            None,
+        )
+        .await
+        {
+            Ok(_) => {
+                accepted = true;
+                break;
+            }
+            Err(AppError::ErasurePreparing) => {
+                super::super::personal_erasure_service::prepare_one_for_test(
+                    &state.db,
+                    &state.encryption_keys,
+                )
+                .await
+                .unwrap();
+            }
+            Err(error) => panic!("account acceptance: {error:?}"),
+        }
+    }
+    assert!(accepted);
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"_id":&original.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        super::super::channel_relay_service::store_outbound_message(
+            &state.db,
+            &bot.id,
+            &original.conversation_id,
+            &bot.user_id,
+            &bot.platform,
+            "route-key",
+            Some(&original.id),
+            Some("late-account-ack"),
+            original.platform_conversation_id.as_deref(),
+            "text",
+            None
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .count_documents(doc! {"channel_bot_id":&bot.id,"direction":"outbound"})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"_id":before.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn same_owner_reconsent_refuses_old_sources_but_preserves_issued_acknowledgements() {
+    use crate::services::channel_text_delivery as journal;
+    let (state, _, server, mut a) = fixture("messenger").await;
+    configure(&state, &a).await;
+    a.credential_source = "platform".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&a.id}, &a)
+        .await
+        .unwrap();
+    let original = crate::services::channel_adapters::meta::tests::original(&state, &a).await;
+    assert!(
+        crate::services::channel_admission_service::store(&state.db, original.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let plan = journal::begin_bound(&state.db, "same-owner-a", &a, &original.id, "hash-a", 1)
+        .await
+        .unwrap();
+    let journal::PartClaim::Send(attempt) = journal::claim(&state.db, &plan, 0).await.unwrap()
+    else {
+        panic!("A claim");
+    };
+    page_grant(&server, "901", "page-token-b").await;
+    let s = service(&state, &server);
+    let start = s
+        .start(
+            &a.user_id,
+            &a.user_id,
+            "messenger",
+            "Same-owner Page",
+            Some(&a.id),
+        )
+        .await
+        .unwrap();
+    s.exchange(
+        &a.user_id,
+        "messenger",
+        &state_value(&start),
+        Some("same-owner-consent-b"),
+    )
+    .await
+    .unwrap();
+    let b = s
+        .finish(&a.user_id, &start.session_id, "222", true)
+        .await
+        .unwrap();
+    assert_eq!(a.id, b.id);
+    assert_eq!(a.user_id, b.user_id);
+    assert_ne!(
+        a.meta_binding.as_ref().unwrap().grant_id,
+        b.meta_binding.as_ref().unwrap().grant_id
+    );
+    assert!(
+        journal::begin_bound(
+            &state.db,
+            "same-owner-wrong-source",
+            &b,
+            &original.id,
+            "hash-a",
+            1
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        journal::load(&state.db, "same-owner-wrong-source")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        journal::begin_bound(&state.db, "same-owner-a", &b, &original.id, "hash-a", 1)
+            .await
+            .is_err()
+    );
+    journal::finish(
+        &state.db,
+        &plan,
+        0,
+        &attempt,
+        crate::models::channel_text_delivery::TextPartState::Sent,
+        Some("issued-a-success"),
+        None,
+    )
+    .await
+    .unwrap();
+    let stored = journal::load(&state.db, "same-owner-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.meta_grant.as_ref().unwrap().grant_id,
+        a.meta_binding.as_ref().unwrap().grant_id
+    );
+    assert_eq!(
+        stored.parts[0].platform_message_id.as_deref(),
+        Some("issued-a-success")
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn malformed_scope_chronology_keeps_only_its_exact_target_pending() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let scope = super::super::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, &bot),
+        |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
+    )
+    .await
+    .unwrap();
+    let bad = uuid::Uuid::new_v4().to_string();
+    let bad_grant = uuid::Uuid::new_v4().to_string();
+    let mut malformed = bson::to_document(&scope).unwrap();
+    malformed.insert("_id", uuid::Uuid::new_v4().to_string());
+    malformed.insert("bot_id", &bad);
+    malformed.insert("grant_id", &bad_grant);
+    malformed.insert("status", "sealed");
+    malformed.insert("authorized_at", "verified repair needed");
+    let scopes = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES);
+    scopes
+        .update_one(
+            doc! {"_id":&scope.id},
+            doc! {"$set":{"authorized_at":"repair from live parent"}},
+        )
+        .await
+        .unwrap();
+    scopes.insert_one(&malformed).await.unwrap();
+    let s = service(&state, &server);
+    let response = accept_provider_request(
+        &s,
+        "instagram",
+        &provider_request(json!(900), Utc::now().timestamp()),
+        false,
+    )
+    .await
+    .unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    let job = state
+        .db
+        .collection::<bson::Document>(provider::REQUESTS)
+        .find_one(doc! {"_id":response["confirmation_code"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.get_str("status"), Ok("pending"));
+    let targets = job.get_array("targets").unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].as_document().unwrap().get_str("bot_id"),
+        Ok(bad.as_str())
+    );
+    let healthy = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(healthy.bot_token_encrypted.is_empty());
+    assert!(healthy.meta_binding.as_ref().unwrap().provider_revoked);
+    assert_eq!(
+        scopes
+            .find_one(doc! {"_id":malformed.get("_id").cloned()})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("authorized_at"),
+        Ok("verified repair needed")
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_settings() {
+    use crate::models::nyxbot_channel::{
+        EVENTS_COLLECTION_NAME as EVENTS, NyxbotEvent, THREADS_COLLECTION_NAME as THREADS,
+    };
+    let (state, _, server, a) = fixture("messenger").await;
+    configure(&state, &a).await;
+    grant_source(&state, &a, "isolation-source-a").await;
+    super::super::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, &a),
+        |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
+    )
+    .await
+    .unwrap();
+    let channel = uuid::Uuid::new_v4().to_string();
+    let partition = doc! {"channel_id":&channel,"partition":"private-partition"};
+    let update = |source: &str| {
+        vec![doc! {"$set":{
+            "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},"user_id":&a.user_id,"channel_id":&channel,
+            "partition":"private-partition","kind":"private","agent_id":"explicit-chat-specialist","members":"owner",
+            "owner_seen":false,"allow_posts":false,"created_at":{"$ifNull":["$created_at","$$NOW"]},"updated_at":"$$NOW",
+            "last_message_id":source,"last_relay_message_id":source,
+        }}]
+    };
+    let thread = scopes::record_thread(
+        &state.db,
+        &a.id,
+        "isolation-source-a",
+        partition.clone(),
+        update("isolation-source-a"),
+    )
+    .await
+    .unwrap();
+    let old_session = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id":&thread.id},
+            doc! {"$set":{"conversation_id":&old_session}},
+        )
+        .await
+        .unwrap();
+    let make_event = |id: &str, source: &str| {
+        bson::from_document::<NyxbotEvent>(doc! {
+        "_id":id,"channel_id":&channel,"user_id":&a.user_id,"partition":"private-partition","event_id":source,
+        "relay_message_id":source,"status":"running","created_at":bson::DateTime::now(),
+        "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(1)),
+    }).unwrap()
+    };
+    super::super::channel_media_events::insert_meta_response_event(
+        &state.db,
+        &make_event("event-a", "isolation-source-a"),
+        None,
+        &a.id,
+    )
+    .await
+    .unwrap();
+    let a_ref = scopes::event_reference(&state.db, "event-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a_ref.grant_id, a.meta_binding.as_ref().unwrap().grant_id);
+    page_grant(&server, "901", "page-token-b").await;
+    let s = service(&state, &server);
+    let start = s
+        .start(
+            &a.user_id,
+            &a.user_id,
+            "messenger",
+            "Guest isolation",
+            Some(&a.id),
+        )
+        .await
+        .unwrap();
+    s.exchange(
+        &a.user_id,
+        "messenger",
+        &state_value(&start),
+        Some("isolation-consent-b"),
+    )
+    .await
+    .unwrap();
+    let b = s
+        .finish(&a.user_id, &start.session_id, "222", true)
+        .await
+        .unwrap();
+    grant_source(&state, &b, "isolation-source-b").await;
+    let current = scopes::record_thread(
+        &state.db,
+        &b.id,
+        "isolation-source-b",
+        partition.clone(),
+        update("isolation-source-b"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(current.id, thread.id);
+    assert!(current.conversation_id.is_none());
+    assert_eq!(
+        current.agent_id.as_deref(),
+        Some("explicit-chat-specialist")
+    );
+    assert_eq!(current.members.as_deref(), Some("owner"));
+    assert_eq!(
+        current.last_message_id.as_deref(),
+        Some("isolation-source-b")
+    );
+    assert!(
+        scopes::record_thread(
+            &state.db,
+            &b.id,
+            "isolation-source-a",
+            partition,
+            update("isolation-source-a")
+        )
+        .await
+        .is_err()
+    );
+    super::super::channel_media_events::insert_meta_response_event(
+        &state.db,
+        &make_event("event-b", "isolation-source-b"),
+        None,
+        &b.id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        super::super::channel_media_events::insert_meta_response_event(
+            &state.db,
+            &make_event("stale-event-a", "isolation-source-a"),
+            None,
+            &b.id
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(EVENTS)
+            .find_one(doc! {"_id":"stale-event-a"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let b_ref = scopes::event_reference(&state.db, "event-b")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(b_ref.grant_id, b.meta_binding.as_ref().unwrap().grant_id);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .delete_one(doc! {"_id":"isolation-source-a"})
+        .await
+        .unwrap();
+    assert_eq!(
+        scopes::event_reference(&state.db, "event-a")
+            .await
+            .unwrap()
+            .unwrap(),
+        a_ref
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn predecessor_completed_scope_requires_exact_fence_and_deauth_requires_authenticated_cutoff()
+{
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let scope = super::super::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, &bot),
+        |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
+    )
+    .await
+    .unwrap();
+    let grant = &bot.meta_binding.as_ref().unwrap().grant_id;
+    let rows = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES);
+    rows.update_one(
+        doc! {"_id":&scope.id},
+        doc! {"$set":{"status":"completed","completed_at":bson::DateTime::now()}},
+    )
+    .await
+    .unwrap();
+    let fences = state
+        .db
+        .collection::<bson::Document>("channel_meta_erasure_fences");
+    for proof in [
+        doc! {},
+        doc! {"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":"other-grant"},
+        doc! {"local_data_erased_at":"date","completed_grant_id":grant},
+    ] {
+        let mut proof = proof;
+        proof.insert("_id", &bot.id);
+        fences
+            .replace_one(doc! {"_id":&bot.id}, proof)
+            .upsert(true)
+            .await
+            .unwrap();
+        assert!(
+            super::super::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, bot.id.as_str(), grant.as_str()),
+                |tx, &(db, bot, grant)| Box::pin(scopes::mark_complete(db, tx, bot, grant))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            rows.find_one(doc! {"_id":&scope.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .contains_key("identity")
+        );
+    }
+    fences.replace_one(doc! {"_id":&bot.id},doc! {"_id":&bot.id,"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":grant}).await.unwrap();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .delete_one(doc! {"_id":&bot.id})
+        .await
+        .unwrap();
+    super::super::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, bot.id.as_str(), grant.as_str()),
+        |tx, &(db, bot, grant)| Box::pin(scopes::mark_complete(db, tx, bot, grant)),
+    )
+    .await
+    .unwrap();
+    let completed = rows
+        .find_one(doc! {"_id":&scope.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(grants::completed(&completed, grant).unwrap());
+    for field in [
+        "identity",
+        "binding_fingerprint",
+        "app_id",
+        "from_generation",
+        "authorized_at",
+        "completed_at",
+    ] {
+        assert!(!completed.contains_key(field));
+    }
+    let signed = provider_request(json!(900), Utc::now().timestamp());
+    let id = uuid::Uuid::new_v4().to_string();
+    let jobs = state.db.collection::<bson::Document>(provider::REQUESTS);
+    jobs.insert_one(doc! {"_id":&id,"request_hash":fingerprint(&format!("instagram:false:{signed}")),"platform":"instagram","app_id":"111","erase":false,
+        "status":"pending","targets":[{"bot_id":&bot.id,"grant_id":grant}],"next_attempt_at":bson::DateTime::now(),"created_at":bson::DateTime::now()}).await.unwrap();
+    let s = service(&state, &server);
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        jobs.find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status"),
+        Ok("pending")
+    );
+    let replay = accept_provider_request(&s, "instagram", &signed, false)
+        .await
+        .unwrap();
+    assert_eq!(replay["confirmation_code"], id);
+    jobs.update_one(doc! {"_id":&id},doc! {"$set":{"next_attempt_at":bson::DateTime::now(),"targets.0.retry_at":bson::DateTime::now()}}).await.unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        jobs.find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("status"),
+        Ok("completed")
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn saved_source_compares_coexisting_stamps_and_requires_supported_legacy_ranges() {
+    use crate::services::channel_text_delivery as journal;
+    let (state, _, _server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    grant_source(&state, &bot, "proof-source").await;
+    let scope = super::super::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, &bot),
+        |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
+    )
+    .await
+    .unwrap();
+    let sources = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+    let grant = scopes::reference(&bot).unwrap();
+    let mut wrong = grant.clone();
+    wrong.grant_id = uuid::Uuid::new_v4().to_string();
+    sources
+        .update_one(
+            doc! {"_id":"proof-source"},
+            doc! {"$set":{"meta_grant":bson::to_bson(&wrong).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        journal::begin_bound(
+            &state.db,
+            "contradictory-stamps",
+            &bot,
+            "proof-source",
+            "hash",
+            1
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        journal::load(&state.db, "contradictory-stamps")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sources
+        .update_one(
+            doc! {"_id":"proof-source"},
+            doc! {"$unset":{"meta_grant":"","meta_authority.grant_id":""}},
+        )
+        .await
+        .unwrap();
+    let legacy = journal::begin_bound(
+        &state.db,
+        "proven-legacy-range",
+        &bot,
+        "proof-source",
+        "hash",
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy.meta_grant.as_ref(), Some(&grant));
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":&scope.id},
+            doc! {"$set":{"from_generation":0_i64,"legacy_history":true}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        journal::begin_bound(
+            &state.db,
+            "unproven-zero-range",
+            &bot,
+            "proof-source",
+            "hash",
+            1
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        journal::load(&state.db, "unproven-zero-range")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sources
+        .update_one(
+            doc! {"_id":"proof-source"},
+            doc! {"$set":{"meta_authority.grant_id":&grant.grant_id}},
+        )
+        .await
+        .unwrap();
+    let repaired = journal::begin_bound(
+        &state.db,
+        "unproven-zero-range",
+        &bot,
+        "proof-source",
+        "hash",
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(repaired.meta_grant.as_ref(), Some(&grant));
 }

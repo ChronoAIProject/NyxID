@@ -82,7 +82,13 @@ pub(crate) async fn stop_for_delete(
                 .find_one_and_update(filter,doc! {"$set":fields})
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::Conflict("Inbox grant changed; refresh before deleting".into()))?;
-            super::scopes::ensure_current(db,tx,&stopped,false).await?;
+            let scope=super::scopes::ensure_current(db,tx,&stopped,false).await?;
+            if observed.credential_source!="platform" {
+                let closed=db.collection::<Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(
+                    doc! {"_id":&scope.id,"bot_id":&stopped.id,"grant_id":&binding.grant_id,"status":{"$ne":"completed"}},
+                    doc! {"$set":{"erasure_requested":true},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+                if closed.matched_count!=1 {return Err(incomplete());}
+            }
             Ok(stopped)
         })
     }).await

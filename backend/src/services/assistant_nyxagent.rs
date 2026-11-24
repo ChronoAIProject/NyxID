@@ -2473,6 +2473,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            meta_grant: None,
             title_language: None,
             automation_v2: false,
             artifact_head: None,
@@ -3749,6 +3750,23 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         }
     }
+    if let Some(grant) = start
+        .channel_context
+        .as_ref()
+        .and_then(|source| source.meta_grant.as_ref())
+    {
+        super::channel_meta_service::scopes::fence_reference(db, session, grant, true).await?;
+        if start.guest {
+            if row.meta_grant.as_ref().is_some_and(|prior| {
+                prior.bot_id != grant.bot_id || prior.grant_id != grant.grant_id
+            }) {
+                return Err(AppError::Conflict(
+                    "Visitor session belongs to an earlier provider grant".into(),
+                ));
+            }
+            row.meta_grant = Some(grant.clone());
+        }
+    }
     if start.conversation_id.is_some() {
         collection
             .replace_one(owner_filter(user_id, &id)?, &row)
@@ -4001,10 +4019,28 @@ pub(crate) async fn begin_owner_turn_in_session(
         report_to: None,
     };
     if voice_request.is_none() || hidden_voice {
-        db.collection::<AssistantMessage>(MESSAGES)
-            .insert_one(message)
-            .session(&mut *session)
-            .await?;
+        if let Some(grant) = start
+            .channel_context
+            .as_ref()
+            .and_then(|context| context.meta_grant.as_ref())
+        {
+            let mut document = bson::to_document(&message)
+                .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?;
+            document.insert(
+                "meta_grants",
+                bson::to_bson(&[grant])
+                    .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
+            );
+            db.collection::<bson::Document>(MESSAGES)
+                .insert_one(document)
+                .session(&mut *session)
+                .await?;
+        } else {
+            db.collection::<AssistantMessage>(MESSAGES)
+                .insert_one(message)
+                .session(&mut *session)
+                .await?;
+        }
     }
     if voice_request.is_some() {
         let source_conversation = voice_request
@@ -5126,6 +5162,10 @@ artifact_recovery_target: None,
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                let meta_grants:Vec<_>=current.active_turn.as_ref().into_iter().flat_map(|turn|
+                    turn.channel_context.iter().chain(turn.events.iter().flat_map(|event|&event.channel_contexts)))
+                    .filter_map(|context|context.meta_grant.clone()).fold(Vec::new(),|mut grants,grant| {if !grants.contains(&grant) {grants.push(grant);}grants});
+                for grant in &meta_grants {super::channel_meta_service::scopes::fence_reference(&db,session,grant,false).await?;}
                 let error = if current
                     .active_turn
                     .as_ref()
@@ -5420,12 +5460,15 @@ artifact_recovery_target: None,
                     ))
                     .await?;
                 }
-                if let Some(attempt) = attempt {
+                if attempt.is_some() || !meta_grants.is_empty() {
                     let mut saved = bson::to_document(&message).map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
-                    saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
-                    if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
-                        saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});
-                        saved.insert("handoff_delivery_due_at", bson::DateTime::from_chrono(now));
+                    if !meta_grants.is_empty() {saved.insert("meta_grants",bson::to_bson(&meta_grants).map_err(|_|AppError::Internal("Message metadata unavailable".into()))?);}
+                    if let Some(attempt)=attempt {
+                        saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
+                        if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
+                            saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});
+                            saved.insert("handoff_delivery_due_at", bson::DateTime::from_chrono(now));
+                        }
                     }
                     db.collection::<bson::Document>(MESSAGES).insert_one(saved).session(&mut *session).await?;
                 } else {

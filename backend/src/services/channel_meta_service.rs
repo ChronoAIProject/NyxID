@@ -1852,6 +1852,22 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
                 .build(),
         ])
         .await?;
+    db.collection::<ChannelBot>(BOTS).create_index(IndexModel::builder()
+        .keys(doc! {"platform":1,"meta_binding.app_id":1,"meta_binding.grant_subject_id":1,"_id":1}).build()).await?;
+    db.collection::<OAuthSession>(SESSIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"app_id":1,"grant_subject_id":1,"created_at":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>("channel_meta_erasure_fences")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"retired_grant.identity":1,"_id":1})
+                .build(),
+        )
+        .await?;
     db.collection::<ChannelBot>(BOTS)
         .create_index(
             IndexModel::builder()

@@ -69,6 +69,9 @@ pub(crate) async fn erase_provider_inbox(
             "Finish cleanup of the captured inbox grant before erasure".into(),
         ));
     }
+    super::super::channel_meta_service::scopes::claim_purge(&state.db, bot_id, grant_id).await?;
+    #[cfg(test)]
+    super::super::durable_wake_tests::after("meta_purge_scope_claimed").await;
     // Install the erasure fence before deleting payloads. Late provider
     // responses check this durable marker before persisting outbound metadata,
     // so a send that was already in flight cannot repopulate an erased inbox.

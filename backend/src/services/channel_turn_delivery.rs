@@ -33,6 +33,11 @@ pub(crate) async fn bind_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
+    if let Some(value) = bound.get("meta_grant") {
+        let grant: crate::models::channel_meta::GrantRef = bson::from_bson(value.clone())
+            .map_err(|_| super::channel_meta_service::grants::incomplete())?;
+        super::channel_meta_service::scopes::fence_reference(db, session, &grant, true).await?;
+    }
     super::nyxbot_admission_service::bind_in_session(db, session, &bound, turn).await?;
     let replay = bound
         .get_document("delivery")
@@ -418,6 +423,12 @@ pub(crate) async fn enqueue_in_session(
                 && turn.channel_adapter_origin.is_none()
                 && turn.trigger_run_id.is_none()
                 && matching(turn.question_key.as_deref())
+                && compatible_grants(
+                    turn.channel_context
+                        .iter()
+                        .chain(turn.events.iter().flat_map(|event| &event.channel_contexts)),
+                    &event.channel_contexts,
+                )
                 && (if turn.origin == crate::models::assistant_conversation::TurnOrigin::User {
                     // A personal channel repeat may join the owner's app/home
                     // answer without changing its primary destination or turn.
@@ -476,6 +487,7 @@ pub(crate) async fn enqueue_in_session(
             && !e.source_event_ids.is_empty()
             && matching(e.question_key.as_deref())
             && compatible_sources(e.reply_to.first(), event.reply_to.first())
+            && compatible_grants(e.channel_contexts.iter(), &event.channel_contexts)
     }) {
         if pending.source_event_ids.len() > engine::MAX_ALSO_DELIVER {
             return Ok(EnqueueAdmission::default());
@@ -583,6 +595,20 @@ pub(crate) async fn enqueue_in_session(
 
 /// Home owner chats can share work across destinations. Native children retain
 /// their exact agent/generation/child authority, never a text-only match.
+fn compatible_grants<'a>(
+    existing: impl Iterator<Item = &'a crate::models::assistant_conversation::ChannelTurnContext>,
+    incoming: &[crate::models::assistant_conversation::ChannelTurnContext],
+) -> bool {
+    !existing
+        .filter_map(|context| context.meta_grant.as_ref())
+        .any(|old| {
+            incoming
+                .iter()
+                .filter_map(|context| context.meta_grant.as_ref())
+                .any(|new| old.bot_id == new.bot_id && old.grant_id != new.grant_id)
+        })
+}
+
 fn compatible_sources(
     a: Option<&crate::models::assistant_conversation::ChannelOrigin>,
     b: Option<&crate::models::assistant_conversation::ChannelOrigin>,

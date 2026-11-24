@@ -1389,6 +1389,7 @@ fn verified_context(
     event: &NyxbotEvent,
 ) -> crate::models::assistant_conversation::ChannelTurnContext {
     crate::models::assistant_conversation::ChannelTurnContext {
+        meta_grant: None,
         text_completeness: None,
         org_origin: None,
         source_event_id: event.id.clone(),

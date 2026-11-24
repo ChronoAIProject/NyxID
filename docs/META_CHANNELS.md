@@ -338,10 +338,21 @@ typed completion proof and replay state remain, without a terminal TTL.
 Subjectless manual account retirement removes its unused scope. This additional bookkeeping is excluded from personal export and is registered as
 erasure bookkeeping in the personal-data inventory.
 
+The original relay event and turn context retain the admitted grant before
+inbound metadata expires. Visitor conversations rotate internally when that
+grant changes; the public chat, explicit specialist and chat policy remain on
+the existing chat row. Owner homes retain turn/message provenance. Sources from
+different grants on the same inbox are not coalesced into one owner turn.
+Manual purge claims the exact scope before reading its inventory. Bound outbound
+persistence also takes the message owner's personal-erasure barrier, including
+settlement against a retired scope; another owner's retirement does not widen
+that erasure authority.
+
 Signed callback confirmation records the keyed subject and cutoff with a
 durable scope cursor. Historical reconnects are captured in indexed pages of
-100 scopes by the existing request worker, with at most one page of unresolved
-targets on a request. Current-installation and retained-draft compatibility
+100 scopes by the existing request worker. Initial compatibility capture holds
+at most 200 targets (100 current and 100 distinct retired); later discovery
+holds at most one page of 100 targets. Current-installation and retained-draft compatibility
 capture is capped; an overflow uses indexed, restartable pages before the
 request can complete. The request retains no raw subject. Every fresh grant
 write shares the subject fence, so asynchronous capture does not permit writes
