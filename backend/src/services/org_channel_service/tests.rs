@@ -1688,14 +1688,20 @@ async fn member_private_home_remains_usable_from_own_session_after_unlink() {
     let f = Fixture::new("org_channel_member_home_unlink").await;
     let origin = f.link(&f.org.member, "member").await;
     let db = &f.org.state.db;
-    let home = Box::pin(team::home_thread_for(
-        db,
-        &f.org.state.encryption_keys,
-        &f.org.member,
-        &f.agent,
-    ))
-    .await
-    .unwrap();
+    let homes = db.collection::<Document>("assistant_conversations");
+    let filter = team::thread_filter_for(&f.org.member, &f.agent);
+    assert_eq!(homes.count_documents(filter.clone()).await.unwrap(), 0);
+    let first_dm = || {
+        Box::pin(team::home_thread_for(
+            db,
+            &f.org.state.encryption_keys,
+            &f.org.member,
+            &f.agent,
+        ))
+    };
+    let (home, other) = tokio::try_join!(first_dm(), first_dm()).unwrap();
+    assert_eq!(home.id, other.id);
+    assert_eq!(homes.count_documents(filter).await.unwrap(), 1);
     let request = engine::TurnRequest {
         acknowledgement_id: None,
         retry_of: None,

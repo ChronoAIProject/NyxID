@@ -1079,41 +1079,34 @@ pub async fn home_thread_for(
         .await;
     }
     if let Some(row) = conversations
-        .find_one(own)
+        .find_one(own.clone())
         .sort(doc! {"created_at":1,"_id":1})
         .await?
     {
         return Ok(row);
     }
-    let mut session = db.client().start_session().await?;
-    let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
-        db, actor, agent, None,
-    ))
-    .await?;
-    let db_owned = db.clone();
-    let keys = keys.clone();
-    let agent = agent.clone();
-    let actor = actor.to_owned();
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation = create_thread_with_kind(
-                &db_owned,
-                &keys,
-                &actor,
-                &agent,
-                &agent.name,
-                false,
-                session,
-                None,
-                learning_epoch,
-                None,
-            )
-            .await;
-            transactions::transaction_result(operation)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)
+    // A member's private home has no pointer on the organization-owned agent.
+    // The owner-lifecycle write in create_thread_for serializes concurrent
+    // creations for this member. Repeat the lookup on each transaction retry.
+    super::transaction_service::run_db_only(
+        db,
+        &(db, keys, actor, agent, &own),
+        |tx, &(db, keys, actor, agent, own)| {
+            Box::pin(async move {
+                if let Some(row) = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one(own.clone())
+                    .sort(doc! {"created_at":1,"_id":1})
+                    .session(&mut *tx)
+                    .await?
+                {
+                    return Ok(row);
+                }
+                create_thread_for(db, keys, actor, agent, &agent.name, tx).await
+            })
+        },
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

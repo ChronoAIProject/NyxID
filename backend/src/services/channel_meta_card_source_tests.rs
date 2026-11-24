@@ -265,6 +265,48 @@ async fn denied_meta_card_continuation_keeps_proof_and_cannot_publish_after_eras
 }
 
 #[tokio::test]
+async fn explicit_web_retry_collecting_a_prior_denial_can_request_a_new_decision() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    let original = begin(&f, None, None, false).await;
+    let chat = crate::services::assistant_authority_tests::chat_for_row(
+        &f.state,
+        &f.bot.user_id,
+        &original,
+    )
+    .await;
+    let denied = acks::request(db, &chat, request("Review operation"))
+        .await
+        .unwrap();
+    acks::decide(db, &f.bot.user_id, &original.id, &denied.id, false)
+        .await
+        .unwrap();
+    assert!(
+        acks::source::publish_owner_denial(db, &f.bot.user_id, &denied.id, &original.id)
+            .await
+            .unwrap()
+    );
+    finish_source_turn(&f.state, &original, "Decision recorded").await;
+    let retry = begin(&f, Some(&original.id), None, false).await;
+    let turn = retry.active_turn.as_ref().unwrap();
+    assert!(
+        turn.events
+            .iter()
+            .any(|event| event.kind == "action_denied")
+    );
+    let chat =
+        crate::services::assistant_authority_tests::chat_for_row(&f.state, &f.bot.user_id, &retry)
+            .await;
+    let pending = acks::request(db, &chat, request("Review operation"))
+        .await
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_ne!(pending.id, denied.id);
+    assert_eq!(pending.requested_turn_id.as_ref(), Some(&turn.turn_id));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn erased_captured_input_cannot_be_recreated_after_public_reset_but_retained_web_input_can_delay()
  {
     for meta in [true, false] {

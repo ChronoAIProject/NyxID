@@ -156,11 +156,10 @@ pub(crate) async fn select(
     let mut input_id = origin.and_then(|origin| origin.initiating_input_id.clone());
     // A denial explains an existing question; it never creates another ask.
     if origin.is_none()
-        && let Some(event) = active.and_then(|turn| {
-            turn.events
-                .iter()
-                .find(|event| event.kind == "action_denied")
-        })
+        && let Some(turn) = active
+        && turn.origin == crate::models::assistant_conversation::TurnOrigin::Event
+        && let [event] = turn.events.as_slice()
+        && event.kind == "action_denied"
         && let Some(id) = event
             .question_key
             .as_deref()
