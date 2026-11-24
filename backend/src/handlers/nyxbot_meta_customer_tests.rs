@@ -104,11 +104,12 @@ async fn signed_customer_message(state: &AppState, channel_id: &str, sender: &st
     let body = json!({
         "message_id":id, "correlation_id":format!("jti-{id}"), "platform":row.platform,
         "agent":{"api_key_id":row.route_api_key_id,"name":"support"},
-        "conversation":{"id":"route","platform_id":sender,"type":"private"},
+        "conversation":{"id":row.route_id,"platform_id":sender,"type":"private"},
         "sender":{"platform_id":sender}, "content":{"type":"text","text":text},
         "timestamp":Utc::now().to_rfc3339(),
         "raw_platform_data":{"asset_id":"222","sender":{"id":sender.rsplit(':').next().unwrap()}},
     });
+    store_direct_source(state, &row, &body).await;
     let bytes = serde_json::to_vec(&body).unwrap();
     let proof = crate::crypto::jwt::generate_relay_callback_token(
         &state.jwt_keys,

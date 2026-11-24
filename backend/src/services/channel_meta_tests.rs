@@ -49,6 +49,13 @@ async fn configure(state: &crate::AppState, bot: &ChannelBot) {
     .unwrap();
 }
 
+async fn configure_transfer(state: &crate::AppState, bot: &ChannelBot) {
+    configure(state, bot).await;
+    super::super::role_service::seed_system_roles(&state.db)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn enrollment_opt_out_serializes_with_an_installation_commit() {
     let db = crate::test_utils::connect_transaction_test_database("meta_enrollment_fence").await;
@@ -2003,7 +2010,7 @@ async fn prepared_meta_credentials_transfer_before_and_after_signed_deauthorizat
     };
     for revoked in [false, true] {
         let (state, _, server, bot) = fixture("instagram").await;
-        configure(&state, &bot).await;
+        configure_transfer(&state, &bot).await;
         let mut keys = crate::test_utils::test_encryption_keys();
         keys.set_contextual_record_writes(true);
         let db = &state.db;
@@ -3560,7 +3567,7 @@ async fn manual_account_retirement_sweeper_preserves_transferred_history_without
     for explicit_delete in [false, true] {
         use crate::services::ownership_transfer_service as transfer;
         let (state, _, server, mut bot) = fixture("instagram").await;
-        configure(&state, &bot).await;
+        configure_transfer(&state, &bot).await;
         bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
         bot.credential_source = "user".into();
         state
@@ -3952,7 +3959,7 @@ async fn transferred_manual_inbox_requires_verified_token_and_explicit_routing_c
     use crate::services::{channel_bot_service as bots, ownership_transfer_service as transfer};
     for held in [false, true] {
         let (state, adapter, server, mut bot) = fixture("instagram").await;
-        configure(&state, &bot).await;
+        configure_transfer(&state, &bot).await;
         bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
         state
             .db
