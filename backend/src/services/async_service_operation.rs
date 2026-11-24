@@ -92,6 +92,21 @@ pub fn validate_contract(c: &AsyncOperationContract, spec: &Value) -> AppResult<
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
+    db.collection::<bson::Document>(WATCHES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"poll_at":1,"lease_until":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("meta_queued_delivery_poll".to_owned())
+                        .partial_filter_expression(
+                            doc! {"state":"queued","meta_contexts.0":{"$exists":true}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     for keys in [
         doc! {"state":1,"poll_at":1,"lease_until":1},
         doc! {"state":1,"expires_at":1},
@@ -478,7 +493,8 @@ async fn discard_policy_refusal(db: &Database, watch: &AsyncServiceOperation) ->
 
 pub async fn claim(db: &Database) -> AppResult<Option<AsyncServiceOperation>> {
     let now = Utc::now();
-    Ok(db.collection::<AsyncServiceOperation>(WATCHES).find_one_and_update(doc!{"state":{"$in":["submitting","waiting","cancelling","ready"]},"poll_at":{"$lte":bson::DateTime::from_chrono(now)},"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]},doc!{"$set":{"lease_id":Uuid::new_v4().to_string(),"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(60))}}).sort(doc!{"poll_at":1}).return_document(ReturnDocument::After).await?)
+    Ok(db.collection::<AsyncServiceOperation>(WATCHES).find_one_and_update(doc!{"$and":[{"$or":[{"state":{"$in":["submitting","waiting","cancelling","ready"]}},{"state":"queued","meta_contexts.0":{"$exists":true}}]},
+        {"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]}],"poll_at":{"$lte":bson::DateTime::from_chrono(now)}},doc!{"$set":{"lease_id":Uuid::new_v4().to_string(),"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(60))}}).sort(doc!{"poll_at":1}).return_document(ReturnDocument::After).await?)
 }
 pub fn retain_shutdown_release(
     db: &Database,
@@ -696,6 +712,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
     let w = w.clone();
     session.start_transaction().and_run2(async move |session| {
         let result:AppResult<bool>=Box::pin(async {
+            if meta_lineage::retire_in_session(&db,session,&w).await? {return Ok(false)}
             let conversations=db.collection::<AssistantConversation>(CONVERSATIONS);
             let Some(row)=conversations.find_one(doc!{"_id":&w.conversation_id,"user_id":&w.user_id}).session(&mut *session).await? else {
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;return Ok(false);
