@@ -54,7 +54,7 @@ fn credential_filter(bot: &ChannelBot) -> AppResult<Document> {
     Ok(filter)
 }
 
-pub(crate) struct CredentialSnapshot {
+pub struct CredentialSnapshot {
     bot: ChannelBot,
     platform: Option<PlatformCredentialSnapshot>,
 }
@@ -104,6 +104,22 @@ impl CredentialSnapshot {
         let bytes = bson::to_vec(&fields)
             .map_err(|_| AppError::Internal("Unable to encode credential check".into()))?;
         Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
+    pub(crate) fn meta_webhook_signer_filter(&self) -> AppResult<Option<Document>> {
+        if self.bot.credential_source != "platform" {
+            return Ok(None);
+        }
+        let platform = self.platform.as_ref().ok_or_else(changed)?;
+        let app = self.bot.app_id.as_deref().ok_or_else(changed)?;
+        let signer = platform
+            .secrets
+            .get("webhook_signing_secret")
+            .ok_or_else(changed)?;
+        Ok(Some(doc! {
+            "_id": &platform.id, "provider": &self.bot.platform, "fields.app_id": app,
+            "secrets.webhook_signing_secret": signer.clone(),
+        }))
     }
 
     pub(crate) async fn send_token(

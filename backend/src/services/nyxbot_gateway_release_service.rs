@@ -634,6 +634,82 @@ pub(crate) async fn revoke_in_session(
     }
 }
 
+/// Retire all local authority derived from a NyxBot channel while another
+/// installation transaction still owns the parent lock.  Meta reconnects can
+/// replace the provider application without having an `AppState` (and without
+/// making a remote gateway call), but they must use the same route, follow,
+/// notification, and execution fences as ordinary channel retirement.
+pub(crate) async fn retire_references_in_session(
+    db: &Database,
+    row: &NyxbotChannel,
+    reason: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    if row.org_specialist.is_some() {
+        super::org_channel_service::lifecycle::retire_in_session(db, session, &row.id, None)
+            .await?;
+    }
+    super::channel_thread_follow_service::suspend_in_session(
+        db,
+        &row.user_id,
+        &row.id,
+        reason,
+        session,
+    )
+    .await?;
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.channel_id": &row.id})
+        .session(&mut *session)
+        .await?;
+    db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME)
+        .delete_many(doc! {"task.channel_source.channel_id": &row.id})
+        .session(&mut *session)
+        .await?;
+
+    let owner = bot_owner(row).to_owned();
+    let mut route_keys = std::collections::BTreeSet::new();
+    route_keys.insert(row.route_api_key_id.clone());
+    if let Some(key) = row.pending_route_api_key_id.as_deref() {
+        route_keys.insert(key.to_owned());
+    }
+    for key in route_keys.into_iter().filter(|key| !key.is_empty()) {
+        super::channel_routing_service::retire_key_routes_in_session(
+            db,
+            &owner,
+            &row.channel_bot_id,
+            &key,
+            session,
+        )
+        .await?;
+        revoke_in_session(db, &owner, &key, session).await?;
+    }
+    for key in [
+        row.agent_api_key_id.as_deref(),
+        row.pending_agent_api_key_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|key| !key.is_empty())
+    {
+        revoke_in_session(db, &row.user_id, key, session).await?;
+    }
+    db.collection::<Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": &row.user_id},
+            doc! {
+                "$inc": {"execution_policy_revision": 1_i64, "notification_epoch": 1_i64},
+                "$set": {"status": "disconnected", "owner_sender_ids": [], "last_error": reason,
+                    "gateway_no_progress": false, "updated_at": bson::DateTime::now()},
+                "$unset": {"gateway_setup_release_id": "", "agent_key_ciphertext": "",
+                    "pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+                    "link_code_hash": "", "link_code_expires_at": ""},
+            },
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(())
+}
+
 /// Retire only a still-unadopted attempt. A failed read/unknown commit never
 /// authorizes rollback of a subsequently adopted connection.
 pub(crate) async fn retire_attempt(

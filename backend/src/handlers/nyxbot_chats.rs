@@ -2343,6 +2343,11 @@ async fn send_post_planned_impl(
         models::channel_text_delivery::TextPartState,
         services::{channel_reply_plan as plan, channel_text_delivery as journal},
     };
+    // Bound customer replies use the relay reply journal. An initiated post
+    // for a Meta inbox must fail before creating an outbound delivery plan.
+    if crate::services::channel_adapters::meta::is_meta(&target.bot.platform) {
+        return Err(AppError::ChannelPlatformSendUnsupported);
+    }
     if !outbound.attachments.is_empty() || plan::has_structured_content(&outbound) {
         return send_post_one(state, target, outbound, fence).await;
     }

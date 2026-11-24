@@ -202,11 +202,17 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
     for adapter in crate::services::channel_adapters::registered_adapters(&cache) {
         assert_eq!(
             adapter.managed_onboarding().is_some(),
-            matches!(adapter.platform_id(), "whatsapp" | "x")
+            matches!(
+                adapter.platform_id(),
+                "whatsapp" | "x" | "messenger" | "instagram"
+            )
         );
         assert_eq!(
             adapter.platform_webhook(),
-            matches!(adapter.platform_id(), "whatsapp" | "x")
+            matches!(
+                adapter.platform_id(),
+                "whatsapp" | "x" | "messenger" | "instagram"
+            )
         );
     }
     let all = credentials::descriptors(&cache);
@@ -215,7 +221,17 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         .map(|(_, descriptor)| descriptor.provider)
         .collect();
     providers.sort_unstable();
-    assert_eq!(providers, ["aurinko", "meta", "telegram-new", "x"]);
+    assert_eq!(
+        providers,
+        [
+            "aurinko",
+            "instagram",
+            "messenger",
+            "meta",
+            "telegram-new",
+            "x"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -489,6 +505,19 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
     let (_, Json(list)) = admin::list(State(state.clone()), auth.clone())
         .await
         .unwrap();
+    for platform in ["messenger", "instagram"] {
+        let row = list.iter().find(|row| row.platform == platform).unwrap();
+        let expected = format!(
+            "{}/api/v1/webhooks/channel/{platform}/platform",
+            state.config.base_url.trim_end_matches('/')
+        );
+        assert_eq!(row.callback_url.as_deref(), Some(expected.as_str()));
+        let adapter = resolve_adapter(platform, &state.token_exchange_cache).unwrap();
+        assert_eq!(
+            adapter.managed_onboarding().unwrap().completion_fields,
+            ["asset_id", "exclusive_routing_verified"]
+        );
+    }
     let serialized = serde_json::to_value(&list).unwrap();
     assert!(!serialized.to_string().contains("secret-for-test"));
     assert!(

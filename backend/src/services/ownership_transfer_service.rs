@@ -445,7 +445,14 @@ async fn inspect(
                 }
                 if !matches!(
                     bot.platform.as_str(),
-                    "telegram" | "discord" | "lark" | "feishu" | "slack" | "whatsapp"
+                    "telegram"
+                        | "discord"
+                        | "lark"
+                        | "feishu"
+                        | "slack"
+                        | "whatsapp"
+                        | "messenger"
+                        | "instagram"
                 ) {
                     blockers.push("This managed channel has owner-bound registration state. Reconnect it under the destination owner instead".into());
                 }
@@ -958,7 +965,16 @@ pub async fn transfer_with_keys(
             }
             let mut update = doc! { "$set": set };
             if kind == ResourceKind::ChannelBot {
-                update.insert("$inc", doc! { "ownership_version": 1_i64 });
+                let mut increments=doc! {"ownership_version":1_i64};
+                let moving_bot=db.collection::<Document>(BOTS).find_one(doc! {"_id":&resource_id}).session(&mut **transaction).await?;
+                if moving_bot.as_ref().and_then(|row|row.get_str("platform").ok()).is_some_and(super::channel_adapters::meta::is_meta) {
+                    increments.insert("meta_binding.generation",1_i64);
+                    update.get_document_mut("$set").map_err(|_|AppError::Internal("Invalid channel transfer".into()))?.extend(doc! {
+                        "meta_binding.subscription":"reconnect_required","meta_binding.exclusive_routing_verified":false,
+                        "webhook_registered":false,"status":"failed","error":"Reauthorize this inbox for its new owner before delivery can resume"
+                    });
+                }
+                update.insert("$inc",increments);
             }
             let mut resource_filter = doc! { "_id": &resource_id, "is_active": true };
             match kind {

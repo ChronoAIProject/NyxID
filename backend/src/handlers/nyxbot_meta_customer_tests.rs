@@ -1,0 +1,425 @@
+//! First-party customer setup uses the same committed channel and guest policy
+//! as ordinary NyxBot management, including existing installations.
+use super::*;
+use crate::handlers::channel_meta;
+use crate::services::feature_flag_service as flags;
+use tower::ServiceExt;
+
+async fn app(state: &AppState) -> (Router, String) {
+    flags::set_platform_override(
+        &state.db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let token = token_for(state, OWNER);
+    (
+        Router::new()
+            .route(
+                "/bots/{id}/customer-setup",
+                post(channel_meta::customer_setup),
+            )
+            .with_state(state.clone()),
+        token,
+    )
+}
+fn token_for(state: &AppState, actor: &str) -> String {
+    crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(actor).unwrap(),
+        "openid",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap()
+}
+async fn action(
+    app: &Router,
+    token: &str,
+    bot: &str,
+    agent: &str,
+    action: &str,
+) -> (StatusCode, Value) {
+    let response = Box::pin(
+        app.clone().oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/bots/{bot}/customer-setup"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"agent_id":agent,"action":action}).to_string(),
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let status = response.status();
+    let body = body_text(response).await;
+    (status, serde_json::from_str(&body).unwrap())
+}
+async fn specialist(state: &AppState) -> crate::models::assistant_agent::AssistantAgent {
+    crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            name: "customer-support".into(),
+            description: "Customer support".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            machines: None,
+            logins: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .0
+}
+
+async fn signed_customer_message(state: &AppState, channel_id: &str, sender: &str, text: &str) {
+    let row = load_channel(state, OWNER, channel_id).await.unwrap();
+    let id = Uuid::new_v4().to_string();
+    let body = json!({
+        "message_id":id, "correlation_id":format!("jti-{id}"), "platform":row.platform,
+        "agent":{"api_key_id":row.route_api_key_id,"name":"support"},
+        "conversation":{"id":"route","platform_id":sender,"type":"private"},
+        "sender":{"platform_id":sender}, "content":{"type":"text","text":text},
+        "timestamp":Utc::now().to_rfc3339(),
+        "raw_platform_data":{"asset_id":"222","sender":{"id":sender.rsplit(':').next().unwrap()}},
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let proof = crate::crypto::jwt::generate_relay_callback_token(
+        &state.jwt_keys,
+        &state.config,
+        &format!("jti-{id}"),
+        &row.route_api_key_id,
+        &id,
+        &row.platform,
+        &sha256_hex(&bytes),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-nyxid-callback-token", proof.parse().unwrap());
+    let (_guard, completed) = watch_relay_callback(channel_id, &id);
+    assert_eq!(
+        relay_callback(
+            State(state.clone()),
+            Path(channel_id.to_owned()),
+            headers,
+            Bytes::from(bytes)
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(20), completed)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn meta_personal_customer_setup_prepares_then_enables_without_rotating_on_readiness_checks() {
+    for platform in ["messenger", "instagram"] {
+        let (state, calls, server) = setup("meta_customer_personal").await;
+        let agent = specialist(&state).await;
+        let bot = bot_doc(platform, "Customer inbox");
+        let bot_id = bot.get_str("_id").unwrap().to_owned();
+        state
+            .db
+            .collection::<bson::Document>("channel_bots")
+            .insert_one(bot)
+            .await
+            .unwrap();
+        let (router, token) = app(&state).await;
+        let (status, assigned) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{assigned}");
+        assert_eq!(assigned["guests_enabled"], false);
+        assert!(
+            assigned["owner_link_code"]
+                .as_str()
+                .is_some_and(|code| !code.is_empty())
+        );
+        let channel_id = assigned["channel_id"].as_str().unwrap();
+        let sender = format!("{platform}:{bot_id}:222:333");
+        signed_customer_message(&state, channel_id, &sender, "ordinary first DM").await;
+        assert!(
+            load_channel(&state, OWNER, channel_id)
+                .await
+                .unwrap()
+                .owner_sender_ids
+                .is_empty()
+        );
+        let before = state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .find_one(doc! {"_id":channel_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let (status, checked) = action(&router, &token, &bot_id, &agent.id, "check").await;
+        assert_eq!(status, StatusCode::OK, "{checked}");
+        assert!(checked["owner_link_code"].is_null());
+        let after = state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .find_one(doc! {"_id":channel_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "readiness must not mutate routing or owner verification"
+        );
+        let (status, failed) = action(&router, &token, &bot_id, &agent.id, "enable_guests").await;
+        assert!(!status.is_success(), "{failed}");
+        assert_eq!(
+            load_channel(&state, OWNER, channel_id)
+                .await
+                .unwrap()
+                .private_chats
+                .as_deref()
+                .unwrap_or("owner"),
+            "owner"
+        );
+        let (status, prepared) = action(&router, &token, &bot_id, &agent.id, "prepare_model").await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+        // PrepareModel schedules the existing hidden owner turn. Readiness
+        // becomes ready only after its authenticated model callback commits a
+        // usable route and the preparation job records that terminal result.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let (status, progress) = action(&router, &token, &bot_id, &agent.id, "check").await;
+            assert_eq!(status, StatusCode::OK, "{progress}");
+            if progress["readiness"]["guest_readiness"]["status"] == "ready" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "model preparation did not commit readiness: {progress}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let (status, enabled) = action(&router, &token, &bot_id, &agent.id, "enable_guests").await;
+        assert_eq!(status, StatusCode::OK, "{enabled}");
+        assert_eq!(enabled["guests_enabled"], true);
+        for visitor in ["444", "555"] {
+            let customer = format!("{platform}:{bot_id}:222:{visitor}");
+            signed_customer_message(&state, channel_id, &customer, "A private support question")
+                .await;
+        }
+        let turns = calls.lock().await;
+        assert_eq!(turns.len(), 2);
+        for turn in turns.iter() {
+            let contexts = turn_context_tests::contexts(turn);
+            assert_eq!(contexts.len(), 1);
+            assert_eq!(contexts[0]["identity"]["platform"], platform);
+            assert_eq!(contexts[0]["sender"]["classification"], "guest");
+            assert_eq!(turn["_test_channel_context"]["guest"], true);
+        }
+        drop(turns);
+        let threads = channel_conversations(&state, channel_id).await;
+        assert_eq!(threads.len(), 2);
+        assert!(threads.iter().all(|thread| thread.guest_turn));
+        assert_ne!(
+            threads[0].channel.as_ref().unwrap().partition,
+            threads[1].channel.as_ref().unwrap().partition
+        );
+        let (status, repeated) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["guests_enabled"], true);
+        assert!(repeated["owner_link_code"].is_null());
+        assert_eq!(repeated["channel_id"], assigned["channel_id"]);
+        let (status, renewed) = action(&router, &token, &bot_id, &agent.id, "owner_link").await;
+        assert_eq!(status, StatusCode::OK, "{renewed}");
+        assert_ne!(renewed["owner_link_code"], assigned["owner_link_code"]);
+        assert_eq!(
+            renewed["guests_enabled"], true,
+            "owner verification must preserve public access"
+        );
+        signed_customer_message(
+            &state,
+            channel_id,
+            &sender,
+            renewed["owner_link_code"].as_str().unwrap(),
+        )
+        .await;
+        let verified = load_channel(&state, OWNER, channel_id).await.unwrap();
+        assert_eq!(verified.owner_sender_ids, [sender]);
+        assert!(
+            verified.link_code_hash.is_none(),
+            "owner code is consumed once"
+        );
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_is_atomic() {
+    for platform in ["messenger", "instagram"] {
+        let (state, _, server) = setup("meta_customer_org").await;
+        let (row, _, agent, org_id) = org_channel_tests::org_channel(&state, false).await;
+        state
+            .db
+            .collection::<bson::Document>("channel_bots")
+            .update_one(
+                doc! {"_id":&row.channel_bot_id},
+                doc! {"$set":{"platform":platform}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"platform":platform,"private_chats":"owner"}},
+            )
+            .await
+            .unwrap();
+        let (router, _) = app(&state).await;
+        let other_admin = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&other_admin, UserType::Person))
+            .await
+            .unwrap();
+        state
+            .db
+            .collection("org_memberships")
+            .insert_one(crate::test_utils::test_membership(
+                &org_id,
+                &other_admin,
+                crate::models::org_membership::OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        let token = token_for(&state, &other_admin);
+        let before = state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for name in ["check", "assign"] {
+            let (status, result) =
+                action(&router, &token, &row.channel_bot_id, &agent.id, name).await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["guests_enabled"], false);
+            assert!(result["owner_link_code"].is_null());
+        }
+        let after = state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, after);
+        let (status, result) = action(
+            &router,
+            &token,
+            &row.channel_bot_id,
+            &agent.id,
+            "enable_guests",
+        )
+        .await;
+        assert!(
+            !status.is_success(),
+            "unfunded org must remain closed: {result}"
+        );
+        let live = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(live.private_chats.as_deref(), Some("owner"));
+        assert!(!live.org_specialist.as_ref().unwrap().guests.enabled);
+        assert!(
+            !action(
+                &router,
+                &token,
+                &row.channel_bot_id,
+                &agent.id,
+                "owner_link"
+            )
+            .await
+            .0
+            .is_success()
+        );
+        let mut fresh = bot_doc(platform, "Fresh organization inbox");
+        fresh.insert("user_id", &org_id);
+        let fresh_id = fresh.get_str("_id").unwrap().to_owned();
+        state
+            .db
+            .collection::<bson::Document>("channel_bots")
+            .insert_one(fresh)
+            .await
+            .unwrap();
+        let (status, assigned) = action(&router, &token, &fresh_id, &agent.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{assigned}");
+        assert_eq!(assigned["guests_enabled"], false);
+        assert!(assigned["owner_link_code"].is_null());
+        let billing = crate::billing_integration_tests::billing_service(
+            &state.db,
+            Arc::new(crate::billing_integration_tests::FakeLago::default()),
+            1000,
+        );
+        billing.ensure_wallet(&org_id).await.unwrap();
+        for bot_id in [&row.channel_bot_id, &fresh_id] {
+            let (status, enabled) =
+                action(&router, &token, bot_id, &agent.id, "enable_guests").await;
+            assert_eq!(status, StatusCode::OK, "{enabled}");
+            assert_eq!(enabled["guests_enabled"], true);
+            let (status, checked) = action(&router, &token, bot_id, &agent.id, "check").await;
+            assert_eq!(status, StatusCode::OK, "{checked}");
+            assert_eq!(checked["guests_enabled"], true);
+            let committed = load_channel(&state, OWNER, checked["channel_id"].as_str().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(committed.private_chats.as_deref(), Some("everyone"));
+            assert!(committed.org_specialist.as_ref().unwrap().guests.enabled);
+            let before_repeat = committed
+                .org_specialist
+                .as_ref()
+                .unwrap()
+                .guests
+                .revision
+                .clone();
+            let (status, repeated) =
+                action(&router, &token, bot_id, &agent.id, "enable_guests").await;
+            assert_eq!(status, StatusCode::OK, "{repeated}");
+            assert_eq!(repeated["guests_enabled"], true);
+            let after_repeat =
+                load_channel(&state, OWNER, repeated["channel_id"].as_str().unwrap())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                after_repeat
+                    .org_specialist
+                    .as_ref()
+                    .unwrap()
+                    .guests
+                    .revision,
+                before_repeat
+            );
+        }
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}

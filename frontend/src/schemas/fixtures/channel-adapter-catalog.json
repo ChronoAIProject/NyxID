@@ -702,6 +702,146 @@
       }
     },
     {
+      "adapter_id": "messenger",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": null,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": true,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://developers.facebook.com/documentation/business-messaging/messenger-platform/get-started"
+      }
+    },
+    {
+      "adapter_id": "instagram",
+      "contract_version": 1,
+      "operations": ["receive_message", "send_message"],
+      "messaging": {
+        "reply_to": false,
+        "initiated_send": false,
+        "inbound_media": [],
+        "outbound_media": [],
+        "max_attachment_bytes": null,
+        "threads": {
+          "thread_reply": false,
+          "thread_follow": false,
+          "thread_history": false
+        },
+        "inbound_text": true,
+        "outbound_text": true,
+        "edit": false,
+        "max_text_bytes": 1000,
+        "delivery": "accepted"
+      },
+      "calls": {
+        "inbound": false,
+        "outbound": false,
+        "transfer": false,
+        "dtmf_input": false,
+        "end_session": false
+      },
+      "conversation": {
+        "final_transcripts": false,
+        "cumulative_interim_transcripts": false,
+        "streamed_output": false,
+        "interruption": false,
+        "playback_evidence": "unsupported",
+        "explicit_cancel": false
+      },
+      "instructions": {
+        "external_nyxbot": true,
+        "nyxbot_refresh": "between_turns",
+        "provider_prompt_replacement": "unsupported"
+      },
+      "lifecycle": {
+        "reconnect": true,
+        "automatic_effect_replay": false,
+        "durable_ingress_dedup": true,
+        "max_session_seconds": null,
+        "max_frame_bytes": null,
+        "output_queue_capacity": null
+      },
+      "usage": {
+        "units": [],
+        "evidence": "adapter_specific",
+        "configured_billing": false
+      },
+      "setup": {
+        "credential_modes": [
+          {
+            "kind": "channel_bot",
+            "implemented": true,
+            "prerequisite": null
+          }
+        ],
+        "credential_alternatives": ["channel_bot"],
+        "required_resources": [],
+        "carrier": "none",
+        "speech": "none",
+        "agent": "nyxbot",
+        "documentation": "https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login"
+      }
+    },
+    {
       "adapter_id": "telnyx.conversation_relay",
       "contract_version": 1,
       "operations": [

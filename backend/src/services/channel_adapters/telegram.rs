@@ -1741,6 +1741,7 @@ mod tests {
 
     fn make_test_bot(webhook_secret_hash: &str) -> ChannelBot {
         ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,

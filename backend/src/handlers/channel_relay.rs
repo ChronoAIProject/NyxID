@@ -4407,6 +4407,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -4474,6 +4475,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -4511,6 +4513,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -5017,6 +5020,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -5257,6 +5261,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -6613,3 +6618,7 @@ mod x_public_tests;
 #[cfg(test)]
 #[path = "channel_activity_tests.rs"]
 mod activity_tests;
+
+#[cfg(test)]
+#[path = "channel_meta_integration_tests.rs"]
+mod meta_integration_tests;

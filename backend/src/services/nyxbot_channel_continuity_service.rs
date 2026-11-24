@@ -176,3 +176,28 @@ pub(crate) async fn restore_existing(
         }).await;transactions::transaction_result(work)
     }).await.map_err(transactions::map_transaction_error)
 }
+
+/// Rotate only the owner challenge of a live personal connection. Readiness,
+/// routing, guest exposure and existing verified senders are unaffected.
+pub(crate) async fn rotate_owner_link(
+    db: &Database,
+    row: &NyxbotChannel,
+    hash: &str,
+) -> AppResult<chrono::DateTime<Utc>> {
+    if row.org_specialist.is_some() {
+        return Err(conflict());
+    }
+    let expires = Utc::now() + chrono::Duration::hours(LINK_CODE_TTL_HOURS);
+    let args = (db.clone(), row.clone(), hash.to_owned(), expires);
+    super::transaction_service::run_db_only(db, &args, |tx, (db, row, hash, expires)| {
+        Box::pin(async move {
+            super::platform_bot_authority::fence_personal_routes(db, &row.channel_bot_id, owner(row), tx).await?;
+            let changed = db.collection::<NyxbotChannel>(CHANNELS).update_one(
+                doc! {"_id": &row.id, "user_id": &row.user_id, "status": "active", "agent_id": &row.agent_id, "org_specialist": null},
+                doc! {"$set": {"link_code_hash": hash, "link_code_expires_at": bson::DateTime::from_chrono(*expires)}},
+            ).session(&mut *tx).await?;
+            if changed.matched_count != 1 { return Err(conflict()); }
+            Ok(*expires)
+        })
+    }).await
+}

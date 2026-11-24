@@ -1676,6 +1676,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_cma_sandbox_reservations::resolve),
         )
         .route(
+            "/channel-platforms/{platform}/delivery",
+            axum::routing::put(handlers::channel_meta::platform_delivery),
+        )
+        .route(
             "/platform-credentials",
             get(handlers::admin_platform_credentials::list),
         )
@@ -3650,6 +3654,30 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::channel_bots::telegram_bot_profile),
         )
         .route(
+            "/channel-bots/{id}/delivery",
+            post(handlers::channel_meta::bot_delivery),
+        )
+        .route(
+            "/channel-bots/{id}/customer-setup",
+            post(handlers::channel_meta::customer_setup),
+        )
+        .route(
+            "/channel-bots/meta/{platform}/start",
+            post(handlers::channel_meta::start),
+        )
+        .route(
+            "/channel-bots/meta/{platform}/exchange",
+            post(handlers::channel_meta::exchange),
+        )
+        .route(
+            "/channel-bots/meta-sessions/{id}",
+            get(handlers::channel_meta::progress),
+        )
+        .route(
+            "/channel-bots/meta-sessions/{id}/finish",
+            post(handlers::channel_meta::finish),
+        )
+        .route(
             "/channel-bots/managed-onboarding/{platform}",
             get(handlers::channel_managed::bootstrap),
         )
@@ -3940,6 +3968,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::channel_webhooks::channel_subscription)
                 .post(handlers::channel_webhooks::channel_webhook_with_runtime),
         )
+        .route("/api/v1/webhooks/channel/{platform}/deauthorize", post(handlers::channel_meta::deauthorize).layer(axum::extract::DefaultBodyLimit::max(20*1024)))
+        .route("/api/v1/webhooks/channel/{platform}/data-deletion", post(handlers::channel_meta::data_deletion).layer(axum::extract::DefaultBodyLimit::max(20*1024)))
+        .route("/api/v1/webhooks/channel/{platform}/deletions/{id}", get(handlers::channel_meta::deletion_status))
         .route(
             "/api/v1/webhooks/channel/{platform}/platform",
             get(handlers::channel_webhooks::platform_subscription)

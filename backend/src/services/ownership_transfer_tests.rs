@@ -2571,3 +2571,77 @@ async fn catalog_master_transfer_rebinds_staged_and_strict_material() {
         f.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn meta_transfer_fences_admitted_authority_and_requires_the_new_owner_to_reauthorize() {
+    for platform in ["messenger", "instagram"] {
+        let f = fixture("ownership_meta_fence").await;
+        let bot = insert_bot(&f).await;
+        f.db.collection::<Document>(BOTS)
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set": {
+                    "platform":platform, "app_id":"111", "meta_binding": {
+                        "grant_id":Uuid::new_v4().to_string(), "generation":7_i64,
+                        "token_fingerprint":"fingerprint", "grant_actor_id":&f.owner,
+                        "grant_subject_id":"900", "app_id":"111", "exclusive_routing_verified":true,
+                        "subscription":"active", "provider_revoked":false,
+                    },
+                }},
+            )
+            .await
+            .unwrap();
+        let admitted = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+            .await
+            .unwrap();
+        let reviewed = preview(
+            &f.db,
+            &f.owner,
+            ResourceKind::ChannelBot,
+            &bot.id,
+            &f.destination,
+            5,
+        )
+        .await
+        .unwrap();
+        owner_transfer(
+            &f,
+            (&f.owner, None),
+            ResourceKind::ChannelBot,
+            &bot.id,
+            &f.destination,
+            &reviewed.version,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        let live = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(live.user_id, f.destination);
+        assert_eq!(live.meta_binding.as_ref().unwrap().generation, 8);
+        assert_eq!(
+            live.meta_binding.as_ref().unwrap().subscription,
+            "reconnect_required"
+        );
+        assert!(
+            !live
+                .meta_binding
+                .as_ref()
+                .unwrap()
+                .exclusive_routing_verified
+        );
+        assert!(!live.webhook_registered);
+        let state = crate::test_utils::test_app_state(f.db.clone());
+        assert!(matches!(
+            crate::services::channel_meta_service::MetaService::from(&state).verify(&live).await,
+            Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"
+        ));
+        assert!(require_current_bot(&f.db, &admitted).await.is_err());
+        assert!(
+            crate::services::channel_adapters::meta::require_ingress(&f.db, &admitted, "old-chat")
+                .await
+                .is_err()
+        );
+    }
+}

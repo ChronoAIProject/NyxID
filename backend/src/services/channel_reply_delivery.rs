@@ -30,9 +30,34 @@ impl Delivery {
         count: usize,
     ) -> AppResult<Self> {
         let record = Self::record(uuid::Uuid::new_v4().to_string(), bot, original, count)?;
-        db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
-            .insert_one(&record)
+        if super::channel_adapters::meta::is_meta(&bot.platform) {
+            super::transaction_service::run_db_only(
+                db,
+                &(db, &record, bot.platform.as_str()),
+                |tx, &(db, record, platform)| {
+                    Box::pin(async move {
+                        super::channel_relay_service::fence_meta_observation(
+                            db,
+                            tx,
+                            &record.channel_bot_id,
+                            platform,
+                            true,
+                        )
+                        .await?;
+                        db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
+                            .insert_one(record)
+                            .session(&mut *tx)
+                            .await?;
+                        Ok(())
+                    })
+                },
+            )
             .await?;
+        } else {
+            db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
+                .insert_one(&record)
+                .await?;
+        }
         Ok(Self::from_record(record, bot))
     }
 
@@ -290,6 +315,7 @@ pub async fn send_parts(
     let mut delivery = Delivery::begin(db, bot, original, parts.len()).await?;
     let mut last = None;
     for (index, part) in parts.into_iter().enumerate() {
+        let provider_attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sent = Box::pin(async {
             super::ownership_transfer_service::require_current_bot(db, bot).await?;
             let now = bson::DateTime::now();
@@ -309,15 +335,18 @@ pub async fn send_parts(
                 db,
                 delivery.formatting_receipt(index),
                 Some(&bot.id),
-                adapter.send_bound_reply_outcome(
-                    db,
-                    http,
-                    bot,
-                    original,
-                    credentials,
-                    chat,
-                    &part,
-                    None,
+                super::channel_platform::track_provider_attempt(
+                    provider_attempted.clone(),
+                    adapter.send_bound_reply_outcome(
+                        db,
+                        http,
+                        bot,
+                        original,
+                        credentials,
+                        chat,
+                        &part,
+                        None,
+                    ),
                 ),
             )
             .await?;
@@ -343,6 +372,13 @@ pub async fn send_parts(
                 |record| record.component_ids.clone(),
             );
             if let Some(error) = outcome.error.take() {
+                if outcome
+                    .observation
+                    .as_ref()
+                    .is_some_and(|record| !record.uncertain && record.component_ids.is_empty())
+                {
+                    delivery.parts[index].status = PartStatus::Failed;
+                }
                 delivery.observed(db, index, ids, &stored.id).await?;
                 return Err(error);
             }
@@ -363,6 +399,11 @@ pub async fn send_parts(
         match sent {
             Ok(sent) => last = Some(sent),
             Err(error) => {
+                if super::channel_adapters::meta::is_meta(&bot.platform)
+                    && !provider_attempted.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    delivery.parts[index].status = PartStatus::Failed;
+                }
                 delivery.failed(db, index, &error).await?;
                 return Err(failure_after_dispatch(error));
             }

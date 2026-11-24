@@ -250,6 +250,7 @@ pub(crate) fn inbound_metadata(
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
         original_message: is_telegram.then(|| super::telegram_input::original(&inbound.raw_data)),
+        meta_authority: None,
         nyxbot_admission: None,
         thread_context: None,
         activity: None,
@@ -293,6 +294,42 @@ pub(crate) fn inbound_metadata(
     }
 }
 
+/// Write the bot in the same transaction as creating a journal or observation.
+/// A completed provider send can still be recorded after a normal disconnect.
+/// Erasure writes this row before removing any of its identifying records.
+pub(crate) async fn fence_meta_observation(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    bot_id: &str,
+    platform: &str,
+    require_active: bool,
+) -> AppResult<()> {
+    if db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .find_one(doc! {"_id": bot_id})
+        .session(&mut *tx)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict("Meta inbox data is being erased".into()));
+    }
+    let mut filter = doc! {"_id": bot_id, "platform": platform};
+    if require_active {
+        filter.insert("is_active", true);
+    }
+    if db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(filter, doc! {"$inc":{"meta_observation_revision":1_i64}})
+        .session(&mut *tx)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict("Meta inbox is unavailable".into()));
+    }
+    Ok(())
+}
+
 /// Persist outbound-message metadata (agent -> platform direction).
 ///
 /// Per ADR-013, the reply *text* is not stored here. The caller passes the
@@ -320,6 +357,7 @@ pub async fn store_outbound_message(
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
         original_message: None,
+        meta_authority: None,
         nyxbot_admission: None,
         thread_context: None,
         activity: None,
@@ -350,9 +388,33 @@ pub async fn store_outbound_message(
         updated_at: Some(now),
     };
 
-    db.collection::<ChannelMessage>(COLLECTION_NAME)
-        .insert_one(&message)
+    if crate::services::channel_adapters::meta::is_meta(platform) {
+        let args = (
+            db.clone(),
+            message.clone(),
+            channel_bot_id.to_owned(),
+            platform.to_owned(),
+        );
+        crate::services::transaction_service::run_db_only(
+            db,
+            &args,
+            |tx, (db, message, channel_bot_id, platform)| {
+                Box::pin(async move {
+                    fence_meta_observation(db, tx, channel_bot_id, platform, false).await?;
+                    db.collection::<ChannelMessage>(COLLECTION_NAME)
+                        .insert_one(message)
+                        .session(&mut *tx)
+                        .await?;
+                    Ok(())
+                })
+            },
+        )
         .await?;
+    } else {
+        db.collection::<ChannelMessage>(COLLECTION_NAME)
+            .insert_one(&message)
+            .await?;
+    }
 
     Ok(message)
 }
@@ -398,6 +460,7 @@ pub async fn store_device_event_message(
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
         original_message: None,
+        meta_authority: None,
         nyxbot_admission: None,
         thread_context: None,
         activity: None,
@@ -1303,6 +1366,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_meta_outbound_result_cannot_repopulate_erased_inbox() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "channel_relay_meta_erasure_fence",
+        )
+        .await;
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &bot_id, "platform": "instagram", "is_active": true})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>("channel_meta_erasure_fences")
+            .insert_one(doc! {"_id": &bot_id, "requested_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        let result = store_outbound_message(
+            &db,
+            &bot_id,
+            "conversation",
+            &owner,
+            "instagram",
+            "route-key",
+            None,
+            Some("late-provider-id"),
+            Some("asset:sender"),
+            "text",
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(
+            db.collection::<ChannelMessage>(COLLECTION_NAME)
+                .count_documents(doc! {"channel_bot_id": &bot_id})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn outbound_message_for_api_key_conflicts_on_duplicate_matches() {
         let Some(db) =
             crate::test_utils::connect_test_database("channel_relay_outbound_api_key").await
@@ -1658,6 +1762,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,

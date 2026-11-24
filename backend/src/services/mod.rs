@@ -643,3 +643,5 @@ pub mod crash_report_service;
 pub mod crash_report_export;
 
 pub mod nyxbot_response_read;
+
+pub mod channel_meta_service;

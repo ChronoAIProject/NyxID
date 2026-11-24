@@ -1335,7 +1335,7 @@ impl AccountTools<'_> {
             "update_channel_bot" | "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
                 // Org bots are managed as their org, like in the UI.
-                let user = bot.user_id.as_str();
+                let owner = bot.user_id.as_str();
                 let adapter =
                     channel_adapters::resolve_adapter(&bot.platform, self.token_exchange_cache)?;
                 if name == "delete_channel_bot" {
@@ -1346,18 +1346,19 @@ impl AccountTools<'_> {
                         self.keys,
                         adapter.as_ref(),
                         &bot.id,
-                        user,
+                        owner,
                     )
                     .await?;
                     Ok(json!({"deleted": true}))
                 } else {
-                    let bot = channel_bot_service::update_bot(
+                    let bot = channel_bot_service::update_bot_as_actor(
                         self.db,
                         self.keys,
                         self.http,
                         adapter.as_ref(),
                         &bot.id,
                         user,
+                        owner,
                         channel_bot_service::UpdateBotParams {
                             x_events: None,
                             label: args["label"].as_str(),

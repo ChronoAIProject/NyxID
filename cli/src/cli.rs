@@ -200,7 +200,7 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
-    /// Manage channel bot relay (Telegram/Discord/Lark/Feishu/Slack/WhatsApp)
+    /// Manage messaging channel bots, relay delivery, and inbox connections
     ChannelBot {
         #[command(subcommand)]
         command: ChannelBotCommands,
@@ -5866,6 +5866,26 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Suspend or verify and resume a Messenger/Instagram inbox without deleting its identity
+    Delivery {
+        id: String,
+        #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
+        suspend: bool,
+        #[arg(long, conflicts_with = "suspend")]
+        resume: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Suspend or restore a Meta platform's delivery gate (platform admin)
+    PlatformDelivery {
+        platform: String,
+        #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
+        suspend: bool,
+        #[arg(long, conflicts_with = "suspend")]
+        resume: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Create a one-time hosted setup link, optionally with a completion webhook
     ConnectLink {
         /// Platform ID from channel-bot platforms
@@ -5916,7 +5936,7 @@ pub enum ChannelBotCommands {
         after_help = "Discover required fields and capabilities with: nyxid channel-bot platforms --output json"
     )]
     Register {
-        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp, aurinko (email)
+        /// Platform ID from channel-bot platforms, including messenger and instagram
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser
@@ -5932,7 +5952,7 @@ pub enum ChannelBotCommands {
         /// Label for this bot
         #[arg(long, required_unless_present = "managed")]
         label: Option<String>,
-        /// Platform app ID (required for Lark/Feishu)
+        /// Platform app ID for manual Lark, Feishu, Messenger, or Instagram setup
         #[arg(long)]
         app_id: Option<String>,
         /// App secret (hidden from help -- use --app-secret-env instead).
@@ -5942,7 +5962,8 @@ pub enum ChannelBotCommands {
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Lark/Feishu verification token. Falls back to
+        /// For manual Messenger and Instagram setup, pass "exclusive" after verifying routing.
+        /// Lark/Feishu verification token falls back to
         /// NYXID_LARK_VERIFICATION_TOKEN when omitted.
         #[arg(long)]
         verification_token: Option<String>,

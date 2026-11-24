@@ -14,6 +14,9 @@ pub(crate) async fn claim(
 ) -> AppResult<EventDedupClaimResult> {
     let event = message.platform_message_id.as_deref().unwrap_or_default();
     let namespace = match message.platform.as_str() {
+        "messenger" | "instagram" if super::channel_delivery_service::valid_message_id(event) => {
+            "meta-inbox-inbound"
+        }
         "discord" if super::discord_gateway::valid_message_id(event) => "discord-inbound",
         "whatsapp" if super::channel_delivery_service::valid_message_id(event) => {
             "whatsapp-inbound"
@@ -86,10 +89,28 @@ async fn admit_fenced(
                             doc! {"$inc":{"channel_metadata_admission_revision":1_i64}},
                         ).session(&mut *session).await?;
                     if owner.matched_count != 1 { return Ok(false); }
+                    if let Some(authority) = &message.meta_authority {
+                        let bot = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
+                            doc! {"_id":&message.channel_bot_id,"user_id":&message.user_id,"is_active":true,"meta_binding.generation":authority.generation,"meta_binding.subscription":"active"},
+                            doc! {"$inc":{"meta_admission_revision":1_i64}},
+                        ).session(&mut *session).await?;
+                        if bot.matched_count != 1 {return Ok(false);}
+                        let chat = message.platform_conversation_id.as_deref().unwrap_or_default();
+                        let control = db.collection::<Document>(super::channel_adapters::meta::CONTROLS).update_one(
+                            doc! {"identity_key":format!("{}:{chat}",message.channel_bot_id.as_deref().unwrap_or_default()),
+                                "controlled":true,"generation":authority.generation},
+                            doc! {"$inc":{"admission_revision":1_i64}},
+                        ).session(&mut *session).await?;
+                        if control.matched_count != 1 {return Ok(false);}
+                    }
+                    let mut committed = doc! {"state":"committed", "updated_at":"$$NOW", "expires_at":{"$dateAdd":{"startDate":"$$NOW", "unit":"day", "amount":30}}};
+                    if message.meta_authority.is_some() {
+                        committed.insert("channel_bot_id", doc! {"$literal": &message.channel_bot_id});
+                    }
                     let fenced = db.collection::<Document>(EVENT_DEDUP_COLLECTION_NAME)
                         .update_one(
                             doc! {"_id":&claim.id, "claim_id":&claim.claim_id, "state":"claimed", "$expr":{"$gt":["$expires_at", "$$NOW"]}},
-                            vec![doc! {"$set":{"state":"committed", "updated_at":"$$NOW", "expires_at":{"$dateAdd":{"startDate":"$$NOW", "unit":"day", "amount":30}}}}],
+                            vec![doc! {"$set":committed}],
                         ).session(&mut *session).await?;
                     if fenced.matched_count != 1 { return Ok(false); }
                     let existing = db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))

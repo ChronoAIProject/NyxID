@@ -3,7 +3,7 @@ import type { ChannelBotDetail, ChannelPlatform, ChannelPlatformDescriptor, Chan
 export const TELEGRAM_MANAGER_DELETION_NOTE = "Bot creation and the manager webhook will remain available. The manager token stays in Admin → Platform Credentials → Telegram — bot creation.";
 
 export type ChannelCredentialField = Exclude<Extract<keyof CreateChannelBotRequest, string>, "platform" | "label" | "target_org_id">;
-export type ManagedFlow = "meta_embedded_signup" | "oauth_connection";
+export type ManagedFlow = "meta_embedded_signup" | "oauth_connection" | "meta_oauth";
 export interface ChannelFieldDescriptor extends Omit<ChannelRegistrationField, "name"> {
   readonly name: ChannelCredentialField;
   readonly configuredKey?: keyof Pick<ChannelBotDetail, "app_secret_configured" | "lark_verification_token_configured" | "lark_encrypt_key_configured">;
@@ -16,7 +16,7 @@ const configuredKeys: Record<string, ChannelFieldDescriptor["configuredKey"]> = 
 
 export function platformView(descriptor?: ChannelPlatformDescriptor, id = "") {
   const candidate = descriptor?.managed_onboarding?.flow;
-  const flow: ManagedFlow | undefined = candidate === "meta_embedded_signup" || candidate === "oauth_connection" ? candidate : undefined;
+  const flow: ManagedFlow | undefined = candidate === "meta_embedded_signup" || candidate === "oauth_connection" || candidate === "meta_oauth" ? candidate : undefined;
   return {
     label: descriptor?.display_name ?? id,
     activities: descriptor?.activities ?? [],
@@ -37,7 +37,9 @@ export function platformView(descriptor?: ChannelPlatformDescriptor, id = "") {
     advancedLabel: "Advanced: use your own credentials",
     connectLabel: `Connect ${descriptor?.display_name ?? id} account`,
     connectedLabel: "Connected account",
-    deletionNote: descriptor?.managed_onboarding ? "The platform account stays connected. Manage it separately in your account's connections." : undefined,
+    deletionNote: flow === "meta_oauth"
+      ? "Disconnecting removes this inbox subscription. Other inboxes connected with the same login stay connected."
+      : descriptor?.managed_onboarding ? "The platform account stays connected. Manage it separately in your account's connections." : undefined,
   };
 }
 export function channelPlatformViews(descriptors: readonly ChannelPlatformDescriptor[]) {

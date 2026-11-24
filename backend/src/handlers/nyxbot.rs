@@ -712,7 +712,7 @@ pub struct LinkInstructions {
     pub expires_at: chrono::DateTime<Utc>,
 }
 
-fn new_link_code() -> Zeroizing<String> {
+pub(super) fn new_link_code() -> Zeroizing<String> {
     crate::services::assistant_wake_service::watch::new_link_code()
 }
 
@@ -725,7 +725,11 @@ fn link_url(row: &NyxbotChannel, code: &str) -> Option<String> {
     }
 }
 
-async fn load_channel(state: &AppState, owner: &str, id: &str) -> AppResult<NyxbotChannel> {
+pub(super) async fn load_channel(
+    state: &AppState,
+    owner: &str,
+    id: &str,
+) -> AppResult<NyxbotChannel> {
     if Uuid::parse_str(id).is_err() {
         return Err(AppError::NotFound("Channel agent not found".into()));
     }
@@ -2485,7 +2489,17 @@ const CONNECT_WATCH_GRACE_MINUTES: i64 = 30;
 /// The onboarding page for a platform the owner can register now. Telegram
 /// prefers creation inside Telegram (`telegram-new`) when an administrator has
 /// configured it, else the bot-token form.
-async fn setup_platform(state: &AppState, requested: &str) -> AppResult<(String, String)> {
+async fn setup_platform(
+    state: &AppState,
+    actor: &str,
+    requested: &str,
+) -> AppResult<(String, String)> {
+    crate::services::channel_adapters::meta_managed::require_enrollment(
+        &state.db,
+        actor,
+        &requested.trim().to_ascii_lowercase(),
+    )
+    .await?;
     let entries = crate::services::channel_platform_catalog_service::list(
         &state.db,
         &state.token_exchange_cache,
@@ -2543,7 +2557,7 @@ pub(crate) async fn setup_link_tool(
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
-    let (platform, display_name) = setup_platform(state, platform).await?;
+    let (platform, display_name) = setup_platform(state, owner, platform).await?;
     let label = label
         .map(|label| setup_label(label.trim()))
         .filter(|label| !label.is_empty());

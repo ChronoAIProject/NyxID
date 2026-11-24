@@ -27,6 +27,8 @@ export function isPublicPath(path: string): boolean {
     path.startsWith("/error") ||
     path.startsWith("/oauth-consent") ||
     path === "/oauth-complete" ||
+    path === "/channel-bots/meta-callback/messenger" ||
+    path === "/channel-bots/meta-callback/instagram" ||
     path === "/oauth-launching" ||
     path === "/cli-auth" ||
     path === "/cli/pair" ||

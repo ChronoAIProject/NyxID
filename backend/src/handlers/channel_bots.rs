@@ -1241,6 +1241,12 @@ pub(crate) async fn create_bot_with_link(
     link_claim: Option<&crate::services::channel_connect_link_service::Claim>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let actor = auth_user.user_id.to_string();
+    crate::services::channel_adapters::meta_managed::require_enrollment(
+        &state.db,
+        &actor,
+        adapter.platform_id(),
+    )
+    .await?;
     let descriptor = adapter.registration();
     if descriptor.managed_only {
         return Err(AppError::ValidationError(
@@ -1278,32 +1284,19 @@ pub(crate) async fn create_bot_with_link(
     let owner_id = resolve_create_owner(state, &actor, body.target_org_id.as_deref()).await?;
 
     // Create bot: verify token, encrypt, insert in pending status
-    let create_result = if let Some(claim) = link_claim {
-        channel_bot_service::create_bot_linked(
-            &state.db,
-            &state.config,
-            &state.encryption_keys,
-            &state.http_client,
-            adapter,
-            &owner_id,
-            label,
-            &fields,
-            Some(claim),
-        )
-        .await?
-    } else {
-        channel_bot_service::create_bot(
-            &state.db,
-            &state.config,
-            &state.encryption_keys,
-            &state.http_client,
-            adapter,
-            &owner_id,
-            label,
-            &fields,
-        )
-        .await?
-    };
+    let create_result = channel_bot_service::create_bot_linked(
+        &state.db,
+        &state.config,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter,
+        &actor,
+        &owner_id,
+        label,
+        &fields,
+        link_claim,
+    )
+    .await?;
 
     let bot_id = create_result.bot.id.clone();
     let webhook_secret = create_result.webhook_secret;
@@ -1508,12 +1501,13 @@ pub async fn update_bot(
         None => None,
     };
 
-    let mut updated = channel_bot_service::update_bot(
+    let mut updated = channel_bot_service::update_bot_as_actor(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
         adapter.as_ref(),
         &bot_id,
+        &actor,
         &owner_id,
         crate::services::channel_bot_service::UpdateBotParams {
             x_events: body.x_events.as_deref(),
@@ -1729,16 +1723,9 @@ pub async fn delete_bot(
     let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
-    let managed_webhook_cleanup = channel_bot_service::delete_bot(
-        &state.db,
-        &state.config,
-        &state.http_client,
-        &state.encryption_keys,
-        adapter.as_ref(),
-        &bot_id,
-        &owner_id,
-    )
-    .await?;
+    let managed_webhook_cleanup =
+        channel_bot_service::delete_bot_with_state(&state, adapter.as_ref(), &bot_id, &owner_id)
+            .await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -1898,6 +1885,18 @@ pub(crate) async fn verify_bot_with_adapter(
     telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
     api_key_id: Option<&str>,
 ) -> AppResult<Json<VerifyBotResponse>> {
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) {
+        crate::services::channel_meta_service::MetaService::from(state)
+            .verify(&bot)
+            .await?;
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        return Ok(Json(VerifyBotResponse {
+            last_verification: None,
+            id: current.id,
+            status: current.status,
+            webhook_registered: current.webhook_registered,
+        }));
+    }
     if bot.platform == "telegram" {
         let verified = channel_bot_service::verify_telegram_bot(
             &state.db,
@@ -2589,6 +2588,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -2667,6 +2667,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,

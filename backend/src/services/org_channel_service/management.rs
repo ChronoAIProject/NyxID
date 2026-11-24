@@ -66,6 +66,7 @@ pub(crate) async fn patch(
             expected_revision: Some(input.expected_revision),
         },
         input.enabled.is_some(),
+        false,
     )
     .await
 }
@@ -173,7 +174,16 @@ pub(crate) async fn update(
     row: &NyxbotChannel,
     input: GuestSettings,
 ) -> AppResult<()> {
-    update_choice(db, actor, row, input, true).await
+    update_choice(db, actor, row, input, true, false).await
+}
+
+pub(crate) async fn enable_customer_dms(
+    db: &Database,
+    actor: &str,
+    row: &NyxbotChannel,
+    input: GuestSettings,
+) -> AppResult<()> {
+    update_choice(db, actor, row, input, true, true).await
 }
 
 async fn update_choice(
@@ -182,6 +192,7 @@ async fn update_choice(
     row: &NyxbotChannel,
     input: GuestSettings,
     explicit_enabled: bool,
+    open_private_chats: bool,
 ) -> AppResult<()> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
     super::require_admin(db, actor, &b.org_id).await?;
@@ -275,6 +286,7 @@ async fn update_choice(
     // Deprecated-only writes record the save without changing execution authority.
     let unchanged = ready
         && policy == b.guests
+        && !open_private_chats
         && !(explicit_enabled && (!policy.enabled || policy.revision.is_empty()));
     if !unchanged {
         policy.revision = uuid::Uuid::new_v4().to_string();
@@ -289,8 +301,9 @@ async fn update_choice(
         unchanged,
         migration_off,
         author_services,
+        open_private_chats,
     );
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services)|Box::pin(async move{
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats)|Box::pin(async move{
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;
         super::fence_management(db,tx,row,actor).await?;
         if *ready && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }
@@ -318,7 +331,7 @@ async fn update_choice(
         let mut fields=doc!{"org_specialist.guests":bson::to_bson(policy).map_err(|_|super::denied())?,"updated_at":bson::DateTime::now()};
         // Explicitly enabling guests opens private guest admission too. Editing
         // a budget or delegation must not broaden a saved private-chat limit.
-        if policy.enabled && !b.guests.enabled {fields.insert("private_chats","everyone");}
+        if *open_private_chats || (policy.enabled && !b.guests.enabled) {fields.insert("private_chats","everyone");}
         let changed=db.collection::<Document>("nyxbot_channels").update_one(filter,
             doc!{"$set":fields}).session(&mut *tx).await?;
         if changed.matched_count!=1 {return Err(settings_changed());}

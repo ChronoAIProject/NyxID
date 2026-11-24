@@ -37,6 +37,8 @@ import { editableChannelFields, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/cha
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { ManagedMetaDetail } from "@/components/channels/managed-meta";
+import { MetaCustomerSetup } from "@/components/channels/meta-customer-setup";
 import { CredentialVerification, RouteReadiness } from "@/components/channels/bot-readiness";
 import { routeAgentIssue, verificationErrorMessage } from "@/lib/channel-readiness";
 import { PageHeader } from "@/components/shared/page-header";
@@ -662,7 +664,7 @@ function DeleteBotDialog({
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>{translateUi("Delete Channel Bot")}</DialogTitle>
-          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && translateUi(" {{deletionNote}}", { deletionNote: deletionNote })}
+          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && <> {translateUi(deletionNote)}</>}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -1263,6 +1265,11 @@ export function ChannelBotDetailPage() {
       )}
       {(() => {
         if (bot.credential_source === "telegram_manager") return null;
+        if (bot.platform === "messenger" || bot.platform === "instagram") {
+          return bot.credential_source === "platform"
+            ? <ManagedMetaDetail bot={bot} orgId={ownerOrgId} />
+            : <><MetaCustomerSetup botId={bot.id} orgId={ownerOrgId} /><EditVerificationSection bot={bot} /></>;
+        }
         const flow = getPlatform(bot.platform).managedFlow;
         const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;
         return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(getPlatform(bot.platform)).length > 0 && <EditVerificationSection bot={bot} />;

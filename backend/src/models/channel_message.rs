@@ -10,6 +10,20 @@ pub struct TextCompleteness {
     pub truncated: bool,
 }
 
+/// Server-owned reply authority from one authenticated private inbox message.
+/// No customer text or bearer credential is retained.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MetaMessageAuthority {
+    pub generation: i64,
+    pub asset_id: String,
+    pub sender_id: String,
+    pub binding: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub event_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub reply_expires_at: DateTime<Utc>,
+}
+
 /// Provider handles and descriptive metadata only; never media bytes or captions.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAttachment {
@@ -97,6 +111,8 @@ pub struct ChannelMessage {
     /// Public callback/history DTOs continue to expose the raw source metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) effective_attachment_filenames: Vec<Option<String>>,
+    #[serde(default)]
+    pub meta_authority: Option<MetaMessageAuthority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nyxbot_admission: Option<NyxbotAdmission>,
     /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
@@ -218,6 +234,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
