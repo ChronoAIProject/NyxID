@@ -471,6 +471,7 @@
   "Sign-in failed. Return to setup and reconnect.": "Sign-in failed. Return to setup and reconnect.",
   "Sign-in is still processing. Return to setup to check its status.": "Sign-in is still processing. Return to setup to check its status.",
   "Sign-in was cancelled. No inbox was connected. Return to setup to reconnect.": "Sign-in was cancelled. No inbox was connected. Return to setup to reconnect.",
+  "Specialist assigned. Readiness checks are unavailable. Check readiness again.": "Specialist assigned. Readiness checks are unavailable. Check readiness again.",
   "Start a new setup": "Start a new setup",
   "Sticker": "Sticker",
   "Store this verification secret now. It will not be shown again.": "Store this verification secret now. It will not be shown again.",

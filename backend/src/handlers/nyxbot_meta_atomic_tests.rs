@@ -662,10 +662,10 @@ async fn legacy_org_meta_guest_reductions_remain_available_on_callback_failure()
         ),
     )
     .await;
-    // A live route permits this legacy expansion, but the fleet switches to
-    // Grants before the write. Its previously narrowed service list must survive.
+    // The live route is healthy and the last readiness read still saw the
+    // incompatible replica. Its departure cannot widen the frozen service list.
     crate::services::durable_wake_tests::resume_after(
-        "org_guest_before_meta_write",
+        "meta_legacy_grants_cutover_fence",
         async {
             assert!(matches!(
                 patch(json!({"service_ids":service_ids,"expected_revision":revision().await}))

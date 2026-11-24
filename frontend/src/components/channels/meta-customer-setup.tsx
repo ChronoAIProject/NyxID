@@ -204,7 +204,12 @@ function CustomerSetupForm({ botId, orgId }: SetupProps) {
                 )}
           </p>
         )}
-        {orgId && readiness && (
+        {readiness?.readiness_reason === "diagnostics_unavailable" && (
+          <p role="status" className="type-caption text-muted-foreground">
+            {t("Specialist assigned. Readiness checks are unavailable. Check readiness again.")}
+          </p>
+        )}
+        {orgId && readiness && readiness.readiness_reason !== "diagnostics_unavailable" && (
           <p role="status" className="type-caption text-muted-foreground">
             {!readiness.grants_ready
               ? t(

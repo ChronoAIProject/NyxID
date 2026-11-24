@@ -105,8 +105,8 @@ pub(crate) async fn original(state: &crate::AppState, bot: &ChannelBot) -> Chann
             Inbox::Instagram
         },
         &bot.id,
-        "222",
-        &event("222", "333", "mid.1"),
+        &bot.platform_bot_id,
+        &event(&bot.platform_bot_id, "333", "mid.1"),
     )
     .unwrap();
     let mut message = channel_relay_service::inbound_metadata(
@@ -132,6 +132,17 @@ pub(crate) async fn original(state: &crate::AppState, bot: &ChannelBot) -> Chann
         .await
         .unwrap();
     message
+}
+
+async fn admit_original(state: &crate::AppState, message: &ChannelMessage) {
+    use crate::services::{
+        channel_admission_service as admission, coordination_service::EventDedupClaimResult,
+    };
+    let EventDedupClaimResult::Claimed(claim) = admission::claim(&state.db, message).await.unwrap()
+    else {
+        panic!("expected a fresh inbound");
+    };
+    assert!(admission::admit(&state.db, &claim, message).await.unwrap());
 }
 
 #[tokio::test]
@@ -985,6 +996,7 @@ async fn multipart_fence(scenario: &str) {
         original.meta_authority.as_mut().unwrap().event_at =
             Utc::now() - Duration::hours(24) + Duration::milliseconds(500);
     }
+    admit_original(&state, &original).await;
     let key = uuid::Uuid::new_v4().to_string();
     state
         .db
@@ -1114,12 +1126,15 @@ async fn messenger_reply_persists_a_definite_provider_refusal_and_returns_its_co
     };
     let (state, adapter, server, bot) = fixture("messenger").await;
     let original = original(&state, &bot).await;
-    state
-        .db
-        .collection(crate::models::channel_message::COLLECTION_NAME)
-        .insert_one(&original)
-        .await
-        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v25.0/222/thread_owner"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":[{"thread_owner":{"app_id":"111"}}]})),
+        )
+        .mount(&server)
+        .await;
+    admit_original(&state, &original).await;
     let key = uuid::Uuid::new_v4().to_string();
     state
         .db
@@ -1175,6 +1190,7 @@ async fn response_disconnect_keeps_unknown_acceptance_in_the_journal_without_sen
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (state, mut a, _, bot) = fixture("instagram").await;
     let original = original(&state, &bot).await;
+    admit_original(&state, &original).await;
     let key = uuid::Uuid::new_v4().to_string();
     state
         .db
@@ -1325,6 +1341,7 @@ async fn stale_standby_after_reconnect_cannot_close_instagram_control() {
 async fn meta_erasure_fences_journal_creation_but_disconnect_keeps_an_accepted_receipt() {
     let (state, _, _, bot) = fixture("instagram").await;
     let inbound = original(&state, &bot).await;
+    admit_original(&state, &inbound).await;
     state
         .db
         .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
@@ -1356,6 +1373,20 @@ async fn meta_erasure_fences_journal_creation_but_disconnect_keeps_an_accepted_r
         .insert_one(doc! {"_id":&bot.id})
         .await
         .unwrap();
+    let grant = bot.meta_binding.as_ref().unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+            .update_one(
+                doc! {"bot_id":&bot.id,"grant_id":&grant.grant_id},
+                doc! {"$set":{"erasure_requested":true}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+        1
+    );
     assert!(store().await.is_err());
     assert!(
         crate::services::channel_reply_delivery::Delivery::begin(&state.db, &bot, &inbound, 1)

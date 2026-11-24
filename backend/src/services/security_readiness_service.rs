@@ -833,7 +833,60 @@ async fn activation_audit(
     }
 }
 
+/// First activation freezes the service set visible to Grants on existing Meta
+/// bindings. Serialize it with legacy saves that could expand that set.
+pub(crate) async fn fence_org_guest_grants_activation(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<bson::Document>(ROLLOUTS)
+        .update_one(
+            doc! {"_id":"nyxbot-org-guest-grants-activation-fence"},
+            doc! {"$inc":{"revision":1_i64}},
+        )
+        .upsert(true)
+        .session(session)
+        .await?;
+    Ok(())
+}
+
+/// A recorded activation is durable even while an incompatible replica returns.
+/// Inspect the indexed marker under the same transaction as the legacy edit.
+pub(crate) async fn org_guest_grants_activated_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<bool> {
+    Ok(db.collection::<bson::Document>(ROLLOUTS)
+        .find_one(doc! {"record_kind":RECORD_KIND,"capability":super::org_channel_service::GUEST_GRANTS_READINESS})
+        .projection(doc! {"_id":1})
+        .session(session)
+        .await?
+        .is_some())
+}
+
 async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
+    if capability != super::org_channel_service::GUEST_GRANTS_READINESS {
+        return publish_activation(db, capability, None).await;
+    }
+    super::transaction_service::run_db_only(db, &db, |session, db| {
+        Box::pin(async move {
+            fence_org_guest_grants_activation(db, session).await?;
+            publish_activation(
+                db,
+                super::org_channel_service::GUEST_GRANTS_READINESS,
+                Some(session),
+            )
+            .await
+        })
+    })
+    .await
+}
+
+async fn publish_activation(
+    db: &Database,
+    capability: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<bool> {
     let record = SecurityCapabilityActivation {
         id: uuid::Uuid::new_v4().to_string(),
         record_kind: RECORD_KIND.into(),
@@ -842,15 +895,18 @@ async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
     };
     // Equal unique-index predicates plus $setOnInsert make concurrent
     // heartbeats converge on one immutable first activation timestamp.
-    let result = db
+    let update = db
         .collection::<SecurityCapabilityActivation>(ROLLOUTS)
         .update_one(
             doc! {"record_kind": RECORD_KIND, "capability": capability},
             doc! {"$setOnInsert": bson::to_document(&record)
             .map_err(|_| AppError::SecurityReadinessUnavailable)?},
         )
-        .upsert(true)
-        .await?;
+        .upsert(true);
+    let result = match session {
+        Some(session) => update.session(session).await?,
+        None => update.await?,
+    };
     Ok(result.upserted_id.is_some())
 }
 

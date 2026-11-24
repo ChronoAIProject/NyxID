@@ -445,7 +445,40 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         let after_error = load_channel(&state, OWNER, fresh_channel).await.unwrap();
         assert_eq!(after_error.org_specialist, closed.org_specialist);
         assert_eq!(after_error.private_chats, closed.private_chats);
+        let other = crate::services::assistant_team_service::create_specialist_for(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            &org_id,
+            crate::services::assistant_team_service::CreateRequest {
+                name: "readiness-diagnostics".into(),
+                description: "Support".into(),
+                display_name: None,
+                persona: None,
+                voice_instructions: None,
+                targets: Default::default(),
+                account_read: false,
+                specialty: None,
+                machines: None,
+                logins: None,
+                created_by: "user",
+            },
+        )
+        .await
+        .unwrap()
+        .0;
+        let (status, assigned) = action(&router, &token, &fresh_id, &other.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{assigned}");
+        assert_eq!(assigned["agent_id"], other.id);
+        assert_eq!(
+            assigned["readiness"]["readiness_reason"],
+            "diagnostics_unavailable"
+        );
+        let reassigned = load_channel(&state, OWNER, fresh_channel).await.unwrap();
+        assert_eq!(reassigned.agent_id.as_deref(), Some(other.id.as_str()));
         budgets.delete_one(doc! {"_id":&budget_id}).await.unwrap();
+        let (status, restored) = action(&router, &token, &fresh_id, &agent.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{restored}");
         for bot_id in [&row.channel_bot_id, &fresh_id] {
             let (status, enabled) =
                 action(&router, &token, bot_id, &agent.id, "enable_guests").await;

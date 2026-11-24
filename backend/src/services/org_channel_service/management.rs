@@ -397,6 +397,20 @@ async fn update_choice(
         if (*ready || *direct_meta) && super::guest_grants_ready(db).await? != *ready {
             return Err(if *ready { AppError::SecurityReadinessUnavailable } else { settings_changed() });
         }
+        let expands_frozen_services = *direct_meta && !*ready && *author_services &&
+            policy.service_ids.iter().any(|id| {
+                !b.guests.service_ids.contains(id) || policy.service_authority.get(id) != b.guests.service_authority.get(id)
+            });
+        if expands_frozen_services {
+            use crate::services::security_readiness_service as readiness;
+            readiness::fence_org_guest_grants_activation(db, tx).await?;
+            #[cfg(test)]
+            crate::services::durable_wake_tests::after("meta_legacy_grants_cutover_fence").await;
+            if readiness::org_guest_grants_activated_in_session(db, tx).await? {
+                return Err(AppError::Conflict("Guest permissions have moved to Grants. Review the specialist’s guest services there before expanding access.".into()));
+            }
+        }
+
         let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
         let newly_eligible = *direct_meta && !*ready
             && !legacy_eligible(&b.guests,&live) && legacy_eligible(policy,&live);

@@ -471,6 +471,7 @@
   "Sign-in failed. Return to setup and reconnect.": "登入失敗。請返回設定並重新連線。",
   "Sign-in is still processing. Return to setup to check its status.": "登入仍在處理中。請返回設定查看狀態。",
   "Sign-in was cancelled. No inbox was connected. Return to setup to reconnect.": "登入已取消，未連結任何收件匣。請返回設定重新連線。",
+  "Specialist assigned. Readiness checks are unavailable. Check readiness again.": "已指派專員。目前無法檢查就緒狀態，請重試。",
   "Start a new setup": "開始新的設定",
   "Sticker": "貼紙",
   "Store this verification secret now. It will not be shown again.": "請立即儲存此驗證金鑰。它不會再次顯示。",

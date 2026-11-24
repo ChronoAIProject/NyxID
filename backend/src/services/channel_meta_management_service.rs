@@ -37,11 +37,7 @@ pub async fn customer_setup(
     agent_id: &str,
     action: CustomerAction,
 ) -> AppResult<CustomerSetupResult> {
-    use crate::{
-        errors::AppError,
-        models::nyxbot_channel::NyxbotChannel,
-        services::{nyxbot_chat_settings_service::AccessSettings, org_channel_service as org},
-    };
+    use crate::{errors::AppError, models::nyxbot_channel::NyxbotChannel};
     use CustomerAction::*;
 
     let (owner, bot) =
@@ -153,66 +149,18 @@ pub async fn customer_setup(
             url: None,
         });
     }
-    let readiness = if row.org_specialist.is_some() {
-        if action == PrepareModel {
-            return Err(AppError::ValidationError("Organization guest model setup runs under verified guest funding. Enable the ready organization guest binding, then test from a separate customer account; setup diagnostics appear on this channel.".into()));
+    let readiness_result =
+        customer_readiness(state, actor, &mut row, &specialist.id, &action).await;
+    let readiness = match readiness_result {
+        Ok(readiness) => readiness,
+        Err(error) if action == Assign => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Assigned Meta inbox readiness diagnostics unavailable"
+            );
+            serde_json::json!({"readiness_reason":"diagnostics_unavailable"})
         }
-        let inputs = org::management::view_inputs(&state.db, actor, &row).await?;
-        if action == EnableGuests {
-            if !inputs.ready {
-                return Err(AppError::ValidationError("Organization guest grants are not ready. Enable nyxbot:org-guest-grants-v1 after all serving replicas are ready.".into()));
-            }
-            let already_open = row.private_chats.as_deref() == Some("everyone")
-                && row
-                    .org_specialist
-                    .as_ref()
-                    .is_some_and(|binding| binding.guests.enabled);
-            if !already_open {
-                row = org::management::enable_customer_dms(
-                    &state.db,
-                    actor,
-                    &row,
-                    org::management::GuestSettings {
-                        enabled: true,
-                        service_ids: None,
-                        daily_credits: None,
-                        expected_revision: row
-                            .org_specialist
-                            .as_ref()
-                            .map(|b| b.guests.revision.clone()),
-                    },
-                    Some(&super::nyxbot_channel_query_service::direct_callback(
-                        &state.config.base_url,
-                        &row.id,
-                    )),
-                )
-                .await?;
-            }
-        }
-        inputs.render(&row, row.org_specialist.as_ref().ok_or_else(org::denied)?)
-    } else {
-        if action == PrepareModel {
-            setup::prepare_guest_model(state, actor, Some(&specialist.id), None).await?;
-        }
-        let facts = setup::audience_readiness_for_channel(state, actor, &row).await?;
-        if action == EnableGuests {
-            if facts.guest_readiness.status != "ready" {
-                return Err(AppError::ValidationError(facts.guest_readiness.fix.unwrap_or_else(||"Customer model setup is pending. Prepare the guest model, then check readiness again.".into())));
-            }
-            setup::update_confirmed_access(
-                state,
-                actor,
-                &row,
-                &AccessSettings {
-                    private_chats: Some("everyone".into()),
-                    private_chat_posts: Some(false),
-                    apply_to_existing: false,
-                },
-            )
-            .await?;
-        }
-        serde_json::to_value(facts)
-            .map_err(|_| AppError::Internal("Unable to report guest readiness".into()))?
+        Err(error) => return Err(error),
     };
     let committed = if action == Assign || (action == EnableGuests && row.org_specialist.is_some())
     {
@@ -243,6 +191,78 @@ pub async fn customer_setup(
         owner_link_expires_at: issued_link
             .as_ref()
             .map(|link| link.expires_at.to_rfc3339()),
+    })
+}
+
+async fn customer_readiness(
+    state: &AppState,
+    actor: &str,
+    row: &mut crate::models::nyxbot_channel::NyxbotChannel,
+    specialist_id: &str,
+    action: &CustomerAction,
+) -> AppResult<serde_json::Value> {
+    use super::{nyxbot_chat_settings_service::AccessSettings, org_channel_service as org};
+    use CustomerAction::*;
+    Ok(if row.org_specialist.is_some() {
+        if *action == PrepareModel {
+            return Err(AppError::ValidationError("Organization guest model setup runs under verified guest funding. Enable the ready organization guest binding, then test from a separate customer account; setup diagnostics appear on this channel.".into()));
+        }
+        let inputs = org::management::view_inputs(&state.db, actor, row).await?;
+        if *action == EnableGuests {
+            if !inputs.ready {
+                return Err(AppError::ValidationError("Organization guest grants are not ready. Enable nyxbot:org-guest-grants-v1 after all serving replicas are ready.".into()));
+            }
+            let already_open = row.private_chats.as_deref() == Some("everyone")
+                && row
+                    .org_specialist
+                    .as_ref()
+                    .is_some_and(|binding| binding.guests.enabled);
+            if !already_open {
+                *row = org::management::enable_customer_dms(
+                    &state.db,
+                    actor,
+                    row,
+                    org::management::GuestSettings {
+                        enabled: true,
+                        service_ids: None,
+                        daily_credits: None,
+                        expected_revision: row
+                            .org_specialist
+                            .as_ref()
+                            .map(|b| b.guests.revision.clone()),
+                    },
+                    Some(&super::nyxbot_channel_query_service::direct_callback(
+                        &state.config.base_url,
+                        &row.id,
+                    )),
+                )
+                .await?;
+            }
+        }
+        inputs.render(row, row.org_specialist.as_ref().ok_or_else(org::denied)?)
+    } else {
+        if *action == PrepareModel {
+            setup::prepare_guest_model(state, actor, Some(specialist_id), None).await?;
+        }
+        let facts = setup::audience_readiness_for_channel(state, actor, row).await?;
+        if *action == EnableGuests {
+            if facts.guest_readiness.status != "ready" {
+                return Err(AppError::ValidationError(facts.guest_readiness.fix.unwrap_or_else(||"Customer model setup is pending. Prepare the guest model, then check readiness again.".into())));
+            }
+            setup::update_confirmed_access(
+                state,
+                actor,
+                row,
+                &AccessSettings {
+                    private_chats: Some("everyone".into()),
+                    private_chat_posts: Some(false),
+                    apply_to_existing: false,
+                },
+            )
+            .await?;
+        }
+        serde_json::to_value(facts)
+            .map_err(|_| AppError::Internal("Unable to report guest readiness".into()))?
     })
 }
 

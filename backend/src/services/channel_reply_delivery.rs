@@ -172,8 +172,12 @@ impl Delivery {
     }
 
     pub async fn attempting(&mut self, db: &mongodb::Database, index: usize) -> AppResult<()> {
+        let previous = self.parts[index].status;
         self.parts[index].status = PartStatus::Uncertain;
-        self.save_part(db, index, true).await?;
+        if let Err(error) = self.save_part(db, index, true).await {
+            self.parts[index].status = previous;
+            return Err(error);
+        }
         self.trace_attempt(index);
         Ok(())
     }

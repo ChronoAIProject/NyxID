@@ -466,6 +466,11 @@ audience or owner challenge atomically. They reload the confirmed assignment and
 delivery health inside that transaction. Personal and organization guest enabling
 use the same live route proof before opening access. Explicitly closing access
 remains available on a failing route, subject to the existing owner/admin checks.
+After the first organization Grants activation, the service list and permission
+digests on a direct Meta binding are a ceiling. During a temporary fallback,
+administrators can remove services, edit spending limits or close guest access.
+Expanding that ceiling requires the reviewed Grants adoption flow. Upgrade all
+serving writers and drain earlier versions before enabling these new channels.
 Hosted assistant setup stores only its server-computed expected callback in the
 trusted wake reference. Wake admission verifies that callback and the live route
 before minting an owner code. An older Meta wake without that proof gives repair
