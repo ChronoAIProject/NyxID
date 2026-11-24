@@ -4182,6 +4182,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::invocation_diagnostics::DiagnosticProbe>()
         .is_some();
+    let publication_dispatch = request
+        .extensions()
+        .get::<crate::services::agent_skill_service::PublicationDispatch>()
+        .cloned();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -5781,6 +5785,11 @@ async fn execute_resolved_proxy_inner<'a>(
 
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
+    if let Some(dispatch) = &publication_dispatch {
+        // Admission and approval have finished. Fence the owner, invocation and
+        // exact lease before reserving funds or handing the ZIP to a transport.
+        dispatch.begin().await?;
+    }
     if crate::services::telnyx_platform_service::contract(&target.service).is_some() {
         // Scheduled writes require a separate durable-grant lifecycle. Reject
         // unsupported execution surfaces before either billing or dispatch.
@@ -5811,6 +5820,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 ),
             )?;
         destination_audit.dispatch();
+        if let Some(dispatch) = &publication_dispatch {
+            dispatch.transport_attempt(true);
+        }
         let managed = crate::services::telnyx_platform_service::execute(
             &state.db,
             state.billing.clone(),
@@ -6439,6 +6451,9 @@ async fn execute_resolved_proxy_inner<'a>(
                             return Err(error);
                         }
                     }
+                    if let Some(dispatch) = &publication_dispatch {
+                        dispatch.transport_attempt(true);
+                    }
                     let result = if let Some(upload) = streaming_body.take() {
                         let headers = std::mem::take(&mut attempt_request.headers);
                         let mut parameters = crate::crypto::secret_json::SecretJson(
@@ -6491,6 +6506,12 @@ async fn execute_resolved_proxy_inner<'a>(
                             )
                             .await
                     };
+                    if let (Some(dispatch), Err(failure)) = (&publication_dispatch, &result)
+                        && !failure.dispatched
+                        && !had_dispatched_failure
+                    {
+                        dispatch.transport_attempt(false);
+                    }
                     if let Err(failure) = &result
                         && !failure.dispatched
                         && !matches!(failure.error, AppError::NodeCredentialMissing(_))
@@ -7376,6 +7397,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
                 mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
                 destination_audit.dispatch();
+                if let Some(dispatch) = &publication_dispatch {
+                    dispatch.transport_attempt(true);
+                }
                 let response_result = until_client_disconnect(
                     &downstream_cancellation,
                     box_proxy_future(|| {
@@ -7627,11 +7651,15 @@ async fn execute_resolved_proxy_inner<'a>(
                 resource_owner_id: service_owner_for_approval,
                 user_service_id: resolved_user_service_id.as_deref(),
             };
+            if let Some(dispatch) = &publication_dispatch {
+                dispatch.transport_attempt(true);
+            }
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
-                        if crate::services::credential_verification::checking()
+                        if publication_dispatch.is_some()
+                            || crate::services::credential_verification::checking()
                             || is_pool_attempt
                             || operation_scoped
                             || operation_guest
@@ -7668,6 +7696,17 @@ async fn execute_resolved_proxy_inner<'a>(
                 }),
             )
             .await;
+            if let (Some(dispatch), Ok(Err(error))) = (&publication_dispatch, &downstream_result)
+                && !had_dispatched_failure
+                && (matches!(
+                    error,
+                    proxy_service::ForwardRequestError::PreDispatchRejected(_)
+                ) || matches!(error, proxy_service::ForwardRequestError::Transport(e) if e.is_connect()))
+            {
+                // Reviewed uploads return redirects. A connect failure here
+                // cannot follow an earlier successful same-origin hop.
+                dispatch.transport_attempt(false);
+            }
             let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
                 Some(meter) => Ok(Err(proxy_service::ForwardRequestError::from(meter.error()))),
                 None => downstream_result,

@@ -394,6 +394,22 @@ request. Read denial, missing authentication, and transport failure have
 separate failure codes; an unavailable validator is never reported as an
 invalid package.
 
+During acknowledgement, NyxID claims the reviewed operation before it calls the
+proxy. The proxy records the durable dispatch marker after checking the route,
+connection policy and approval, before forwarding the reviewed ZIP. If the
+proxy refuses the create during admission, the card offers **Retry publication**
+for the same package and operation. A cancelled admission cannot resume and
+send after the card becomes retryable.
+
+For a create with a missing response, **Check again** searches the approving
+person's private skills. When keyword search has no exact name or spans several
+pages, NyxID also reads the canonical skill name at the reviewed version. It
+attaches a match only after checking the signed owner's private ACL, GUID,
+version, package hash, dependency closure and downloaded bytes. A missing
+version can still belong to a delayed request. The owner can ask NyxBot to
+start a new skill draft. The original card only checks the existing operation. A confirmed name collision on a fresh create
+returns the draft for revision.
+
 For a definitive refusal before Ornn mutation, NyxID clears the started flag
 only if that operation has never had an uncertain dispatch. The same
 transaction releases its reserved target, allowing a revised draft to claim
