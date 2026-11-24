@@ -101,7 +101,7 @@ async fn expired_skill_review_renews_after_real_registry_write_refusal_and_resto
             proposal.publication.as_ref().unwrap().operation_id
         );
         server.verify().await;
-        db.drop().await.unwrap();
+        close_fixture(db).await;
     }
 }
 
@@ -212,7 +212,7 @@ async fn full_access_renewal_receipt_keeps_b_source_while_a_is_active_in_both_er
                 .is_none()
         );
         server.verify().await;
-        db.drop().await.unwrap();
+        close_fixture(db).await;
     }
 }
 
@@ -314,7 +314,12 @@ async fn idle_app_edit_full_access_renewal_keeps_absent_creation_turn_and_surviv
         Some(skill.as_str())
     );
     server.verify().await;
-    db.drop().await.unwrap();
+    close_fixture(db).await;
+}
+
+async fn close_fixture(db: &mongodb::Database) {
+    crate::services::security_readiness_service::stop_test_replica(db).await;
+    crate::test_utils::drop_test_database(db).await;
 }
 
 async fn settle(f: &Fixture, row: &crate::models::assistant_conversation::AssistantConversation) {
@@ -430,7 +435,7 @@ async fn deleting_drafting_grant_retires_original_claim_and_unstarted_proposal_a
     let fresh = draft_in_chat(&f, &caller).await.unwrap();
     assert_ne!(fresh["proposal_id"], first["proposal_id"]);
     assert_ne!(fresh["acknowledgement_id"], first["acknowledgement_id"]);
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 async fn queue_draft_repair_notice(f: &Fixture) -> (ChannelBot, String) {
@@ -488,7 +493,7 @@ async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web
             .iter()
             .any(|event| event.id == unrelated.id)
     );
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -560,7 +565,7 @@ async fn stale_skill_repair_notice_preserves_uncertain_evidence_and_allows_healt
         .await
         .unwrap();
     assert_eq!(admitted.active_turn.unwrap().events[0].id, healthy.id);
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -619,7 +624,7 @@ async fn deleting_drafting_grant_preserves_verified_publication_but_retires_orig
         .is_some()
     );
     server.verify().await;
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -659,7 +664,7 @@ async fn uncertain_draft_publication_keeps_erasure_pending_with_original_evidenc
             .unwrap()
             .is_some()
     );
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -747,7 +752,7 @@ async fn renew_meta_skill_review_keeps_original_b_source_while_a_or_web_uses_hom
                 .unwrap()
                 .is_none()
         );
-        db.drop().await.unwrap();
+        close_fixture(db).await;
     }
 }
 
@@ -786,7 +791,7 @@ async fn prepared_renewal_cannot_recreate_review_after_original_grant_cleanup() 
             .unwrap(),
         0
     );
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -853,7 +858,7 @@ async fn contradictory_mixed_grant_claim_keeps_both_original_operations_for_repa
                 .is_some()
         );
     }
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -932,7 +937,7 @@ async fn original_draft_erasure_releases_only_exact_reserved_target_and_retains_
         } else {
             assert_eq!(retained.unwrap(), holder);
         }
-        db.drop().await.unwrap();
+        close_fixture(db).await;
     }
 }
 
@@ -1002,7 +1007,7 @@ async fn original_draft_claim_inventory_resumes_after_one_hundred_rows() {
             .unwrap(),
         0
     );
-    db.drop().await.unwrap();
+    close_fixture(db).await;
 }
 
 #[tokio::test]
@@ -1114,6 +1119,6 @@ async fn signed_cleanup_finds_superseded_meta_draft_after_real_key_rotation_and_
             "allowed"
         );
         server.verify().await;
-        db.drop().await.unwrap();
+        close_fixture(db).await;
     }
 }
