@@ -113,7 +113,7 @@ fn reusable_card(card: &AssistantAcknowledgement) -> bool {
         || (card.status == "allowed" && card.kind == "action")
 }
 
-fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
+pub(super) fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
     acks::RequestOrigin {
         initiating_input_id: claim.initiating_input_id.clone(),
         meta_contexts: claim.meta_contexts.clone(),

@@ -107,7 +107,7 @@ async fn expired_skill_review_renews_after_real_registry_write_refusal_and_resto
 
 #[tokio::test]
 async fn full_access_renewal_receipt_keeps_b_source_while_a_is_active_in_both_erasure_orders() {
-    for a_first in [true, false] {
+    for (a_first, renewal) in [(true, true), (false, true), (true, false)] {
         let f = fixture("meta_full_access_renewal_receipt").await;
         let server = setup_ornn(&f).await;
         let (b, b_chat) = meta_turn(&f).await;
@@ -140,17 +140,28 @@ async fn full_access_renewal_receipt_keeps_b_source_while_a_is_active_in_both_er
         .unwrap();
         let skill = Uuid::new_v4().to_string();
         mount_publication(&f, &server, &proposal, &skill, "POST").await;
-        let axum::Json(result)=crate::handlers::assistant_agent_learning::approve(
+        let result = if renewal {
+            let axum::Json(result)=crate::handlers::assistant_agent_learning::approve(
             axum::extract::State(f.state.clone()),crate::test_utils::test_auth_user(&f.owner),
             axum::extract::Path((proposal.agent_id.clone(),proposal.id.clone())),
             axum::Json(serde_json::from_value(json!({"revision":proposal.revision,"agent_skills_revision":proposal.agent_skills_revision,"renewal_of":&original.id})).unwrap()),
         ).await.unwrap();
+            result
+        } else {
+            // The same saved review can be recovered by a fresh MCP chat
+            // after the owner enables Full access.
+            let caller = another_authoring_chat(&f).await;
+            let result = draft_in_chat(&f, &caller).await.unwrap();
+            assert_eq!(result["proposal_id"], proposal.id);
+            result
+        };
         assert_eq!(result["status"], "pinned");
         let receipt = cards
             .find_one(doc! {"user_id":&f.owner,"tool_name":review::TOOL,"decided_by":"access_mode"})
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(receipt.conversation_id, original.conversation_id);
         assert_eq!(receipt.creation_turn_id, original.creation_turn_id);
         assert_eq!(receipt.requested_turn_id, original.requested_turn_id);
         assert_ne!(receipt.creation_turn_id, a_chat.turn_id);

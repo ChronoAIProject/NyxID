@@ -424,15 +424,24 @@ Authored-skill renewal revalidates the original card, draft operation and saved
 initiating input in one transaction; an unrelated active turn cannot select the
 renewed review's source. Interrupted review recovery validates the saved source
 in its original home and binds any MCP activity to the retrying caller's chat.
+The original source is also retained on each proposal, independently of its
+reusable content claim. Replacing a claim after key rotation preserves the
+superseded proposal's grant and input identity. Legacy claims are copied to
+their exact proposal before replacement. Preview and publication transactions
+share renewal eligibility, including recoverable registry-access failures.
+Full-access renewal and recovery preserve automatic publication while recording
+the receipt against the original review's home, input and grant. The receipt
+transaction revalidates that input and source; a later active turn cannot
+supply replacement evidence.
 Before removing initiating history, grant cleanup scans original authored-draft
-claims in pages of 100. It removes exact unstarted proposals and their matching
+claims and per-proposal origins in pages of 100. It removes exact unstarted proposals and their matching
 reserved publication targets, allowing a fresh draft afterward. First dispatch
 checks the original grant in the dispatch-marker transaction. A dispatched or
 uncertain operation keeps cleanup pending until reconciliation establishes its
 outcome. A verified publication and its attached skill retain their independent
-lifetime; only the original grant-bearing claim is removed. Mixed-grant or
+lifetime; the original grant-bearing claim and proposal source are removed. Mixed-grant or
 contradictory claim/operation evidence remains pending for repair. Final grant
-inventory checks these claims again before recording completion.
+inventory checks both source records again before recording completion.
 Denial continuations retain the original requesting question, so explaining a
 denial does not create a new approval. Queue pruning removes only the exact
 continuation after positively established source loss and preserves it for
