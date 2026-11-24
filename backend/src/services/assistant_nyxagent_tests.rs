@@ -6894,6 +6894,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        meta_contexts: Vec::new(),
         artifact_catalog_service_id: None,
         artifact_mode: None,
         artifact_result: None,

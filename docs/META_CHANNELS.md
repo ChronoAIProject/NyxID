@@ -405,6 +405,15 @@ quoted in its excerpt, and removes the matching service-execution binding.
 Card creation and binding publication fence their original source grants in
 the write transaction; a missing erased card cannot acquire a new binding.
 Independent cards and the ordinary audit log retain their existing lifetime.
+Async service watches retain a bounded set of their original Meta source
+references on the watch itself, without display names, chat labels or provider
+credentials. Reservation, result enqueue, admission and connected consumption
+fence those grants. Result and CMA-approval events carry the same references
+into the existing queue; admitted inputs and replies therefore keep their
+provenance after the inbound event or encrypted result expires. These fields
+follow the watch's existing retention, and scoped cleanup cancels and drains
+any remaining exact watches before completion. Web watches keep empty Meta
+provenance and preserve their ordinary behavior.
 
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved

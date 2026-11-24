@@ -46,6 +46,10 @@ pub(crate) async fn required(db: &Database, bot: &str, grant: &str) -> AppResult
             doc! {"meta_grant.bot_id":bot,"meta_grant.grant_id":grant},
         ),
         ("assistant_conversations", queued_filter(bot, grant)),
+        (
+            crate::models::async_service_operation::COLLECTION_NAME,
+            async_filter(bot, grant),
+        ),
     ] {
         if db
             .collection::<Document>(collection)
@@ -84,6 +88,67 @@ fn exact(scope: &Document) -> AppResult<Document> {
 
 fn setup_links(bot: &str, grant: &str) -> Document {
     doc! {"bot_id":bot,"$or":[{"connection_id":grant},{"meta_grant.bot_id":bot,"meta_grant.grant_id":grant}]}
+}
+
+fn async_filter(bot: &str, grant: &str) -> Document {
+    doc! {"meta_contexts":{"$elemMatch":{"meta_grant.bot_id":bot,"meta_grant.grant_id":grant}}}
+}
+
+async fn erase_watches(
+    db: &Database,
+    tx: &mut ClientSession,
+    scope: &Document,
+    phase: i32,
+) -> AppResult<Option<Step>> {
+    let bot = scope.get_str("bot_id").map_err(|_| grants::incomplete())?;
+    let grant = scope
+        .get_str("grant_id")
+        .map_err(|_| grants::incomplete())?;
+    let collection = crate::models::async_service_operation::COLLECTION_NAME;
+    let rows = page(
+        db,
+        tx,
+        collection,
+        async_filter(bot, grant),
+        &Document::new(),
+    )
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    for row in rows {
+        let contexts: Vec<crate::models::assistant_conversation::ChannelTurnContext> =
+            bson::from_bson(
+                row.get("meta_contexts")
+                    .cloned()
+                    .ok_or_else(grants::incomplete)?,
+            )
+            .map_err(|_| grants::incomplete())?;
+        for context in contexts {
+            let proof = context.meta_grant.ok_or_else(grants::incomplete)?;
+            if context.channel_bot_id != proof.bot_id {
+                return Err(grants::incomplete());
+            }
+            reference_in_range(&proof, scope)?;
+        }
+        let filter = doc! {"_id":row.get("_id").cloned(),"state":row.get("state").cloned()};
+        match row.get_str("state") {
+            Ok("submitting" | "waiting" | "ready" | "queued") => {
+                db.collection::<Document>(collection).update_one(filter,doc! {"$unset":{"secret_context_versions.result_encrypted":""},
+                    "$set":{"state":"cancelling","result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}})
+                    .session(&mut *tx).await?;
+            }
+            Ok("cancelling") => {}
+            Ok("delivered" | "cancelled") => {
+                db.collection::<Document>(collection)
+                    .delete_one(filter)
+                    .session(&mut *tx)
+                    .await?;
+            }
+            _ => return Err(grants::incomplete()),
+        }
+    }
+    Ok(Some(Step::stay(doc! {"phase":phase})))
 }
 
 async fn eligible(
@@ -1771,6 +1836,11 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
             setup_links(bot, grant),
             17,
         ),
+        (
+            crate::models::async_service_operation::COLLECTION_NAME,
+            async_filter(bot, grant),
+            17,
+        ),
     ] {
         if db
             .collection::<Document>(collection)
@@ -1937,6 +2007,9 @@ async fn step(
             .await
         }
         17 => {
+            if let Some(step) = erase_watches(db, tx, scope, phase).await? {
+                return Ok(step);
+            }
             let links = erase_page(
                 db,
                 tx,
@@ -1967,6 +2040,8 @@ async fn step(
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::IndexModel;
+    db.collection::<Document>(crate::models::async_service_operation::COLLECTION_NAME)
+        .create_index(IndexModel::builder().keys(doc! {"meta_contexts.meta_grant.bot_id":1,"meta_contexts.meta_grant.grant_id":1,"_id":1}).build()).await?;
     for field in ["creation_turn_id", "requested_turn_id"] {
         db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
             .create_index(
