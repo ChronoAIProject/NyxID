@@ -70,7 +70,7 @@ pub const EVENT_RETENTION_HOURS: i64 = 24;
 #[cfg(test)]
 use crate::services::nyxbot_channel_connection_service::{
     CONNECT_INSERT_GATE, ConnectInsertGate, RESTORE_CONNECT_FAIL_STAGE, RESTORE_FAIL_ACTIVATION,
-    RESTORE_FAIL_ROUTE, gateway_flag,
+    RESTORE_FAIL_ROUTE, gateway_flag, known_owner_senders,
 };
 use crate::services::nyxbot_channel_connection_service::{
     bot_creator, connect_direct, create_gateway_agent_key, gateway_diagnostic_audit,
