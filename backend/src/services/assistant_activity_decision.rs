@@ -92,10 +92,8 @@ pub(crate) async fn bind_meta_in_session(
     kind: &str,
     id: &str,
     session: &mut ClientSession,
-) -> AppResult<()> {
-    bind_inner(db, chat, kind, id, false, Some(session), true, true)
-        .await
-        .map(|_| ())
+) -> AppResult<Option<ActivityBinding>> {
+    bind_inner(db, chat, kind, id, false, Some(session), false, true).await
 }
 
 /// Called only at trusted gates, after their owner/key/turn checks. The update

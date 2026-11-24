@@ -234,5 +234,6 @@ async fn long_web_turn_requests_cards_with_one_projected_provenance_read_each() 
         "ordinary_auto_receipts={receipts} projected_reads={receipt_reads} receipt_p95_us={}",
         receipt_times[p95].as_micros()
     );
+    crate::services::security_readiness_service::stop_test_replica(&db).await;
     db.drop().await.unwrap();
 }

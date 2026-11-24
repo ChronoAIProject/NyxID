@@ -6564,7 +6564,33 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
             .unwrap(),
         reserved
     );
-    let owner_home = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    // Two first owner deliveries start from the same specialist snapshot,
+    // before either has a home. Both must receive a persisted, usable home.
+    use crate::services::assistant_team_service as team;
+    let specialist = team::ensure_nyxbot(&state.db, &b.user_id).await.unwrap();
+    assert!(specialist.home_conversation_id.is_none());
+    let homes =
+        || team::home_thread_for(&state.db, &state.encryption_keys, &b.user_id, &specialist);
+    let (first, second) = tokio::try_join!(homes(), homes()).unwrap();
+    assert_eq!(first.id, second.id);
+    let owner_home = first.id;
+    assert_eq!(
+        team::agent(&state.db, &b.user_id, &specialist.id)
+            .await
+            .unwrap()
+            .home_conversation_id
+            .as_ref(),
+        Some(&owner_home)
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("assistant_conversations")
+            .count_documents(team::thread_filter_for(&b.user_id, &specialist))
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(
         scopes::bind_thread_conversation(&state.db, &assignment, &b_ref, &later, Some(&owner_home))
             .await

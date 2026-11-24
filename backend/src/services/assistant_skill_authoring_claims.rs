@@ -277,7 +277,7 @@ pub(super) async fn finalize(
     let reservation = reservation.clone();
     let binding = binding.clone();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    let (card, activity) = session.start_transaction().and_run2(async move |session| {
         let db = &db;
         let reservation = &reservation;
         let binding = &binding;
@@ -298,7 +298,7 @@ pub(super) async fn finalize(
                     && card.api_key_id == claim.api_key_id && card.conversation_id == claim.conversation_id
                     && card.authored_skill.as_ref().is_some_and(|r| r.revision == reservation.proposal.revision)
                 {
-                    return Ok(card);
+                    return Ok((card, None));
                 }
                 return Err(conflict());
             }
@@ -317,5 +317,9 @@ pub(super) async fn finalize(
             }, Some(&origin), approval, session).await
         }).await;
         mutations::transaction_result(result)
-    }).await.map_err(mutations::map_transaction_error)
+    }).await.map_err(mutations::map_transaction_error)?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
+    Ok(card)
 }

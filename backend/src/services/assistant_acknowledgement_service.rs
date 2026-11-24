@@ -2411,20 +2411,21 @@ pub struct RequestOrigin {
 /// authority fence, deduplication and voice-confirmation bookkeeping.
 /// Pass the initiating caller's approval capability separately from a recovered
 /// origin's authority, which may now describe an unrelated active turn.
-pub async fn request_in_session(
+pub(crate) async fn request_in_session(
     db: &Database,
     chat: &ChatAuthority,
     request: Request<'_>,
     origin: Option<&RequestOrigin>,
     approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
-) -> AppResult<AssistantAcknowledgement> {
+) -> AppResult<(
+    AssistantAcknowledgement,
+    Option<super::assistant_activity_decision::ActivityBinding>,
+)> {
     let candidate = prepare_request_candidate(db, chat, request, None, None).await?;
-    Ok(
-        request_candidate_in_session(db, chat, &candidate, origin, approval, session)
-            .await?
-            .0,
-    )
+    let (row, _, binding) =
+        request_candidate_in_session(db, chat, &candidate, origin, approval, session).await?;
+    Ok((row, binding))
 }
 
 async fn request_tracked_with_machine_context(
@@ -2441,7 +2442,7 @@ async fn request_tracked_with_machine_context(
     let db = db.clone();
     let chat = chat.clone();
     let mut session = db.client().start_session().await?;
-    let (row, created) = session
+    let (row, created, binding) = session
         .start_transaction()
         .and_run2(async move |session| {
             let operation = Box::pin(request_candidate_in_session(
@@ -2457,6 +2458,9 @@ async fn request_tracked_with_machine_context(
         })
         .await
         .map_err(mutations::map_transaction_error)?;
+    if let Some(binding) = binding {
+        binding.publish_after_commit();
+    }
     if created && row.kind != "action" {
         audit_access_requested(&audit_db, &audit_chat, &row).await;
     }
@@ -2607,12 +2611,16 @@ async fn request_candidate_in_session(
     origin: Option<&RequestOrigin>,
     approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
-) -> AppResult<(AssistantAcknowledgement, bool)> {
+) -> AppResult<(
+    AssistantAcknowledgement,
+    bool,
+    Option<super::assistant_activity_decision::ActivityBinding>,
+)> {
     let result = Box::pin(request_candidate_inner(
         db, chat, candidate, origin, approval, session,
     ))
     .await?;
-    if !result.0.meta_contexts.is_empty() {
+    let binding = if !result.0.meta_contexts.is_empty() {
         super::assistant_activity_decision::bind_meta_in_session(
             db,
             chat,
@@ -2620,7 +2628,7 @@ async fn request_candidate_in_session(
             &result.0.id,
             session,
         )
-        .await?;
+        .await?
     } else {
         super::assistant_activity_decision::bind(
             db,
@@ -2631,8 +2639,9 @@ async fn request_candidate_in_session(
             Some(session),
         )
         .await?;
-    }
-    Ok(result)
+        None
+    };
+    Ok((result.0, result.1, binding))
 }
 
 async fn request_candidate_inner(

@@ -3515,12 +3515,24 @@ async fn start_chat_turn(
             ))
             .await?;
             (home.id, true)
+        } else if meta_grant.is_some() {
+            let agent =
+                crate::services::assistant_team_service::agent(&state.db, &actor, &agent_id)
+                    .await?;
+            let home = Box::pin(crate::services::assistant_team_service::home_thread_for(
+                &state.db,
+                &state.encryption_keys,
+                &actor,
+                &agent,
+            ))
+            .await?;
+            (home.id, true)
         } else {
             owner_thread(state, row, &agent_id).await?
         };
         // The chat now answers into that thread (asynchronous replies and
         // word confirmations find it there).
-        if let Some(grant) = &meta_grant {
+        let selected = if let Some(grant) = &meta_grant {
             crate::services::channel_meta_service::scopes::bind_thread_conversation(
                 &state.db,
                 row,
@@ -3528,7 +3540,7 @@ async fn start_chat_turn(
                 chat,
                 Some(&id),
             )
-            .await?;
+            .await?
         } else {
             state
                 .db
@@ -3538,8 +3550,9 @@ async fn start_chat_turn(
                     doc! {"$set": {"conversation_id": &id}},
                 )
                 .await?;
-        }
-        (id, exists)
+            id
+        };
+        (selected, exists)
     } else if execution.is_some() {
         crate::services::org_channel_service::transcript::lane_for_grant(
             &state.db,

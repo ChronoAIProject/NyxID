@@ -1019,53 +1019,71 @@ pub async fn home_thread_for(
     agent: &AssistantAgent,
 ) -> AppResult<AssistantConversation> {
     super::org_agent_service::require_use(db, actor, agent).await?;
-    // An agent's home is one of its own threads, never a chat app channel
-    // thread (a group's, or someone else's private chat), nor an isolated
-    // automation thread whose untrusted context must stay separate.
-    if let Some(id) = agent.home_conversation_id.as_deref()
-        && let Some(row) = db
-            .collection::<AssistantConversation>(CONVERSATIONS)
-            .find_one(doc! {"_id": id, "user_id": actor,
-            "channel": bson::Bson::Null, "platform_thread": bson::Bson::Null,
-            "automation_thread": {"$ne": true}})
-            .await?
-    {
-        return Ok(row);
-    }
+    // Resolve existing homes through the same private-thread identity used by
+    // the fallback selection. Group and automation threads cannot become home.
     let mut own = thread_filter_for(actor, agent);
     own.insert("channel", bson::Bson::Null);
     own.insert("platform_thread", bson::Bson::Null);
     own.insert("automation_thread", doc! {"$ne": true});
-    let newest = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one(own)
-        .sort(if actor == agent.user_id {
-            doc! {"updated_at": -1}
-        } else {
-            doc! {"created_at": 1, "_id": 1}
-        })
-        .await?;
-    if let Some(row) = newest {
-        if actor != agent.user_id {
+    let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
+    if let Some(id) = agent.home_conversation_id.as_deref() {
+        let mut pinned = own.clone();
+        pinned.insert("_id", id);
+        if let Some(row) = conversations.find_one(pinned).await? {
             return Ok(row);
         }
-        db.collection::<AssistantAgent>(AGENTS)
-            .update_one(
-                doc! {"_id": &agent.id},
-                doc! {"$set": {"home_conversation_id": &row.id}},
-            )
-            .await?;
-        return Ok(row);
     }
-    // The pointer referenced a deleted thread (or none exists): clear it so
-    // the new thread becomes home inside the transaction.
     if actor == agent.user_id {
-        db.collection::<AssistantAgent>(AGENTS)
-            .update_one(
-                doc! {"_id": &agent.id},
-                doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
-            )
-            .await?;
+        // Re-read the pointer in the creating transaction. Concurrent first
+        // deliveries retry against the winner's committed home.
+        return super::transaction_service::run_db_only(
+            db,
+            &(db, keys, actor, agent, &own),
+            |tx, &(db, keys, actor, agent, own)| {
+                Box::pin(async move {
+                    let agents = db.collection::<AssistantAgent>(AGENTS);
+                    let live = agents
+                        .find_one(doc! {"_id":&agent.id,"user_id":actor})
+                        .session(&mut *tx)
+                        .await?
+                        .ok_or_else(not_found)?;
+                    let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
+                    if let Some(id) = &live.home_conversation_id {
+                        let mut pinned = own.clone();
+                        pinned.insert("_id", id);
+                        if let Some(row) = conversations.find_one(pinned).session(&mut *tx).await? {
+                            return Ok(row);
+                        }
+                    }
+                    let existing = conversations
+                        .find_one(own.clone())
+                        .sort(doc! {"updated_at":-1,"_id":1})
+                        .session(&mut *tx)
+                        .await?;
+                    agents
+                        .update_one(
+                            doc! {"_id":&live.id,"user_id":actor},
+                            doc! {"$set":{
+                                "home_conversation_id":existing.as_ref().map(|row|&row.id)
+                            }},
+                        )
+                        .session(&mut *tx)
+                        .await?;
+                    if let Some(row) = existing {
+                        return Ok(row);
+                    }
+                    create_thread_for(db, keys, actor, &live, &live.name, tx).await
+                })
+            },
+        )
+        .await;
+    }
+    if let Some(row) = conversations
+        .find_one(own)
+        .sort(doc! {"created_at":1,"_id":1})
+        .await?
+    {
+        return Ok(row);
     }
     let mut session = db.client().start_session().await?;
     let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
