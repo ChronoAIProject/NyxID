@@ -184,11 +184,10 @@ pub(crate) async fn select(
                     .ok_or(AppError::AssistantTurnRequired)?,
             )
         }
-    } else if origin.is_some() {
-        None
-    } else if first
-        .as_ref()
-        .is_some_and(|input| input.role != "event" || !input.proofs.is_empty())
+    } else if origin.is_some()
+        || first
+            .as_ref()
+            .is_some_and(|input| input.role != "event" || !input.proofs.is_empty())
         || !active_contexts.is_empty()
         || active
             .is_some_and(|turn| turn.trigger_run_id.is_some() || turn.automation_work.is_some())
