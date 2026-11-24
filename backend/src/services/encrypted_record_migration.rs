@@ -56,6 +56,7 @@ enum Adapter {
     NyxbotChannelKey,
     EventBinding,
     GatewayTransport,
+    CmaRequest,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -324,12 +325,12 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_cma_sandboxes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::CmaRequest,
         fields: &["request_ciphertext"],
     },
     Entry {
         collection: "assistant_cma_creations",
-        adapter: Adapter::Pending,
+        adapter: Adapter::CmaRequest,
         fields: &["request_ciphertext"],
     },
     Entry {
@@ -565,7 +566,8 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
         Some(
-            previous_labels::EVENT_BINDING_DIGEST
+            previous_labels::GATEWAY_SETUP_DIGEST
+            | previous_labels::EVENT_BINDING_DIGEST
             | previous_labels::CHANNEL_KEY_DIGEST
             | previous_labels::WHATSAPP_DIGEST
             | previous_labels::CHANNEL_BOT_DIGEST
@@ -772,6 +774,9 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::CmaRequest => {
+            super::assistant_cma_request_record::verify(keys, entry.collection, row).await
+        }
         Adapter::EventBinding => {
             super::nyxbot_event_binding_service::storage::verify(db, keys, row).await
         }
@@ -906,6 +911,9 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::CmaRequest => {
+            super::assistant_cma_request_record::migrate(db, keys, entry.collection, row).await
+        }
         Adapter::EventBinding => {
             super::nyxbot_event_binding_service::storage::migrate(db, keys, row).await
         }
@@ -1459,6 +1467,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 mod tests {
     mod channel_bots;
     mod channel_keys;
+    mod cma_requests;
     mod event_bindings;
     mod gateway_transport;
     mod registry;

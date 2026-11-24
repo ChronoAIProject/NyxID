@@ -68,8 +68,8 @@ A collection may use separate adapters for different fields.
 | `trigger_deliveries` | `envelope_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
 | `user_service_connections` | `credential_encrypted` | [connection_record_service.rs](../../backend/src/services/connection_record_service.rs) | Implemented |
 | `async_service_operation_artifacts` | `data_encrypted` | [generated_artifacts/storage.rs](../../backend/src/services/generated_artifacts/storage.rs) | Implemented |
-| `assistant_cma_sandboxes` | `request_ciphertext` | — | Pending |
-| `assistant_cma_creations` | `request_ciphertext` | — | Pending |
+| `assistant_cma_sandboxes` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
+| `assistant_cma_creations` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
@@ -92,12 +92,16 @@ new field generation. Owner transfer rebinds local credentials and retires the o
 generations in the transaction that moves the bot and its routes.
 [Bot record adapter](../../backend/src/services/channel_bot_record.rs) · [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
 
+Each CMA request copy uses its own stored collection, row ID, user ID and field.
+The adapter checks the hash of the exact HTTP body and compares the full source
+document before updating the envelope and its marker. An uncertain creation
+retains its request and idempotency key through rewrap and recovery.
+[CMA request storage](../../backend/src/services/assistant_cma_request_record.rs)
+
 ### Production storage for Pending fields
 
-- Mobile social sign-in stores and redeems its encrypted PKCE-bound response. CMA
-  sandbox recovery opens the sandbox request and checks the creation’s request
-  hash. The creation also retains its own encrypted copy until cleanup.
-  [Mobile delivery](../../backend/src/services/mobile_social_service.rs) · [Sandbox recovery](../../backend/src/services/assistant_cma_sandbox_service.rs) · [Creation admission](../../backend/src/services/assistant_cma_admission.rs)
+- Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
+  [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
