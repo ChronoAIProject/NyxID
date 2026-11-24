@@ -308,9 +308,9 @@ pub(crate) async fn relink_in_session(
         if !management_fenced {
             super::super::org_channel_service::fence_management(db, session, current, manager)
                 .await?;
-        } else {
-            super::super::org_channel_service::fence_binding(db, session, current).await?;
         }
+        // A combined transaction already fenced this old binding. Its access
+        // write separately checks the new binding after this relink.
         super::super::org_channel_service::live_doc(
             db,
             session,

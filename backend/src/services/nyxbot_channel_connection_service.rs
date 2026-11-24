@@ -772,26 +772,41 @@ pub(crate) async fn connect(
                 },
             )
             .await;
-            if let Err(error) = activation {
-                // The commit may have succeeded. A failed reread leaves the
-                // durable reservation to recovery, never destructive rollback.
-                let current = load_channel(state, owner, &id).await?;
-                if current.status != "active"
-                    || current.link_code_hash.as_deref() != Some(&sha256_hex(code.as_bytes()))
-                {
-                    let ids = releases::retire_connection(
-                        state,
-                        &current,
-                        ReleaseReason::SetupFailed,
-                        "failed",
-                        Some("setup_interrupted"),
-                    )
-                    .await?;
-                    releases::try_inline(state, &ids).await;
-                    return Err(error);
+            let row = match activation {
+                Ok(row) => row,
+                Err(error) => {
+                    // The commit may have succeeded. A failed reread leaves the
+                    // durable reservation to recovery, never destructive rollback.
+                    let current = load_channel(state, owner, &id).await?;
+                    if current.status != "active" {
+                        let ids = releases::retire_connection(
+                            state,
+                            &current,
+                            ReleaseReason::SetupFailed,
+                            "failed",
+                            Some("setup_interrupted"),
+                        )
+                        .await?;
+                        releases::try_inline(state, &ids).await;
+                        return Err(error);
+                    }
+                    if current.link_code_hash.as_deref() != Some(&sha256_hex(code.as_bytes())) {
+                        return Err(AppError::Conflict(
+                            "Owner link was superseded; check the current assignment".into(),
+                        ));
+                    }
+                    current
                 }
+            };
+            let row = if guarded_default {
+                row
+            } else {
+                load_channel(state, owner, &id).await?
+            };
+            #[cfg(test)]
+            if guarded_default {
+                super::durable_wake_tests::after("meta_new_connect_after_commit").await;
             }
-            let row = load_channel(state, owner, &id).await?;
             if !restoration {
                 audit(
                     state,
@@ -822,7 +837,11 @@ pub(crate) async fn connect(
             if let Some(code) = effects.sync_gateway_groups(state, &row, true).await? {
                 tracing::warn!(code, "NyxBot gateway group admission not restored");
             }
-            let row = load_channel(state, owner, &id).await?;
+            let row = if guarded_default {
+                row
+            } else {
+                load_channel(state, owner, &id).await?
+            };
             let link = LinkInstructions {
                 url: link_url(&row, &code),
                 code,

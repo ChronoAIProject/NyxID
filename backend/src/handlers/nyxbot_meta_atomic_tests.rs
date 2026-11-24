@@ -706,23 +706,57 @@ async fn combined_org_meta_patch_shares_authority_and_preserves_old_and_new_bind
             .unwrap()
             .get_i64("org_channel_fence")
             .unwrap_or(0);
+        let channel_fence_before = state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("org_channel_fence")
+            .unwrap_or(0);
         let Json(response) = link_channel(
             State(state.clone()),
             crate::test_utils::test_auth_user(OWNER),
             Path(row.id.clone()),
             Json(LinkRequest {
                 agent_id: Some(second.id.clone()),
-                private_chats: Some("owner".into()),
+                private_chats: Some("everyone".into()),
                 private_chat_posts: Some(false),
                 apply_to_existing: false,
             }),
         )
         .await
         .unwrap();
-        assert_eq!(response["private_chats"], "owner");
+        assert_eq!(response["private_chats"], "everyone");
+        assert_eq!(
+            response["audience_readiness"]["configuration"]["instructions_present"],
+            true
+        );
+        assert_ne!(response["guest_readiness"]["reason"], "agent_unavailable");
+        assert!(
+            response["guest_access_description"]
+                .as_str()
+                .unwrap()
+                .contains("organization")
+        );
+        let channel_fence_after = state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("org_channel_fence")
+            .unwrap();
+        assert_eq!(
+            channel_fence_after - channel_fence_before,
+            2,
+            "old binding once, new binding once"
+        );
         let after = load_channel(&state, OWNER, &row.id).await.unwrap();
         assert_eq!(after.agent_id.as_deref(), Some(second.id.as_str()));
-        assert_eq!(after.private_chats.as_deref(), Some("owner"));
+        assert_eq!(after.private_chats.as_deref(), Some("everyone"));
         assert_ne!(
             after.org_specialist.as_ref().unwrap().revision,
             row.org_specialist.as_ref().unwrap().revision
@@ -762,4 +796,313 @@ async fn combined_org_meta_patch_shares_authority_and_preserves_old_and_new_bind
             Err(AppError::Conflict(_))
         ));
     }
+}
+
+#[tokio::test]
+async fn legacy_meta_policy_cannot_lift_execution_refusal_without_a_live_route() {
+    use crate::services::{org_channel_service as org, security_readiness_service as readiness};
+    for fault in ["missing-cap", "stale-digest"] {
+        let (state, _calls, _server) = setup("meta_legacy_execution_gate").await;
+        let (mut row, _, org_id) = org_meta(&state).await;
+        let replica = readiness::overlapping_test_replica(&state.db).await;
+        readiness::remove_test_replica_capability(&state.db, &replica, org::GUEST_GRANTS_READINESS)
+            .await;
+        let policy = &mut row.org_specialist.as_mut().unwrap().guests;
+        policy.enabled = true;
+        policy.revision = Uuid::new_v4().to_string();
+        policy.daily_credits = if fault == "missing-cap" {
+            None
+        } else {
+            Some(crate::models::credits::Credits::from_whole(10))
+        };
+        if fault == "stale-digest" {
+            policy.service_ids = vec!["prior-service".into()];
+            policy
+                .service_authority
+                .insert("prior-service".into(), "stale".into());
+        }
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        callback_for(
+            &state,
+            &org_id,
+            &row.route_api_key_id,
+            "https://callbacks.example.test/drift",
+        )
+        .await;
+        let before = row.org_specialist.as_ref().unwrap().guests.clone();
+        let edit = if fault == "missing-cap" {
+            json!({"daily_credits":"1","expected_revision":before.revision})
+        } else {
+            json!({"service_ids":[],"expected_revision":before.revision})
+        };
+        assert!(matches!(
+            crate::handlers::org_specialist_channels::update_tool(&state, OWNER, &row.id, &edit)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .org_specialist
+                .unwrap()
+                .guests,
+            before
+        );
+        if fault == "stale-digest" {
+            // Narrow the budget without reauthorizing the unrelated stale delegation.
+            crate::handlers::org_specialist_channels::update_tool(
+                &state,
+                OWNER,
+                &row.id,
+                &json!({"daily_credits":"5","expected_revision":before.revision}),
+            )
+            .await
+            .unwrap();
+            let saved = load_channel(&state, OWNER, &row.id)
+                .await
+                .unwrap()
+                .org_specialist
+                .unwrap()
+                .guests;
+            assert_eq!(saved.service_authority, before.service_authority);
+            assert_eq!(saved.service_ids, before.service_ids);
+        }
+        callback_for(
+            &state,
+            &org_id,
+            &row.route_api_key_id,
+            &crate::services::nyxbot_channel_query_service::direct_callback(
+                &state.config.base_url,
+                &row.id,
+            ),
+        )
+        .await;
+        let current = load_channel(&state, OWNER, &row.id).await.unwrap();
+        let edit = if fault == "missing-cap" {
+            json!({"daily_credits":"1","expected_revision":current.org_specialist.as_ref().unwrap().guests.revision})
+        } else {
+            json!({"service_ids":[],"expected_revision":current.org_specialist.as_ref().unwrap().guests.revision})
+        };
+        crate::handlers::org_specialist_channels::update_tool(&state, OWNER, &row.id, &edit)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn meta_org_enable_cannot_fall_back_to_legacy_after_readiness_preflight() {
+    use crate::services::{org_channel_service as org, security_readiness_service as readiness};
+    let (state, _calls, _server) = setup("meta_org_enable_readiness_boundary").await;
+    let (row, agent, _) = org_meta(&state).await;
+    let (router, token) = app(&state).await;
+    let replica = readiness::overlapping_test_replica(&state.db).await;
+    assert!(org::guest_grants_ready(&state.db).await.unwrap());
+    crate::services::durable_wake_tests::resume_after(
+        "org_meta_before_guest_mode",
+        async {
+            let (status, body) = action(
+                &router,
+                &token,
+                &row.channel_bot_id,
+                &agent.id,
+                "enable_guests",
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        },
+        async {
+            readiness::remove_test_replica_capability(
+                &state.db,
+                &replica,
+                org::GUEST_GRANTS_READINESS,
+            )
+            .await;
+        },
+    )
+    .await;
+    let closed = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(closed.private_chats, row.private_chats);
+    assert_eq!(
+        closed.org_specialist.as_ref().unwrap().guests,
+        row.org_specialist.as_ref().unwrap().guests
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+        .delete_one(doc! {"_id":replica.id})
+        .await
+        .unwrap();
+    let (status, body) = action(
+        &router,
+        &token,
+        &row.channel_bot_id,
+        &agent.id,
+        "enable_guests",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .org_specialist
+            .unwrap()
+            .guests
+            .enabled
+    );
+}
+
+#[tokio::test]
+async fn first_and_repaired_meta_connect_return_their_committed_owner_code() {
+    for repair in [false, true] {
+        let (state, _calls, _server) = setup("meta_activation_response_snapshot").await;
+        let _ = app(&state).await;
+        let first = specialist_named(&state, "activation-first").await;
+        let second = specialist_named(&state, "activation-second").await;
+        let bot_id = if repair {
+            let (_, _, _, row) = assigned(&state, "instagram").await;
+            routes::update_conversation(
+                &state.db,
+                row.route_id.as_deref().unwrap(),
+                OWNER,
+                None,
+                None,
+                Some(false),
+                None,
+            )
+            .await
+            .unwrap();
+            row.channel_bot_id
+        } else {
+            let bot = bot_doc("instagram", "Fresh response inbox");
+            let id = bot.get_str("_id").unwrap().to_owned();
+            state
+                .db
+                .collection::<bson::Document>("channel_bots")
+                .insert_one(bot)
+                .await
+                .unwrap();
+            id
+        };
+        let snapshot = std::sync::Mutex::new(None);
+        crate::services::durable_wake_tests::resume_after(
+            "meta_new_connect_after_commit",
+            async {
+                let Json(response) = connect_channel(
+                    State(state.clone()),
+                    crate::test_utils::test_auth_user(OWNER),
+                    Json(ConnectRequest {
+                        bot_id: bot_id.clone(),
+                        agent_id: Some(first.id.clone()),
+                    }),
+                )
+                .await
+                .unwrap();
+                let committed: NyxbotChannel = snapshot.lock().unwrap().clone().unwrap();
+                assert_eq!(response["channel_agent"]["agent_id"], first.id);
+                assert_eq!(
+                    response["link"]["expires_at"],
+                    json!(committed.link_code_expires_at.unwrap())
+                );
+                assert_eq!(
+                    committed.link_code_hash,
+                    Some(crate::crypto::token::hash_token(
+                        response["link"]["code"].as_str().unwrap()
+                    ))
+                );
+                let current = load_channel(&state, OWNER, &committed.id).await.unwrap();
+                assert_eq!(current.agent_id.as_deref(), Some(second.id.as_str()));
+                assert_ne!(current.link_code_hash, committed.link_code_hash);
+            },
+            async {
+                let current = state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"channel_bot_id":&bot_id,"status":"active"})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                *snapshot.lock().unwrap() = Some(current);
+                let Json(response) = connect_channel(
+                    State(state.clone()),
+                    crate::test_utils::test_auth_user(OWNER),
+                    Json(ConnectRequest {
+                        bot_id: bot_id.clone(),
+                        agent_id: Some(second.id.clone()),
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response["channel_agent"]["agent_id"], second.id);
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn combined_meta_patch_keeps_readiness_for_its_committed_target_during_a_second_relink() {
+    let (state, _calls, _server) = setup("meta_committed_audience_result").await;
+    let (_, _, first, row) = assigned(&state, "instagram").await;
+    let second = specialist_named(&state, "committed-readiness-second").await;
+    state
+        .db
+        .collection::<bson::Document>("assistant_agents")
+        .update_one(doc! {"_id":&first.id}, doc! {"$set":{"description":""}})
+        .await
+        .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "meta_combined_after_commit",
+        async {
+            let Json(response) = link_channel(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(OWNER),
+                Path(row.id.clone()),
+                Json(LinkRequest {
+                    agent_id: Some(second.id.clone()),
+                    private_chats: Some("everyone".into()),
+                    private_chat_posts: None,
+                    apply_to_existing: false,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response["agent"], second.name);
+            assert_eq!(
+                response["audience_readiness"]["configuration"]["instructions_present"],
+                true
+            );
+            assert_eq!(
+                load_channel(&state, OWNER, &row.id)
+                    .await
+                    .unwrap()
+                    .agent_id
+                    .as_deref(),
+                Some(first.id.as_str())
+            );
+        },
+        async {
+            let Json(response) = link_channel(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(OWNER),
+                Path(row.id.clone()),
+                Json(LinkRequest {
+                    agent_id: Some(first.id.clone()),
+                    private_chats: None,
+                    private_chat_posts: None,
+                    apply_to_existing: false,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response["agent"], first.name);
+        },
+    )
+    .await;
 }

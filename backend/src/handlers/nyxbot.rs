@@ -2885,15 +2885,17 @@ pub async fn link_channel(
         || settings.private_chat_posts.is_some()
         || settings.apply_to_existing;
     let combined = has_settings && body.agent_id.is_some();
+    let mut committed_meta_audience = false;
     if combined {
-        result = crate::services::nyxbot_channel_setup_service::update_assignment_access(
-            &state,
-            &owner,
-            &id,
-            body.agent_id.as_deref().expect("combined assignment"),
-            &settings,
-        )
-        .await?;
+        (result, committed_meta_audience) =
+            crate::services::nyxbot_channel_setup_service::update_assignment_access(
+                &state,
+                &owner,
+                &id,
+                body.agent_id.as_deref().expect("combined assignment"),
+                &settings,
+            )
+            .await?;
     } else if has_settings {
         result = chats::update_access(&state, &owner, &id, &settings).await?;
     }
@@ -2907,7 +2909,7 @@ pub async fn link_channel(
         }
         // A combined relink/audience PATCH must describe the final target, not
         // the agent loaded before linking. Diagnostics cannot undo a saved change.
-        if settings.private_chats.as_deref() == Some("everyone") {
+        if settings.private_chats.as_deref() == Some("everyone") && !committed_meta_audience {
             match chats::audience_readiness(&state, &owner, &id).await {
                 Ok(facts) => {
                     result["guest_readiness"] = json!(&facts.guest_readiness);
