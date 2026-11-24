@@ -918,6 +918,7 @@ async fn exact_turn_feedback_and_artifact_deliveries_drain_before_source_and_kee
         let write = |id: &str, turn: &str| FeedbackWrite {
             user_id: f.bot.user_id.clone(),
             message_id: id.into(),
+            check_source_grant: true,
             conversation_id: Some(conversation.clone()),
             group_id: None,
             turn_id: Some(turn.into()),

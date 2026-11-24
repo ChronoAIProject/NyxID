@@ -1895,6 +1895,18 @@ async fn generated_artifact_publication_uses_retained_turn_grant_and_refuses_aft
         )
         .await
         .unwrap();
+    // Long ordinary histories share this artifact path. Untagged rows must
+    // neither exhaust the proof limit nor hide the one tagged source.
+    let ordinary: Vec<_> = (2..=102).map(|seq| doc! {
+        "_id": Uuid::new_v4().to_string(), "user_id": &w.user_id,
+        "conversation_id": &w.conversation_id, "turn_id": &w.turn_id,
+        "role": "assistant", "origin":"user", "seq":seq,
+        "text":"Independent progress", "status":"completed", "created_at":bson::DateTime::now(),
+    }).collect();
+    db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .insert_many(ordinary)
+        .await
+        .unwrap();
     db.collection::<Document>(WATCHES)
         .update_one(
             doc! {"_id":&w.id},

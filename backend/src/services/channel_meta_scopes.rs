@@ -416,7 +416,12 @@ pub(crate) async fn fence_assistant_turn(
 ) -> AppResult<()> {
     let mut cursor = db
         .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
-        .find(doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn})
+        // A long ordinary turn has no grant evidence to validate.
+        .find(
+            doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,
+            "meta_grants":{"$exists":true, "$ne":null}},
+        )
+        .projection(doc! {"_id":0,"meta_grants":1})
         .limit(101)
         .session(&mut *tx)
         .await?;
