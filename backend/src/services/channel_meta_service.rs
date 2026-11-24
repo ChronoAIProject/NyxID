@@ -1412,6 +1412,60 @@ impl MetaService<'_> {
         )
         .await
     }
+    pub(crate) async fn delete_snapshot(
+        &self,
+        actor: &str,
+        bot: &ChannelBot,
+    ) -> AppResult<Option<&'static str>> {
+        super::channel_connection_webhook_service::serialized(
+            self.db,
+            &format!("meta-asset:{}:{}", bot.platform, bot.platform_bot_id),
+            self.delete_snapshot_inner(actor, bot),
+        )
+        .await
+    }
+    async fn delete_snapshot_inner(
+        &self,
+        actor: &str,
+        bot: &ChannelBot,
+    ) -> AppResult<Option<&'static str>> {
+        let grant = &bot.meta_binding.as_ref().ok_or_else(conflict)?.grant_id;
+        let stopped = grants::stop_for_delete(self.db, actor, bot).await?;
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_delete_after_stop").await;
+        let result = self.disconnect_inner(&stopped).await;
+        let current = match super::channel_bot_service::get_bot_for_user(
+            self.db,
+            &bot.id,
+            &bot.user_id,
+        )
+        .await
+        {
+            Ok(current) => current,
+            Err(AppError::ChannelBotNotFound(_))
+                if grants::completion_for(self.db, &bot.id, grant).await? =>
+            {
+                return Ok(Some("removed"));
+            }
+            Err(error) => return Err(error),
+        };
+        if current.is_active {
+            return Err(result.err().unwrap_or_else(conflict));
+        }
+        let removed = current
+            .meta_binding
+            .as_ref()
+            .is_some_and(|binding| binding.subscription == "removed");
+        self.db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .update_many(
+                doc! {"channel_bot_id":&bot.id},
+                doc! {"$set":{"is_active":false,"updated_at":bson::DateTime::now()}},
+            )
+            .await?;
+        Ok(Some(if removed { "removed" } else { "failed" }))
+    }
+
     pub async fn disconnect(&self, bot: &ChannelBot) -> AppResult<()> {
         super::channel_connection_webhook_service::serialized(
             self.db,
@@ -1697,9 +1751,10 @@ pub(crate) async fn sweep_service(
     let outcomes=stream::iter(0..16).map(|_| async {
         let Some((bot,lease))=claim_due(service.db).await? else {return Ok(());};
         let result=if !bot.is_active {
+            let manual_purge = grants::manual_purge_authorized(service.db,&bot).await?;
             let result = service.disconnect(&bot).await;
             if result.is_ok() && bot.credential_source != "platform"
-                && grants::manual_purge_authorized(service.db,&bot).await?
+                && manual_purge
                 && let Ok(live) = super::channel_bot_service::get_bot(service.db, &bot.id).await
                 && live.meta_binding.as_ref().is_some_and(|binding| binding.subscription == "removed")
             {

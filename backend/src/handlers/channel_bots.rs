@@ -1712,18 +1712,16 @@ pub async fn delete_bot(
 
     // Resolve the effective owner (personal or org via admin access).
     let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    #[cfg(test)]
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) {
+        crate::services::durable_wake_tests::after("meta_delete_after_authorization").await;
+    }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     let managed_webhook_cleanup = if crate::services::channel_adapters::meta::is_meta(&bot.platform)
     {
-        channel_bot_service::delete_bot_with_state_as_actor(
-            &state,
-            adapter.as_ref(),
-            &bot_id,
-            &owner_id,
-            &actor,
-        )
-        .await?
+        channel_bot_service::delete_bot_observed_with_state(&state, adapter.as_ref(), &bot, &actor)
+            .await?
     } else {
         channel_bot_service::delete_bot_with_state(&state, adapter.as_ref(), &bot_id, &owner_id)
             .await?

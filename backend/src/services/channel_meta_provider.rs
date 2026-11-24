@@ -301,6 +301,10 @@ pub async fn accept_provider_request(
                 if let Some(existing) = db.collection::<bson::Document>(REQUESTS)
                     .find_one(doc! {"request_hash": hash}).session(&mut *tx).await?
                 {
+                    let cutoff = bson::DateTime::from_chrono(*issued + Duration::seconds(1));
+                    db.collection::<bson::Document>(REQUESTS).update_one(
+                        doc! {"_id":existing.get("_id").cloned(),"request_hash":hash},
+                        doc! {"$set":{"signed_cutoff":cutoff}}).session(&mut *tx).await?;
                     return Ok(existing.get_str("_id").map_err(|_| invalid())?.to_owned());
                 }
                 let identity = grant_identity(platform, app, subject)?;
@@ -347,7 +351,7 @@ pub async fn accept_provider_request(
                         Ok(at) if at >= &cutoff => continue,
                         Ok(_) => {
                             let bot: ChannelBot = bson::from_document(raw.clone()).map_err(|_|invalid())?;
-                            apply_callback_state(db,tx,&bot,*erase).await?;
+                            apply_callback_state(db,tx,&bot,*erase,&cutoff).await?;
                         }
                         Err(_) => {} // Exact identity, unresolved chronology: no destructive effect.
                     }
@@ -458,8 +462,7 @@ async fn reconcile_job(
             erase,
             bot_id,
             grant_id,
-            job.get_datetime("signed_cutoff")
-                .map_err(|_| super::grants::incomplete())?,
+            job.get_datetime("signed_cutoff").ok(),
         )
         .await
         {
@@ -505,8 +508,25 @@ async fn reconcile_target(
     erase: bool,
     bot_id: &str,
     grant_id: &str,
-    cutoff: &bson::DateTime,
+    cutoff: Option<&bson::DateTime>,
 ) -> AppResult<()> {
+    let cutoff = if let Some(cutoff) = cutoff {
+        cutoff
+    } else {
+        let proof = state
+            .db
+            .collection::<bson::Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"_id":bot_id})
+            .await?
+            .ok_or_else(super::grants::incomplete)?;
+        if erase && super::grants::completed(&proof, grant_id)? {
+            return super::super::personal_erasure_service::erase_provider_inbox(
+                state, bot_id, grant_id,
+            )
+            .await;
+        }
+        return Err(super::grants::incomplete());
+    };
     let raw = state
         .db
         .collection::<bson::Document>(BOTS)
@@ -525,11 +545,13 @@ async fn reconcile_target(
             }
             let bot: ChannelBot =
                 bson::from_document(raw.clone()).map_err(|_| super::grants::incomplete())?;
+            #[cfg(test)]
+            super::super::durable_wake_tests::after("meta_provider_before_transition").await;
             super::super::transaction_service::run_db_only(
                 &state.db,
-                &(&state.db, &bot, erase),
-                |tx, &(db, bot, erase)| {
-                    Box::pin(async move { apply_callback_state(db, tx, bot, erase).await })
+                &(&state.db, &bot, erase, cutoff),
+                |tx, &(db, bot, erase, cutoff)| {
+                    Box::pin(async move { apply_callback_state(db, tx, bot, erase, cutoff).await })
                 },
             )
             .await?;
@@ -631,10 +653,30 @@ async fn apply_callback_state(
     tx: &mut mongodb::ClientSession,
     bot: &ChannelBot,
     erase: bool,
+    cutoff: &bson::DateTime,
 ) -> AppResult<()> {
+    // The live row and monotonic erasure bit belong to this transaction, not
+    // the worker's earlier snapshot. A delayed deauth cannot undo deletion.
+    let mut filter =
+        doc! {"_id":&bot.id,"user_id":&bot.user_id,"platform_bot_id":&bot.platform_bot_id};
+    filter.extend(super::grants::grant_filter(
+        &bot.meta_binding.as_ref().ok_or_else(invalid)?.grant_id,
+    ));
+    let bot = db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(filter)
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(conflict)?;
     let binding = bot.meta_binding.as_ref().ok_or_else(invalid)?;
+    let authorized = binding
+        .authorized_at
+        .ok_or_else(super::grants::incomplete)?;
+    if bson::DateTime::from_chrono(authorized) >= *cutoff {
+        return Ok(());
+    }
     let advance = bot.is_active && !binding.provider_revoked;
-    let keep = !erase && bot.is_active;
+    let keep = !erase && !binding.erasure_requested && bot.is_active;
     let subscription = if keep && binding.operator_suspended {
         "suspended"
     } else if keep {

@@ -214,6 +214,31 @@ async fn erase_attributed(
             ])
             .max_time(std::time::Duration::from_secs(5))
             .await?.try_collect().await?;
+        // Native saved plans use the original event UUID as their source.
+        // Personal conversation deletion may remove the handoff while this
+        // independent delivery origin and channel parent remain available.
+        let native: Vec<Document> = db
+            .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+            .find(doc! {"_id":{"$in":&sources}})
+            .projection(doc! {"user_id":1,"channel_id":1,"partition":1,"delivery.origin":1})
+            .max_time(std::time::Duration::from_secs(5))
+            .await?
+            .try_collect()
+            .await?;
+        let native_channels: Vec<_> = native
+            .iter()
+            .filter_map(|event| event.get_str("channel_id").ok())
+            .collect();
+        let parents: Vec<Document> = if native_channels.is_empty() {
+            Vec::new()
+        } else {
+            db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+                .find(doc! {"_id":{"$in":native_channels}})
+                .projection(doc! {"user_id":1,"channel_bot_id":1,"platform":1})
+                .await?
+                .try_collect()
+                .await?
+        };
         let mut remove = Vec::new();
         let mut attribute = std::collections::BTreeMap::<String, Vec<Document>>::new();
         let mut unresolved = false;
@@ -230,6 +255,16 @@ async fn erase_attributed(
                 .filter(|row| row.get_str("inbound_message_id") == Ok(plan.source_id.as_str()))
             {
                 evidence.observe(receipt, &plan.user_id, "inbound_message_id");
+            }
+            for event in native
+                .iter()
+                .filter(|event| event.get_str("_id") == Ok(plan.source_id.as_str()))
+            {
+                match native_target(event, &parents, plan, bot_id, platform) {
+                    Ok(Some(target)) => evidence.prove(target),
+                    Ok(None) => {}
+                    Err(()) => evidence.conflicting = true,
+                }
             }
             if evidence.proven.is_none() && !evidence.conflicting {
                 let canonical = plan.logical_key.starts_with("saved-result:");
@@ -291,6 +326,60 @@ async fn erase_attributed(
             return Err(attribution_required(bot_id));
         }
     }
+}
+
+fn native_target(
+    event: &Document,
+    parents: &[Document],
+    plan: &LegacyPlan,
+    erased_bot: &str,
+    erased_platform: &str,
+) -> Result<Option<Target>, ()> {
+    if event.get_str("user_id") != Ok(plan.user_id.as_str()) {
+        return Ok(None);
+    }
+    let origin = event
+        .get_document("delivery")
+        .and_then(|delivery| delivery.get_document("origin"))
+        .map_err(|_| ())?;
+    let origin: crate::models::assistant_conversation::ChannelOrigin =
+        bson::from_document(origin.clone()).map_err(|_| ())?;
+    if event.get_str("channel_id") != Ok(origin.nyxbot_channel_id.as_str())
+        || event.get_str("partition") != Ok(origin.partition.as_str())
+        || origin
+            .native_event_id
+            .as_deref()
+            .is_some_and(|id| id != plan.source_id)
+    {
+        return Err(());
+    }
+    let cache =
+        std::sync::Arc::new(super::provider_token_exchange_service::TokenExchangeCache::new());
+    if super::channel_adapters::resolve_adapter(&origin.platform, &cache).is_err() {
+        return Err(());
+    }
+    if let Some(key) = plan.logical_key.strip_prefix("saved-result:") {
+        let (turn, _) = key.split_once(':').ok_or(())?;
+        if turn.is_empty()
+            || super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key
+        {
+            return Err(());
+        }
+    }
+    let parent = parents
+        .iter()
+        .find(|parent| parent.get_str("_id") == Ok(origin.nyxbot_channel_id.as_str()))
+        .ok_or(())?;
+    if parent.get_str("user_id") != Ok(plan.user_id.as_str())
+        || parent.get_str("platform") != Ok(origin.platform.as_str())
+    {
+        return Err(());
+    }
+    let bot = parent.get_str("channel_bot_id").map_err(|_| ())?;
+    if bot == erased_bot && origin.platform != erased_platform {
+        return Err(());
+    }
+    Ok(Some(Target::Bot(bot.to_owned())))
 }
 
 enum SavedTarget {
@@ -804,6 +893,126 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn deleted_saved_handoff_recovers_native_sibling_from_retained_event_and_persists_parent()
+    {
+        let (state, _, _server, mut bot) = fixture("instagram").await;
+        stop_for_erasure(&state, &mut bot).await;
+        let native_bot = uuid::Uuid::new_v4().to_string();
+        let channel = uuid::Uuid::new_v4().to_string();
+        let mut native_parent = parent(&bot.user_id, &native_bot, &channel, "discord");
+        native_parent.insert("bot_owner_id", uuid::Uuid::new_v4().to_string());
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .insert_one(native_parent)
+            .await
+            .unwrap();
+        let event = uuid::Uuid::new_v4().to_string();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let turn = uuid::Uuid::new_v4().to_string();
+        let origin = ChannelOrigin {
+            org_execution: None,
+            native_event_id: Some(event.clone()),
+            thread: None,
+            nyxbot_channel_id: channel.clone(),
+            partition: "private-native".into(),
+            platform: "discord".into(),
+        };
+        let key = channel_supplemental_delivery::saved_key(&turn, &origin);
+        let receipt = channel_text_delivery::begin(
+            &state.db,
+            &key,
+            &bot.user_id,
+            &event,
+            "native-receipt",
+            1,
+        )
+        .await
+        .unwrap();
+        let now = bson::DateTime::now();
+        state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME).insert_one(doc! {
+            "_id":&conversation,"user_id":&bot.user_id,"title":"Personal saved answer","model":"test",
+            "credential_api_key_id":"","message_count":1_i64,"created_at":now,"updated_at":now}).await.unwrap();
+        state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME).insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"user_id":&bot.user_id,"conversation_id":&conversation,
+            "turn_id":&turn,"role":"assistant","handoff_delivery":{"targets":[saved(&turn,&origin)]}}).await.unwrap();
+        state.db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME).insert_one(doc! {
+            "_id":&event,"user_id":&bot.user_id,"channel_id":&channel,"partition":&origin.partition,"event_id":"native-source",
+            "status":"completed","conversation_id":&conversation,"turn_id":&turn,"created_at":now,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::days(30)),
+            "delivery":{"version":1,"state":"sent","origin":bson::to_bson(&origin).unwrap(),"sender_id":"native-sender",
+                "guest":false,"addressed":true,"transport":"gateway","stream_deadline":now,"checked_at":now}}).await.unwrap();
+        super::super::assistant_nyxagent::delete(&state.db, &bot.user_id, &conversation)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .db
+                .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(doc! {"turn_id":&turn})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .db
+                .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&event})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let unknown_source = uuid::Uuid::new_v4().to_string();
+        let unknown_key = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "a".repeat(64));
+        channel_text_delivery::begin(
+            &state.db,
+            &unknown_key,
+            &bot.user_id,
+            &unknown_source,
+            "unresolved",
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            erase_legacy(&state.db, &bot).await,
+            Err(AppError::Conflict(_))
+        ));
+        let plans = state
+            .db
+            .collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
+        assert!(
+            plans
+                .find_one(doc! {"_id":&receipt.id,"channel_bot_id":&native_bot})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // The original native source can now expire without losing sibling proof.
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+            .delete_one(doc! {"_id":event})
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(doc! {
+            "_id":unknown_source,"user_id":&bot.user_id,"channel_bot_id":&bot.id})
+            .await
+            .unwrap();
+        erase_legacy(&state.db, &bot).await.unwrap();
+        assert!(
+            plans
+                .find_one(doc! {"_id":&receipt.id,"channel_bot_id":native_bot})
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn query_counter(stats: &Document, name: &str) -> i64 {

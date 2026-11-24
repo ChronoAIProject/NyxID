@@ -326,9 +326,18 @@ Signed requests retain their authenticated authorization cutoff. A missing or
 malformed authorization date keeps that exact target pending without revoking
 its token, unsubscribing it or purging its data. Verified chronology repair is
 checked against both sides of the original cutoff before any provider effect.
-A later grant stays outside the request. Missing or malformed exact completion
+A later grant stays outside the request. A verified replay can restore the
+original authenticated cutoff on an earlier request format; exact durable
+completion proof can settle an already erased target independently of that date.
+Deauthorization transitions reread the live grant in their transaction and
+preserve a concurrent deletion request.
+Missing or malformed exact completion
 proof cannot remove a retained obligation or acknowledge success.
 
+Manual Delete acquires the existing asset lease before stopping the installation;
+a busy asset returns the existing retry conflict with its bot and routes intact.
+It captures the handler's authorized snapshot and accepts a concurrent successful
+purge only from typed completion proof for that captured grant.
 Manual Delete captures its actor, owner, credential source, grant and stopped
 generation on the original bot in the stop transaction. HTTP cleanup, assistant
 Delete retries and account retirement honor that same obligation. A reconnect
@@ -364,6 +373,10 @@ ownership transfers) selects eligible receipts; the indexed exact turn lookup lo
 conversation owner against the saved destination's individual channel parent.
 That read is bounded and runs only when source/receipt evidence is insufficient;
 it does not enumerate channel-owner history or expand receipt ownership.
+When personal conversation deletion removed the saved handoff, a retained native
+event can still prove the exact journal owner, destination and channel parent.
+The source batch reads those events and parents by indexed IDs and persists
+positive sibling attribution on the original receipt before its source expires.
 Native gateway saved replies retain their existing linking-person journal owner
 and record their independently verified bot parent as well. It preserves positively identified sibling and other-platform
 receipts and never purges an owner's unrelated journals. Organization guest
