@@ -6,7 +6,6 @@ import type {
 } from "./types";
 
 export type BackendApprovalRequestItem = {
-  grant_expiry_days?: number | null;
   execution_proposal?: { version: number; state: string; review_path: string; supported?: boolean; can_decide?: boolean } | null;
   id: string;
   service_name: string;
@@ -85,7 +84,6 @@ export function mapBackendRequestToChallenge(
     action,
     resource,
     approval_mode: item.approval_mode,
-    grant_expiry_days: item.grant_expiry_days,
     risk_level: risk,
     status: mapChallengeStatus(item.status),
     created_at: item.created_at,

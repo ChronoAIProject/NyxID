@@ -72,7 +72,7 @@ export function toAssistantApprovalEntry(
       agent_key_prefix: request.requester_label ?? request.requester_type,
       approval_mode: request.approval_mode,
       grant_duration_sec:
-        request.approval_mode === "grant" ? (request.grant_expiry_days == null ? grantDurationSec : request.grant_expiry_days * 86400) : null,
+        request.approval_mode === "grant" ? grantDurationSec : null,
       expires_at: request.expires_at,
       decision: toDecision(request.status),
       decision_channel: toDecisionChannel(request.decision_channel),

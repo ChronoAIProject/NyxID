@@ -224,10 +224,15 @@ async fn ensure_row_approvable(
 
 pub(super) async fn resolve_default_service_ids(
     db: &Database,
-    _actor_user_id: &str,
+    actor_user_id: &str,
     owner_user_id: &str,
     default_services: Option<&[String]>,
 ) -> AppResult<Vec<String>> {
+    // Platform services belong to people; org approval only resolves existing org services.
+    if owner_user_id == actor_user_id {
+        crate::services::unified_key_service::auto_provision_no_auth_services(db, actor_user_id)
+            .await?;
+    }
     let Some(default_services) = default_services else {
         return Ok(Vec::new());
     };
@@ -456,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_approve_requires_opt_in_and_persists_scoped_catalog_grant() {
+    async fn auto_connected_device_approve_provisions_slug_and_persists_grant() {
         let (db, response, _) = setup_pending_row("auto_connected_device_approve")
             .await
             .unwrap();
@@ -468,32 +473,6 @@ mod tests {
         .insert_one(&catalog)
         .await
         .unwrap();
-        let rejected = approve_for_test(
-            &db,
-            &actor,
-            DeviceCodeApproveInput {
-                user_code: response.user_code.clone(),
-                org_id: None,
-                label: None,
-                default_services: Some(vec![catalog.slug.clone()]),
-                allow_auto_connected_services: true,
-            },
-        )
-        .await;
-        assert!(
-            rejected.is_err(),
-            "login must not create a missing service connection"
-        );
-        assert_eq!(
-            db.collection::<bson::Document>("user_services")
-                .count_documents(doc! {})
-                .await
-                .unwrap(),
-            0
-        );
-        crate::test_utils::connect_catalog_fixture_services(&db, &actor)
-            .await
-            .unwrap();
         let approved = approve_for_test(
             &db,
             &actor,

@@ -2942,10 +2942,6 @@ async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
-        fresh_decision: false,
-        caller_api_key_id: None,
-        approval_protocol: None,
-        grant_expiry_days_snapshot: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: None,

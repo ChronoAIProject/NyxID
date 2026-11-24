@@ -3,7 +3,6 @@ export type ApprovalMode = "per_request" | "grant";
 export type ApprovalDecisionChannel = "web" | "telegram" | "mobile";
 
 export type ChallengeItem = {
-  grant_expiry_days?: number | null;
   id: string;
   title: string;
   action: string;

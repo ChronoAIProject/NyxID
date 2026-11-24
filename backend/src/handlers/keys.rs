@@ -1341,6 +1341,15 @@ pub async fn list_keys_with_tool_bindings(
         &user_id_str,
     )
     .await?;
+    if auth_user.auth_method != AuthMethod::ApiKey {
+        unified_key_service::auto_provision_with_grants(
+            &state.db,
+            &user_id_str,
+            &grants,
+            &providers,
+        )
+        .await?;
+    }
     let views = unified_key_service::list_keys_read_only_with_tool_bindings(
         &state.db,
         &state.encryption_keys,

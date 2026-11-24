@@ -1681,9 +1681,24 @@ pub async fn resolve_proxy_target(
         ));
     }
 
-    if user_conn.is_none() {
+    if service.platform_key.is_some()
+        && user_conn.is_none()
+        && !user_has_legacy_personal_connection(db, user_id, None, Some(&service.id)).await?
+    {
+        return resolve_catalog_platform_target(
+            db,
+            encryption_keys,
+            user_id,
+            service,
+            platform_user_rate_limit,
+        )
+        .await;
+    }
+
+    // For services requiring user credentials, a connection record is mandatory
+    if service.requires_user_credential && user_conn.is_none() {
         return Err(AppError::Forbidden(
-            "You must connect to this service before making requests".into(),
+            "You must connect to this service before making requests".to_string(),
         ));
     }
 
@@ -1879,30 +1894,6 @@ pub async fn resolve_proxy_target_lenient(
     if service.service_category == "provider" {
         return Err(AppError::BadRequest(
             "Provider services are not proxyable".to_string(),
-        ));
-    }
-
-    let connection = db
-        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
-        .find_one(doc! {"user_id":user_id,"service_id":service_id})
-        .await?;
-    if connection
-        .as_ref()
-        .is_some_and(|connection| !connection.is_active)
-    {
-        return Err(AppError::Forbidden(
-            "You have disconnected from this service".into(),
-        ));
-    }
-    if connection.is_none()
-        && db
-            .collection::<bson::Document>(crate::models::node_service_binding::COLLECTION_NAME)
-            .find_one(doc! {"user_id":user_id,"service_id":service_id,"is_active":true})
-            .await?
-            .is_none()
-    {
-        return Err(AppError::Forbidden(
-            "You must connect to this service before making requests".into(),
         ));
     }
 
@@ -2299,27 +2290,6 @@ async fn resolve_proxy_target_from_user_service_with_mode(
         // 1. Personal lookup (short-circuit for the common case).
         let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
         if let Some(us) = personal {
-            if us.source.as_deref() == Some(AUTO_PROVISION_SOURCE) {
-                // A retained automatic row must not shadow an independently
-                // selected legacy credential or node binding, including a
-                // disabled legacy connection that deliberately blocks routing.
-                let legacy =
-                    user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id)
-                        .await?;
-                let node_binding = if let Some(catalog) = us.catalog_service_id.as_deref() {
-                    db.collection::<bson::Document>(
-                        crate::models::node_service_binding::COLLECTION_NAME,
-                    )
-                    .find_one(doc! {"user_id":user_id,"service_id":catalog})
-                    .await?
-                    .is_some()
-                } else {
-                    false
-                };
-                if legacy || node_binding {
-                    return Ok(None);
-                }
-            }
             return Ok(Some(
                 finish_resolution(
                     db,
@@ -3222,10 +3192,7 @@ fn approval_hint_from_user_service(user_service: &UserService) -> ApprovalResolu
             .clone()
             .unwrap_or_else(|| user_service.id.clone()),
         service_owner_id: user_service.user_id.clone(),
-        is_auto_connected: matches!(
-            user_service.source.as_deref(),
-            Some(AUTO_PROVISION_SOURCE | super::unified_key_service::CATALOG_OPT_IN_SOURCE)
-        ),
+        is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     }
 }
 
@@ -3295,12 +3262,8 @@ pub(crate) async fn verify_auto_provision_eligibility(
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
     };
 
-    if user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE) {
-        return Err(AppError::Forbidden(
-            "Connect this service to enable it".into(),
-        ));
-    }
-    if user_service.source.as_deref() != Some(super::unified_key_service::CATALOG_OPT_IN_SOURCE) {
+    // Only check auto-provisioned services
+    if user_service.source.as_deref() != Some(AUTO_PROVISION_SOURCE) {
         return Ok(());
     }
 
@@ -3575,7 +3538,7 @@ async fn finish_resolution(
             credential_source: None,
             org_routing,
             pool_selection,
-            is_auto_connected: matches!(user_service.source.as_deref(),Some(AUTO_PROVISION_SOURCE | super::unified_key_service::CATALOG_OPT_IN_SOURCE)),
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
         });
     }
 
@@ -3627,7 +3590,7 @@ async fn finish_resolution(
             credential_source: None,
             org_routing,
             pool_selection,
-            is_auto_connected: matches!(user_service.source.as_deref(),Some(AUTO_PROVISION_SOURCE | super::unified_key_service::CATALOG_OPT_IN_SOURCE)),
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
         });
     }
 
@@ -3734,7 +3697,7 @@ async fn finish_resolution(
             credential_source: api_key.credential_source.clone(),
             org_routing,
             pool_selection,
-            is_auto_connected: matches!(user_service.source.as_deref(),Some(AUTO_PROVISION_SOURCE | super::unified_key_service::CATALOG_OPT_IN_SOURCE)),
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
         });
     }
 
@@ -3806,7 +3769,7 @@ async fn finish_resolution(
         credential_source: api_key.credential_source.clone(),
         org_routing,
         pool_selection,
-        is_auto_connected: matches!(user_service.source.as_deref(),Some(AUTO_PROVISION_SOURCE | super::unified_key_service::CATALOG_OPT_IN_SOURCE)),
+        is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     })
 
     }).await?;
@@ -6338,23 +6301,6 @@ mod tests {
         assert_eq!(server_target.credential.as_str(), "catalog-secret");
         assert!(server_target.service.inject_delegation_token);
 
-        db.collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
-            .insert_one(UserServiceConnection {
-                id: uuid::Uuid::new_v4().to_string(),
-                user_id: user_id.clone(),
-                service_id: service.id.clone(),
-                credential_encrypted: None,
-                secret_context_versions: Default::default(),
-                credential_type: None,
-                credential_label: None,
-                metadata: None,
-                is_active: true,
-                state_version: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
-            .await
-            .unwrap();
         let strict_target = resolve_proxy_target(
             &db,
             &keys,
@@ -6413,9 +6359,6 @@ mod tests {
             .await
             .expect("insert auto-provision user service");
 
-        crate::test_utils::connect_catalog_fixture_services(&db, &user_id)
-            .await
-            .unwrap();
         let auto_resolution = resolve_proxy_target_from_user_service(
             &db,
             &keys,
@@ -7373,7 +7316,6 @@ mod tests {
             .await
             .unwrap();
         let creator = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
-        let caller = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
         let mut catalog = dummy_service();
         catalog.created_by.clone_from(&creator.id);
         catalog.slug = crate::services::assistant_service::AEVATAR_SLUG.into();
@@ -7383,7 +7325,7 @@ mod tests {
         catalog.identity_propagation_mode = "jwt".into();
         catalog.forward_access_token = true;
         db.collection::<User>(USERS)
-            .insert_many([&creator, &caller])
+            .insert_one(creator)
             .await
             .unwrap();
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -7398,51 +7340,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(approved, [(catalog.id.clone(), catalog.slug.clone())]);
-        assert!(matches!(
-            resolve_proxy_target(
-                &db,
-                &test_encryption_keys(),
-                &caller.id,
-                &catalog.id,
-                disabled_platform_rate_limit(),
-            )
-            .await,
-            Err(AppError::Forbidden(_))
-        ));
-        crate::services::security_readiness_service::ready_test_replica(&db).await;
-        let connection = crate::services::unified_key_service::connect_catalog_service(
+        let target = resolve_proxy_target(
             &db,
-            &caller.id,
-            &caller.id,
-            &catalog.slug,
+            &test_encryption_keys(),
+            &uuid::Uuid::new_v4().to_string(),
+            &catalog.id,
+            disabled_platform_rate_limit(),
         )
         .await
         .unwrap();
-        let target = resolve_proxy_target_by_user_service_id(
-            &db,
-            &test_encryption_keys(),
-            &caller.id,
-            &connection.id,
-            None,
-            None,
-            test_execution_context(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .target;
         assert_eq!(
-            admit_caller_bearer(
-                &db,
-                &caller.id,
-                Some(&connection.id),
-                &target,
-                None,
-                Some("fixture"),
-                &[],
-            )
-            .await
-            .unwrap(),
+            admit_caller_bearer(&db, "caller", None, &target, None, Some("fixture"), &[])
+                .await
+                .unwrap(),
             Some("fixture")
         );
         assert_eq!(target.base_url, catalog.base_url);

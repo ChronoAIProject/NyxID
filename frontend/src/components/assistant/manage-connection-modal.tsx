@@ -59,12 +59,12 @@ function canModifyKey(key: KeyInfo): boolean {
   const source = key.credential_source;
   const readOnly = source?.type === "org" && source.role !== "admin";
   return (
-    !readOnly && !key.auto_connected
+    !readOnly && !key.auto_connected && key.credential_binding !== "platform"
   );
 }
 
 function readOnlyReason(key: KeyInfo): string {
-  if (key.auto_connected) {
+  if (key.auto_connected || key.credential_binding === "platform") {
     return "Platform-managed connection — manage it from the service catalog.";
   }
   return "Managed by your organization — an org admin can change it.";
@@ -78,7 +78,6 @@ function readOnlyReason(key: KeyInfo): string {
  */
 function canReplaceCredential(key: KeyInfo): boolean {
   return (
-    key.credential_binding !== "platform" &&
     Boolean(key.api_key_id) &&
     key.credential_type !== "oauth2" &&
     key.credential_type !== "node_managed" &&

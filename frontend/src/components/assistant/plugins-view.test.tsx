@@ -1,10 +1,3 @@
-vi.mock("@/hooks/use-approvals", () => ({
-  useApprovalAuthoringCapabilities: () => ({
-    data: { personal_rules: true, catalog_opt_in: mocks.optInReady },
-    error: mocks.capabilityError,
-    refetch: mocks.retryCapabilities,
-  }),
-}));
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,10 +7,7 @@ import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { ApiError } from "@/lib/api-client";
 
 vi.mock("@/hooks/use-agent-skills", () => ({
-  useSkillSearch: vi.fn(() => ({
-    data: { items: [], total_pages: 1 },
-    isLoading: false,
-  })),
+  useSkillSearch: vi.fn(() => ({ data: { items: [], total_pages: 1 }, isLoading: false })),
   useAgentSkills: vi.fn(() => ({ data: undefined })),
   useSetAgentSkills: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
   useAttachLatestSkill: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
@@ -33,32 +23,16 @@ const mocks = vi.hoisted(() => ({
   useDeleteKey: vi.fn(),
   useUpdateExternalApiKey: vi.fn(),
   createConnect: vi.fn(),
-  connectCatalog: vi.fn(),
-  optInReady: true,
-  capabilityError: null as Error | null,
-  retryCapabilities: vi.fn(),
 }));
 vi.mock("@/hooks/use-connect-links", () => ({
-  useCreateAssistantConnectLink: () => ({
-    mutateAsync: mocks.createConnect,
-    isPending: false,
-  }),
+  useCreateAssistantConnectLink: () => ({ mutateAsync: mocks.createConnect, isPending: false }),
 }));
 vi.mock("./assistant-link-modals", () => ({
-  AssistantLinkModal: ({ href }: { readonly href: string | null }) =>
-    href ? (
-      <div role="dialog" aria-label="Hosted connection" data-href={href} />
-    ) : null,
+  AssistantLinkModal: ({ href }: { readonly href: string | null }) => href
+    ? <div role="dialog" aria-label="Hosted connection" data-href={href} /> : null,
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
-  useConnectCatalogService: () => ({
-    mutateAsync: mocks.connectCatalog.mockResolvedValue({
-      connection_id: "opt-in",
-      is_active: true,
-    }),
-    isPending: false,
-  }),
   useCatalog: mocks.useCatalog,
   useCatalogEntry: mocks.useCatalogEntry,
   useKeys: mocks.useKeys,
@@ -180,13 +154,8 @@ function mockLoaded({
 describe("PluginsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.optInReady = true;
-    mocks.capabilityError = null;
     mockLoaded();
-    mocks.createConnect.mockImplementation(
-      async ({ serviceSlug }: { serviceSlug: string }) =>
-        `/connect/${serviceSlug}`,
-    );
+    mocks.createConnect.mockImplementation(async ({ serviceSlug }: { serviceSlug: string }) => `/connect/${serviceSlug}`);
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
     mocks.useKey.mockReturnValue({
       data: {
@@ -232,221 +201,59 @@ describe("PluginsView", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     // The card itself is the only CTA — there is no nested Connect button.
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Hosted connection",
-    });
+    const dialog = await screen.findByRole("dialog", { name: "Hosted connection" });
     expect(dialog).toHaveAttribute("data-href", "/connect/github");
-    expect(mocks.createConnect).toHaveBeenCalledWith({
-      serviceSlug: "github",
-      personal: false,
-    });
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "github", personal: false });
   });
 
   it("offers a personal hosted connection when Added contains only an org account", async () => {
-    mockLoaded({
-      keyRows: [
-        {
-          ...keys[0]!,
-          credential_source: {
-            type: "org",
-            org_id: "org",
-            org_name: "Acme",
-            role: "admin",
-            allowed: true,
-          },
-        },
-      ] as unknown as KeyInfo[],
-    });
+    mockLoaded({ keyRows: [{ ...keys[0]!, credential_source: { type: "org", org_id: "org", org_name: "Acme", role: "admin", allowed: true } }] as unknown as KeyInfo[] });
     render(<PluginsView />);
     expect(screen.getByRole("button", { name: "Manage OpenAI" })).toBeVisible();
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Connect your own" }));
-    expect(
-      await screen.findByRole("dialog", { name: "Hosted connection" }),
-    ).toHaveAttribute("data-href", "/connect/openai");
-    expect(mocks.createConnect).toHaveBeenCalledWith({
-      serviceSlug: "openai",
-      personal: true,
-    });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Connect your own" }));
+    expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toHaveAttribute("data-href", "/connect/openai");
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "openai", personal: true });
     const advanced = screen.getByRole("link", { name: "Advanced setup" });
     expect(advanced).toHaveAttribute("data-to", "/keys");
-    expect(JSON.parse(advanced.getAttribute("data-search") ?? "null")).toEqual({
-      tab: "services",
-      action: "add-service",
-    });
+    expect(JSON.parse(advanced.getAttribute("data-search") ?? "null")).toEqual({ tab: "services", action: "add-service" });
   });
 
-  it("gates only opt-in during mixed readiness and retries capability failures", async () => {
-    mocks.optInReady = false;
-    mocks.capabilityError = new Error("unavailable");
-    mockLoaded({
-      catalogRows: [
-        ...catalog,
-        {
-          ...catalog[0]!,
-          slug: "weather",
-          name: "Weather",
-          requires_credential: false,
-        },
-      ],
-    });
-    render(<PluginsView />);
-    expect(
-      screen.getByRole("button", { name: "Connect Weather" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Connect GitHub" }),
-    ).toBeEnabled();
-    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(mocks.retryCapabilities).toHaveBeenCalledOnce();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Connect GitHub" }),
-    );
-    expect(mocks.createConnect).toHaveBeenCalledWith({
-      serviceSlug: "github",
-      personal: false,
-    });
-    expect(mocks.connectCatalog).not.toHaveBeenCalled();
-  });
-
-  it("disables unready platform model opt-in while keeping hosted BYOK reachable", async () => {
-    mocks.optInReady = false;
-    mockLoaded({
-      catalogRows: [
-        ...catalog,
-        {
-          ...catalog[1]!,
-          slug: "chrono-llm",
-          name: "Chrono LLM",
-          platform_key: { available: true },
-        } as CatalogEntry,
-      ],
-    });
-    render(<PluginsView />);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Add a model connection" }),
-    );
-    const picker = screen.getByRole("dialog");
-    expect(
-      within(picker).getByRole("button", { name: "Chrono LLM" }),
-    ).toBeDisabled();
-    await userEvent.click(
-      within(picker).getByRole("button", {
-        name: "Connect your own Chrono LLM",
-      }),
-    );
-    expect(mocks.createConnect).toHaveBeenCalledWith({
-      serviceSlug: "chrono-llm",
-      personal: true,
-    });
-    expect(mocks.connectCatalog).not.toHaveBeenCalled();
-  });
-
-  it("offers platform opt-in and personal model setup separately", async () => {
-    mockLoaded({
-      catalogRows: [
-        ...catalog,
-        {
-          ...catalog[1]!,
-          slug: "chrono-llm",
-          name: "Chrono LLM",
-          platform_key: { available: true },
-        } as CatalogEntry,
-      ],
-    });
+  it("creates a personal Chrono LLM model connection and keeps model setup paths explicit", async () => {
+    mockLoaded({ catalogRows: [...catalog, { ...catalog[1]!, slug: "chrono-llm", name: "Chrono LLM", platform_key: { available: true } } as CatalogEntry] });
     mocks.createConnect.mockResolvedValue("/connect/chrono-llm");
     const user = userEvent.setup();
     render(<PluginsView />);
-    await user.click(
-      screen.getByRole("button", { name: "Add a model connection" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Add a model connection" }));
     const picker = screen.getByRole("dialog");
-    expect(
-      within(picker).getByRole("link", {
-        name: "Custom OpenAI-compatible endpoint",
-      }),
-    ).toHaveAttribute(
-      "data-search",
-      JSON.stringify({ tab: "services", action: "add-service" }),
-    );
-    await user.click(
-      within(picker).getByRole("button", { name: "Chrono LLM" }),
-    );
-    expect(mocks.connectCatalog).toHaveBeenCalledWith({ slug: "chrono-llm" });
-    await user.click(
-      screen.getByRole("button", { name: "Add a model connection" }),
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Connect your own Chrono LLM" }),
-    );
-    expect(mocks.createConnect).toHaveBeenCalledWith({
-      serviceSlug: "chrono-llm",
-      personal: true,
-    });
-    expect(
-      await screen.findByRole("dialog", { name: "Hosted connection" }),
-    ).toBeInTheDocument();
+    expect(within(picker).getByRole("link", { name: "Custom OpenAI-compatible endpoint" })).toHaveAttribute("data-search", JSON.stringify({ tab: "services", action: "add-service" }));
+    await user.click(within(picker).getByRole("button", { name: "Chrono LLM" }));
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "chrono-llm", personal: true });
+    expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toBeInTheDocument();
   });
 
   it("keeps secondary org actions inside the same card without activating Manage", async () => {
-    mockLoaded({
-      keyRows: [
-        {
-          ...keys[0]!,
-          credential_source: { type: "org", role: "viewer" },
-        } as KeyInfo,
-      ],
-    });
+    mockLoaded({ keyRows: [{ ...keys[0]!, credential_source: { type: "org", role: "viewer" } } as KeyInfo] });
     mocks.createConnect.mockResolvedValue("/connect/openai");
     render(<PluginsView />);
     const own = screen.getByRole("button", { name: "Connect your own" });
-    expect(own.closest("[data-plugin-card]")).toBe(
-      screen
-        .getByRole("button", { name: "Manage OpenAI" })
-        .closest("[data-plugin-card]"),
-    );
+    expect(own.closest("[data-plugin-card]")).toBe(screen.getByRole("button", { name: "Manage OpenAI" }).closest("[data-plugin-card]"));
     await userEvent.setup().click(own);
     expect(mocks.useKey).not.toHaveBeenCalled();
-    expect(mocks.createConnect).toHaveBeenCalledWith({
-      serviceSlug: "openai",
-      personal: true,
-    });
+    expect(mocks.createConnect).toHaveBeenCalledWith({ serviceSlug: "openai", personal: true });
   });
 
   it("offers one model card, keeps owned model connections, and lists providers only in the picker", async () => {
-    const inference = {
-      wire_protocol: "openai_completions",
-      model_list: true,
-      binding: "user",
-    } as const;
-    mockLoaded({
-      catalogRows: [
-        ...catalog.map((entry) =>
-          entry.slug === "openai" ? { ...entry, inference } : entry,
-        ),
-        { ...catalog[1]!, slug: "deepseek", name: "DeepSeek", inference },
-      ],
-    });
+    const inference = { wire_protocol: "openai_completions", model_list: true, binding: "user" } as const;
+    mockLoaded({ catalogRows: [...catalog.map(entry => entry.slug === "openai" ? { ...entry, inference } : entry), { ...catalog[1]!, slug: "deepseek", name: "DeepSeek", inference }] });
     render(<PluginsView />);
     expect(screen.getByRole("button", { name: "Manage OpenAI" })).toBeVisible();
     const models = screen.getByRole("region", { name: "Models" });
-    expect(models.querySelectorAll("[data-plugin-card]")).toHaveLength(1);
-    expect(
-      screen.queryByRole("button", { name: "Connect DeepSeek" }),
-    ).not.toBeInTheDocument();
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Add a model connection" }));
+    expect(models.querySelectorAll('[data-plugin-card]')).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Connect DeepSeek" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Add a model connection" }));
     const picker = screen.getByRole("dialog");
-    expect(
-      within(picker).getByRole("button", { name: "DeepSeek" }),
-    ).toBeVisible();
-    expect(
-      within(picker)
-        .getByRole("link", { name: "Custom OpenAI-compatible endpoint" })
-        .querySelector("svg"),
-    ).not.toBeNull();
+    expect(within(picker).getByRole("button", { name: "DeepSeek" })).toBeVisible();
+    expect(within(picker).getByRole("link", { name: "Custom OpenAI-compatible endpoint" }).querySelector("svg")).not.toBeNull();
   });
 
   it("connects from the keyboard", async () => {
@@ -497,9 +304,7 @@ describe("PluginsView", () => {
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
     await user.click(await screen.findByRole("button", { name: "Replace" }));
-    expect(
-      screen.queryByRole("button", { name: "Save" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("New credential"), "sk-new-secret");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(mutate).toHaveBeenCalledWith(
@@ -592,55 +397,49 @@ describe("PluginsView", () => {
     });
   });
 
-  it("offers automatic rows for explicit connection", () => {
+  it("hides auto-connected services without offering them as new connections", () => {
     mockLoaded({
-      keyRows: [{ ...keys[0]!, auto_connected: true }, keys[1]!],
+      keyRows: [
+        { ...keys[0]!, auto_connected: true },
+        keys[1]!,
+      ],
     });
     render(<PluginsView />);
 
-    expect(
-      screen.queryByRole("button", { name: "Manage OpenAI" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Connect OpenAI" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Manage Internal Admin API" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Manage OpenAI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect OpenAI" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage Internal Admin API" })).toBeInTheDocument();
   });
 
-  it.each([{ auto_connected: true }])(
-    "hides mutation controls if a connection becomes platform-managed after listing (%j)",
-    async (binding) => {
-      mocks.useKey.mockReturnValue({
-        data: {
-          ...keys[0],
-          status: "active",
-          is_active: true,
-          proxy_url: "http://localhost:3011/api/v1/proxy/s/openai",
-          last_used_at: null,
-          granted_scopes: null,
-          ...binding,
-        },
-        isLoading: false,
-      });
-      const user = userEvent.setup();
-      render(<PluginsView />);
-      await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
-      expect(await screen.findByRole("dialog")).toBeInTheDocument();
-      expect(screen.queryByRole("switch")).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Delete" }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Replace" }),
-      ).not.toBeInTheDocument();
-      // The advanced-settings escape hatch remains.
-      expect(
-        screen.getByRole("link", { name: /advanced settings/i }),
-      ).toBeInTheDocument();
-    },
-  );
+  it.each([{ auto_connected: true }, { auto_connected: false, credential_binding: "platform" }])("hides mutation controls if a connection becomes platform-managed after listing (%j)", async (binding) => {
+    mocks.useKey.mockReturnValue({
+      data: {
+        ...keys[0],
+        status: "active",
+        is_active: true,
+        proxy_url: "http://localhost:3011/api/v1/proxy/s/openai",
+        last_used_at: null,
+        granted_scopes: null,
+        ...binding,
+      },
+      isLoading: false,
+    });
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Replace" }),
+    ).not.toBeInTheDocument();
+    // The advanced-settings escape hatch remains.
+    expect(
+      screen.getByRole("link", { name: /advanced settings/i }),
+    ).toBeInTheDocument();
+  });
 
   it("stacks every credential of a multi-connection service in one modal", async () => {
     mockLoaded({
@@ -722,9 +521,7 @@ describe("PluginsView", () => {
     render(<PluginsView />);
 
     expect(
-      screen.queryByText(
-        "Failed to load the plugin catalog. Please try again.",
-      ),
+      screen.queryByText("Failed to load the plugin catalog. Please try again."),
     ).not.toBeInTheDocument();
     expect(toastSpy).toHaveBeenCalledWith(
       "Could not load plugins",

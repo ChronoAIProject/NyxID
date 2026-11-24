@@ -196,7 +196,6 @@ pub async fn set_platform_connection_active(
 ) -> AppResult<()> {
     let service = user_service_service::get_user_service(db, owner_id, service_id).await?;
     if active {
-        user_service_service::validate_connection_enable(db, &service).await?;
         let catalog = db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .find_one(doc! { "_id": service.catalog_service_id.as_deref().unwrap_or("") })
@@ -206,7 +205,7 @@ pub async fn set_platform_connection_active(
     }
     crate::services::service_history::collection::<UserService>(db, crate::models::user_service::COLLECTION_NAME)
         .update_one(doc! { "_id": service_id, "user_id": owner_id, "credential_binding": "platform" },
-            doc! { "$set": { "is_active": active, "updated_at": bson::DateTime::from_chrono(Utc::now()) }, "$inc": { "state_version": 1_i64 } }).await.map_err(user_service_service::map_connection_write_error)?;
+            doc! { "$set": { "is_active": active, "updated_at": bson::DateTime::from_chrono(Utc::now()) }, "$inc": { "state_version": 1_i64 } }).await?;
     Ok(())
 }
 

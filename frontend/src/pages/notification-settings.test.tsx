@@ -3,14 +3,15 @@ import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import { NotificationSettingsPage } from "./notification-settings";
 const mocks = vi.hoisted(() => ({ save: vi.fn().mockResolvedValue({}) }));
-// The page links to the assistant's approval rules and is rendered without a router here.
-vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a> }));
+vi.mock("@/hooks/use-user-services", () => ({ useUserServices: () => ({ data: [] }) }));
 vi.mock("@/components/shared/approval-setup-wizard", () => ({ ApprovalSetupWizard: () => null }));
 vi.mock("@/hooks/use-approvals", () => ({
   useNotificationSettings: () => ({ data: { telegram_connected: false, telegram_enabled: false, push_enabled: true, approval_required: true, global_approval_mode: "writes_only", approval_timeout_secs: 300, grant_expiry_days: 30 }, isLoading: false }),
   useUpdateNotificationSettings: () => ({ mutateAsync: mocks.save }),
   useTelegramLink: () => ({}), useTelegramDisconnect: () => ({}),
   usePushDevices: () => ({ data: { devices: [] } }), useRemoveDevice: () => ({}),
+  useServiceApprovalConfigs: () => ({ data: { configs: [] } }),
+  useSetServiceApprovalConfig: () => ({}), useDeleteServiceApprovalConfig: () => ({}),
 }));
 it("defaults Mentions in groups on for older settings and saves an explicit opt-out", async () => {
   const user = userEvent.setup();
@@ -35,11 +36,4 @@ it("preserves an omitted mention preference when saving another setting", async 
   const saved = mocks.save.mock.lastCall?.[0];
   expect(saved).toEqual(expect.objectContaining({ approval_timeout_secs: 60 }));
   expect(saved).not.toHaveProperty("group_mentions_enabled");
-});
-
-it("no longer edits per-service approval and points to the approval rules instead", () => {
-  render(<NotificationSettingsPage />);
-  expect(screen.queryByText("Per-Service Approval Overrides")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Add Override" })).not.toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Open approval rules" })).toHaveAttribute("href", "/assistant/approvals");
 });

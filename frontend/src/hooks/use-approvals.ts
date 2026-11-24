@@ -261,20 +261,13 @@ export function useSetServiceApprovalConfig() {
       approvalMode,
       rules,
       defaultEffect,
-      grantExpiryDays,
-      expectedRevision,
-      disabled,
       orgId,
     }: {
       readonly serviceId: string;
       readonly approvalRequired?: boolean;
       readonly approvalMode?: ApprovalMode;
       readonly rules?: readonly ApprovalRule[];
-      readonly defaultEffect?: ApprovalEffect | null;
-      /** Days (1 to 365) a remembered approval lasts under this policy. */
-      readonly grantExpiryDays?: number | null;
-      readonly expectedRevision?: string;
-      readonly disabled?: boolean;
+      readonly defaultEffect?: ApprovalEffect;
       /** When set, the policy is set on the given org's behalf. Caller
        *  must be an admin of that org. The org's policy is dominant for
        *  org-shared services. */
@@ -284,8 +277,6 @@ export function useSetServiceApprovalConfig() {
         ? `/approvals/service-configs/${serviceId}?org_id=${encodeURIComponent(orgId)}`
         : `/approvals/service-configs/${serviceId}`;
       return api.put<SetServiceApprovalConfigResponse>(path, {
-        ...(expectedRevision !== undefined ? { expected_revision: expectedRevision } : {}),
-        ...(disabled !== undefined ? { disabled } : {}),
         ...(approvalRequired !== undefined
           ? { approval_required: approvalRequired }
           : {}),
@@ -293,9 +284,6 @@ export function useSetServiceApprovalConfig() {
         ...(rules !== undefined ? { rules } : {}),
         ...(defaultEffect !== undefined
           ? { default_effect: defaultEffect }
-          : {}),
-        ...(grantExpiryDays !== undefined
-          ? { grant_expiry_days: grantExpiryDays }
           : {}),
       });
     },
@@ -314,17 +302,14 @@ export function useDeleteServiceApprovalConfig() {
     mutationFn: async ({
       serviceId,
       orgId,
-      expectedRevision,
     }: {
       readonly serviceId: string;
       readonly orgId?: string;
-      readonly expectedRevision?: string;
     }): Promise<DeleteServiceApprovalConfigResponse> => {
       const path = orgId
         ? `/approvals/service-configs/${serviceId}?org_id=${encodeURIComponent(orgId)}`
         : `/approvals/service-configs/${serviceId}`;
-      const suffix = expectedRevision === undefined ? "" : `${orgId ? "&" : "?"}expected_revision=${encodeURIComponent(expectedRevision)}`;
-      return api.delete<DeleteServiceApprovalConfigResponse>(path + suffix);
+      return api.delete<DeleteServiceApprovalConfigResponse>(path);
     },
     onSuccess: (_, variables) => {
       void queryClient.invalidateQueries({
@@ -332,9 +317,4 @@ export function useDeleteServiceApprovalConfig() {
       });
     },
   });
-}
-
-/** Old replicas return 404: authoring stays unavailable until the whole fleet supports it. */
-export function useApprovalAuthoringCapabilities() {
-  return useQuery({ queryKey: ["approvals", "authoring-capabilities"], queryFn: () => api.get<{ personal_rules: boolean; catalog_opt_in: boolean }>("/approvals/capabilities"), staleTime: 0, retry: false });
 }

@@ -196,10 +196,10 @@ async fn nyxbot_policy_request_commands() {
     assert_eq!(
         &commands[upsert + 1..upsert + 5],
         &[
-            ("update".into(), GRANTS.into()),
-            ("find".into(), REQUESTS.into()),
             ("insert".into(), INTENTS.into()),
             ("commitTransaction".into(), "".into()),
+            ("update".into(), GRANTS.into()),
+            ("update".into(), REQUESTS.into()),
         ]
     );
     assert_eq!(f.rows(INTENTS).await.len(), 1);

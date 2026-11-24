@@ -141,13 +141,7 @@ pub(super) async fn load(
         subject,
         approval_service_id,
         &operation,
-        matches!(
-            connection.source.as_deref(),
-            Some(
-                AUTO_PROVISION_SOURCE | crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE
-            )
-        ),
-        Some(key_id),
+        connection.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     )
     .await?;
     if approval.required

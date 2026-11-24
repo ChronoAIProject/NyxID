@@ -4356,7 +4356,6 @@ async fn authorize_mcp_operation(
             auth.auth_method == AuthMethod::Session,
             target.is_auto_connected,
             auth.chat.as_ref(),
-            auth.api_key_id.as_deref(),
         )
     })
     .await
@@ -4439,8 +4438,6 @@ async fn wait_for_mcp_approval(
         operation,
         pending.resolution.grant_scope.clone(),
     );
-    request_operation.fresh_decision = pending.resolution.fresh_decision;
-    request_operation.caller_api_key_id = auth.api_key_id.clone();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth.assistant_group_id.as_deref(),
@@ -4506,19 +4503,6 @@ async fn wait_for_mcp_approval(
                 approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
             outcome.to_string()
         })?;
-    approval_service::recheck_after_decision(
-        &state.db,
-        &auth.effective_approval_owner_user_id(),
-        &target.service_owner_user_id,
-        &target.service_id,
-        operation,
-        target.is_auto_connected,
-        auth.api_key_id.as_deref(),
-        &approval_request.approval_mode,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(
             &state.db,
@@ -8327,86 +8311,15 @@ mod tests {
 
     #[tokio::test]
     async fn auto_connected_mcp_auth_scope_and_tool_listing_follow_live_grant() {
-        async fn call_status(state: &AppState, auth: &McpAuthContext) -> serde_json::Value {
-            use crate::services::billing::{
-                BillingIngress,
-                route_inventory::{BillingRoutePolicy, enforce_billing_egress_classification},
-            };
-            let request = JsonRpcRequest {
-                jsonrpc: JSONRPC_VERSION.into(),
-                id: Some(serde_json::json!(2)),
-                method: "tools/call".into(),
-                params: Some(serde_json::json!({"name":"autoplatform__status", "arguments":{}})),
-            };
-            let permit = enforce_billing_egress_classification(
-                Some(BillingRoutePolicy::Metered(BillingIngress::Mcp)),
-                BillingIngress::Mcp,
-            )
-            .unwrap();
-            let response = Box::pin(handle_tools_call(
-                state, auth, None, &request, false, permit,
-            ))
-            .await;
-            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .unwrap();
-            serde_json::from_slice(&bytes).unwrap()
-        }
-        async fn listed(state: &AppState, auth: &McpAuthContext) -> bool {
-            let response = handle_tools_list(state, auth, None, &tools_list_request()).await;
-            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            body["result"]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| tool["name"] == "autoplatform__status")
-        }
-        let db =
-            crate::test_utils::connect_transaction_test_database("auto_connected_mcp_auth").await;
+        let db = crate::test_utils::connect_transaction_test_database("auto_connected_mcp").await;
         let owner = uuid::Uuid::new_v4().to_string();
         db.collection::<User>(USERS)
             .insert_one(test_user(&owner, UserType::Person))
             .await
             .unwrap();
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observed = calls.clone();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
-        catalog.base_url = format!("http://{}", listener.local_addr().unwrap());
-        let upstream = axum::Router::new().route(
-            "/status",
-            axum::routing::get(move || {
-                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async { axum::Json(serde_json::json!({"ok":true})) }
-            }),
-        );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, upstream).await.unwrap();
-        });
-        db.collection::<crate::models::downstream_service::DownstreamService>(
-            crate::models::downstream_service::COLLECTION_NAME,
-        )
-        .insert_one(&catalog)
-        .await
-        .unwrap();
-        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
-            crate::models::service_endpoint::COLLECTION_NAME,
-        )
-        .insert_one(crate::test_utils::test_service_endpoint(
-            &catalog.id,
-            "status",
-            "GET",
-            "/status",
-        ))
-        .await
-        .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let ep = uuid::Uuid::new_v4().to_string();
-        let mut service =
-            test_user_service(&id, &owner, "autoplatform", &ep, Some(&catalog.id), None);
+        let mut service = test_user_service(&id, &owner, "autoplatform", &ep, None, None);
         service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.into());
         db.collection::<UserService>(USER_SERVICES)
             .insert_one(&service)
@@ -8417,9 +8330,9 @@ mod tests {
                 &ep,
                 &owner,
                 "Platform",
-                &catalog.base_url,
+                "https://example.com",
                 None,
-                Some(&catalog.id),
+                None,
             ))
             .await
             .unwrap();
@@ -8433,7 +8346,7 @@ mod tests {
             None,
             None,
             Some(false),
-            Some(true),
+            Some(false),
             Some(true),
             None,
             None,
@@ -8445,75 +8358,40 @@ mod tests {
         let state = test_app_state(db.clone());
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", key.full_key.parse().unwrap());
-        let before = authenticate_mcp(&state, &headers, false).await.unwrap();
-        assert!(!before.allowed_service_ids.contains(&id));
-        assert!(!listed(&state, &before).await);
-        let denied = call_status(&state, &before).await;
-        assert!(denied["error"].is_object() || denied["result"]["isError"] == true);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        crate::test_utils::connect_catalog_fixture_services(&db, &owner)
-            .await
-            .unwrap();
         for flag in [false, true] {
+            let body = serde_json::from_value(
+                serde_json::json!({ "allow_auto_connected_services": flag }),
+            )
+            .unwrap();
             let _ = crate::handlers::api_keys::update_key(
                 State(state.clone()),
                 crate::test_utils::test_auth_user(&owner),
                 Path(key.id.clone()),
-                axum::Json(
-                    serde_json::from_value(
-                        serde_json::json!({"allow_auto_connected_services":flag}),
-                    )
-                    .unwrap(),
-                ),
+                axum::Json(body),
             )
             .await
             .unwrap();
             let auth = authenticate_mcp(&state, &headers, false).await.unwrap();
             assert_eq!(auth.allowed_service_ids.contains(&id), flag);
-            assert_eq!(
-                filter_services_by_scope(vec![user_managed(&id)], &auth).len(),
-                usize::from(flag)
-            );
+            let visible = filter_services_by_scope(vec![user_managed(&id)], &auth);
+            assert_eq!(visible.len(), usize::from(flag));
             assert!(
                 matches!(mcp_service_scope(&auth), mcp_service::ServiceScope::Allowed(ids) if ids.contains(&id) == flag)
             );
-            assert_eq!(listed(&state, &auth).await, flag);
-            let result = call_status(&state, &auth).await;
-            if flag {
-                assert!(
-                    result["error"].is_null() && result["result"]["isError"] != true,
-                    "{result}"
-                );
-            } else {
-                assert!(
-                    result["error"].is_object() || result["result"]["isError"] == true,
-                    "{result}"
-                );
-            }
-        }
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        for active in [false, true] {
-            let _ = crate::handlers::keys::update_key(
-                State(state.clone()),
-                crate::test_utils::test_auth_user(&owner),
-                Path(id.clone()),
-                axum::Json(
-                    serde_json::from_value(serde_json::json!({"is_active":active})).unwrap(),
-                ),
-            )
-            .await
-            .unwrap();
-            let auth = authenticate_mcp(&state, &headers, false).await.unwrap();
-            assert_eq!(listed(&state, &auth).await, active);
-            let result = call_status(&state, &auth).await;
+            let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let tools = body["result"]["tools"].as_array().unwrap();
             assert_eq!(
-                result["error"].is_null() && result["result"]["isError"] != true,
-                active,
-                "{result}"
+                tools.iter().any(|tool| tool["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("autoplatform__")),
+                flag
             );
         }
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        server.abort();
         db.drop().await.unwrap();
     }
 
@@ -9106,8 +8984,6 @@ mod tests {
 
         let now = chrono::Utc::now();
         let config = ServiceApprovalConfig {
-            disabled: false,
-            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_id.clone(),
             service_id: catalog_service_id.clone(),
@@ -9330,8 +9206,6 @@ mod tests {
             .expect("insert allowlisted cancellation endpoint");
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
-                disabled: false,
-                grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: service.id.clone(),

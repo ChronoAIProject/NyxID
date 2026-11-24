@@ -4,7 +4,7 @@ use crate::models::{
     provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig},
     service_provider_requirement::{COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement},
     user_provider_token::{COLLECTION_NAME as TOKENS, UserProviderToken},
-    user_service::{COLLECTION_NAME as CONNECTIONS, UserService},
+    user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME as CONNECTIONS, UserService},
 };
 use crate::services::credential_record_service as records;
 use crate::services::delegation_service::{
@@ -144,7 +144,6 @@ async fn optional_fixture() -> OptionalFixture {
         .insert_one(&requirement)
         .await
         .unwrap();
-    crate::test_utils::connect_catalog_fixture_services(&db, &owner).await.unwrap();
     let listed = Box::pin(crate::handlers::keys::list_keys(
         axum::extract::State(state.clone()),
         crate::test_utils::test_auth_user(&owner),
@@ -154,8 +153,7 @@ async fn optional_fixture() -> OptionalFixture {
     let connection = db
         .collection::<UserService>(CONNECTIONS)
         .find_one(doc! {
-            "user_id":&owner, "catalog_service_id":&catalog.id,
-            "source":crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE,
+            "user_id":&owner, "catalog_service_id":&catalog.id, "source":AUTO_PROVISION_SOURCE,
         })
         .await
         .unwrap()

@@ -4315,7 +4315,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts explicitly opted-in credential-free catalog services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **Approval controls** apply to authenticated proxy requests.
 
@@ -8943,22 +8943,9 @@ Creates or updates a per-service approval override. When set, this value takes p
 }
 ```
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `approval_required` | boolean, optional | Legacy fallback for a policy with no rules/default. |
-| `approval_mode` | `per_request` or `grant` | Default approval mode; omitted preserves it. |
-| `rules` | ordered array | Whole ordered list of `effect`, `methods`, `resource_pattern`, `verbs`, `mode` and optional `api_key_ids` (maximum 20 IDs per rule, 50 rules). Empty key IDs mean all callers; scoped rules match only the calling NyxID key. |
-| `default_effect` | `auto_allow`, `require_approval`, `deny` or null | Unmatched fallback. Omitted preserves; null restores the legacy/no-opinion behavior. |
-| `grant_expiry_days` | integer 1–365 or null | New remembered approvals use these days. Omitted preserves; null uses the account default. Existing grants retain identity and expiry. |
-| `disabled` | boolean, personal only | Suspend the override without rewriting rules; normal global/account fallback applies. |
-| `expected_revision` | string | Reviewed revision returned by the server; empty means no policy existed. Stale edits return 409, including edits after deletion. |
-
-Rules and days validate and commit together with reconciliation and the audit.
-An identical save is a no-op. New fields require fleet readiness; clients must
-first read `GET /api/v1/approvals/capabilities`. Old replicas return 404 and cannot
-be used to author these fields. List/config responses include `revision`,
-`disabled`, ordered `rules`, nullable `default_effect` and `grant_expiry_days`.
-DELETE accepts `?expected_revision=...` and applies the same stale-edit check.
+| Field               | Type    | Required | Description                              |
+|---------------------|---------|----------|------------------------------------------|
+| `approval_required` | boolean | Yes      | Whether approval is required for this service |
 
 **Response (200):**
 
@@ -10113,20 +10100,3 @@ Retry preserves the original wait clock; it neither attests remote completion
 nor restarts the 24-hour bound. Follow the remote-cleanup operator procedure in
 [PERSONAL_ERASURE_INVENTORY.md](security/PERSONAL_ERASURE_INVENTORY.md) before
 submitting the retry, and poll status for verified progress.
-
-### Explicit personal catalog connection
-
-`POST /api/v1/catalog/{slug}/connect` accepts `{}` under a first-party human session
-and returns `{ "connection_id": "<UserService UUID>", "is_active": true }`.
-It supports eligible credential-free/legacy-master/platform catalog services and
-requires `catalog_opt_in` readiness from `/approvals/capabilities`. It checks live
-owner/catalog/access rules and rejects `org_id`; organization connection workflows
-remain separate. Credential-required BYOK/OAuth setup uses existing Connect links.
-
-Retries return the existing personal connection, including `is_active: false` for
-a disabled one. Enable/disable explicitly uses `PUT /keys/{connection_id}` with
-`is_active`. Catalog browsing, inventory, login, onboarding and grant listing do
-not create connections. Ordinary HTTP/MCP execution requires an explicit saved
-connection. Legacy automatic rows must opt in; server-selected model carriers
-retain their dedicated authority. Deleting then reconnecting creates a new row
-without reviving a tombstone or orphaning the new endpoint.

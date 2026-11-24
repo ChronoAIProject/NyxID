@@ -728,7 +728,7 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         specs.push((account.clone(), service, settings.access_mode));
     }
     for account in &accounts {
-        crate::test_utils::connect_catalog_fixture_services(&j.state.db, account)
+        crate::services::unified_key_service::auto_provision_no_auth_services(&j.state.db, account)
             .await
             .unwrap();
     }

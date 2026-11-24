@@ -1020,92 +1020,83 @@ mod tests {
 
     #[tokio::test]
     async fn auto_connected_endpoint_is_redacted_and_cannot_be_updated() {
-        for source in [
-            AUTO_PROVISION_SOURCE,
-            crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE,
-        ] {
-            let Some(db) = connect_test_database("h_user_ep_auto_managed").await else {
-                return;
-            };
-            let user_id = uuid::Uuid::new_v4().to_string();
-            let ep_id = uuid::Uuid::new_v4().to_string();
-            let service_id = uuid::Uuid::new_v4().to_string();
-            let platform_url = "https://platform.internal.example/v1";
-            db.collection::<User>(USERS)
-                .insert_one(test_user(&user_id, UserType::Person))
-                .await
-                .unwrap();
-            db.collection::<UserEndpoint>(EP_COLLECTION)
-                .insert_one(test_user_endpoint(
-                    &ep_id,
-                    &user_id,
-                    "Platform service",
-                    platform_url,
-                    Some("cat-1"),
-                    None,
-                ))
-                .await
-                .unwrap();
-            let mut service = test_user_service(
-                &service_id,
-                &user_id,
-                "platform-service",
-                &ep_id,
-                Some("cat-1"),
-                None,
-            );
-            service.source = Some(source.to_string());
-            service.credential_binding = Some("user".into());
-            db.collection::<UserService>(USER_SERVICE_COLLECTION)
-                .insert_one(service)
-                .await
-                .unwrap();
-            let state = test_app_state(db.clone());
-            let auth = test_auth_user(&user_id);
-
-            let Json(list) = list_endpoints(
-                State(state.clone()),
-                auth.clone(),
-                Query(EndpointListQuery { org_id: None }),
-            )
+        let Some(db) = connect_test_database("h_user_ep_auto_managed").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let platform_url = "https://platform.internal.example/v1";
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-            let response = &list.endpoints[0];
-            assert!(response.auto_connected);
-            assert!(response.url.is_none());
-            assert!(
-                !serde_json::to_string(response)
-                    .unwrap()
-                    .contains(platform_url)
-            );
-
-            let error = update_endpoint(
-                State(state.clone()),
-                auth.clone(),
-                tele(),
-                Path(ep_id.clone()),
-                Json(UpdateEndpointRequest {
-                    url: Some("https://attacker.example/v1".to_string()),
-                    label: None,
-                    openapi_spec_url: None,
-                    recommended_skills: None,
-                }),
-            )
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "Platform service",
+                platform_url,
+                Some("cat-1"),
+                None,
+            ))
             .await
-            .expect_err("platform-managed endpoint update must be rejected");
-            assert!(matches!(error, AppError::Forbidden(_)));
+            .unwrap();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "platform-service",
+            &ep_id,
+            Some("cat-1"),
+            None,
+        );
+        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        db.collection::<UserService>(USER_SERVICE_COLLECTION)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let auth = test_auth_user(&user_id);
 
-            let deleted = delete_endpoint(State(state), auth, tele(), Path(ep_id.clone())).await;
-            assert!(matches!(deleted, Err(AppError::Forbidden(_))));
-            let stored = db
-                .collection::<UserEndpoint>(EP_COLLECTION)
-                .find_one(doc! { "_id": ep_id })
-                .await
+        let Json(list) = list_endpoints(
+            State(state.clone()),
+            auth.clone(),
+            Query(EndpointListQuery { org_id: None }),
+        )
+        .await
+        .unwrap();
+        let response = &list.endpoints[0];
+        assert!(response.auto_connected);
+        assert!(response.url.is_none());
+        assert!(
+            !serde_json::to_string(response)
                 .unwrap()
-                .unwrap();
-            assert_eq!(stored.url, platform_url);
-            db.drop().await.unwrap();
-        }
+                .contains(platform_url)
+        );
+
+        let error = update_endpoint(
+            State(state),
+            auth,
+            tele(),
+            Path(ep_id.clone()),
+            Json(UpdateEndpointRequest {
+                url: Some("https://attacker.example/v1".to_string()),
+                label: None,
+                openapi_spec_url: None,
+                recommended_skills: None,
+            }),
+        )
+        .await
+        .expect_err("platform-managed endpoint update must be rejected");
+        assert!(matches!(error, AppError::Forbidden(_)));
+
+        let stored = db
+            .collection::<UserEndpoint>(EP_COLLECTION)
+            .find_one(doc! { "_id": ep_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.url, platform_url);
     }
 
     #[tokio::test]
