@@ -711,6 +711,52 @@ pub(crate) async fn record_thread(
     }).await
 }
 
+/// Bind a conversation to the thread observed for this delivery. An owner
+/// chat selects its home. A guest keeps the existing consent's reservation.
+pub(crate) async fn bind_thread_conversation(
+    db: &Database,
+    grant: &GrantRef,
+    thread: &crate::models::nyxbot_channel::NyxbotThread,
+    home: Option<&str>,
+) -> AppResult<String> {
+    let filter = doc! {
+        "_id": &thread.id, "channel_id": &thread.channel_id, "partition": &thread.partition,
+        "last_message_id": &thread.last_message_id, "last_relay_message_id": &thread.last_relay_message_id,
+        "meta_grant.bot_id": &grant.bot_id, "meta_grant.grant_id": &grant.grant_id,
+        "meta_grant.generation": grant.generation,
+    };
+    let conversation = match home {
+        Some(id) => doc! { "$literal": id },
+        None => {
+            let reserved = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+            doc! { "$ifNull": ["$conversation_id", {"$literal": reserved}] }
+        }
+    };
+    let update = doc! {"$set": {"conversation_id": conversation}};
+    let context = (db.clone(), grant.clone(), filter, update);
+    super::super::transaction_service::run_db_only(
+        db,
+        &context,
+        |tx, (db, grant, filter, update)| {
+            Box::pin(async move {
+                fence_reference(db, tx, grant, true).await?;
+                let row = db
+                    .collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                    .find_one_and_update(filter.clone(), vec![update.clone()])
+                    .projection(doc! {"conversation_id": 1})
+                    .return_document(mongodb::options::ReturnDocument::After)
+                    .session(tx)
+                    .await?
+                    .ok_or_else(super::grants::incomplete)?;
+                row.get_str("conversation_id")
+                    .map(str::to_owned)
+                    .map_err(|_| super::grants::incomplete())
+            })
+        },
+    )
+    .await
+}
+
 pub(crate) async fn observe_thread(
     db: &Database,
     bot: &str,

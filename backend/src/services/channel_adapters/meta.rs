@@ -675,6 +675,14 @@ pub(crate) async fn require_reply(
         .as_ref()
         .ok_or_else(|| unreachable("message_binding_required"))?;
     let now = Utc::now();
+    #[cfg(test)]
+    let now = TEST_REPLY_NOW
+        .try_with(|clock| {
+            chrono::DateTime::from_timestamp_millis(clock.load(std::sync::atomic::Ordering::SeqCst))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(now);
     if authority.event_at > now {
         return Err(unreachable("event_time_invalid"));
     }
@@ -872,22 +880,11 @@ async fn apply_webhook_state_inner(
     db: &mongodb::Database,
     bot: &ChannelBot,
     value: Value,
-    platform_signer: Option<&bson::Document>,
+    snapshot: &crate::services::channel_verification_service::CredentialSnapshot,
     tx: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
-    if let Some(signer) = platform_signer {
-        let matched = db
-            .collection::<bson::Document>(crate::models::platform_credential::COLLECTION_NAME)
-            .update_one(
-                signer.clone(),
-                doc! {"$inc": {"channel_observation_version": 1_i64}},
-            )
-            .session(&mut *tx)
-            .await?
-            .matched_count;
-        if matched == 0 {
-            return Err(unreachable("binding_changed"));
-        }
+    if !snapshot.fence_meta_webhook_signer(db, tx).await? {
+        return Err(unreachable("binding_changed"));
     }
     let live = db
         .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
@@ -1330,20 +1327,13 @@ impl PlatformAdapter for MetaAdapter {
         if !has_control {
             return Ok(());
         }
-        let args = (
-            db.clone(),
-            bot.clone(),
-            value,
-            self.inbox,
-            snapshot.meta_webhook_signer_filter()?,
-        );
+        let args = (db.clone(), bot.clone(), value, self.inbox, snapshot);
         crate::services::transaction_service::run_db_only(
             db,
             &args,
-            |tx, (db, bot, value, inbox, signer)| {
+            |tx, (db, bot, value, inbox, snapshot)| {
                 Box::pin(async move {
-                    apply_webhook_state_inner(*inbox, db, bot, value.clone(), signer.as_ref(), tx)
-                        .await
+                    apply_webhook_state_inner(*inbox, db, bot, value.clone(), snapshot, tx).await
                 })
             },
         )
@@ -1549,6 +1539,8 @@ impl PlatformAdapter for MetaAdapter {
 #[path = "meta_tests.rs"]
 pub(crate) mod tests;
 
+#[cfg(test)]
+tokio::task_local! {static TEST_REPLY_NOW: std::sync::Arc<std::sync::atomic::AtomicI64>;}
 #[cfg(test)]
 tokio::task_local! {static TEST_GRAPH_BASE:String;}
 #[cfg(test)]

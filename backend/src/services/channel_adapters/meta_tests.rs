@@ -1009,12 +1009,13 @@ async fn multipart_fence(scenario: &str) {
     };
     let (state, a, server, bot) = fixture("instagram").await;
     let mut original = original(&state, &bot).await;
+    let before = Utc::now();
+    let clock = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(before.timestamp_millis()));
     if scenario == "reply_token" {
-        original.meta_authority.as_mut().unwrap().reply_expires_at =
-            Utc::now() + Duration::milliseconds(500);
+        original.meta_authority.as_mut().unwrap().reply_expires_at = before + Duration::seconds(1);
     } else if scenario == "window" {
         original.meta_authority.as_mut().unwrap().event_at =
-            Utc::now() - Duration::hours(24) + Duration::milliseconds(500);
+            before - Duration::hours(24) + Duration::seconds(1);
     }
     admit_original(&state, &original).await;
     let key = uuid::Uuid::new_v4().to_string();
@@ -1024,13 +1025,24 @@ async fn multipart_fence(scenario: &str) {
         .insert_one(doc! {"_id":&key,"is_active":true})
         .await
         .unwrap();
+    let provider_clock = clock.clone();
+    let timing_case = matches!(scenario, "reply_token" | "window");
     Mock::given(method("POST"))
         .and(path("/v25.0/222/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(std::time::Duration::from_millis(750))
-                .set_body_json(json!({"message_id":"prefix-accepted"})),
-        )
+        .respond_with(move |_: &wiremock::Request| {
+            let response =
+                ResponseTemplate::new(200).set_body_json(json!({"message_id":"prefix-accepted"}));
+            if timing_case {
+                // The provider accepted part one. Part two sees the closed window.
+                provider_clock.store(
+                    (before + Duration::seconds(2)).timestamp_millis(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                response
+            } else {
+                response.set_delay(std::time::Duration::from_millis(750))
+            }
+        })
         .expect(1)
         .mount(&server)
         .await;
@@ -1054,6 +1066,9 @@ async fn multipart_fence(scenario: &str) {
         vec![reply.clone(), reply],
     );
     let control_loss = async {
+        if timing_case {
+            return;
+        }
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while server.received_requests().await.unwrap().is_empty() {
                 tokio::task::yield_now().await;
@@ -1095,7 +1110,9 @@ async fn multipart_fence(scenario: &str) {
         .unwrap();
         assert!(require_ingress(&state.db, &bot, &chat).await.is_err());
     };
-    let (result, ()) = tokio::join!(send, control_loss);
+    let (result, ()) = TEST_REPLY_NOW
+        .scope(clock, async { tokio::join!(send, control_loss) })
+        .await;
     let reason = match scenario {
         "control" => "meta:inbox_control_lost",
         "reply_token" => "meta:reply_token_expired",

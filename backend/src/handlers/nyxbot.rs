@@ -3347,12 +3347,14 @@ async fn reply_decision(
     actor: &str,
     conversation_id: &str,
     text: &str,
+    grant: Option<&crate::models::channel_meta::GrantRef>,
 ) -> AppResult<Option<(bool, bool)>> {
     let Some(decided) = crate::services::assistant_platform_reply_decision::decide_owner_reply(
         &state.db,
         actor,
         conversation_id,
         text,
+        grant,
     )
     .await?
     else {
@@ -3518,14 +3520,24 @@ async fn start_chat_turn(
         };
         // The chat now answers into that thread (asynchronous replies and
         // word confirmations find it there).
-        state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .update_one(
-                doc! {"_id": &chat.id},
-                doc! {"$set": {"conversation_id": &id}},
+        if let Some(grant) = &meta_grant {
+            crate::services::channel_meta_service::scopes::bind_thread_conversation(
+                &state.db,
+                grant,
+                chat,
+                Some(&id),
             )
             .await?;
+        } else {
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .update_one(
+                    doc! {"_id": &chat.id},
+                    doc! {"$set": {"conversation_id": &id}},
+                )
+                .await?;
+        }
         (id, exists)
     } else if execution.is_some() {
         crate::services::org_channel_service::transcript::lane_for_grant(
@@ -3537,7 +3549,14 @@ async fn start_chat_turn(
         )
         .await?
     } else {
-        let (_, id) = thread_conversation(state, row, &chat.partition).await?;
+        let id = if let Some(grant) = &meta_grant {
+            crate::services::channel_meta_service::scopes::bind_thread_conversation(
+                &state.db, grant, chat, None,
+            )
+            .await?
+        } else {
+            thread_conversation(state, row, &chat.partition).await?.1
+        };
         let exists = engine::get(&state.db, &actor, &id).await.is_ok();
         (id, exists)
     };
@@ -3560,7 +3579,7 @@ async fn start_chat_turn(
     // Nobody else can.
     let mut answered = None;
     if exists && !guest && !had_media && sender.original_message {
-        match reply_decision(state, &actor, &conversation_id, text).await {
+        match reply_decision(state, &actor, &conversation_id, text, meta_grant.as_ref()).await {
             Ok(Some((_, true))) => {
                 return Ok(Inbound::Reply(
                     "Decision saved. The automation will continue in its thread.".into(),

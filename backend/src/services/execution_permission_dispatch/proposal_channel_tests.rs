@@ -251,7 +251,8 @@ async fn migration_channel_review_resume_and_result_occurrence_keep_original_sou
             &f.state.db,
             &f.owner,
             &row.id,
-            "yes"
+            "yes",
+            None,
         )
         .await
         .unwrap()
