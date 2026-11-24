@@ -125,20 +125,13 @@ pub(crate) async fn link(
         after_link(state, owner, &row, agent).await;
         return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": true}));
     }
-    let callback = (row.transport == "direct"
-        && super::channel_adapters::meta::is_meta(&row.platform))
-    .then(|| super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &row.id));
-    #[cfg(test)]
-    if callback.is_some() {
-        super::durable_wake_tests::after("meta_relink_before_commit").await;
-    }
     crate::services::channel_thread_follow_service::relink(
         &state.db,
         &row.user_id,
         owner,
         &row.id,
         &agent.id,
-        callback.as_deref(),
+        None,
     )
     .await?;
     let open_group = state
@@ -245,7 +238,7 @@ pub(crate) async fn mutate_meta_assignment(
                         && !(row.agent_id.is_none() && agent.is_nyxbot())
                     {
                         super::channel_thread_follow_service::relink_in_session(
-                            db, &row, actor, &agent.id, tx,
+                            db, &row, actor, &agent.id, tx, true,
                         )
                         .await?;
                         row = db
@@ -260,7 +253,13 @@ pub(crate) async fn mutate_meta_assignment(
                 }
                 let applied = if let Some(settings) = settings {
                     super::nyxbot_chat_settings_service::update_in_session(
-                        db, tx, &row, actor, settings, true,
+                        db,
+                        tx,
+                        &row,
+                        actor,
+                        settings,
+                        true,
+                        row.org_specialist.is_some(),
                     )
                     .await?
                 } else {
@@ -294,6 +293,15 @@ pub(crate) async fn after_link(
     if row.org_specialist.is_none() && row.private_chats.as_deref() == Some("everyone") {
         let _ = prepare_guest_model(state, actor, Some(&agent.id), None).await;
     }
+    audit_link(state, actor, row, agent).await;
+}
+
+async fn audit_link(
+    state: &AppState,
+    actor: &str,
+    row: &NyxbotChannel,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) {
     audit(
         state,
         actor,
@@ -341,7 +349,11 @@ pub(crate) async fn update_assignment_access(
         mutate_meta_assignment(state, actor, &row, Some(&agent), Some(settings), None).await?;
     let mut result = access_result(state, actor, &current, settings, applied, audience).await?;
     if changed {
-        after_link(state, actor, &current, &agent).await;
+        if settings.private_chats.as_deref() != Some("everyone") {
+            after_link(state, actor, &current, &agent).await;
+        } else {
+            audit_link(state, actor, &current, &agent).await;
+        }
     }
     result["agent"] = json!(agent.name);
     result["changed"] = json!(changed);

@@ -147,7 +147,7 @@ async fn update_inner(
                 } else {
                     row.clone()
                 };
-                update_in_session(db, tx, &row, manager, settings, *confirm_assignment).await
+                update_in_session(db, tx, &row, manager, settings, *confirm_assignment, false).await
             })
         },
     )
@@ -162,11 +162,16 @@ pub(crate) async fn update_in_session(
     manager: &str,
     settings: &AccessSettings,
     confirm_assignment: bool,
+    management_fenced: bool,
 ) -> AppResult<u64> {
     if row.org_specialist.is_some() {
-        super::org_channel_service::fence_management(db, tx, row, manager).await?;
+        if management_fenced {
+            super::org_channel_service::fence_binding(db, tx, row).await?;
+        } else {
+            super::org_channel_service::fence_management(db, tx, row, manager).await?;
+        }
     }
-    if let Some(org) = row.bot_owner_id.as_deref() {
+    if let Some(org) = row.bot_owner_id.as_deref().filter(|_| !management_fenced) {
         super::org_membership_authority::fence_live_member(db, &row.user_id, tx).await?;
         // Contend with role changes/revocation, not just a snapshot read.
         let changed = db

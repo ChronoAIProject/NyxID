@@ -989,6 +989,25 @@ pub(crate) async fn fence_management(
         true,
     )
     .await?;
-    live_doc(db,tx,"nyxbot_channels",doc!{"_id":&row.id,"org_specialist.revision":&b.revision,"status":{"$in":["active","pending"]}},true).await?;
+    fence_binding(db, tx, row).await
+}
+
+/// Revalidate old/new binding identity without reacquiring actor/org writes
+/// already held by the encompassing assignment transaction.
+pub(crate) async fn fence_binding(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &NyxbotChannel,
+) -> AppResult<()> {
+    let b = row.org_specialist.as_ref().ok_or_else(denied)?;
+    live_doc(
+        db,
+        tx,
+        "nyxbot_channels",
+        doc! {"_id":&row.id,"agent_id":&row.agent_id,
+        "org_specialist.revision":&b.revision,"status":{"$in":["active","pending"]}},
+        true,
+    )
+    .await?;
     Ok(())
 }
