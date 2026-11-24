@@ -14,11 +14,10 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
     sessionStorage.setItem(MOCK_NYXBOT_STORAGE, selection);
   }
 }
-const mockNyxbotEnabled =
-  globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ??
-  (import.meta.env.DEV &&
-    typeof window !== "undefined" &&
-    sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1");
+const nyxbotPreview = import.meta.env.DEV && typeof window !== "undefined" &&
+  sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1";
+const mockNyxbotEnabled = globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ?? nyxbotPreview;
+const mockNotificationsEnabled = globalThis.__nyxidAssistantHttpFaults?.notificationsEnabled ?? nyxbotPreview;
 
 const mockModelControlsEnabled =
   globalThis.__nyxidAssistantHttpFaults?.modelControlsEnabled ??
@@ -42,6 +41,7 @@ const MOCK_USER = {
       "experimental:ai-assistant",
       ...(mockModelControlsEnabled ? ["assistant:model-controls"] : []),
       ...(mockNyxbotEnabled ? ["assistant:nyxagent-engine"] : []),
+      ...(mockNotificationsEnabled ? ["assistant:notifications"] : []),
       ...(globalThis.__nyxidAssistantHttpFaults?.voiceEnabled ? ["assistant:voice"] : []),
     ],
   },

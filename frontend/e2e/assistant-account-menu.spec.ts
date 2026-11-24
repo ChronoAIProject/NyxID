@@ -145,6 +145,31 @@ for (const width of [320, 390, 768, 1024, 1280]) {
   }
 }
 
+for (const width of [390, 1280]) {
+  test(`the header bell opens unread activity at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await openAssistant(page, { faults: { nyxagentEnabled: true, notificationsEnabled: true } });
+    const unreadBell = page.getByRole("button", { name: "Notifications, 1 unread", exact: true });
+    await unreadBell.click();
+    const feed = page.getByRole("dialog", { name: "Notifications", exact: true });
+    await expect(feed.getByText("Your morning calendar briefing is ready.")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(unreadBell).toBeFocused();
+
+    if (width < 768) {
+      await page.getByRole("button", { name: "Open chats" }).click();
+      const drawer = page.locator("aside").filter({ has: page.getByRole("button", { name: "Close chats" }) });
+      await drawer.getByRole("button", { name: "Notifications, 1 unread" }).click();
+    } else {
+      await page.getByRole("button", { name: "Hide sidebar" }).click();
+      await unreadBell.click();
+    }
+    await feed.getByRole("button", { name: "Mark all notifications as read" }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("button", { name: "Notifications", exact: true })).toBeVisible();
+  });
+}
+
 test("the mobile account menu opens notification preferences inside Settings", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openAssistant(page, { faults: { nyxagentEnabled: true } });

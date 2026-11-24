@@ -790,7 +790,7 @@ settings links.
 Opening pushes history; Settings tab changes replace, Billing user changes push
 and automatic cleanup replaces. Back immediately after opening closes the panel;
 Back after an explicit close reopens it with any pending top-up already consumed.
-Notifications is a tab in Account Settings. The assistant account menu shows the linked email, Settings, Billing and Usage when available, Open Studio, and Log out. Profile also contains Log out. The agent details sheet and in-chat
+The assistant header bell beside Search opens the activity feed and shows its unread count. Notification preferences are a tab in Account Settings. The assistant account menu shows the linked email, Settings, Billing and Usage when available, Open Studio, and Log out. Profile also contains Log out. The agent details sheet and in-chat
 connection/setup flows keep their existing presentation. Studio `/settings` and
 `/billing` remain available. Lago checkout returns to `/billing` (as configured in
 `docs/LAGO_SETUP.md`), even when started in the assistant.
