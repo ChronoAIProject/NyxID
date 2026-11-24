@@ -248,3 +248,105 @@ async fn meta_async_scope_read_error_and_unresolved_proof_retry_without_discardi
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn admitted_meta_result_survives_deadline_before_or_after_payload_read_and_settles_delivered()
+{
+    for read_first in [true, false] {
+        let f = fixture().await;
+        let db = &f.state.db;
+        let (original, watch) = ready(&f, true, None).await;
+        assert!(watches::enqueue(db, &watch).await.unwrap());
+        let admitted = card_sources::begin(&f, Some(&original.id), None, true).await;
+        assert_eq!(
+            admitted.active_turn.as_ref().unwrap().events[0].id,
+            watch.id
+        );
+        if read_first {
+            assert!(
+                watches::input_context(&f.state, &admitted)
+                    .await
+                    .unwrap()
+                    .contains("Retained operation result")
+            );
+        }
+        db.collection::<Document>(WATCHES)
+            .update_one(
+                doc! {"_id":&watch.id},
+                doc! {"$set":{"deadline":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        due(&f, &watch.id).await;
+        sweep(&f).await;
+        let active = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.state, "queued");
+        assert!(active.result_encrypted.is_some());
+        assert!(
+            watches::input_context(&f.state, &admitted)
+                .await
+                .unwrap()
+                .contains("Retained operation result")
+        );
+        finish_source_turn(&f.state, &admitted, "Consumed result successfully").await;
+        let delivered = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.state, "delivered");
+        assert!(delivered.result_encrypted.is_none());
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn admitted_meta_result_still_obeys_payload_retention_and_grant_erasure() {
+    for expired in [true, false] {
+        let f = fixture().await;
+        let db = &f.state.db;
+        let (original, watch) = ready(&f, true, None).await;
+        assert!(watches::enqueue(db, &watch).await.unwrap());
+        let admitted = card_sources::begin(&f, Some(&original.id), None, true).await;
+        assert_eq!(
+            admitted.active_turn.as_ref().unwrap().events[0].id,
+            watch.id
+        );
+        if expired {
+            db.collection::<Document>(WATCHES).update_one(doc! {"_id":&watch.id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::hours(5))}}).await.unwrap();
+        } else {
+            db.collection::<Document>(GRANT_SCOPES)
+                .update_one(
+                    doc! {"_id":f.scope.get("_id").cloned()},
+                    doc! {"$set":{"erasure_requested":true}},
+                )
+                .await
+                .unwrap();
+        }
+        due(&f, &watch.id).await;
+        sweep(&f).await;
+        let terminal = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.state, "cancelled");
+        assert!(terminal.result_encrypted.is_none());
+        assert_eq!(
+            terminal.reason.as_deref(),
+            Some(if expired {
+                "result_expired"
+            } else {
+                "authority_lost"
+            })
+        );
+        db.drop().await.unwrap();
+    }
+}
