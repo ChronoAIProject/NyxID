@@ -108,7 +108,7 @@ async fn signed_customer_message(state: &AppState, channel_id: &str, sender: &st
     let source = inbound_for(
         state,
         &bot,
-        &row.route_id,
+        row.route_id.as_deref().expect("assigned customer route"),
         &row.route_api_key_id,
         participant,
         &Uuid::new_v4().to_string(),
