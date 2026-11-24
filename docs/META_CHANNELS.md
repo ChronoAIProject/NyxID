@@ -398,6 +398,13 @@ fields add no provider subject, owner list or copied content and do not change
 the public checkpoint response. An unsettled external operation retains its
 existing cancellation obligation before its turn data can be removed.
 
+Exact turn cleanup also removes feedback comments and artifact-delivery rows
+linked by their original turn fields. It clears an artifact head only if that
+head still selects the erased delivery. Feedback and artifact publication check
+retained source authority inside their write transaction; a claimed grant
+cannot recreate those descendants. Independent web turns and newer artifact
+heads retain their own data.
+
 Signed callback confirmation records the keyed subject and cutoff with a
 durable scope cursor. Historical reconnects are captured in indexed pages of
 100 scopes by the existing request worker. Current and retired compatibility capture share one

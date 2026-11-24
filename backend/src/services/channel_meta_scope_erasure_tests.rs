@@ -851,3 +851,166 @@ async fn final_inventory_revisits_nested_queued_and_active_provenance_before_com
         db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn exact_turn_feedback_and_artifact_deliveries_drain_before_source_and_keep_successor_head() {
+    use crate::services::assistant_feedback_service::{self as feedback, FeedbackWrite};
+    for successor_head in [false, true] {
+        let f = fixture().await;
+        let db = &f.state.db;
+        let proof = scopes::reference(&f.bot).unwrap();
+        let mut parent = conversation(&f.bot.user_id, false, &proof);
+        let conversation = parent.get_str("_id").unwrap().to_owned();
+        let mut web = message(
+            &f.bot.user_id,
+            &conversation,
+            "web-turn",
+            3,
+            "assistant",
+            &proof,
+        );
+        web.remove("meta_grants");
+        let a = message(
+            &f.bot.user_id,
+            &conversation,
+            "a-turn",
+            2,
+            "assistant",
+            &proof,
+        );
+        let delivery_a = uuid::Uuid::new_v4().to_string();
+        let delivery_b = uuid::Uuid::new_v4().to_string();
+        parent.insert(
+            "artifact_head",
+            doc! {"message_id":if successor_head {&delivery_b}else{&delivery_a},"seq":3_i64},
+        );
+        db.collection::<Document>("assistant_conversations")
+            .insert_one(parent)
+            .await
+            .unwrap();
+        db.collection::<Document>("assistant_messages")
+            .insert_many([a.clone(), web.clone()])
+            .await
+            .unwrap();
+        let write = |id: &str, turn: &str| FeedbackWrite {
+            user_id: f.bot.user_id.clone(),
+            message_id: id.into(),
+            conversation_id: Some(conversation.clone()),
+            group_id: None,
+            turn_id: Some(turn.into()),
+            vote: "up".into(),
+            comment: Some(format!("Private {turn} feedback")),
+            comment_present: true,
+            context: None,
+        };
+        feedback::upsert_feedback(db, write(a.get_str("_id").unwrap(), "a-turn"))
+            .await
+            .unwrap();
+        feedback::upsert_feedback(db, write(web.get_str("_id").unwrap(), "web-turn"))
+            .await
+            .unwrap();
+        let deliveries = db.collection::<Document>(crate::models::generated_artifact::DELIVERIES);
+        for (id, origin, event) in [
+            (&delivery_a, "a-turn", "artifact-event-a"),
+            (&delivery_b, "web-turn", "artifact-event-b"),
+        ] {
+            deliveries
+                .insert_one(
+                    doc! {"_id":id,"user_id":&f.bot.user_id,"conversation_id":&conversation,
+                    "originating_turn_id":origin,"event_turn_id":event,"attachment_ids":[]},
+                )
+                .await
+                .unwrap();
+        }
+        db.collection::<Document>(BOTS)
+            .update_one(
+                doc! {"_id":&f.bot.id},
+                doc! {"$set":{"is_active":false,"meta_binding.subscription":"removed"}},
+            )
+            .await
+            .unwrap();
+        crate::services::durable_wake_tests::resume_after(
+            "meta_feedback_before_write",
+            async {
+                assert!(
+                    feedback::upsert_feedback(db, write(a.get_str("_id").unwrap(), "a-turn"))
+                        .await
+                        .is_err()
+                );
+            },
+            async {
+                let service = MetaService::from(&f.state);
+                let cutoff =
+                    bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::seconds(1));
+                let mut done = false;
+                for _ in 0..64 {
+                    if pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff)
+                        .await
+                        .unwrap()
+                    {
+                        done = true;
+                        break;
+                    }
+                }
+                assert!(done);
+            },
+        )
+        .await;
+        let feedback_rows =
+            db.collection::<Document>(crate::models::assistant_message_feedback::COLLECTION_NAME);
+        assert_eq!(
+            feedback_rows
+                .count_documents(doc! {"conversation_id":&conversation,"turn_id":"a-turn"})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            feedback_rows
+                .count_documents(doc! {"conversation_id":&conversation,"turn_id":"web-turn"})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            deliveries
+                .find_one(doc! {"_id":&delivery_a})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            deliveries
+                .find_one(doc! {"_id":&delivery_b})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let retained = db
+            .collection::<Document>("assistant_conversations")
+            .find_one(doc! {"_id":&conversation})
+            .await
+            .unwrap()
+            .unwrap();
+        if successor_head {
+            assert_eq!(
+                retained
+                    .get_document("artifact_head")
+                    .unwrap()
+                    .get_str("message_id"),
+                Ok(delivery_b.as_str())
+            );
+        } else {
+            assert!(!retained.contains_key("artifact_head"));
+        }
+        assert_eq!(
+            db.collection::<Document>("assistant_messages")
+                .find_one(doc! {"_id":web.get("_id").cloned()})
+                .await
+                .unwrap()
+                .unwrap(),
+            web
+        );
+        db.drop().await.unwrap();
+    }
+}

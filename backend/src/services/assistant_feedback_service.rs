@@ -194,6 +194,8 @@ pub async fn upsert_feedback(
     write: FeedbackWrite,
 ) -> crate::errors::AppResult<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
     #[cfg(test)]
+    super::durable_wake_tests::after("meta_feedback_before_write").await;
+    #[cfg(test)]
     if let Ok(pause) = FEEDBACK_WRITE_PAUSE.try_with(Clone::clone) {
         pause.entered.notify_one();
         pause.release.notified().await;
@@ -222,15 +224,30 @@ pub async fn upsert_feedback(
         "$set": set,
         "$setOnInsert": {"_id": &new_id, "created_at": bson::DateTime::from_chrono(now)},
     };
-    let context = (db.clone(), write.user_id.clone(), filter, update);
+    let context = (
+        db.clone(),
+        write.user_id.clone(),
+        filter,
+        update,
+        write.conversation_id.clone(),
+        write.message_id.clone(),
+        write.turn_id.clone(),
+    );
     let mut retries = 0;
     let previous = loop {
         let result = super::transaction_service::run_db_only(
             db,
             &context,
-            |tx, (db, owner, filter, update)| {
+            |tx, (db, owner, filter, update, conversation, message, turn)| {
                 Box::pin(async move {
                     fence_feedback_owner(db, owner, tx).await?;
+                    if let Some(conversation) = conversation {
+                        let source = db.collection::<bson::Document>(MESSAGE_COLLECTION)
+                            .find_one(doc! {"_id":message,"user_id":owner,"conversation_id":conversation,"turn_id":turn})
+                            .session(&mut *tx).await?
+                            .ok_or_else(|| crate::errors::AppError::NotFound("message not found".into()))?;
+                        super::channel_meta_service::scopes::fence_assistant_source(db,tx,&source).await?;
+                    }
                     Ok(db
                         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
                         .find_one_and_update(filter.clone(), update.clone())

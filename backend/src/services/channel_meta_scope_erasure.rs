@@ -1101,16 +1101,49 @@ async fn erase_turn(
         }
         return Ok(Step::stay(doc! {"phase":phase}));
     }
-    for collection in [
-        crate::models::assistant_tool_result::COLLECTION_NAME,
-        crate::models::assistant_attachment::COLLECTION_NAME,
-        crate::models::assistant_resource::COLLECTION_NAME,
-        crate::models::async_service_operation::COLLECTION_NAME,
-        crate::models::generated_artifact::COLLECTION_NAME,
+    for (collection, linkage) in [
+        (
+            crate::models::assistant_tool_result::COLLECTION_NAME,
+            doc! {"turn_id":turn},
+        ),
+        (
+            crate::models::assistant_attachment::COLLECTION_NAME,
+            doc! {"$or":[{"turn_id":turn},{"source_turn_id":turn}]},
+        ),
+        (
+            crate::models::assistant_resource::COLLECTION_NAME,
+            doc! {"turn_id":turn},
+        ),
+        (
+            crate::models::async_service_operation::COLLECTION_NAME,
+            doc! {"turn_id":turn},
+        ),
+        (
+            crate::models::generated_artifact::COLLECTION_NAME,
+            doc! {"turn_id":turn},
+        ),
+        (
+            crate::models::assistant_message_feedback::COLLECTION_NAME,
+            doc! {"turn_id":turn},
+        ),
+        (
+            crate::models::generated_artifact::DELIVERIES,
+            doc! {"$or":[{"originating_turn_id":turn},{"event_turn_id":turn}]},
+        ),
     ] {
-        let filter = doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn};
+        let mut filter = doc! {"user_id":owner,"conversation_id":conversation};
+        filter.extend(linkage);
         let rows = page(db, tx, collection, filter.clone(), &Document::new()).await?;
         if !rows.is_empty() {
+            if collection == crate::models::generated_artifact::DELIVERIES {
+                for delivery in &rows {
+                    // A successor's head is independent: clear only the exact
+                    // delivery selected by this erased turn's original row.
+                    db.collection::<Document>("assistant_conversations").update_one(
+                        doc! {"_id":conversation,"user_id":owner,"artifact_head.message_id":delivery.get("_id").cloned()},
+                        doc! {"$unset":{"artifact_head":""}}).session(&mut *tx).await?;
+                }
+            }
             let ids: Vec<_> = rows
                 .into_iter()
                 .filter_map(|row| row.get("_id").cloned())
@@ -1590,6 +1623,7 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
         crate::models::assistant_resource::COLLECTION_NAME,
         crate::models::async_service_operation::COLLECTION_NAME,
         crate::models::generated_artifact::COLLECTION_NAME,
+        crate::models::assistant_message_feedback::COLLECTION_NAME,
     ] {
         db.collection::<Document>(collection)
             .create_index(
@@ -1614,6 +1648,22 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             )
             .await?;
     }
+    for field in ["originating_turn_id", "event_turn_id"] {
+        db.collection::<Document>(crate::models::generated_artifact::DELIVERIES)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"user_id":1,"conversation_id":1,field:1,"_id":1})
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"source_turn_id":1,"_id":1})
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
