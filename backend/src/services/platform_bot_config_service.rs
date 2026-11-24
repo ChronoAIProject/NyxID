@@ -474,7 +474,7 @@ async fn convert_locked(
                 .update_many(doc! {"channel_bot_id": &bot_id}, doc! {"$set": {"is_active": false, "default_agent": false, "updated_at": bson::DateTime::from_chrono(now)}})
                 .session(&mut *session).await?;
             db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-                .update_many(doc! {"channel_bot_id": &bot_id}, doc! {"$set": {"status": "disconnected", "last_error": "platform_conversion", "updated_at": bson::DateTime::from_chrono(now)}, "$unset": {"link_code_hash": "", "link_code_expires_at": "", "agent_key_ciphertext": ""}, "$inc": {"follow_binding_generation": 1_i64}})
+                .update_many(doc! {"channel_bot_id": &bot_id}, doc! {"$set": {"status": "disconnected", "last_error": "platform_conversion", "updated_at": bson::DateTime::from_chrono(now)}, "$unset": {"link_code_hash": "", "link_code_expires_at": "", "agent_key_ciphertext": "", crate::services::nyxbot_channel_key::VERSION_PATH: ""}, "$inc": {"follow_binding_generation": 1_i64}})
                 .session(&mut *session).await?;
             Ok(profile)
         }.await;

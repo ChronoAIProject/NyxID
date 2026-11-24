@@ -667,6 +667,18 @@ async fn release_retirement_and_route_key_revocation_roll_back_together() {
 async fn release_disconnect_org_loss_fallback_and_setup_failure_capture_pending_attempts() {
     for mode in ["disconnect", "org", "fallback", "setup_failure"] {
         let (state, row, _, _, upstream) = fixture("release_paths").await;
+        let rows = state.db.collection::<Document>(CHANNELS);
+        let source = rows.find_one(doc! {"_id":&row.id}).await.unwrap().unwrap();
+        assert!(
+            channel_key::migrate(&state.db, &state.encryption_keys, &source)
+                .await
+                .unwrap()
+        );
+        let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(
+            row.secret_context_versions.get(channel_key::FIELD),
+            Some(&3)
+        );
         let reserved = reserve(&state, &row).await;
         release::dispatch(&state.db, &reserved).await.unwrap();
         match mode {
@@ -702,13 +714,10 @@ async fn release_disconnect_org_loss_fallback_and_setup_failure_capture_pending_
         assert_eq!(retired.owner_user_id, OWNER);
         assert_retired_key(&state, &reserved.agent_api_key_id).await;
         assert_retired_key(&state, &reserved.route_api_key_id).await;
-        assert!(
-            load_channel(&state, OWNER, &row.id)
-                .await
-                .unwrap()
-                .gateway_setup_release_id
-                .is_none()
-        );
+        let retired_channel = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert!(retired_channel.gateway_setup_release_id.is_none());
+        assert!(retired_channel.agent_key_ciphertext.is_none());
+        assert!(retired_channel.secret_context_versions.is_empty());
         upstream.abort();
         state.db.drop().await.unwrap();
     }

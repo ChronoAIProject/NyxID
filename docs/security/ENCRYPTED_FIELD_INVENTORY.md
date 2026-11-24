@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 33 implemented adapters
-and 16 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 34 implemented adapters
+and 15 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -53,7 +53,7 @@ A collection may use separate adapters for different fields.
 | `channel_connect_links` | `receiver.secret_encrypted` | [channel_connect_link_service.rs](../../backend/src/services/channel_connect_link_service.rs) | Implemented |
 | `downstream_services` | `credential_encrypted` | [catalog_credential_record_service.rs](../../backend/src/services/catalog_credential_record_service.rs) | Implemented |
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
-| `nyxbot_channels` | `agent_key_ciphertext` | — | Pending |
+| `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | — | Pending |
 | `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload` | — | Pending |
 | `mobile_social_deliveries` | `ciphertext` | — | Pending |
@@ -110,6 +110,13 @@ generations in the transaction that moves the bot and its routes.
   active turn’s restart window. Approval requests retain encrypted payloads
   and results under the selected proposal version.
   [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+
+The NyxBot gateway agent key binds to the channel ID, linking person and
+installed agent key ID. On an org route, the org owns the separate route key.
+Direct-to-gateway preparation stores pending IDs. Adoption publishes the
+ciphertext with its installed ID. Storage verification checks the matching
+API key’s retained owner and SHA-256 digest, including for revoked keys.
+[Channel key storage](../../backend/src/services/nyxbot_channel_key.rs)
 
 The native WhatsApp Verify Token binds to the settings row’s bot ID, owner and
 ownership generation. Callback transitions preserve it. Relay-phase settings
