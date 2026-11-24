@@ -334,13 +334,14 @@ async fn erased_captured_input_cannot_be_recreated_after_public_reset_but_retain
             if meta {
                 erase(&f).await;
             }
-            crate::handlers::assistant_nyxagent::reset_context(
+            let reset = crate::handlers::assistant_nyxagent::reset_context(
                 axum::extract::State(f.state.clone()),
                 crate::test_utils::test_auth_user(&f.bot.user_id),
                 axum::extract::Path(original.id.clone()),
             )
             .await
             .unwrap();
+            assert_eq!(reset.reset_reason.as_deref(), Some("user_reset"));
             assert_eq!(
                 engine::get(db, &f.bot.user_id, &original.id)
                     .await
