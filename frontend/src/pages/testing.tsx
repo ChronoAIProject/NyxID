@@ -36,7 +36,7 @@ export function TestingPage() {
         <div className="border-b border-hairline py-10 sm:py-14">
           <h1 className="type-compact-page-title sm:type-page-title">{t("NyxBot skill templates")}</h1>
           <p className="mt-3 max-w-xl text-16 text-muted-foreground">
-            {t("Pick a task to open its skill in a private NyxBot chat with a ready-to-send starter message.")}
+            {t("Pick a task to start its skill in a private NyxBot chat.")}
           </p>
         </div>
         <ul className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

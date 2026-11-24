@@ -155,6 +155,9 @@ function firstSentence(text: string): string {
  */
 export function describeEventNotice(text: string, t = translateUi): EventNotice {
   const notice = text.trim();
+  if (notice === "Started a skill from the NyxBot template gallery.") {
+    return { kind: "notice", tone: "neutral", summary: t("Started a skill from the NyxBot template gallery.") };
+  }
   if (notice.startsWith("Skill ") && (notice.includes("published and attached") || notice.includes("requires a corrected package"))) {
     return { kind: "notice", tone: notice.includes("published and attached") ? "success" : "warning", summary: t("Skill publication"), detail: notice };
   }

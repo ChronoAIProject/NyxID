@@ -7,7 +7,6 @@ import {
   skillVersionsSchema,
   skillPreviewSchema,
   type AgentSkill,
-  type SkillPin,
   attachedSkillPreviewSchema,
   agentSkillHistorySchema,
   skillImproveSchema,
@@ -18,23 +17,17 @@ function agentSkillsPath(id: string) {
   return `${base}/agents/${encodeURIComponent(id)}/skills`;
 }
 
-async function readAgentSkills(id: string, authorityGuard?: () => void) {
+async function readAgentSkills(id: string) {
   return agentSkillsSchema.parse(
-    await assistantJson(agentSkillsPath(id), { authorityGuard }),
+    await assistantJson(agentSkillsPath(id)),
   );
 }
 
 function writeAgentSkills(
   id: string,
   selection: { expected_revision: number; skills: AgentSkill[] },
-  authorityGuard?: () => void,
 ) {
-  return assistantJson(agentSkillsPath(id), { method: "PUT", body: selection, authorityGuard });
-}
-
-function sameSkillPin(left: SkillPin, right: SkillPin) {
-  return left.source === right.source && left.skill_id === right.skill_id &&
-    left.version === right.version && left.sha256 === right.sha256;
+  return assistantJson(agentSkillsPath(id), { method: "PUT", body: selection });
 }
 
 export function useAgentSkills(id: string) {
@@ -62,37 +55,6 @@ export function useSetAgentSkills(id: string) {
   });
 }
 
-/** An explicit gallery start may append a pin or reuse an exact enabled one. */
-export function useAttachTemplateSkill() {
-  const client = useQueryClient();
-  const owner = useAuthStore((state) => state.user?.id);
-  return async (
-    agentId: string,
-    reference: AgentSkill,
-    authorityGuard: () => void,
-    attach = true,
-  ): Promise<"ready" | "disabled" | "different" | "full" | "missing"> => {
-    const current = await readAgentSkills(agentId, authorityGuard);
-    const existing = current.skills.find((skill) => skill.skill_id === reference.skill_id);
-    if (existing) {
-      const sameDependencies = existing.dependencies.length === reference.dependencies.length &&
-        existing.dependencies.every((pin) => reference.dependencies.some((entry) => sameSkillPin(pin, entry)));
-      if (!sameSkillPin(existing, reference) || !sameDependencies) return "different";
-      return existing.disabled ? "disabled" : "ready";
-    }
-    if (!attach) return "missing";
-    if (current.skills.length >= 16) return "full";
-    await writeAgentSkills(agentId, {
-      expected_revision: current.revision,
-      skills: [...current.skills, reference],
-    }, authorityGuard);
-    void Promise.all([
-      client.invalidateQueries({ queryKey: ["agent-skills", owner, agentId] }),
-      client.invalidateQueries({ queryKey: ["agent-skill-history", owner, agentId] }),
-    ]);
-    return "ready";
-  };
-}
 export function useSetSkillPreload(agentId: string, skillId: string) {
   const client = useQueryClient();
   const owner = useAuthStore((s) => s.user?.id);

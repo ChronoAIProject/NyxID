@@ -214,27 +214,34 @@ skill and the three setup steps. Guests can choose **Log in** or **Create
 an account**. Signed-in visitors choose **Open NyxBot**. An optional
 `code` from the gallery is carried to the existing registration flow.
 
-Each action records the visitor's intent to attach the skill, then builds a
-same-origin `/assistant?skill=<template-slug>&skillSetup=<id>` return URL.
+Continuing records the visitor's intent to start the skill and builds a
+same-origin return URL at `/assistant?skill=<template-slug>&skillSetup=<id>`.
 A host-only cookie and a same-tab session record must agree. Both expire
-after 30 minutes and are cleared before attachment. A plain
-SSO landing on `/` or `/assistant` can recover the same-tab selection after
-the visitor starts a provider from the NyxID sign-in form. Other return
-destinations retain precedence. A shared deep link opens the preview and
-offers an explicit **Open NyxBot** action.
+after 30 minutes and are cleared before launch. A plain SSO landing on
+`/` or `/assistant` can recover the same-tab selection after the visitor
+starts a provider from the NyxID sign-in form. Other return destinations
+retain precedence. A shared deep link opens the preview with an explicit
+**Start skill** action.
 
-NyxID verifies the published GUID, version, and SHA-256 through its catalog.
-It attaches the exact skill to the owner's personal NyxBot through the
-existing revision check, or reuses a matching enabled pin. The owner's
-Skills editor manages disabled and different pins. The regular NyxBot
-composer opens with an editable starter. The owner chooses when to send.
-Reloading a prefilled chat checks the saved pin against the live record and
-restores the local draft.
+The browser sends a structured launch to
+`POST /api/v1/assistant/nyxagent/skill-templates/{slug}/start`. NyxID
+verifies the Ornn GUID, version, SHA-256, and dependency closure. It
+attaches the exact enabled pin, creates a private thread, and queues one
+opening event in the same transaction. An account-bound setup ID lets
+the browser recover the same thread after a refresh or lost response.
 
-Curated entries live in `frontend/src/lib/assistant/skill-templates.ts`.
-Verify the exact published package before updating a pin. Starting a gallery
-template requires the NyxAgent engine and works with `assistant:skill-runs`
-off. That separate flag enables the outline and run features above.
+The chat shows the overview and starting template above the transcript.
+NyxBot reads the verified skill and begins by asking for any missing
+inputs. The composer starts empty. The standard turn history shows the
+server notice and NyxBot's response. The owner can cancel while the
+opening event is queued or stop the active turn.
+
+The shared gallery allowlist lives in `shared/nyxbot-skill-templates.json`.
+The localized starting templates live in
+`frontend/src/lib/assistant/skill-templates.ts`. The gallery works with
+`assistant:skill-runs` off and includes curated input prompts and expected
+output for skills without a supported outline. With that flag enabled,
+a supported outline from the verified package appears in the chat.
 
 ### Preview with hosted sign-in
 
@@ -249,5 +256,5 @@ Open `http://nyxbot-preview.localhost:4739/testing`, select **Try this**,
 then choose **Log in** or **Create an account**. Choose a provider and open
 its sign-in tab. The provider returns to NyxID’s hosted device verification
 page. Matching the displayed code and approving the browser delivers a
-session to the original local tab. The selected template opens there. This
-preview uses the signed-in person’s live skills and chat account.
+session to the original local tab. The selected skill starts in a private NyxBot chat. The preview uses
+the signed-in person’s live skills and chat account.

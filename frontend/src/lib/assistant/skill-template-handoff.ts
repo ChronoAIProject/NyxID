@@ -1,6 +1,7 @@
 import { findSkillTemplate, type SkillTemplate } from "./skill-templates";
 
 const STORAGE_KEY = "nyxid:skill-template-setup";
+const LAUNCH_KEY = "nyxid:skill-template-launch";
 const OPEN_DRAFT_KEY = "nyxid:skill-template-draft";
 const COOKIE_PREFIX = "nyxid_skill_setup_";
 const LIFETIME_SECONDS = 30 * 60;
@@ -16,9 +17,8 @@ interface PendingSetup extends SkillSetupSearch {
   readonly ssoStarted?: boolean;
 }
 
-interface OpenTemplateDraft extends SkillSetupSearch {
+interface TemplateLaunch extends SkillSetupSearch {
   readonly owner: string;
-  readonly agentId: string;
 }
 
 export function isSkillSetupId(value: unknown): value is string {
@@ -82,7 +82,7 @@ export function createSkillSetup(skill: SkillTemplate["slug"], owner?: string): 
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(setup));
     setCookie(skillSetup, skill);
   } catch {
-    // The verified chat preview still opens. The owner can attach from there.
+    // The owner can still start from the template preview.
   }
   return { skill, skillSetup };
 }
@@ -155,7 +155,7 @@ export function discardUnrelatedSkillSetup(path: string, search: string) {
   if (!matchesSetup(pending, setup)) clearPendingSkillSetup();
 }
 
-/** Consume the browser intent before allowing an automatic attach. */
+/** Consume the browser intent before allowing an automatic launch. */
 export function claimSkillSetup(setup: SkillSetupSearch, owner: string): boolean {
   const pending = readPending();
   if (!pending || !matchesSetup(pending, setup)) return false;
@@ -163,31 +163,22 @@ export function claimSkillSetup(setup: SkillSetupSearch, owner: string): boolean
   return !pending.owner || pending.owner === owner;
 }
 
-export function readOpenTemplateDraft(setup: SkillSetupSearch, owner: string): string | undefined {
-  try {
-    const entry = JSON.parse(sessionStorage.getItem(OPEN_DRAFT_KEY) ?? "null") as Partial<OpenTemplateDraft> | null;
-    if (entry?.skill !== setup.skill || entry.skillSetup !== setup.skillSetup || entry.owner !== owner) return;
-    const agentId = entry.agentId;
-    if (typeof agentId === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(agentId)) return agentId;
-  } catch {
-    // A blocked storage read can still use the ordinary preview.
-  }
+export function readTemplateLaunch(setup: SkillSetupSearch, owner: string): boolean {
+  return [LAUNCH_KEY, OPEN_DRAFT_KEY].some((key) => {
+    try {
+      const entry = JSON.parse(sessionStorage.getItem(key) ?? "null") as Partial<TemplateLaunch> | null;
+      return entry?.skill === setup.skill && entry.skillSetup === setup.skillSetup && entry.owner === owner;
+    } catch {
+      return false;
+    }
+  });
 }
 
-export function saveOpenTemplateDraft(setup: SkillSetupSearch, owner: string, agentId: string) {
-  const entry: OpenTemplateDraft = { ...setup, owner, agentId };
+export function saveTemplateLaunch(setup: SkillSetupSearch, owner: string) {
+  const entry: TemplateLaunch = { ...setup, owner };
   try {
-    sessionStorage.setItem(OPEN_DRAFT_KEY, JSON.stringify(entry));
+    sessionStorage.setItem(LAUNCH_KEY, JSON.stringify(entry));
   } catch {
-    // The current chat can still be used when browser storage is blocked.
-  }
-}
-
-export function clearOpenTemplateDraft(setupId: string, owner: string) {
-  try {
-    const entry = JSON.parse(sessionStorage.getItem(OPEN_DRAFT_KEY) ?? "null") as Partial<OpenTemplateDraft> | null;
-    if (entry?.skillSetup === setupId && entry.owner === owner) sessionStorage.removeItem(OPEN_DRAFT_KEY);
-  } catch {
-    // Draft cleanup is best-effort when storage is blocked.
+    // Retries from the current page still use the same setup ID.
   }
 }

@@ -226,6 +226,7 @@ export function useNyxAgentAssistantChat({
     // fallback without it and a slow backstop with it. A turn NyxID (not
     // this page) starts here reaches the thread row first: `streaming`.
     refetchInterval: (query) => {
+      if (query.state.data?.conversation.gallery_skill?.state === "queued") return 2000;
       // An owner can decide a proxy approval outside this thread.
       const oldestDeadline = Date.now() - 15_000;
       if (query.state.data?.approvals.some((row) =>

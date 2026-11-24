@@ -75,7 +75,7 @@ export function SkillTemplateWelcomePage() {
           </DialogTitle>
           <DialogDescription>
             {template
-              ? t("Continuing adds this skill to your personal NyxBot and opens a private chat with a starter message you can edit before sending.")
+              ? t("Continuing adds this skill to your personal NyxBot and starts it in a private chat.")
               : t("Choose a skill from the gallery to get started with NyxBot.")}
           </DialogDescription>
         </DialogHeader>

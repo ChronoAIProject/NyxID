@@ -251,6 +251,12 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
             return Ok(());
         }
+        let gallery = row.gallery_skill.as_ref().is_some_and(|launch| {
+            launch.state == crate::models::assistant_conversation::GallerySkillState::Queued
+        });
+        if gallery {
+            engine::require_enabled(&state.db, owner).await?;
+        }
         if row.pending_events.iter().all(|e| {
             e.kind != crate::services::async_service_operation::EVENT_KIND
                 && e.automation_work
@@ -284,6 +290,9 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         #[cfg(test)]
         tests::wait_for_wake_barrier(&state.db).await;
         let mut start = event_turn(id);
+        // The explicit gallery action follows the owner's live permissions
+        // cohort, including after a restart on another replica.
+        start.execution_enrollment = gallery;
         start.org_access = org_access;
         let mut group_seen = None;
         if row.group_request_id.is_some()

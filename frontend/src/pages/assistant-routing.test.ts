@@ -48,7 +48,7 @@ describe("assistantChatSurface", () => {
 describe("skill template links", () => {
   const skill = "research-paper-writing-rigor";
 
-  it("accepts a known slug with fixed starter content", () => {
+  it("accepts a known slug and ignores injected input", () => {
     expect(parseAssistantSearch({ skill, prompt: "untrusted prompt" })).toEqual({ skill });
     expect(parseAssistantSearch({ skill: "unknown" })).toEqual({});
     expect(parseAssistantSearch({ skill: [skill, skill] })).toEqual({});
@@ -60,6 +60,13 @@ describe("skill template links", () => {
       expect(parseAssistantSearch({ skill, [key]: "somewhere-else" }).skill).toBeUndefined();
     },
   );
+
+  it("allows a gallery overview hint on a persisted NyxBot conversation", () => {
+    const c = "nyxa-" + "a".repeat(32);
+    expect(parseAssistantSearch({ c, template: skill })).toEqual({ c, template: skill });
+    expect(parseAssistantSearch({ c, template: "unknown" })).toEqual({ c });
+    expect(parseAssistantSearch({ template: skill })).toEqual({});
+  });
 
   it("retains only a known gallery slug and a bounded invite code", () => {
     expect(parseSkillGallerySearch({ skill, code: "TEST-1234", return_to: "https://example.com" }))

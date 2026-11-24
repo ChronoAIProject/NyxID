@@ -85,7 +85,7 @@ RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-u
 
 # Copy the real source code, build script, docs, prompts, and catalog spec overlays
 # (docs, prompts, specs, and assets are embedded via include_str!/include_bytes!)
-COPY shared/native-app-links.json shared/allowed-card-continuation.json shared/
+COPY shared/native-app-links.json shared/allowed-card-continuation.json shared/nyxbot-skill-templates.json shared/
 COPY backend/src backend/src
 COPY backend/build.rs backend/build.rs
 COPY backend/prompts backend/prompts

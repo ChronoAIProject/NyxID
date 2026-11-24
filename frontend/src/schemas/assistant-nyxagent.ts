@@ -138,6 +138,10 @@ export const nyxAgentConversationSchema = z.object({
   agent: nyxAgentConversationAgentSchema.nullable().default(null),
   /** Wake-up events queued for this thread's next turn. */
   pending_events: z.number().int().nonnegative().default(0),
+  gallery_skill: z.object({
+    slug: z.string(),
+    state: z.enum(["queued", "admitted", "cancelled", "unavailable"]),
+  }).optional(),
   /** Set on threads that answer one of the user's channel bots. */
   channel: nyxAgentChannelOriginSchema.nullable().default(null),
 });

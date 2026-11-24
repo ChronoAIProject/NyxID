@@ -335,8 +335,16 @@ pub struct ConversationResponse {
     agent: Option<AgentRefResponse>,
     /// Wake-up events waiting for this thread's next turn.
     pending_events: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gallery_skill: Option<GallerySkillResponse>,
     channel: Option<ChannelOriginResponse>,
 }
+#[derive(Serialize)]
+struct GallerySkillResponse {
+    slug: String,
+    state: crate::models::assistant_conversation::GallerySkillState,
+}
+
 impl ConversationResponse {
     async fn project_model(&mut self, db: &mongodb::Database, actor: &str) -> AppResult<()> {
         let public =
@@ -465,6 +473,10 @@ impl From<AssistantConversation> for ConversationResponse {
                 destroyed: false,
             }),
             pending_events: row.pending_events.len(),
+            gallery_skill: row.gallery_skill.map(|launch| GallerySkillResponse {
+                slug: launch.slug,
+                state: launch.state,
+            }),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 parent_chat_id: None,
                 thread_id: None,
@@ -1823,6 +1835,19 @@ pub async fn stop(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     let target = engine::get(&state.db, &user_id, &id).await?;
+    use crate::models::assistant_conversation::GallerySkillState;
+    let target = if target
+        .gallery_skill
+        .as_ref()
+        .is_some_and(|launch| launch.state == GallerySkillState::Queued)
+    {
+        if crate::services::assistant_skill_templates::cancel_queued(&state.db, &target).await? {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        engine::get(&state.db, &user_id, &id).await?
+    } else {
+        target
+    };
     let stopped = engine::request_stop_row_target(&state.db, &target).await?;
     if let Some(row) = stopped.as_ref().filter(|row| {
         row.active_turn

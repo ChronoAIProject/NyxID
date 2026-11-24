@@ -94,7 +94,8 @@ import { isLegacyConversationId } from "@/lib/assistant/conversation-ids";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
-import { clearOpenTemplateDraft } from "@/lib/assistant/skill-template-handoff";
+import { findSkillTemplate } from "@/lib/assistant/skill-templates";
+import { SkillTemplateOverview } from "./skill-template-overview";
 import {
   useAssistantOnboarding,
   useHideSuggestions,
@@ -216,8 +217,8 @@ export function ChannelUserEntry({
   );
 }
 
-export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) {
-  useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
+export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, introduction, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly introduction?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) {
+  useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} introduction={introduction} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
 
 export function AssistantChatPage() {
   useUiTranslation();
@@ -604,7 +605,7 @@ export function DirectAssistantChatPage() {
  * The NyxAgent engine: a group chat (`?g=`), a thread (`?c=`, `?draft`,
  * `?agent=`), or the NyxBot home when none of those are set.
  */
-export function NyxAgentAssistantChatPage({ templateDraft }: { readonly templateDraft?: TemplateDraft } = {}) {
+export function NyxAgentAssistantChatPage() {
   useUiTranslation();
   const search = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
@@ -612,17 +613,10 @@ export function NyxAgentAssistantChatPage({ templateDraft }: { readonly template
   if (search.g) {
     return <NyxAgentGroupPage key={search.g} groupId={search.g} mock={Boolean(search.mock)} />;
   }
-  return <NyxAgentThreadPage templateDraft={templateDraft} />;
+  return <NyxAgentThreadPage />;
 }
 
-export interface TemplateDraft {
-  readonly agent: NyxAgentConversationAgent;
-  readonly key: string;
-  readonly setupId?: string;
-  readonly title: string;
-}
-
-function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: TemplateDraft }) {
+function NyxAgentThreadPage() {
   const { i18n } = useUiTranslation();
   const voiceFlagEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
@@ -709,7 +703,7 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
   const [requestError, setRequestError] = useState<{ scope: string; message: string }>();
   const pendingSend = useRef<{ scope: string } | undefined>(undefined);
   // No thread, draft or agent in the URL: the NyxBot home.
-  const home = !search.c && !search.draft && !search.agent && !templateDraft;
+  const home = !search.c && !search.draft && !search.agent;
   // Router state is global: while the sidebar navigates to another page this
   // component is still mounted and sees that page's (thread-less) URL.
   const onChatRoute = useRouterState({
@@ -780,14 +774,13 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
   }, [selectedId, user?.id, onChatRoute]);
   const adopt = useCallback((id: string) => {
     if (selection.current !== selectedId) return;
-    if (templateDraft?.setupId && user?.id) clearOpenTemplateDraft(templateDraft.setupId, user.id);
     if (pendingSend.current) pendingSend.current.scope = `${user?.id}:${id}`;
     void navigate({
       to: "/assistant",
       search: (previous) => ({ ...parseAccountPanelSearch(previous), c: id, ...(search.mock ? { mock: 1 as const } : {}) }),
       replace: true,
     });
-  }, [navigate, search.mock, selectedId, templateDraft?.setupId, user?.id]);
+  }, [navigate, search.mock, selectedId, user?.id]);
   const agents = useNyxBotAgents();
   const groups = useNyxBotGroups();
   // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
@@ -811,14 +804,13 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
         destroyed: selectedAgent.status === "destroyed",
       }
     : undefined;
-  const newThreadAgent = templateDraft?.agent ?? draftAgent;
-  const headerAgent = selectedId ? threadAgent : newThreadAgent;
+  const headerAgent = selectedId ? threadAgent : draftAgent;
   const chat = useNyxAgentAssistantChat({
     selectedConversationId: selectedId,
     reviewCardId: search.card,
     onConversationAdopted: adopt,
     threadsAgentId: selectedAgent?.id,
-    draftAgent: newThreadAgent,
+    draftAgent,
   });
   // Keep rejected retries with the other request failures above the chat.
   const retryFailedMessage = useCallback(async (messageId: string) => {
@@ -988,6 +980,28 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
   }, [home, chat.isStreaming]);
 
   const conversation = chat.conversation;
+  const gallery = conversation?.gallery_skill;
+  const template = findSkillTemplate(gallery?.slug ?? (chat.isLoading && !conversation ? search.template : undefined));
+  const galleryQueued = gallery?.state === "queued";
+  const [cancellingGallery, setCancellingGallery] = useState(false);
+  const launchStatus = galleryQueued ? translateUi("Waiting for NyxBot to start the skill…")
+    : gallery?.state === "cancelled" ? translateUi("Skill start cancelled.")
+    : gallery?.state === "unavailable" ? translateUi("The pinned skill changed before NyxBot could start it.")
+    : undefined;
+
+  async function stopGallery() {
+    const scope = errorScope;
+    setRequestError(undefined);
+    setCancellingGallery(true);
+    try {
+      await chat.stop();
+      await chat.refreshHistory();
+    } catch {
+      setRequestError({ scope, message: "Could not stop NyxBot. Try again shortly." });
+    } finally {
+      setCancellingGallery(false);
+    }
+  }
   // Threads carry the agent's handle; its display name lives on the agent list.
   const headerNamed = headerAgent ? withDisplayName(headerAgent, agents.data?.agents) : undefined;
   const agentName = headerNamed ? agentTitle(headerNamed) : "NyxBot";
@@ -1116,7 +1130,7 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
           </>
         ) : undefined}
       />
-      {conversation && !chat.isStreaming ? (
+      {conversation && !chat.isStreaming && !galleryQueued ? (
         <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
       ) : null}
       {headerAgent?.kind === "nyxbot" ? <NyxAgentRequestLinks
@@ -1258,7 +1272,7 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
             }}
             onReplayIntro={() => setIntro("account_menu")}
           />
-        ) : chat.isLoading && !chat.session.messages.length ? (
+        ) : chat.isLoading && !chat.session.messages.length && !template ? (
           <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading conversation...")}</div>
         ) : (
           <CardLanguageContext.Provider value={cardLanguage}>
@@ -1272,6 +1286,20 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
             ) : null}
             <NyxAgentThreadMessageList
               session={voiceSession}
+              introduction={template ? (
+                <div className="space-y-3">
+                  <SkillTemplateOverview template={template} />
+                  {launchStatus ? (
+                    <div className="flex flex-wrap items-center gap-3">
+                      <p role="status" className="type-body text-muted-foreground">{launchStatus}</p>
+                      {galleryQueued ? (
+                        <Button type="button" variant="outline" size="sm" disabled={cancellingGallery}
+                          onClick={() => void stopGallery()}>{translateUi("Cancel skill start")}</Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : undefined}
               renderMessage={(message) => {
                 if (message.voiceGroup) return (
                   <NyxAgentAssistantEntry
@@ -1416,7 +1444,7 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
               emptyDescription={
                 headerAgent?.kind === "specialist"
                   ? translateUi("Talk to {{value1}} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.", { value1: agentName })
-                  : templateDraft?.title ?? "See your connected services, connect a new one, " +
+                  : "See your connected services, connect a new one, " +
                     "set up a channel bot, or check approvals."
               }
             />
@@ -1483,7 +1511,7 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
             agentModel={selectedAgent?.model}
             voiceActive={voiceMounted && currentVoice?.active}
             voiceActivity={voiceMounted ? currentVoice?.activity : undefined}
-            key={`${user?.id}:${selectedId ?? templateDraft?.key ?? headerAgent?.id ?? "draft"}`}
+            key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
             onVoice={
               voiceEnabled && !destroyed && !channelPlatform
                 ? async (id, preparation) => {
@@ -1507,12 +1535,12 @@ function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: Templa
             }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
-            disabled={destroyed}
+            disabled={destroyed || galleryQueued || Boolean(template && !conversation)}
             ownerUserId={user?.id ?? null}
             draftKey={
               selectedId
                 ? `conv:${selectedId}`
-                : templateDraft?.key ?? (headerAgent?.kind === "specialist"
+                : (headerAgent?.kind === "specialist"
                   ? `screen:nyxagent:agent:${headerAgent.id}`
                   : "screen:nyxagent:assistant")
             }

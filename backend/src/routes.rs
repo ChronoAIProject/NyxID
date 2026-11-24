@@ -2829,6 +2829,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/nyxagent/drafts", post(handlers::assistant_uploads::draft))
         .route(
+            "/nyxagent/skill-templates/{slug}/start",
+            post(handlers::agent_skills::start_template)
+                .layer(axum::extract::DefaultBodyLimit::max(256)),
+        )
+        .route(
             "/nyxagent/conversations/{id}/attachments",
             post(handlers::assistant_uploads::upload),
         )

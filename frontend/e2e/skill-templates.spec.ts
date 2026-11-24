@@ -51,20 +51,22 @@ async function fixture(page: Page, options: {
   unavailable?: boolean;
   conflict?: boolean;
   badPreview?: boolean;
-  previewError?: number;
-  turnError?: number | "admitted";
+  launchError?: number;
+  loseLaunchResponse?: boolean;
+  queued?: boolean;
   skillCount?: number;
-  missingPersonalAgent?: boolean;
   existing?: Partial<typeof pin>;
   profileGate?: Promise<void>;
 } = {}) {
   let signedIn = options.signedIn ?? true;
   let displayName = "Owner";
-  let revision = 2;
+  const revision = 2;
   let conflict = options.conflict;
-  let badPreview = options.badPreview;
-  let previewError = options.previewError;
-  let turnError = options.turnError;
+  const badPreview = options.badPreview;
+  let launchError = options.launchError;
+  let launched: { slug: string; state: "queued" | "admitted" | "cancelled" } | undefined;
+  let loseLaunchResponse = options.loseLaunchResponse;
+  const launches: { slug: string; setupId: string }[] = [];
   let skills = [other, ...(options.existing ? [{ ...pin, ...options.existing }] : [])];
   if (options.skillCount) {
     skills = Array.from({ length: options.skillCount }, (_, index) => ({
@@ -143,20 +145,9 @@ async function fixture(page: Page, options: {
       const skill = url.searchParams.get("skill");
       const version = url.searchParams.get("version");
       previewRequests.push([skill, version]);
-      if (previewError) {
-        const status = previewError;
-        previewError = undefined;
-        return route.fulfill({ status, json: status === 400 ? {
-          error: "validation_error",
-          error_code: 1003,
-          message: "Package mismatch",
-          details: { reason: "pinned_version_mismatch" },
-        } : {} });
-      }
       const template = [research, claims].find((entry) => entry.skillId === skill && entry.version === version);
       if (!template) return route.fulfill({ status: 404, json: {} });
       const sha256 = badPreview ? other.sha256 : template.sha256;
-      badPreview = false;
       return ok({
         reference: { ...pin, skill_id: template.skillId, name: template.slug, version, sha256 },
         description: "Published skill",
@@ -165,34 +156,47 @@ async function fixture(page: Page, options: {
     }
     if (path === "/assistant/nyxagent/agents") {
       agentReads.push(path);
-      const roster = options.missingPersonalAgent ? [{ ...agent, kind: "specialist" }] : [agent];
-      return ok({ agents: roster, limits });
+      return ok({ agents: [agent], limits });
     }
     if (path === "/assistant/nyxagent/settings") return ok(limits);
     if (path === `/assistant/nyxagent/agents/${agentId}/skills`) {
-      if (request.method() === "PUT") {
-        const selection = request.postDataJSON();
-        writes.push(selection);
-        if (conflict) {
-          conflict = false;
-          revision += 1;
-          skills = [...skills, { ...other, skill_id: "33333333-3333-4333-8333-333333333333" }];
-          return route.fulfill({ status: 409, json: { error: "conflict", error_code: 1005, message: "Skills changed" } });
-        }
-        expect(selection.expected_revision).toBe(revision);
-        skills = selection.skills;
-        revision += 1;
-      }
+      if (request.method() === "PUT") writes.push(request.postDataJSON());
       return ok({ revision, skills, metadata: {} });
+    }
+    const launch = /^\/assistant\/nyxagent\/skill-templates\/([^/]+)\/start$/.exec(path);
+    if (launch) {
+      expect(request.method()).toBe("POST");
+      const body = request.postDataJSON();
+      expect(body).toEqual({ setup_id: expect.stringMatching(/^[0-9a-f]{32}$/) });
+      launches.push({ slug: launch[1], setupId: body.setup_id });
+      if (conflict || options.existing?.disabled || options.existing?.version || skills.length >= 16) {
+        conflict = false;
+        return route.fulfill({ status: 409, json: { error: "conflict", error_code: 1005, message: "Skills changed" } });
+      }
+      if (badPreview) {
+        return route.fulfill({ status: 400, json: {
+          error: "validation_error", error_code: 1003, message: "Package mismatch",
+          details: { reason: "pinned_version_mismatch" },
+        } });
+      }
+      if (launchError) {
+        const status = launchError;
+        launchError = undefined;
+        return route.fulfill({ status, json: { error: "unavailable", error_code: 1005, message: "Launch unavailable" } });
+      }
+      launched ??= { slug: launch[1], state: options.queued ? "queued" : "admitted" };
+      if (loseLaunchResponse) {
+        loseLaunchResponse = false;
+        return route.abort("failed");
+      }
+      return ok({ id: threadId });
+    }
+    if (path === `/assistant/nyxagent/conversations/${threadId}/stop`) {
+      if (launched?.state === "queued") launched.state = "cancelled";
+      return route.fulfill({ status: 204 });
     }
     if (path === "/assistant/nyxagent/turns") {
       turns.push(request.postDataJSON());
-      const failure = turnError;
-      turnError = undefined;
-      if (typeof failure === "number") return route.fulfill({ status: failure, json: {} });
-      if (failure === "admitted") {
-        return route.fulfill({ contentType: "text/event-stream", body: publishedReply });
-      }
       return route.fulfill({
         headers: { "Content-Type": "text/event-stream", "X-NyxID-Conversation-Id": threadId },
         body: publishedReply,
@@ -200,10 +204,12 @@ async function fixture(page: Page, options: {
     }
     if (path === `/assistant/nyxagent/conversations/${threadId}`) {
       return ok({
-        conversation,
+        conversation: { ...conversation, gallery_skill: launched, pending_events: launched?.state === "queued" ? 1 : 0 },
         before_seq: null,
-        messages: [
-          { id: "message-starter", seq: 1, turn_id: "turn-template", role: "user", text: turns[0]?.text ?? "", created_at: now, status: "completed", error_code: null },
+        messages: launched && launched.state !== "admitted" ? [] : [
+          { id: "message-opening", seq: 1, turn_id: "turn-template", role: launched ? "event" : "user",
+            text: launched ? "- Started a skill from the NyxBot template gallery." : "Earlier question",
+            created_at: now, status: "completed", error_code: null },
           { id: "message-reply", seq: 2, turn_id: "turn-template", role: "assistant", text: "Please share your draft.", created_at: now, status: "completed", error_code: null },
         ],
       });
@@ -215,7 +221,7 @@ async function fixture(page: Page, options: {
     if (path === "/assistant/nyxagent/onboarding") return ok({ show_intro: true });
     return route.fulfill({ status: 404, json: {} });
   });
-  return { agentReads, previewRequests, socialRequests, writes, turns, restoreSession: () => { signedIn = true; } };
+  return { agentReads, previewRequests, socialRequests, writes, turns, launches, restoreSession: () => { signedIn = true; } };
 }
 
 async function openWelcome(page: Page, title = "Strengthen a research paper") {
@@ -265,7 +271,7 @@ test("the gallery stays mounted and the modal supports focus, escape, Back, Forw
   expect(state.turns).toEqual([]);
 });
 
-test("new social accounts confirm their display name before the selected skill attaches", async ({ page }) => {
+test("new social accounts confirm their display name before the selected workflow starts", async ({ page }) => {
   const state = await fixture(page, { signedIn: false, confirmName: true });
   await page.goto("/testing?code=TEST-1234");
   await openWelcome(page);
@@ -275,8 +281,9 @@ test("new social accounts confirm their display name before the selected skill a
   expect(state.writes).toEqual([]);
   await page.getByRole("textbox", { name: "Display name" }).fill("New owner");
   await page.getByRole("button", { name: "Save and continue" }).click();
-  await expect(composerInput(page)).toContainText(research.slug, { timeout: 15_000 });
-  expect(state.writes[0]?.skills.at(-1)?.skill_id).toBe(research.skillId);
+  await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
+  await expect(composerInput(page)).toBeEmpty();
+  expect(state.launches[0]?.slug).toBe(research.slug);
   expect(state.turns).toEqual([]);
 });
 
@@ -352,31 +359,25 @@ for (const [label, path, callbackPath] of [
     expect(remainingSeconds).toBeGreaterThan(1740);
     expect(remainingSeconds).toBeLessThanOrEqual(1800);
     await page.getByRole("button", { name: "Continue with Google" }).click();
-    // A full SSO navigation cold-loads the dev server's assistant modules.
-    await expect(composerInput(page)).toContainText(research.slug, { timeout: 15_000 });
+    await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
+    const overview = page.getByRole("region", { name: "Skill overview" });
+    await expect(overview.getByRole("heading", { name: "Starting template" })).toBeVisible();
+    await expect(overview.getByText("Share the draft, outline, or sections you want reviewed.")).toBeVisible();
+    await expect(composerInput(page)).toBeEmpty();
     if (path === "/register") expect(state.socialRequests[0]?.searchParams.get("invite_code")).toBe("TEST-1234");
-    expect(state.writes).toEqual([{ expected_revision: 2, skills: [other, pin] }]);
+    expect(state.launches).toEqual([{ slug: research.slug, setupId: returnTo.searchParams.get("skillSetup") }]);
+    expect(state.writes).toEqual([]);
     expect(state.turns).toEqual([]);
     expect((await page.context().cookies()).find(({ name }) => name === cookie?.name)).toBeUndefined();
 
-    const editedStarter = `Use ${research.slug} to review my draft.`;
-    await composerInput(page).fill(editedStarter);
     await page.reload();
-    await expect(composerInput(page)).toHaveText(editedStarter, { timeout: 15_000 });
-    expect(state.writes).toHaveLength(1);
-    expect(state.turns).toEqual([]);
-
+    await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
+    await expect(overview).toBeVisible();
+    await expect(composerInput(page)).toBeEmpty();
+    expect(state.launches).toHaveLength(1);
+    await composerInput(page).fill("Here is my draft.");
     await sendButton(page).click();
-    await expect(page).toHaveURL(new RegExp(`/assistant\\?c=${threadId}$`));
-    await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
-    expect(state.turns).toEqual([{
-      agent_id: agentId,
-      text: editedStarter,
-    }]);
-    await page.reload();
-    await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
-    expect(state.writes).toHaveLength(1);
-    expect(state.turns).toHaveLength(1);
+    await expect.poll(() => state.turns[0]?.text).toBe("Here is my draft.");
   });
 }
 
@@ -394,11 +395,11 @@ test("two tabs preserve separate selections and neither can claim the other tab�
   expect((await context.cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(2);
 
   await page.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(composerInput(page)).toContainText(research.slug, { timeout: 15_000 });
+  await expect(page.getByRole("region", { name: "Skill overview" }).getByRole("heading", { name: "Strengthen a research paper" })).toBeVisible();
+  await expect.poll(() => first.launches[0]?.slug).toBe(research.slug);
   await otherTab.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(composerInput(otherTab)).toContainText(claims.slug, { timeout: 15_000 });
-  expect(first.writes[0]?.skills.at(-1)?.skill_id).toBe(research.skillId);
-  expect(second.writes[0]?.skills.at(-1)?.skill_id).toBe(claims.skillId);
+  await expect(otherTab.getByRole("region", { name: "Skill overview" }).getByRole("heading", { name: "Audit research claims" })).toBeVisible();
+  await expect.poll(() => second.launches[0]?.slug).toBe(claims.slug);
   expect(first.turns).toEqual([]);
   expect(second.turns).toEqual([]);
   expect((await context.cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(0);
@@ -424,13 +425,14 @@ test("an existing session selects a template on the welcome page and can retry a
   await openWelcome(page, "Audit research claims");
   await expect(page.locator('li[aria-current="step"]')).toContainText("Open NyxBot");
   await page.getByRole("button", { name: "Open NyxBot" }).click();
-  await expect(page.getByRole("alert")).toContainText("skills changed");
+  await expect(page.getByRole("alert")).toContainText("Check its pinned version");
   expect(state.turns).toEqual([]);
   await page.getByRole("button", { name: "Try again" }).click();
-  await expect(composerInput(page)).toContainText(claims.slug);
-  expect(state.writes.map(({ expected_revision }) => expected_revision)).toEqual([2, 3]);
-  expect(state.writes[1]?.skills).toHaveLength(3);
-  expect(state.writes[1]?.skills[2]).toMatchObject({ skill_id: claims.skillId, version: claims.version, sha256: claims.sha256 });
+  await expect(page.getByText("Please share your draft.")).toBeVisible();
+  expect(state.launches).toHaveLength(2);
+  expect(state.launches[0]).toEqual(state.launches[1]);
+  expect(state.launches[0]?.slug).toBe(claims.slug);
+  expect(state.writes).toEqual([]);
   expect(state.turns).toEqual([]);
   await page.goBack();
   await expect(page.getByRole("heading", { name: "Awesome, let’s get you started." })).toBeVisible();
@@ -448,12 +450,12 @@ test("a choice made while the session is restoring uses the restored account", a
   } finally {
     profile.resolve();
   }
-  await expect(composerInput(page)).toContainText(research.slug);
-  expect(state.writes).toHaveLength(1);
+  await expect(page.getByText("Please share your draft.")).toBeVisible();
+  expect(state.launches).toHaveLength(1);
   expect(state.turns).toEqual([]);
 });
 
-test("a direct chat link keeps its template through sign-in", async ({ page }) => {
+test("a direct chat link keeps its template through sign-in and waits for explicit Start", async ({ page }) => {
   const state = await fixture(page, { signedIn: false });
   const destination = `/assistant?skill=${claims.slug}`;
   await page.goto(destination);
@@ -462,86 +464,86 @@ test("a direct chat link keeps its template through sign-in", async ({ page }) =
   expect(login.searchParams.get("return_to")).toBe(login.origin + destination);
   await page.getByRole("button", { name: "Continue with Google" }).click();
   await expect(page).toHaveURL(login.origin + destination);
-  await expect(page.getByRole("heading", { name: "Audit research claims" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open NyxBot" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Start skill" })).toBeEnabled();
+  expect(state.launches).toEqual([]);
+  await page.getByRole("button", { name: "Start skill" }).click();
+  await expect(page.getByText("Please share your draft.")).toBeVisible();
+  expect(state.launches[0]?.slug).toBe(claims.slug);
   expect(state.turns).toEqual([]);
 });
 
-test("an enabled exact pin is reused after a temporary catalog error", async ({ page }) => {
-  const state = await fixture(page, { existing: {}, previewError: 503 });
+test("a reload after a lost launch response recovers the same conversation", async ({ page }) => {
+  const state = await fixture(page, { loseLaunchResponse: true });
   await page.goto(`/assistant?skill=${research.slug}`);
-  await expect(page.getByRole("alert")).toContainText("temporarily unavailable");
-  expect(state.agentReads).toEqual([]);
-  await page.getByRole("button", { name: "Retry verification" }).click();
-  await page.getByRole("button", { name: "Open NyxBot" }).click();
-  await expect(composerInput(page)).toContainText(research.slug);
-  expect(state.writes).toEqual([]);
-  expect(state.turns).toEqual([]);
-});
-
-for (const scenario of [
-  { name: "denied access", options: { previewError: 403 }, message: "Check your Ornn access" },
-  { name: "a typed pin mismatch", options: { previewError: 400 }, message: "could not verify" },
-  { name: "a different digest", options: { badPreview: true }, message: "could not verify" },
-]) {
-  test(`a preview reports ${scenario.name} without offering Start`, async ({ page }) => {
-    const state = await fixture(page, scenario.options);
-    await page.goto(`/assistant?skill=${research.slug}`);
-    await expect(page.getByRole("alert")).toContainText(scenario.message);
-    await expect(page.getByRole("link", { name: "Choose another template" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Open NyxBot" })).toHaveCount(0);
-    expect(state.agentReads).toEqual([]);
-    expect(state.turns).toEqual([]);
-  });
-}
-
-test("a disabled pin and an unavailable engine keep the selection visible without starting", async ({ page }) => {
-  const state = await fixture(page, { existing: { disabled: true } });
-  await page.goto(`/assistant?skill=${research.slug}`);
-  await page.getByRole("button", { name: "Open NyxBot" }).click();
-  await expect(page.getByRole("alert")).toContainText("skill is disabled");
-  const manage = await page.getByRole("link", { name: "Manage NyxBot skills" }).getAttribute("href");
-  expect(new URL(manage!, page.url()).searchParams.get("agent")).toBe(agentId);
-  expect(new URL(manage!, page.url()).searchParams.get("details")).toBe("skills");
-  expect(state.writes).toEqual([]);
-  expect(state.turns).toEqual([]);
-
-  // Reload with a session without the NyxAgent engine.
-  await page.unroute("**/api/v1/**");
-  const unavailable = await fixture(page, { unavailable: true });
+  await page.getByRole("button", { name: "Start skill" }).click();
+  await expect(page.getByRole("alert")).toContainText("Try again");
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Strengthen a research paper" })).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: "unavailable for this account" })).toBeVisible();
-  expect(unavailable.previewRequests).toEqual([]);
+  await expect(page.getByText("Please share your draft.")).toBeVisible();
+  expect(state.launches).toHaveLength(2);
+  expect(state.launches[0]).toEqual(state.launches[1]);
+  expect(state.turns).toEqual([]);
+});
+
+test("an account-bound legacy gallery URL starts in the regular chat", async ({ page }) => {
+  const state = await fixture(page);
+  const skillSetup = "b".repeat(32);
+  await page.addInitScript(({ owner, skill, skillSetup }) => {
+    sessionStorage.setItem("nyxid:skill-template-draft", JSON.stringify({ owner, skill, skillSetup }));
+  }, { owner, skill: research.slug, skillSetup });
+  await page.goto(`/assistant?skill=${research.slug}&skillSetup=${skillSetup}`);
+  await expect(page.getByText("Please share your draft.")).toBeVisible();
+  expect(state.launches).toEqual([{ slug: research.slug, setupId: skillSetup }]);
+  expect(state.turns).toEqual([]);
+});
+
+test("a queued launch survives reload and can be cancelled", async ({ page }) => {
+  const state = await fixture(page, { queued: true });
+  await page.goto(`/assistant?skill=${research.slug}`);
+  await page.getByRole("button", { name: "Start skill" }).click();
+  await expect(page.getByText("Waiting for NyxBot to start the skill…")).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("Waiting for NyxBot to start the skill…")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel skill start" }).click();
+  await expect(page.getByText("Skill start cancelled.")).toBeVisible();
+  expect(state.launches).toHaveLength(1);
+  expect(state.turns).toEqual([]);
 });
 
 for (const scenario of [
-  { name: "a different version", options: { existing: { version: "1.0" } }, message: "different pin", manage: true },
-  { name: "a full skills list", options: { skillCount: 16 }, message: "has 16 skills", manage: true },
-  { name: "a specialist as the only available agent", options: { missingPersonalAgent: true }, message: "Could not load your personal NyxBot", manage: false },
+  { name: "denied access", options: { launchError: 403 }, message: "Check your Ornn access" },
+  { name: "a different digest", options: { badPreview: true }, message: "could not verify" },
+  { name: "a disabled pin", options: { existing: { disabled: true } }, message: "Check its pinned version" },
+  { name: "a different version", options: { existing: { version: "1.0" } }, message: "Check its pinned version" },
+  { name: "a full skills list", options: { skillCount: 16 }, message: "available space" },
 ]) {
-  test(`a start stops for ${scenario.name}`, async ({ page }) => {
+  test(`a launch reports ${scenario.name}`, async ({ page }) => {
     const state = await fixture(page, scenario.options);
     await page.goto(`/assistant?skill=${research.slug}`);
-    await page.getByRole("button", { name: "Open NyxBot" }).click();
+    await page.getByRole("button", { name: "Start skill" }).click();
     await expect(page.getByRole("alert")).toContainText(scenario.message);
-    await expect(page.getByRole("link", { name: "Manage NyxBot skills" })).toHaveCount(Number(scenario.manage));
+    expect(state.launches).toHaveLength(1);
     expect(state.writes).toEqual([]);
     expect(state.turns).toEqual([]);
   });
 }
 
-test("a token-shaped deep link cannot attach a skill by itself", async ({ page }) => {
-  const state = await fixture(page);
-  const url = `/assistant?skill=${research.slug}&skillSetup=${"a".repeat(32)}`;
-  await page.goto(url);
-  await expect(page.getByRole("button", { name: "Open NyxBot" })).toBeEnabled();
-  expect(state.agentReads).toEqual([]);
-  expect(state.writes).toEqual([]);
+test("an unavailable engine keeps the selection visible", async ({ page }) => {
+  const state = await fixture(page, { unavailable: true });
+  await page.goto(`/assistant?skill=${research.slug}`);
+  await expect(page.getByText("This template requires NyxBot")).toBeVisible();
+  expect(state.launches).toEqual([]);
   expect(state.turns).toEqual([]);
 });
 
-test("an expired setup reaches the selected preview without writing", async ({ page }) => {
+test("a token-shaped deep link cannot launch a skill by itself", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto(`/assistant?skill=${research.slug}&skillSetup=${"a".repeat(32)}`);
+  await expect(page.getByRole("button", { name: "Start skill" })).toBeEnabled();
+  expect(state.launches).toEqual([]);
+  expect(state.turns).toEqual([]);
+});
+
+test("an expired setup reaches the selected preview without launching", async ({ page }) => {
   const state = await fixture(page, { signedIn: false });
   await page.goto("/testing");
   await openWelcome(page);
@@ -552,18 +554,14 @@ test("an expired setup reaches the selected preview without writing", async ({ p
     sessionStorage.setItem(key, JSON.stringify({ ...setup, expiresAt: Date.now() - 1 }));
   });
   await page.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(page.getByRole("button", { name: "Open NyxBot" })).toBeEnabled();
-  expect(state.agentReads).toEqual([]);
-  expect(state.writes).toEqual([]);
+  await expect(page.getByRole("button", { name: "Start skill" })).toBeEnabled();
+  expect(state.launches).toEqual([]);
   expect((await page.context().cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(0);
 });
 
-test("a setup made in one account does not attach after the session changes", async ({ page }) => {
+test("a setup made in one account does not launch after the session changes", async ({ page }) => {
   const state = await fixture(page);
   await page.goto("/testing");
-  await openWelcome(page);
-  await expect(page.getByRole("button", { name: "Open NyxBot" })).toBeVisible();
-  // Simulate the account changing between the welcome action and the return.
   const destination = await page.evaluate(() => {
     const skill = "research-paper-writing-rigor";
     const skillSetup = "a".repeat(32);
@@ -574,26 +572,9 @@ test("a setup made in one account does not attach after the session changes", as
     return `/assistant?${new URLSearchParams({ skill, skillSetup })}`;
   });
   await page.goto(destination);
-  await expect(page.getByRole("button", { name: "Open NyxBot" })).toBeEnabled();
-  expect(state.agentReads).toEqual([]);
-  expect(state.writes).toEqual([]);
+  await expect(page.getByRole("button", { name: "Start skill" })).toBeEnabled();
+  expect(state.launches).toEqual([]);
   expect((await page.context().cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(0);
-});
-
-test("a rejected manual send retains the starter in the normal NyxBot composer", async ({ page }) => {
-  const state = await fixture(page, { turnError: 429 });
-  await page.goto(`/assistant?skill=${research.slug}`);
-  await page.getByRole("button", { name: "Open NyxBot" }).click();
-  await expect(composerInput(page)).toContainText(research.slug);
-  await sendButton(page).click();
-  await expect(page.getByText("Could not send your message")).toBeVisible();
-  await expect(composerInput(page)).toContainText(research.slug);
-  expect(state.writes).toHaveLength(1);
-  expect(state.turns).toHaveLength(1);
-  await sendButton(page).click();
-  await expect(page.getByText("Please share your draft.")).toBeVisible();
-  expect(state.writes).toHaveLength(1);
-  expect(state.turns).toHaveLength(2);
 });
 
 for (const [name, destination] of [
