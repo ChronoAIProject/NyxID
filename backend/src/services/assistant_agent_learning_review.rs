@@ -2675,10 +2675,17 @@ async fn execute(
             }
         }
         recheck(state, actor, row, p, &body, PublicationStage::BaseVerify).await?;
-        // Durable uncertainty boundary, before the first potentially effective
-        // write. Crash/timeout from here on permits reconciliation reads only.
-        mark_started(state, row, p).await?;
-        match publication::publish_classified(reader, body.base_skill.as_ref(), bytes).await {
+        let dispatch = {
+            let state = state.clone();
+            let row = row.clone();
+            let p = p.clone();
+            skills::PublicationDispatch::new(Box::pin(async move {
+                mark_started(&state, &row, &p).await
+            }))
+        };
+        match publication::publish_classified(reader, body.base_skill.as_ref(), bytes, dispatch)
+            .await
+        {
             publication::PublishOutcome::Published(id) => id,
             publication::PublishOutcome::Refused {
                 code,
