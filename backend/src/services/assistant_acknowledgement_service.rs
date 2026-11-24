@@ -2756,7 +2756,9 @@ async fn request_candidate_inner(
     }
     for turn in [
         row.creation_turn_id.as_deref(),
-        row.requested_turn_id.as_deref(),
+        row.requested_turn_id
+            .as_deref()
+            .filter(|turn| Some(*turn) != row.creation_turn_id.as_deref()),
     ]
     .into_iter()
     .flatten()

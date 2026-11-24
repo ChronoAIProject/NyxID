@@ -6360,7 +6360,7 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
     let update = |source: &str| {
         vec![doc! {"$set":{
             "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},"user_id":&a.user_id,"channel_id":&channel,
-            "partition":"private-partition","kind":"private","agent_id":"explicit-chat-specialist","members":"owner",
+            "partition":"private-partition","platform_chat_id":"333","kind":"private","agent_id":"explicit-chat-specialist","members":"owner",
             "owner_seen":false,"allow_posts":false,"created_at":{"$ifNull":["$created_at","$$NOW"]},"updated_at":"$$NOW",
             "last_message_id":source,"last_relay_message_id":source,
         }}]
@@ -6449,12 +6449,67 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
         current.last_message_id.as_deref(),
         Some("isolation-source-b")
     );
+    let assignment: crate::models::nyxbot_channel::NyxbotChannel = bson::from_document(doc! {
+        "_id": &channel, "user_id": &b.user_id,"channel_bot_id": &b.id,"platform":"messenger",
+        "bot_label":"Inbox", "transport":"direct", "status":"active", "route_api_key_id":"fixture",
+        "agent_id":"channel-specialist", "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+    }).unwrap();
+    let channels = state
+        .db
+        .collection::<crate::models::nyxbot_channel::NyxbotChannel>(
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+        );
+    channels.insert_one(&assignment).await.unwrap();
+    // Both DMs have arrived before either owner observation or first reservation.
+    grant_source(&state, &b, "second-source-b").await;
+    let later = scopes::record_thread(
+        &state.db,
+        &b.id,
+        "second-source-b",
+        partition.clone(),
+        update("second-source-b"),
+    )
+    .await
+    .unwrap();
+    assert!(later.conversation_id.is_none() && !later.owner_seen);
+    let b_ref = scopes::reference(&b).unwrap();
+    channels
+        .update_one(
+            doc! {"_id":&channel},
+            doc! {"$set":{"agent_id":"other-specialist"}},
+        )
+        .await
+        .unwrap();
     assert!(
-        scopes::observe_thread(&state.db, &a.id, &thread, doc! {"owner_seen":true})
+        scopes::bind_thread_conversation(&state.db, &assignment, &b_ref, &current, None)
             .await
             .is_err()
     );
-    scopes::observe_thread(&state.db, &b.id, &current, doc! {"owner_seen":true})
+    assert!(
+        scopes::observe_thread(&state.db, &assignment, &current, doc! {"owner_seen":true})
+            .await
+            .is_err()
+    );
+    channels
+        .update_one(
+            doc! {"_id":&channel},
+            doc! {"$set":{"agent_id":&assignment.agent_id}},
+        )
+        .await
+        .unwrap();
+    let mut other_participant = current.clone();
+    other_participant.platform_chat_id = Some("different-participant".into());
+    assert!(
+        scopes::bind_thread_conversation(&state.db, &assignment, &b_ref, &other_participant, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        scopes::observe_thread(&state.db, &assignment, &thread, doc! {"owner_seen":true})
+            .await
+            .is_err()
+    );
+    scopes::observe_thread(&state.db, &assignment, &current, doc! {"owner_seen":true})
         .await
         .unwrap();
     assert!(
@@ -6500,18 +6555,18 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
         .unwrap()
         .unwrap();
     assert_eq!(b_ref.grant_id, b.meta_binding.as_ref().unwrap().grant_id);
-    let reserved = scopes::bind_thread_conversation(&state.db, &b_ref, &current, None)
+    let reserved = scopes::bind_thread_conversation(&state.db, &assignment, &b_ref, &current, None)
         .await
         .unwrap();
     assert_eq!(
-        scopes::bind_thread_conversation(&state.db, &b_ref, &current, None)
+        scopes::bind_thread_conversation(&state.db, &assignment, &b_ref, &current, None)
             .await
             .unwrap(),
         reserved
     );
     let owner_home = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
     assert_eq!(
-        scopes::bind_thread_conversation(&state.db, &b_ref, &current, Some(&owner_home))
+        scopes::bind_thread_conversation(&state.db, &assignment, &b_ref, &later, Some(&owner_home))
             .await
             .unwrap(),
         owner_home
@@ -6526,19 +6581,31 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
         .await
         .unwrap();
     assert_eq!(
-        scopes::bind_thread_conversation(&state.db, &b_ref, &current, Some(&owner_home))
-            .await
-            .unwrap(),
+        scopes::bind_thread_conversation(
+            &state.db,
+            &assignment,
+            &b_ref,
+            &current,
+            Some(&owner_home)
+        )
+        .await
+        .unwrap(),
         owner_home
     );
     assert!(
-        scopes::bind_thread_conversation(&state.db, &b_ref, &current, Some("a-different-home"))
-            .await
-            .is_err()
+        scopes::bind_thread_conversation(
+            &state.db,
+            &assignment,
+            &b_ref,
+            &current,
+            Some("a-different-home")
+        )
+        .await
+        .is_err()
     );
     for destination in [None, Some(old_session.as_str())] {
         assert!(
-            scopes::bind_thread_conversation(&state.db, &a_ref, &thread, destination)
+            scopes::bind_thread_conversation(&state.db, &assignment, &a_ref, &thread, destination)
                 .await
                 .is_err()
         );
@@ -8311,6 +8378,48 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
         );
         assert_eq!(
             input.get_array("meta_grants").unwrap(),
+            &vec![bson::to_bson(&grant).unwrap()]
+        );
+        let running = crate::models::assistant_conversation::RunningResponse {
+            credential_api_key_id: queued.credential_api_key_id.clone(),
+            session_id: "fixture-session".into(),
+            response_id: "fixture-response".into(),
+        };
+        use crate::services::assistant_steering as steering;
+        assert!(
+            steering::set_running_response(&state.db, &queued, Some(&running))
+                .await
+                .unwrap()
+        );
+        let steering::Admission::Dispatch(steer) = steering::reserve(
+            &state.db,
+            &bot.user_id,
+            &web.id,
+            queued_turn,
+            "fixture-web-steer",
+            "Owner clarification",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected a steering receipt for the queued inbox turn");
+        };
+        steering::settle(
+            &state.db,
+            &steer,
+            "may_not_have_applied",
+            Some("steer_unavailable"),
+            503,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            messages
+                .find_one(doc! {"_id":&steer.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_array("meta_grants")
+                .unwrap(),
             &vec![bson::to_bson(&grant).unwrap()]
         );
         settle(&state, &bot.user_id, &queued, "Queued inbox reply").await;

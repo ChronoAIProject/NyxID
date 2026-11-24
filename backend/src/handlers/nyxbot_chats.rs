@@ -162,10 +162,7 @@ pub(super) async fn note_owner_presence(
         }
         if crate::services::channel_adapters::meta::is_meta(&row.platform) {
             crate::services::channel_meta_service::scopes::observe_thread(
-                &state.db,
-                &row.channel_bot_id,
-                &chat,
-                set,
+                &state.db, row, &chat, set,
             )
             .await?;
         } else {

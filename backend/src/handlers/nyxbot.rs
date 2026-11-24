@@ -3523,6 +3523,7 @@ async fn start_chat_turn(
         if let Some(grant) = &meta_grant {
             crate::services::channel_meta_service::scopes::bind_thread_conversation(
                 &state.db,
+                row,
                 grant,
                 chat,
                 Some(&id),
@@ -3551,7 +3552,7 @@ async fn start_chat_turn(
     } else {
         let id = if let Some(grant) = &meta_grant {
             crate::services::channel_meta_service::scopes::bind_thread_conversation(
-                &state.db, grant, chat, None,
+                &state.db, row, grant, chat, None,
             )
             .await?
         } else {

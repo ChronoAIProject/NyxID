@@ -2449,7 +2449,7 @@ impl OwnerTurnClaim {
     }
 }
 
-fn turn_meta_grants(turn: &ActiveTurn) -> Vec<crate::models::channel_meta::GrantRef> {
+pub(crate) fn turn_meta_grants(turn: &ActiveTurn) -> Vec<crate::models::channel_meta::GrantRef> {
     let mut grants = Vec::new();
     for context in turn
         .channel_context

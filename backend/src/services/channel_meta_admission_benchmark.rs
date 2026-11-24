@@ -107,3 +107,100 @@ async fn concurrent_page_admission_with_shared_and_independent_admins() {
         "unique, authorized admissions must all commit"
     );
 }
+
+/// Ordinary owner turns can contain more messages than the Meta proof budget.
+/// Measure the extra projected read on the same transaction that publishes a card.
+#[tokio::test]
+async fn long_web_turn_requests_cards_with_one_projected_provenance_read_each() {
+    use crate::services::{
+        assistant_acknowledgement_service as acks, assistant_authority_tests, assistant_nyxagent,
+    };
+    use std::sync::Mutex;
+    let timings = Arc::new(Mutex::new((None, Vec::new())));
+    let captured = timings.clone();
+    let db = connect_transaction_test_database_with_command_handler(
+        "long_web_turn_cards",
+        EventHandler::callback(move |event| {
+            let mut times = captured.lock().unwrap();
+            match event {
+                CommandEvent::Started(c)
+                    if c.command.get_str("find") == Ok("assistant_messages")
+                        && c.command
+                            .get_document("projection")
+                            .is_ok_and(|p| p.contains_key("meta_grants")) =>
+                {
+                    times.0 = Some(c.request_id);
+                }
+                CommandEvent::Succeeded(c) if times.0 == Some(c.request_id) => {
+                    times.1.push(c.duration);
+                    times.0 = None;
+                }
+                _ => {}
+            }
+        }),
+    )
+    .await;
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    assistant_nyxagent::ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let row =
+        assistant_authority_tests::new_orchestrator(&state, &owner, "Review an operation").await;
+    let chat = assistant_authority_tests::chat_for_row(&state, &owner, &row).await;
+    let turn = &row.active_turn.as_ref().unwrap().turn_id;
+    let messages = db.collection::<bson::Document>("assistant_messages");
+    let sample = messages
+        .find_one(doc! {"conversation_id": &row.id, "turn_id":turn})
+        .await
+        .unwrap()
+        .unwrap();
+    let history: Vec<_> = (1..=101_i64)
+        .map(|n| {
+            let mut message = sample.clone();
+            message.insert("_id", uuid::Uuid::new_v4().to_string());
+            message.insert("role", "assistant");
+            message.insert("seq", n + 100);
+            message
+        })
+        .collect();
+    messages.insert_many(history).await.unwrap();
+    let mut elapsed = Vec::new();
+    let samples = 32;
+    for n in 0..samples {
+        let arguments = serde_json::json!({"item": n});
+        let start = Instant::now();
+        let card = acks::request(
+            &db,
+            &chat,
+            acks::Request {
+                kind: "action",
+                service: None,
+                tool: Some("review_item"),
+                arguments: Some(&arguments),
+                summary: "Review this item",
+                platform: false,
+            },
+        )
+        .await
+        .unwrap();
+        elapsed.push(start.elapsed());
+        assert_eq!(card.requested_turn_id.as_ref(), Some(turn));
+        assert_eq!(card.creation_turn_id.as_ref(), Some(turn));
+    }
+    let mut reads = timings.lock().unwrap().1.clone();
+    assert_eq!(reads.len(), samples);
+    reads.sort_unstable();
+    elapsed.sort_unstable();
+    let p95 = (samples * 95).div_ceil(100) - 1;
+    eprintln!(
+        "ordinary_cards={samples} projected_reads={} projected_read_p95_us={} card_p95_us={}",
+        reads.len(),
+        reads[p95].as_micros(),
+        elapsed[p95].as_micros()
+    );
+    db.drop().await.unwrap();
+}

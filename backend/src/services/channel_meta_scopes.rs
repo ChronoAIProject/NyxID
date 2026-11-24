@@ -4,6 +4,7 @@ use crate::{
     models::{
         channel_bot::ChannelBot,
         channel_meta::{GRANT_SCOPES, GrantRef, GrantScope},
+        nyxbot_channel::{NyxbotChannel, NyxbotThread},
     },
 };
 use bson::{Document, doc};
@@ -447,8 +448,11 @@ pub(crate) async fn assistant_turn_references(
 ) -> AppResult<Vec<GrantRef>> {
     let mut cursor = db
         .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
-        .find(doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn})
-        .projection(doc! {"meta_grants":1})
+        .find(
+            doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,
+            "meta_grants":{"$exists":true, "$ne":null}},
+        )
+        .projection(doc! {"_id":0,"meta_grants":1})
         .limit(101)
         .session(&mut *tx)
         .await?;
@@ -754,19 +758,60 @@ pub(crate) async fn record_thread(
     }).await
 }
 
+/// The latest inbound pointer may advance between recording a DM and starting
+/// its turn. The participant and specialist assignment still have to match.
+async fn fence_thread_assignment(
+    db: &Database,
+    tx: &mut ClientSession,
+    channel: &NyxbotChannel,
+    thread: &NyxbotThread,
+    grant: &GrantRef,
+) -> AppResult<Document> {
+    if channel.channel_bot_id != grant.bot_id
+        || channel.id != thread.channel_id
+        || channel.user_id != thread.user_id
+    {
+        return Err(super::grants::incomplete());
+    }
+    fence_reference(db, tx, grant, true).await?;
+    let assignment = doc! {
+        "_id": &channel.id, "channel_bot_id": &grant.bot_id, "user_id": &channel.user_id,
+        "platform": &channel.platform, "status": "active", "agent_id": &channel.agent_id,
+        "bot_owner_id": &channel.bot_owner_id,
+        "$expr": {"$eq": [{"$ifNull": ["$execution_policy_revision", 0_i64]}, channel.execution_policy_revision]},
+    };
+    let matched = db
+        .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .update_one(
+            assignment,
+            doc! {"$inc": {"follow_capacity_revision": 1_i64}},
+        )
+        .session(tx)
+        .await?
+        .matched_count;
+    if matched != 1 {
+        return Err(super::grants::incomplete());
+    }
+    let mut filter = super::super::nyxbot_thread_mutation::exact(thread);
+    filter.extend(doc! {
+        "user_id": &thread.user_id, "agent_id": &thread.agent_id,
+        "platform_chat_id": &thread.platform_chat_id, "platform_thread_id": &thread.platform_thread_id,
+        "meta_grant.bot_id": &grant.bot_id, "meta_grant.grant_id": &grant.grant_id,
+        "meta_grant.generation": grant.generation,
+        "$expr": {"$eq": [{"$ifNull": ["$execution_policy_revision", 0_i64]}, thread.execution_policy_revision]},
+    });
+    Ok(filter)
+}
+
 /// Bind a conversation to the thread observed for this delivery. An owner
 /// chat selects its home. A guest keeps the existing consent's reservation.
 pub(crate) async fn bind_thread_conversation(
     db: &Database,
+    channel: &NyxbotChannel,
     grant: &GrantRef,
-    thread: &crate::models::nyxbot_channel::NyxbotThread,
+    thread: &NyxbotThread,
     home: Option<&str>,
 ) -> AppResult<String> {
-    let mut filter = doc! {
-        "_id": &thread.id, "channel_id": &thread.channel_id, "partition": &thread.partition,
-        "meta_grant.bot_id": &grant.bot_id, "meta_grant.grant_id": &grant.grant_id,
-        "meta_grant.generation": grant.generation,
-    };
     let observed = doc! {"last_message_id": &thread.last_message_id, "last_relay_message_id": &thread.last_relay_message_id};
     // A newer message from this grant may have already bound the same home.
     // Guest reservation only adopts an existing nonempty ID in that case.
@@ -774,7 +819,7 @@ pub(crate) async fn bind_thread_conversation(
         Some(id) => doc! {"conversation_id": id},
         None => doc! {"conversation_id":{"$type":"string","$ne":""}},
     };
-    filter.insert("$or", vec![observed, already_bound]);
+    let destinations = vec![observed, doc! {"conversation_id": null}, already_bound];
     let conversation = match home {
         Some(id) => doc! { "$literal": id },
         None => {
@@ -783,16 +828,17 @@ pub(crate) async fn bind_thread_conversation(
         }
     };
     let update = doc! {"$set": {"conversation_id": conversation}};
-    let context = (db.clone(), grant.clone(), filter, update);
+    let context = (db, channel, grant, thread, &destinations, &update);
     super::super::transaction_service::run_db_only(
         db,
         &context,
-        |tx, (db, grant, filter, update)| {
+        |tx, &(db, channel, grant, thread, destinations, update)| {
             Box::pin(async move {
-                fence_reference(db, tx, grant, true).await?;
+                let mut filter = fence_thread_assignment(db, tx, channel, thread, grant).await?;
+                filter.insert("$or", destinations.clone());
                 let row = db
                     .collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
-                    .find_one_and_update(filter.clone(), vec![update.clone()])
+                    .find_one_and_update(filter, vec![update.clone()])
                     .projection(doc! {"conversation_id": 1})
                     .return_document(mongodb::options::ReturnDocument::After)
                     .session(tx)
@@ -809,26 +855,37 @@ pub(crate) async fn bind_thread_conversation(
 
 pub(crate) async fn observe_thread(
     db: &Database,
-    bot: &str,
-    thread: &crate::models::nyxbot_channel::NyxbotThread,
+    channel: &NyxbotChannel,
+    thread: &NyxbotThread,
     fields: Document,
 ) -> AppResult<()> {
-    super::super::transaction_service::run_db_only(db, &(db, bot, thread, &fields), |tx, &(db, bot, thread, fields)| {
-        Box::pin(async move {
-            let source = thread.last_relay_message_id.as_deref().or(thread.last_message_id.as_deref())
-                .ok_or_else(super::grants::incomplete)?;
-            let grant = source_in_session(db,tx,source).await?.filter(|grant|grant.bot_id==bot)
-                .ok_or_else(super::grants::incomplete)?;
-            fence_reference(db,tx,&grant,true).await?;
-            let changed = db.collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
-                .update_one(doc! {"_id":&thread.id,"channel_id":&thread.channel_id,
-                    "last_message_id":&thread.last_message_id,"last_relay_message_id":&thread.last_relay_message_id,
-                    "meta_grant.bot_id":bot,"meta_grant.grant_id":&grant.grant_id}, doc! {"$set":fields.clone()})
-                .session(tx).await?;
-            if changed.matched_count!=1 {return Err(super::grants::incomplete());}
-            Ok(())
-        })
-    }).await
+    super::super::transaction_service::run_db_only(
+        db,
+        &(db, channel, thread, &fields),
+        |tx, &(db, channel, thread, fields)| {
+            Box::pin(async move {
+                let source = thread
+                    .last_relay_message_id
+                    .as_deref()
+                    .or(thread.last_message_id.as_deref())
+                    .ok_or_else(super::grants::incomplete)?;
+                let grant = source_in_session(db, tx, source)
+                    .await?
+                    .ok_or_else(super::grants::incomplete)?;
+                let filter = fence_thread_assignment(db, tx, channel, thread, &grant).await?;
+                let changed = db
+                    .collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                    .update_one(filter, doc! {"$set":fields.clone()})
+                    .session(tx)
+                    .await?;
+                if changed.matched_count != 1 {
+                    return Err(super::grants::incomplete());
+                }
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 /// Every authorized whole-inbox purge closes its exact grant writer fence
