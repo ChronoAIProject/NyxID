@@ -216,6 +216,107 @@ async fn full_access_renewal_receipt_keeps_b_source_while_a_is_active_in_both_er
     }
 }
 
+#[tokio::test]
+async fn idle_app_edit_full_access_renewal_keeps_absent_creation_turn_and_survives_active_inbox_erasure()
+ {
+    let f = fixture("app_edit_absent_source_full_access_renewal").await;
+    let server = setup_ornn(&f).await;
+    let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
+    let skill = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &base, &skill, "POST").await;
+    finish(&f, base_card, true).await.unwrap();
+    let db = &f.state.db;
+    settle(&f, &engine::get(db, &f.owner, &f.row.id).await.unwrap()).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{skill}/versions")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[{"version":"1.0"}]}})),
+        )
+        .mount(&server)
+        .await;
+    let (_, axum::Json(edit)) = crate::handlers::agent_skills::improve(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), skill.clone())),
+    )
+    .await
+    .unwrap();
+    let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    let original = cards
+        .find_one(doc! {"_id":&edit.acknowledgement_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(original.creation_turn_id.is_none());
+    assert!(original.meta_contexts.is_empty());
+    db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&original.id},
+            doc! {"$set":{"expires_at":bson::DateTime::from_millis(0),"status":"expired"}},
+        )
+        .await
+        .unwrap();
+    let proposal = stored(&f, &edit.proposal_id).await;
+    let (a, a_chat) = meta_turn(&f).await;
+    assert_eq!(a_chat.conversation_id, original.conversation_id);
+    crate::services::assistant_settings_service::update(
+        db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    mount_publication(&f, &server, &proposal, &skill, "PUT").await;
+    let axum::Json(result) = crate::handlers::assistant_agent_learning::approve(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((proposal.agent_id.clone(), proposal.id.clone())),
+        axum::Json(
+            serde_json::from_value(json!({"revision":proposal.revision,
+            "agent_skills_revision":proposal.agent_skills_revision,"renewal_of":&original.id}))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "pinned");
+    let receipt = cards
+        .find_one(doc! {"user_id":&f.owner,"tool_name":review::TOOL,"decided_by":"access_mode"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(receipt.creation_turn_id.is_none());
+    assert_eq!(receipt.requested_turn_id, original.requested_turn_id);
+    assert_ne!(receipt.requested_turn_id, a_chat.turn_id);
+    assert!(receipt.meta_contexts.is_empty());
+    settle(
+        &f,
+        &engine::get(db, &f.owner, &a_chat.conversation_id)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(erase(&f, &a).await);
+    assert!(
+        cards
+            .find_one(doc! {"_id":&receipt.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let pinned = stored(&f, &proposal.id).await;
+    assert_eq!(pinned.status, "pinned");
+    assert_eq!(
+        pinned.publication.as_ref().unwrap().skill_id.as_deref(),
+        Some(skill.as_str())
+    );
+    server.verify().await;
+    db.drop().await.unwrap();
+}
+
 async fn settle(f: &Fixture, row: &crate::models::assistant_conversation::AssistantConversation) {
     engine::finish_turn(
         &f.state.db,
@@ -251,7 +352,10 @@ async fn meta_turn(f: &Fixture) -> (ChannelBot, ChatAuthority) {
     })
     .await
     .unwrap();
-    settle(f, &engine::get(db, &f.owner, &f.row.id).await.unwrap()).await;
+    let prior = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    if prior.active_turn.is_some() {
+        settle(f, &prior).await;
+    }
     let request: engine::TurnRequest = serde_json::from_value(
         json!({"conversation_id":&f.row.id,"text":"Draft my private weekly review skill"}),
     )
