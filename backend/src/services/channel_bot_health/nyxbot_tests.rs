@@ -617,7 +617,34 @@ fn telegram_org_health_scopes_owner_transfer_and_legacy_active_routes() {
             )
             .await
             .unwrap();
-        assert_eq!(surfaces(&f, &bot).await.0["can_write"], false);
+        let viewer = channel_bots::health(
+            State(f.state.clone()),
+            test_auth_user(&f.owner),
+            Path(bot.id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!viewer.can_write);
+        assert_eq!(
+            viewer.nyxbot_last_error.as_deref(),
+            Some("gateway_rejected_request")
+        );
+        let denied = f
+            .tools()
+            .execute(&f.auth, "nyxid__get_channel_bot", &json!({"bot_id":bot.id}))
+            .await;
+        assert!(denied.is_error);
+        assert_eq!(denied.value["error"], "channel_bot_not_found");
+        f.state
+            .db
+            .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id":&org,"member_user_id":&f.owner},
+                doc! {"$set":{"role":"admin"}},
+            )
+            .await
+            .unwrap();
         // A transfer away and back must not revive failed history from the old generation.
         bot.ownership_version = 2;
         f.state

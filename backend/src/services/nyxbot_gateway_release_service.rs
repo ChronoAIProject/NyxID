@@ -2948,7 +2948,9 @@ pub(crate) async fn resolve(
     // deliberate admin inspection can recover only positively matching custody;
     // neither missing history nor a generic refusal grants deletion authority.
     let historical_refusal = release.platform == "telegram"
-        && release.reason == ReleaseReason::SetupFailed
+        // not_created ran before retirement on older replicas, so their
+        // original reason can still be Setup.
+        && matches!(release.reason, ReleaseReason::Setup | ReleaseReason::SetupFailed)
         && release.state == ReleaseState::Settled
         && release.resolution.as_deref() == Some("not_created")
         && release.dispatch_started_at.is_some();

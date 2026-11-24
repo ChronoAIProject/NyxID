@@ -834,7 +834,7 @@ fn telegram_real_connect_post_reservation_400_retains_and_reconciles_custody() {
                 calls
                     .iter()
                     .any(|(m, id, _)| m == "GET" && id == release.get_str("record_id").unwrap()),
-                "must recover exact reserved record before release: {calls:?}"
+                "must recover the exact reserved record before release"
             );
             // Unavailable unbind cannot settle custody. The worker/admin review
             // keeps the exact reservation, owner and original authority.
@@ -941,7 +941,7 @@ fn telegram_real_connect_post_reservation_400_retains_and_reconciles_custody() {
                     // Model the actual old 400 path: no identity/version was
                     // acknowledged locally, but the exact remote record exists.
                     f.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME).update_one(
-                        doc!{"_id":&retained.id},doc!{"$set":{"state":"settled","resolution":"not_created","gateway_channel_id":null,"expected_version":null,"due_at":null},"$unset":{"review_reason":""}}).await.unwrap();
+                        doc!{"_id":&retained.id},doc!{"$set":{"state":"settled","reason":"setup","resolution":"not_created","gateway_channel_id":null,"expected_version":null,"due_at":null},"$unset":{"review_reason":""}}).await.unwrap();
                     f.state
                         .db
                         .collection::<bson::Document>(CHANNELS)
@@ -1188,6 +1188,9 @@ fn telegram_connect_transaction_uses_live_generation_after_real_aba_transfer() {
     crate::test_utils::run_native_journey_test("telegram_connect_transfer", || async {
         use crate::services::ownership_transfer_service as transfer;
         let f = fixture("telegram").await;
+        crate::services::role_service::seed_system_roles(&f.state.db)
+            .await
+            .unwrap();
         let other = Uuid::new_v4().to_string();
         f.state
             .db
