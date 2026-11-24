@@ -13,8 +13,8 @@ Delegation and specialist replies appear in the conversation's activity cards.
 
 The desktop thread column groups channel conversations by their source chat,
 with the platform and bot connection on the group's secondary line. Each source
-has one level of conversation rows; it does not add another bot tree. The active
-source opens automatically, and searching by thread title, chat name, bot label
+has one level of conversation rows; it does not add another bot tree. Sources
+open by default, and searching by thread title, chat name, bot label
 or platform exposes every matching row. Missing chat names use a platform/kind
 fallback, while opaque bot and parent IDs keep distinct sources separate.
 Pins retain their existing order within each bot, including separate pinned

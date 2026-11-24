@@ -63,6 +63,14 @@ export function thread(page: Page) {
   return page.getByRole("main");
 }
 
+/** Dev-server harness only: wait for onResolved, which dismisses the mobile drawer. */
+export async function waitForAssistantNavigation(page: Page): Promise<void> {
+  await expect.poll(() => page.evaluate(() => {
+    const app = (window as { __nyxApp?: { router: { state: { status: string; resolvedLocation?: { href: string }; location: { href: string } } } } }).__nyxApp;
+    return !!app && app.router.state.status === "idle" && app.router.state.resolvedLocation?.href === app.router.state.location.href;
+  })).toBe(true);
+}
+
 export function composerInput(page: Page) {
   // Placeholder flips to "Assistant is working..." while a turn runs; match
   // the element, not one placeholder value.

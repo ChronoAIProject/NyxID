@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openAssistant } from "./helpers";
+import { openAssistant, waitForAssistantNavigation } from "./helpers";
 
 async function seedThreads(page: Page) {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
@@ -47,6 +47,7 @@ for (const width of [1440, 390]) {
           useAssistantDraftStore.getState().saveDraft(app.authStore.getState().user.id, `conv:${id}`, "Draft to finish later");
         }, ids[10]!);
         if (width === 390) {
+          await waitForAssistantNavigation(page);
           await page.getByRole("button", { name: language === "en" ? "Open chats" : language === "zh-CN" ? "打开聊天" : "開啟聊天" }).click();
         }
         if (width >= 1024) {

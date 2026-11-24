@@ -1,7 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openAssistant } from "./helpers";
+import { openAssistant, waitForAssistantNavigation } from "./helpers";
 
 async function seedChannelThreads(page: Page) {
+  await page.route("**/api/v1/machines/updates", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/remote-machines", (route) => route.fulfill({ json: { machines: [], next_cursor: null } }));
+  await page.route("**/api/v1/service-pools", (route) => route.fulfill({ json: { pools: [] } }));
   await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
   await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
@@ -44,6 +47,7 @@ for (const width of [1440, 390]) for (const mode of ["light", "dark"] as const) 
     const ids = await seedChannelThreads(page);
     await page.goto(`/assistant?mock=1&c=${ids[0]}`, { waitUntil: "domcontentloaded" });
     await expect(page.locator("[data-channel-thread-context]")).toContainText("Product team on Lark");
+    await waitForAssistantNavigation(page);
     if (width === 390) await page.getByRole("button", { name: "Open chats", exact: true }).click();
     const list = width === 390 ? page.locator('aside[data-tour="sidebar"]:visible')
       : page.getByRole("complementary", { name: "Threads", exact: true });
@@ -61,14 +65,15 @@ for (const width of [1440, 390]) for (const mode of ["light", "dark"] as const) 
     await list.getByRole("button", { name: "Clear search", exact: true }).click();
     await expect(search).toHaveValue("");
     const options = () => list.getByRole("button", { name: "Options for Thread · 10:16:45 UTC", exact: true });
-    await options().click();
+    await options().focus();
+    await options().press("Enter");
     await page.getByRole("menuitem", { name: "Pin chat", exact: true }).click();
     await expect(options()).toBeFocused();
     await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toBeVisible();
     const sourceHeaders = list.locator("[data-channel-source]");
     await expect(sourceHeaders).toHaveCount(2);
     await sourceHeaders.nth(1).click();
-    await options().click();
+    await options().press("Enter");
     await page.getByRole("menuitem", { name: "Unpin chat", exact: true }).click();
     await expect(options()).toBeFocused();
     await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toBeVisible();
@@ -92,6 +97,8 @@ for (const width of [1440, 390]) for (const mode of ["light", "dark"] as const) 
       await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toHaveAttribute("aria-current", "page");
       await list.getByRole("button", { name: "Back to workspace", exact: true }).click();
       await list.getByRole("link", { name: "Machines", exact: true }).click();
+      await expect(page).toHaveURL(/\/assistant\/machines/);
+      await waitForAssistantNavigation(page);
       await page.getByRole("button", { name: "Open chats", exact: true }).click();
       await expect(list.getByRole("link", { name: "Machines", exact: true })).toBeVisible();
       await expect(list.getByRole("button", { name: "Back to workspace", exact: true })).toHaveCount(0);
@@ -99,7 +106,8 @@ for (const width of [1440, 390]) for (const mode of ["light", "dark"] as const) 
       await page.getByRole("button", { name: "Rename chat", exact: true }).click();
       await expect(page.getByRole("textbox", { name: "Chat title", exact: true })).toHaveValue("Thread · 2026-11-02 10:16 UTC");
       await page.getByRole("button", { name: "Cancel rename", exact: true }).click();
-      await list.getByRole("button", { name: "Options for Thread · 10:16:45 UTC", exact: true }).click();
+      await options().focus();
+      await options().press("Enter");
       await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
       await list.getByRole("textbox", { name: "Title", exact: true }).fill("Deployment investigation");
       await list.getByRole("button", { name: "Save", exact: true }).click();

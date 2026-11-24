@@ -72,6 +72,10 @@ test.beforeEach(async ({ page, context }) => {
     "/billing/wallet": billingWallet(),
     "/billing/usage": billingUsage([billingRow({ model: "Example model", api_key_name: "Chat agent", api_key_id: "key-1" })]),
     "/billing/grants": { grants: [billingGrant()], page: 1, per_page: 10, total: 1 },
+    "/billing/benefits": {
+      summary: { remaining: "2", unreserved: "1.5", held: "0.5", pending_activation: "0", pending_reclaim: "0", expired_awaiting_cleanup: "0", restricted: "0", generated_at: "2026-10-01T00:00:00Z" },
+      grants: [billingGrant()], total_grants: 1, page: 1, per_page: 10, allowances: [billingAllowance()],
+    },
     "/billing/allowances": { allowances: [billingAllowance()] },
     "/billing/topups": { owner_id: "test-user", topups: [{ id: "topup-1", created_at: "2026-10-01T00:00:00Z", amount_credits: 100, status: "paid", receipt_available: true, invoice_number: "INV-1", credits_expire_at: "2027-10-01T00:00:00Z" }], page: 1, per_page: 10, total: 1 },
     "/catalog": { entries: billingCatalog },
@@ -615,7 +619,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await billing.getByRole("tab", { name: "Usage" }).click();
       await expect(billing.getByText("Usage overview", { exact: true })).toBeVisible();
       await billing.getByText("Explore by service, model or agent").click();
-      await billing.locator("summary").filter({ hasText: "Example LLM" }).first().click();
+      await billing.locator("summary").filter({ hasText: "Example LLM", visible: true }).first().click();
       await billing.getByRole("combobox", { name: "Group by", exact: true }).click();
       await page.getByRole("option", { name: "Model", exact: true }).click();
       await expect(billing.getByText("Example model", { exact: true })).toBeVisible();
