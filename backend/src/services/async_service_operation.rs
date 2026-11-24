@@ -1352,6 +1352,14 @@ pub async fn bind_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Async operation is no longer deliverable".into()))?;
+    // Queue pruning commits timeout before selecting this event. Recheck at
+    // the actual bind as a deadline may pass during the admission transaction.
+    // A failed bind rolls back; the next attempt retires the exact event.
+    if event_id(row).is_some() && !w.meta_contexts.is_empty() && Utc::now() >= w.deadline {
+        return Err(AppError::Conflict(
+            "Async result delivery deadline passed".into(),
+        ));
+    }
     meta_lineage::fence(db, session, &w.meta_contexts, true).await?;
     // Keep the original proof on the admitted event and therefore on input
     // and settlement even after the encrypted result/watch expires.

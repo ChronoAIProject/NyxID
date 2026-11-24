@@ -255,3 +255,69 @@ pub(crate) async fn retire_unavailable(
     })
     .await
 }
+
+/// Retire an exact pending delivery before selecting a new event turn. Doing
+/// this in admission's transaction makes timeout independent of sweeper order
+/// and lets a healthy sibling event proceed in the same admission attempt.
+pub(crate) async fn prune_pending_in_session(
+    db: &Database,
+    tx: &mut ClientSession,
+    owner: &str,
+    conversation: &str,
+    events: Vec<AgentEvent>,
+) -> AppResult<Vec<AgentEvent>> {
+    let mut retained = Vec::with_capacity(events.len());
+    for event in events {
+        if event.kind != EVENT_KIND
+            || !event
+                .channel_contexts
+                .iter()
+                .any(|c| c.meta_grant.is_some())
+        {
+            retained.push(event);
+            continue;
+        }
+        let w = db
+            .collection::<AsyncServiceOperation>(WATCHES)
+            .find_one(doc! {"_id":&event.id,"user_id":owner,"conversation_id":conversation})
+            .session(&mut *tx)
+            .await?
+            .ok_or_else(super::super::channel_meta_service::grants::incomplete)?;
+        if w.meta_contexts.is_empty()
+            || w.meta_contexts.len() > 100
+            || event.channel_contexts.iter().any(|context| {
+                context.meta_grant.is_none()
+                    || context.channel_bot_id
+                        != context
+                            .meta_grant
+                            .as_ref()
+                            .map(|proof| proof.bot_id.as_str())
+                            .unwrap_or_default()
+                    || !w
+                        .meta_contexts
+                        .iter()
+                        .any(|stored| stored.meta_grant == context.meta_grant)
+            })
+            || w.meta_contexts.iter().any(|context| {
+                context.meta_grant.is_none()
+                    || !event
+                        .channel_contexts
+                        .iter()
+                        .any(|stored| stored.meta_grant == context.meta_grant)
+            })
+        {
+            return Err(super::super::channel_meta_service::grants::incomplete());
+        }
+        match w.state.as_str() {
+            "cancelled" | "delivered" => continue,
+            "queued" => {
+                if retire_in_session(db, tx, &w).await? {
+                    continue;
+                }
+            }
+            _ => return Err(super::super::channel_meta_service::grants::incomplete()),
+        }
+        retained.push(event);
+    }
+    Ok(retained)
+}

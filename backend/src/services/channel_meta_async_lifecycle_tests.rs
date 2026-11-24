@@ -74,19 +74,6 @@ async fn meta_async_suspend_resume_releases_ready_and_queued_delivery_quota_and_
         crate::services::channel_meta_service::set_bot_delivery(db, &held, &f.bot.user_id, true)
             .await
             .unwrap();
-        if queued {
-            let request: engine::TurnRequest = serde_json::from_value(
-                serde_json::json!({"conversation_id":&original.id,"text":"Process queued result"}),
-            )
-            .unwrap();
-            let mut start = engine::TurnStart::from(&request);
-            start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
-            assert!(
-                engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys)
-                    .await
-                    .is_err()
-            );
-        }
         due(&f, &watch.id).await;
         sweep(&f).await;
         let terminal = db
@@ -157,6 +144,85 @@ async fn meta_async_deadline_and_expired_queued_payload_end_delivery_without_rem
         );
         assert!(f.server.received_requests().await.unwrap().is_empty());
         db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn queued_meta_result_deadline_at_first_admission_agrees_with_sweep_and_preserves_healthy_event()
+ {
+    for sweep_first in [false, true] {
+        for sibling in [false, true] {
+            let f = fixture().await;
+            let db = &f.state.db;
+            let (original, watch) = ready(&f, true, None).await;
+            assert!(watches::enqueue(db, &watch).await.unwrap());
+            let web = if sibling {
+                let (_, web) = ready(&f, false, Some(&original.id)).await;
+                assert!(watches::enqueue(db, &web).await.unwrap());
+                Some(web)
+            } else {
+                None
+            };
+            db.collection::<Document>(WATCHES)
+                .update_one(
+                    doc! {"_id":&watch.id},
+                    doc! {"$set":{"deadline":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            if sweep_first {
+                due(&f, &watch.id).await;
+                sweep(&f).await;
+            }
+            let before = engine::get(db, &f.bot.user_id, &original.id)
+                .await
+                .unwrap()
+                .message_count;
+            let request:engine::TurnRequest=serde_json::from_value(serde_json::json!({"conversation_id":&original.id,"text":"Process available results"})).unwrap();
+            let mut start = engine::TurnStart::from(&request);
+            start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+            let admission =
+                engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys).await;
+            if let Some(web) = &web {
+                let row = admission.unwrap();
+                assert_eq!(row.active_turn.as_ref().unwrap().events.len(), 1);
+                assert_eq!(row.active_turn.as_ref().unwrap().events[0].id, web.id);
+                assert!(
+                    watches::input_context(&f.state, &row)
+                        .await
+                        .unwrap()
+                        .contains("Retained operation result")
+                );
+                finish_source_turn(&f.state, &row, "Independent web result").await;
+            } else {
+                assert!(matches!(
+                    admission,
+                    Err(crate::errors::AppError::Conflict(_))
+                ));
+                let row = engine::get(db, &f.bot.user_id, &original.id).await.unwrap();
+                assert!(row.active_turn.is_none());
+                assert_eq!(row.message_count, before);
+            }
+            let terminal = db
+                .collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"_id":&watch.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.state, "cancelled");
+            assert_eq!(terminal.reason.as_deref(), Some("timeout"));
+            assert!(terminal.result_encrypted.is_none());
+            assert!(
+                !engine::get(db, &f.bot.user_id, &original.id)
+                    .await
+                    .unwrap()
+                    .pending_events
+                    .iter()
+                    .any(|event| event.id == watch.id)
+            );
+            assert!(f.server.received_requests().await.unwrap().is_empty());
+            db.drop().await.unwrap();
+        }
     }
 }
 
@@ -245,6 +311,48 @@ async fn meta_async_scope_read_error_and_unresolved_proof_retry_without_discardi
             .unwrap()
             .get_str("state"),
         Ok("queued")
+    );
+    // Admission must also retain a pending event on unresolved authority,
+    // rather than treating a failed read as permanent loss or timeout.
+    let queued = db
+        .collection::<Document>(WATCHES)
+        .find_one(doc! {"_id":&watch.id})
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"from_generation":"unresolved"}},
+        )
+        .await
+        .unwrap();
+    let request:engine::TurnRequest=serde_json::from_value(serde_json::json!({"conversation_id":&watch.conversation_id,"text":"Process queued result"})).unwrap();
+    let mut start = engine::TurnStart::from(&request);
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+    assert!(
+        engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys)
+            .await
+            .is_err()
+    );
+    let retained = db
+        .collection::<Document>(WATCHES)
+        .find_one(doc! {"_id":&watch.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.get_str("state"), Ok("queued"));
+    assert_eq!(
+        retained.get("result_encrypted"),
+        queued.get("result_encrypted")
+    );
+    assert!(
+        engine::get(db, &f.bot.user_id, &watch.conversation_id)
+            .await
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|event| event.id == watch.id)
     );
     db.drop().await.unwrap();
 }

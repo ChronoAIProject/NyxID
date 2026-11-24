@@ -2791,6 +2791,38 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
+    if row.pending_events.iter().any(|event| {
+        event.kind == super::async_service_operation::EVENT_KIND
+            && event
+                .channel_contexts
+                .iter()
+                .any(|context| context.meta_grant.is_some())
+    }) {
+        let before = row.pending_events.len();
+        row.pending_events = Box::pin(
+            super::async_service_operation::meta_lineage::prune_pending_in_session(
+                db,
+                session,
+                user_id,
+                &id,
+                std::mem::take(&mut row.pending_events),
+            ),
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            collection
+                .update_one(
+                    owner_filter(user_id, &id)?,
+                    doc! {"$set":{"pending_events":bson::to_bson(&row.pending_events)
+                    .map_err(|_|AppError::Internal("Invalid events".into()))?}},
+                )
+                .session(&mut *session)
+                .await?;
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     if row
         .pending_events
         .iter()
