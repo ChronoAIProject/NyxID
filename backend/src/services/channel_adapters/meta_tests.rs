@@ -1108,6 +1108,66 @@ fn instagram_direct_and_array_shapes_require_one_consistent_account() {
 }
 
 #[tokio::test]
+async fn messenger_reply_persists_a_definite_provider_refusal_and_returns_its_code() {
+    use crate::models::channel_reply_delivery::{
+        COLLECTION_NAME, ChannelReplyDelivery, PartStatus,
+    };
+    let (state, adapter, server, bot) = fixture("messenger").await;
+    let original = original(&state, &bot).await;
+    state
+        .db
+        .collection(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(&original)
+        .await
+        .unwrap();
+    let key = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&key,"is_active":true})
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/v25.0/222/messages"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":{"code":200}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = crate::services::channel_reply_delivery::send_parts(
+        &state.db,
+        &state.http_client,
+        &adapter,
+        &bot,
+        &original,
+        &key,
+        &format!("messenger:{}:222:333", bot.id),
+        &BotCredentials::from("fixture-token"),
+        vec![OutboundReply {
+            text: Some("test reply".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            metadata: None,
+        }],
+    )
+    .await;
+    let error = result.err().expect("provider refused the reply");
+    assert!(
+        matches!(&error, AppError::ChannelConversationNotReachable(reason) if reason=="meta:permission_or_window_refused")
+    );
+    let receipt = state
+        .db
+        .collection::<ChannelReplyDelivery>(COLLECTION_NAME)
+        .find_one(doc! {"inbound_message_id":&original.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.parts[0].failure_code, Some(error.error_code()));
+    assert!(receipt.parts[0].status == PartStatus::Failed);
+    assert!(receipt.parts[0].outbound_message_id.is_some());
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn response_disconnect_keeps_unknown_acceptance_in_the_journal_without_sending_the_suffix() {
     use crate::models::channel_reply_delivery::{
         COLLECTION_NAME, ChannelReplyDelivery, PartStatus,

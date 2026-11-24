@@ -237,18 +237,6 @@ impl Delivery {
         Ok(())
     }
 
-    pub async fn observed(
-        &mut self,
-        db: &mongodb::Database,
-        index: usize,
-        ids: Vec<String>,
-        outbound_message_id: &str,
-    ) -> AppResult<()> {
-        self.parts[index].platform_message_ids = ids;
-        self.parts[index].outbound_message_id = Some(outbound_message_id.into());
-        self.save_part(db, index, false).await
-    }
-
     async fn save_part(&self, db: &mongodb::Database, index: usize, fresh: bool) -> AppResult<()> {
         let fields = bson::to_document(&self.parts[index]).map_err(|_| unconfirmed())?;
         let fields: bson::Document = fields
@@ -411,7 +399,13 @@ pub async fn send_parts(
                 {
                     delivery.parts[index].status = PartStatus::Failed;
                 }
-                delivery.observed(db, index, ids, &stored.id).await?;
+                delivery.parts[index].platform_message_ids = ids;
+                delivery.parts[index].outbound_message_id = Some(stored.id);
+                // An issued Meta attempt has one terminal transition. failed()
+                // publishes both the observation and the provider's refusal code.
+                if delivery.meta_grant.is_none() {
+                    delivery.save_part(db, index, false).await?;
+                }
                 return Err(error);
             }
             outcome
@@ -432,6 +426,7 @@ pub async fn send_parts(
             Ok(sent) => last = Some(sent),
             Err(error) => {
                 if super::channel_adapters::meta::is_meta(&bot.platform)
+                    && delivery.parts[index].status == PartStatus::Uncertain
                     && !provider_attempted.load(std::sync::atomic::Ordering::Relaxed)
                 {
                     delivery.parts[index].status = PartStatus::Failed;
