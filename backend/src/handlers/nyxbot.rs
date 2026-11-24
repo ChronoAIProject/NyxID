@@ -3863,12 +3863,15 @@ async fn start_chat_turn(
             event.media_event_ids = media_event_ids;
             event.media_declared = had_media.then_some(declared);
             event.media_sent_at = had_media.then_some(media_sent_at.unwrap_or_else(Utc::now));
+            let remember_meta_reply =
+                shared && crate::services::channel_adapters::meta::is_meta(&row.platform);
             let queued = crate::services::channel_turn_delivery::enqueue(
                 &state.db,
                 &actor,
                 &conversation_id,
                 event,
                 row.org_specialist.as_ref().map(|_| text),
+                remember_meta_reply,
             )
             .await?;
             if !queued {
@@ -3883,6 +3886,7 @@ async fn start_chat_turn(
             // This preference is for unrelated future updates. Durable source
             // acceptance already owns this answer and must survive its failure.
             if shared
+                && !remember_meta_reply
                 && engine::set_reply_channel(&state.db, &actor, &conversation_id, &origin)
                     .await
                     .is_err()

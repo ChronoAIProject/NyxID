@@ -61,6 +61,7 @@ async fn queue(f: &Fixture, event: &NyxbotEvent, question: &str) -> bool {
         f.event.conversation_id.as_deref().unwrap(),
         work(event, question),
         None,
+        false,
     )
     .await
     .unwrap()
@@ -193,7 +194,8 @@ async fn queue_transaction_rolls_back_source_acceptance_when_conversation_write_
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
             work(&event, "question"),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -319,7 +321,8 @@ async fn every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomi
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
             work(&invalid, "another question"),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -542,6 +545,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         &home.id,
         work(&event, "specialist question"),
         None,
+        false,
     )
     .await
     .unwrap();
@@ -855,6 +859,7 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
         &home.id,
         repeat,
         None,
+        false,
     )))
     .await;
     assert!(accepted.unwrap());
@@ -1044,7 +1049,8 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 media_work,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -1442,7 +1448,8 @@ async fn identity_2187_coalesced_bot_sources_are_scoped_and_pruned_before_runtim
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 event,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -1544,7 +1551,8 @@ async fn identity_2187_later_queued_source_lookup_error_fails_before_model_input
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 event,
-                None
+                None,
+                false
             )
             .await
             .unwrap()

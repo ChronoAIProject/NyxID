@@ -335,6 +335,7 @@ pub async fn enqueue(
     conversation: &str,
     event: crate::models::assistant_conversation::AgentEvent,
     public_text: Option<&str>,
+    remember_reply: bool,
 ) -> AppResult<bool> {
     use super::api_key_mutation_service as transactions;
     let db = db.clone();
@@ -345,8 +346,8 @@ pub async fn enqueue(
     let admission = session
         .start_transaction()
         .and_run2(async move |session| {
-            transactions::transaction_result(
-                Box::pin(enqueue_in_session(
+            let result = async {
+                let admission = Box::pin(enqueue_in_session(
                     &db,
                     &owner,
                     &conversation,
@@ -354,8 +355,28 @@ pub async fn enqueue(
                     public_text.as_deref(),
                     session,
                 ))
-                .await,
-            )
+                .await?;
+                if admission.accepted && remember_reply {
+                    let origin = event
+                        .reply_to
+                        .first()
+                        .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let preference = bson::to_bson(origin)
+                        .map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+                    db.collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {"_id": &conversation, "user_id": &owner},
+                        doc! {"$set": {"reply_channel": preference}},
+                    )
+                    .session(session)
+                    .await?;
+                }
+                Ok(admission)
+            }
+            .await;
+            transactions::transaction_result(result)
         })
         .await
         .map_err(transactions::map_transaction_error)?;

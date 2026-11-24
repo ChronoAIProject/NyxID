@@ -1575,7 +1575,8 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
             &f.org.member,
             &row.id,
             work.clone(),
-            Some("Queued public question")
+            Some("Queued public question"),
+            false
         )
         .await
         .unwrap()
@@ -1586,7 +1587,8 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
             &f.org.member,
             &row.id,
             work,
-            Some("Duplicate question")
+            Some("Duplicate question"),
+            false
         )
         .await
         .is_err()

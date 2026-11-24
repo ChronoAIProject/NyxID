@@ -427,9 +427,16 @@ async fn owner_queue_is_bounded_keeps_event_anchors_and_rechecks_authority_after
                 "sender_id":"human","guest":false,"addressed":true,"transport":"direct",
                 "stream_deadline":bson::DateTime::now(),"checked_at":bson::DateTime::now()}}).await.unwrap();
         assert_eq!(
-            super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
-                .await
-                .unwrap(),
+            super::super::channel_turn_delivery::enqueue(
+                &db,
+                "owner",
+                conversation,
+                event,
+                None,
+                false
+            )
+            .await
+            .unwrap(),
             i < 20
         );
         let saved = sources
@@ -669,7 +676,8 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
             "owner",
             conversation,
             event.clone(),
-            None
+            None,
+            false
         )
         .await
         .unwrap()
@@ -802,9 +810,16 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
         .await
         .unwrap();
     assert!(
-        super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
-            .await
-            .unwrap()
+        super::super::channel_turn_delivery::enqueue(
+            &db,
+            "owner",
+            conversation,
+            event,
+            None,
+            false
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(prune_queue(&db, "owner", conversation).await.unwrap(), 1);
 }

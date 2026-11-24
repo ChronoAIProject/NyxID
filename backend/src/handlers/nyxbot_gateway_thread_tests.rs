@@ -2359,7 +2359,8 @@ async fn delayed_source_identity(newer_message: bool) {
                 OWNER,
                 &conversation,
                 work,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
