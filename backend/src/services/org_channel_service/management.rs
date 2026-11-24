@@ -325,7 +325,15 @@ async fn update_choice(
     };
     ids.sort();
     ids.dedup();
-    let author_services = !ready
+    // Removing a service from a direct Meta inbox does not renew consent
+    // for the services the administrator kept.
+    let removes_only = direct_meta
+        && !ready
+        && input.service_ids.is_some()
+        && ids.iter().all(|id| b.guests.service_ids.contains(id))
+        && b.guests.service_ids.iter().any(|id| !ids.contains(id));
+    let author_services = !removes_only
+        && !ready
         && (input.service_ids.is_some() || (input.enabled && (!direct_meta || !b.guests.enabled)));
     let mut authority = BTreeMap::new();
     for id in ids.iter().filter(|_| author_services) {
@@ -344,7 +352,10 @@ async fn update_choice(
     }
     let mut policy = b.guests.clone();
     policy.enabled = input.enabled;
-    if author_services {
+    if removes_only {
+        policy.service_authority.retain(|id, _| ids.contains(id));
+        policy.service_ids = ids;
+    } else if author_services {
         policy.service_authority = authority;
         policy.service_ids = ids;
     }

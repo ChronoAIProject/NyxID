@@ -639,10 +639,35 @@ async fn legacy_org_meta_guest_reductions_remain_available_on_callback_failure()
         patch(json!({"daily_credits":"6","expected_revision":revision().await})).await,
         Err(AppError::Conflict(_))
     ));
+    // An explicit removal preserves the retained service's stale consent,
+    // including while the delivery route is unhealthy.
+    state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {format!("org_specialist.guests.service_authority.{}", service_ids[0]): "prior-digest"}},
+        )
+        .await
+        .unwrap();
     patch(json!({"service_ids":[&service_ids[0]],"expected_revision":revision().await}))
         .await
         .unwrap();
     let narrower = load_channel(&state, OWNER, &row.id).await.unwrap();
+    let kept = &narrower.org_specialist.as_ref().unwrap().guests;
+    assert_eq!(
+        kept.service_authority
+            .get(&service_ids[0])
+            .map(String::as_str),
+        Some("prior-digest")
+    );
+    assert!(!org::guest_service_selected(
+        &agent,
+        kept,
+        false,
+        &service_ids[0]
+    ));
+    assert!(!kept.service_authority.contains_key(&service_ids[1]));
     assert_eq!(
         narrower.org_specialist.as_ref().unwrap().guests.service_ids,
         vec![service_ids[0].clone()]
