@@ -24,6 +24,8 @@ def main():
                         help="the base already implements bot-local continuity")
     parser.add_argument("--channel-writers", action="store_true",
                         help="exercise active and rolled-back channel writers against the dual-reader base")
+    parser.add_argument("--whatsapp", action="store_true",
+                        help="exercise retained enrollment migration and token replacement after writer rollback")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -112,7 +114,18 @@ def main():
         run("candidate", "read", "current")
         if args.reader_preparation:
             return
+        if args.whatsapp:
+            run("candidate", "migrate", "old", writes=True)
+            run("candidate", "read", "old", legacy=False)
+            run("base", "reject", "old")
+            run("candidate", "replace", "current")
+            run("base", "read", "current")
+            run("candidate", "replace", "current", writes=True)
+            run("candidate", "clear", "current")
+            run("base", "read", "current")
         registry_test = args.test
+        if args.whatsapp:
+            registry_test = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
         if args.channel_writers:
             run("candidate", "replace", "current", writes=True)
             run("base", "read", "current", legacy=False)

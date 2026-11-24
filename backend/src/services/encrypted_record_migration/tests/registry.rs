@@ -51,10 +51,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"payload_ciphertext": &bytes},
         ),
         (
-            channel_whatsapp_native::COLLECTION_NAME,
-            doc! {"native_verify_token_encrypted": &bytes},
-        ),
-        (
             assistant_conversation::COLLECTION_NAME,
             doc! {"active_turn": {"restart_admission": {"window": {"input": &bytes}}}},
         ),
@@ -194,13 +190,14 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "fdb9b9bb2bba7447d7cef07e588e6c1d1ce9461af13bd17be7664d0a47dc1f12"
+        "6c328214696d6e4cdbb50c0b9aa5ef852c20e6e480fd2203ed6002b48477a50b"
     );
     for digest in [
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
         Some(previous_labels::RECONCILED_DIGEST),
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
+        Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -242,7 +239,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::OAUTH_WEBHOOK_DIGEST | previous_labels::RECONCILED_DIGEST
+                        previous_labels::CHANNEL_BOT_DIGEST
+                            | previous_labels::OAUTH_WEBHOOK_DIGEST
+                            | previous_labels::RECONCILED_DIGEST
                     ) =>
             {
                 Some((

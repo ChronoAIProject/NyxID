@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 32 implemented adapters
-and 17 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 33 implemented adapters
+and 16 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -72,7 +72,7 @@ A collection may use separate adapters for different fields.
 | `assistant_cma_creations` | `request_ciphertext` | — | Pending |
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | — | Pending |
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
-| `channel_whatsapp_native` | `native_verify_token_encrypted` | — | Pending |
+| `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | — | Pending |
 
@@ -106,11 +106,16 @@ generations in the transaction that moves the bot and its routes.
   bindings retain the encrypted provider key and producer secret separately.
   Gateway responses store an encrypted replay payload.
   [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Binding setup and cleanup](../../backend/src/services/nyxbot_event_binding_service.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
-- Native WhatsApp enrollment stores its verification token on the native
-  configuration row. Assistant recovery retains the encrypted input on the
+- Assistant recovery retains the encrypted input on the
   active turn’s restart window. Approval requests retain encrypted payloads
   and results under the selected proposal version.
-  [WhatsApp enrollment](../../backend/src/services/whatsapp_native.rs) · [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+  [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+
+The native WhatsApp Verify Token binds to the settings row’s bot ID, owner and
+ownership generation. Callback transitions preserve it. Relay-phase settings
+replacement clears it. Enrollment requires a matching live bot. Migration can
+authenticate retained settings under the original owner after a transfer.
+[WhatsApp enrollment and storage](../../backend/src/services/whatsapp_native/token_record.rs)
 
 ## Source and storage boundaries
 

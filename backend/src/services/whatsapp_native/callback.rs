@@ -850,6 +850,73 @@ mod tests {
             let query = request.url.query().unwrap_or_default();
             !query.contains("access_token") && !query.contains("secret-that-is-not-in-the-url")
         }));
+        // Enrollment installs a token after loading the settings. Publishing
+        // the verified callback must preserve the exact token received by Meta.
+        let db = crate::test_utils::connect_transaction_test_database("wa_enrollment").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut bot = super::super::tests::bot();
+        bot.bot_token_encrypted = state
+            .encryption_keys
+            .encrypt(b"fixture-whatsapp-system-token")
+            .await
+            .unwrap();
+        bot.app_secret_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"fixture-whatsapp-app-secret")
+                .await
+                .unwrap(),
+        );
+        db.collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        )
+        .insert_one(&bot)
+        .await
+        .unwrap();
+        super::super::configure(&db, &bot, "123", "222", true, 0)
+            .await
+            .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/v25.0/123/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+            .mount(&server)
+            .await;
+        super::super::activate_gateway(
+            &db,
+            &state.encryption_keys,
+            &bot,
+            "channel",
+            "https://gateway.example/wa",
+            "https://relay.example/wa",
+        )
+        .await
+        .unwrap();
+        let stored = super::super::load(&db, &bot).await.unwrap().unwrap();
+        assert_eq!(stored.callback.phase, CallbackPhase::Gateway);
+        assert!(stored.native_verify_token_encrypted.is_some());
+        let channel = bson::from_document(bson::doc! {
+            "_id":"channel","user_id":&bot.user_id,"channel_bot_id":&bot.id,"platform":"whatsapp",
+            "bot_label":"fixture","transport":"gateway","status":"active","route_api_key_id":"route",
+            "gateway_source":{"type":"whatsapp","app_id":"123","waba_id":"222","phone_number_id":"333"},
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        }).unwrap();
+        let bundle = crate::services::nyxbot_gateway_source::credentials(
+            &state, &channel, &bot, "agent", "route",
+        )
+        .await
+        .unwrap();
+        let token = bundle["credentials"]["whatsapp"]["verify_token"]
+            .as_str()
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .filter(|r| r.method.as_str() == "POST")
+                .any(|r| url::form_urlencoded::parse(&r.body)
+                    .any(|(name, value)| name == "verify_token" && value == token))
+        );
+        db.drop().await.unwrap();
         TEST_GRAPH_BASES.lock().unwrap().remove("123");
     }
 }
