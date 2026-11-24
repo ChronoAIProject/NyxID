@@ -36,6 +36,8 @@
   "View {{count}} connections_other": "View {{count}} connections",
   "credit grant": "grant",
   "credit grants": "grants",
+  "{{chat}} on {{platform}}, {{count}} threads{{status}}_one": "{{chat}} on {{platform}}, {{count}} thread{{status}}",
+  "{{chat}} on {{platform}}, {{count}} threads{{status}}_other": "{{chat}} on {{platform}}, {{count}} threads{{status}}",
   "{{count}} CMA sessions_one": "{{count}} CMA session",
   "{{count}} CMA sessions_other": "{{count}} CMA sessions",
   "{{count}} actions_one": "{{count}} action",

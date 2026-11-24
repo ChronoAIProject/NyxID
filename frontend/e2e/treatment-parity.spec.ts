@@ -234,7 +234,8 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
     for (const path of ["/keys", "/assistant/plugins"]) {
       const assistant = path.startsWith("/assistant");
       await openRoute(page, path, scale, density, theme, false);
-      const service = page.locator("[data-service-card-header]").filter({ has: page.getByRole("heading", { name: "GitHub", exact: true }) });
+      const serviceScope = assistant ? page.getByRole("region", { name: "Connected", exact: true }) : page;
+      const service = serviceScope.locator("[data-service-card-header]").filter({ has: page.getByRole("heading", { name: "GitHub", exact: true }) });
       await expect(service).toBeVisible();
       const header = await service.evaluate(element => {
         const title = element.querySelector("[data-service-card-title]")!;

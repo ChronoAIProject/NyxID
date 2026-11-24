@@ -1,8 +1,10 @@
-import { useState, type ReactNode } from "react";
-import { MessageSquare, Plus, Search, Settings2, X } from "lucide-react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, MessageSquare, Plus, Search, Settings2, X } from "lucide-react";
 import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
 import { AgentAvatar } from "./nyxbot-agent-avatar";
-import { agentTitle, splitChannelThreads, type ChannelThreadGroup } from "@/lib/assistant/nyxbot-labels";
+import { agentTitle, channelPlatformName, splitChannelThreads } from "@/lib/assistant/nyxbot-labels";
+import { channelSourceTitle, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
+import { ChannelSourceThreads } from "./channel-source-threads";
 import type { SidebarAgents } from "./assistant-sidebar";
 import type { Conversation } from "@/types/assistant";
 import { usePinnedConversationIds } from "@/hooks/use-conversation-pins";
@@ -25,23 +27,32 @@ function threadPeriod(thread: Conversation): string {
 export function AssistantThreadList({
   model,
   renderThread,
-  renderChannel,
+  activeThreadId,
+  notice,
   onClose,
 }: {
   readonly model: SidebarAgents;
   readonly renderThread: (thread: Conversation) => ReactNode;
-  readonly renderChannel: (group: ChannelThreadGroup, searching: boolean) => ReactNode;
+  readonly activeThreadId?: string;
+  readonly notice?: ReactNode;
   readonly onClose?: () => void;
 }) {
   useUiTranslation();
   const [query, setQuery] = useState("");
+  const backButton = useRef<HTMLButtonElement>(null);
+  const mobile = Boolean(model.onBackToWorkspace);
+  useLayoutEffect(() => {
+    if (mobile) backButton.current?.focus({ preventScroll: true });
+  }, [mobile, model.selectedAgentId]);
   const pinnedIds = usePinnedConversationIds();
   const agent = model.agents.find((item) => item.id === model.selectedAgentId);
   if (!agent) return null;
   const name = agentTitle(agent);
   const search = query.trim().toLocaleLowerCase();
   const filtered = model.threads.filter((thread) =>
-    [thread.title, thread.channel?.chat_title, thread.platform_thread?.platform]
+    [thread.title, conversationDisplayTitle(thread), thread.channel?.chat_title, thread.channel?.parent_title,
+      thread.channel?.bot_label, thread.channel ? channelPlatformName(thread.channel.platform) : undefined,
+      thread.channel ? channelSourceTitle(thread.channel) : undefined, thread.platform_thread?.platform]
       .some((value) => value?.toLocaleLowerCase().includes(search)),
   );
   const { own, bots } = splitChannelThreads(filtered);
@@ -62,6 +73,10 @@ export function AssistantThreadList({
       }
     }}>
       <header className="shrink-0 px-4 pb-3 pt-4">
+        {model.onBackToWorkspace ? <button ref={backButton} type="button" data-keep-drawer-open="" onClick={model.onBackToWorkspace}
+          className="mb-4 flex items-center gap-1.5 rounded-md py-1 type-secondary text-text-tertiary hover:text-foreground">
+          <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />{translateUi("Back to workspace")}
+        </button> : null}
         <div className="flex min-w-0 items-center gap-3">
           <AgentAvatar agent={agent} size="lg" />
           <div className="min-w-0 flex-1">
@@ -72,7 +87,7 @@ export function AssistantThreadList({
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {model.onAgentDetails ? (
-              <button type="button" onClick={() => model.onAgentDetails?.(agent.id)}
+              <button type="button" data-keep-drawer-open="" onClick={() => model.onAgentDetails?.(agent.id)}
                 aria-label={translateUi("Agent details")} data-icon-button=""
                 className="flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground">
                 <Settings2 aria-hidden="true" className="h-4 w-4" />
@@ -101,7 +116,7 @@ export function AssistantThreadList({
             aria-label={translateUi("Search threads")} placeholder={translateUi("Search threads")}
             className="assistant-thread-search w-full rounded-lg border border-hairline bg-background/40 py-2 pl-8 pr-8 text-13 text-foreground outline-none placeholder:text-text-tertiary focus:border-ring" />
           {query ? (
-            <button type="button" onClick={() => setQuery("")} aria-label={translateUi("Clear search")}
+            <button type="button" data-keep-drawer-open="" onClick={() => setQuery("")} aria-label={translateUi("Clear search")}
               className="absolute right-2 top-1/2 -translate-y-1/2 rounded text-text-tertiary hover:text-foreground">
               <X aria-hidden="true" className="h-3.5 w-3.5" />
             </button>
@@ -110,6 +125,8 @@ export function AssistantThreadList({
       </header>
       <nav aria-label={translateUi("Threads with {{value1}}", { value1: name })}
         data-scroll-fade="" className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
+        {notice}
+        {own.length && bots.length ? <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("Direct chats")}</h3> : null}
         {[...periods].map(([period, threads]) => (
           <section key={period} aria-label={translateUi(period)} className="mb-4">
             <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi(period)}</h3>
@@ -117,9 +134,10 @@ export function AssistantThreadList({
           </section>
         ))}
         {bots.length ? (
-          <section aria-label={translateUi("Channels")} className="mb-4">
-            <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("Channels")}</h3>
-            {bots.map((group) => renderChannel(group, Boolean(search)))}
+          <section aria-label={translateUi("From chat apps")} className="mb-4">
+            <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("From chat apps")}</h3>
+            {bots.map((bot) => <ChannelSourceThreads key={bot.key} bot={bot} searching={Boolean(search)}
+              activeId={activeThreadId} unreadIds={model.unreadThreadIds} renderThread={renderThread} />)}
           </section>
         ) : null}
         {!filtered.length ? (

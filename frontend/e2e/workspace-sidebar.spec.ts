@@ -14,6 +14,8 @@ async function revealNavigation(page: Page, assistant: boolean) {
   if (page.viewportSize()!.width < 768) await toggle.click();
 }
 async function installWorkspaceFixtures(page: Page) {
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", route => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", route => route.fulfill({ json: { sessions: [] } }));
   await page.route("**/api/v1/triggers", route => route.fulfill({ json: { triggers: [] } }));
   await page.route("**/api/v1/machines/updates", route => route.fulfill({ json: [] }));
   await page.route("**/api/v1/remote-machines", route => route.fulfill({ json: { machines: [], next_cursor: null } }));
