@@ -18,7 +18,9 @@ pub(crate) async fn erase_provider_inbox(
         )
         .find_one(doc! {"_id":bot_id})
         .await?;
-    if super::super::channel_meta_service::scopes::has_history(&state.db, bot_id).await? {
+    if super::super::channel_meta_service::scope_erasure::required(&state.db, bot_id, grant_id)
+        .await?
+    {
         if super::super::channel_meta_service::grants::completion_for(&state.db, bot_id, grant_id)
             .await?
         {

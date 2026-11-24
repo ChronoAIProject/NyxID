@@ -789,7 +789,7 @@ async fn reconcile_target(
             }
         }
     }
-    if erase && super::scopes::has_history(&state.db, bot_id).await? {
+    if erase && super::scope_erasure::required(&state.db, bot_id, grant_id).await? {
         if scope.is_none() {
             return Err(super::grants::incomplete());
         }

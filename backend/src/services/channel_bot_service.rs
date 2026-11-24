@@ -2550,7 +2550,8 @@ pub(crate) async fn delete_bot_observed_with_state(
             .as_ref()
             .map(|binding| binding.grant_id.as_str())
             .unwrap_or_default();
-        if super::channel_meta_service::scopes::has_history(&state.db, bot_id).await? {
+        if super::channel_meta_service::scope_erasure::required(&state.db, bot_id, grant_id).await?
+        {
             // Delivery and the subscription are already stopped. Local pages
             // continue through the durable manual obligation and sweeper;
             // ordinary progress is a successful Delete, not a conflict.
@@ -3007,7 +3008,7 @@ pub(crate) async fn erase_personal_bot(
                 .as_ref()
                 .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
                 .grant_id;
-            if super::channel_meta_service::scopes::has_history(db, bot_id).await? {
+            if super::channel_meta_service::scope_erasure::required(db, bot_id, grant).await? {
                 // Progress keeps the ordinary channel domain pending while
                 // the exact manual obligation drains its bounded pages.
                 super::channel_meta_service::scope_erasure::manual_pass(state, &stopped).await?;

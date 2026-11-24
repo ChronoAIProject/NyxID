@@ -781,3 +781,73 @@ async fn final_positive_inventory_rewinds_behind_the_scope_fence_and_finishes_bo
     assert!(f.server.received_requests().await.unwrap().is_empty());
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn final_inventory_revisits_nested_queued_and_active_provenance_before_completion() {
+    for location in ["pending", "active-direct", "active-events"] {
+        let f = fixture().await;
+        let db = &f.state.db;
+        let proof = scopes::reference(&f.bot).unwrap();
+        let mut parent = conversation(&f.bot.user_id, false, &proof);
+        let context = doc! {"meta_grant":bson::to_bson(&proof).unwrap()};
+        let event = doc! {"channel_contexts":[&context],"text":"retained inbox input"};
+        match location {
+            "pending" => {
+                parent.insert("pending_events", vec![event]);
+            }
+            "active-direct" => {
+                parent.insert(
+                    "active_turn",
+                    doc! {"turn_id":"a-turn","channel_context":context},
+                );
+            }
+            _ => {
+                parent.insert("active_turn", doc! {"turn_id":"a-turn","events":[event]});
+            }
+        }
+        db.collection::<Document>("assistant_conversations")
+            .insert_one(&parent)
+            .await
+            .unwrap();
+        db.collection::<Document>(BOTS)
+            .update_one(
+                doc! {"_id":&f.bot.id},
+                doc! {"$set":{"is_active":false,"meta_binding.subscription":"removed"}},
+            )
+            .await
+            .unwrap();
+        let result = transaction_service::run_db_only(db, &(db, &f.scope), |tx, &(db, scope)| {
+            Box::pin(finish(db, tx, scope))
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.progress.get_i32("phase"), Ok(4));
+        assert!(!result.done);
+        assert!(
+            !grants::completion_for(db, &f.bot.id, &proof.grant_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.collection::<Document>(BOTS)
+                .find_one(doc! {"_id":&f.bot.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let next = transaction_service::run_db_only(db, &(db, &f.scope), |tx, &(db, scope)| {
+            Box::pin(erase_queued(db, tx, scope, 4))
+        })
+        .await
+        .unwrap();
+        assert!(!next.done);
+        assert!(
+            db.collection::<Document>("assistant_conversations")
+                .find_one(queued_filter(&f.bot.id, &proof.grant_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+}
