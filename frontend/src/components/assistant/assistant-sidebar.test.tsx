@@ -651,6 +651,41 @@ describe("NyxBot agents in the sidebar", () => {
     await waitFor(() => expect(onRename).toHaveBeenCalledExactlyOnceWith(row.id, `${row.title} renamed`));
   });
 
+  it("shows channel source groups in the full mobile thread list, with unique generic titles", async () => {
+    const onBackToWorkspace = vi.fn();
+    const source = { platform: "lark", channel_agent_id: "lark-bot", bot_label: "NyxBot",
+      chat_kind: "group", parent_chat_id: "engineering", parent_title: "Engineering" };
+    const first = { ...thread, title: "Thread · 2026-11-02 10:16 UTC", created_at: "2026-11-02T10:16:12Z",
+      channel: { ...source, thread_id: "child-1", chat_id: "child-1" } };
+    const second = { ...first, id: "nyxa-second", created_at: "2026-11-02T10:16:45Z",
+      channel: { ...source, thread_id: "child-2", chat_id: "child-2" } };
+    const { onSelect } = renderAgents({ mobileThreadList: true, onBackToWorkspace,
+      threads: [first, second, { ...thread, id: "direct", channel: null }] });
+    const sourceButton = screen.getByRole("button", { name: "Engineering on Lark, 2 threads" });
+    expect(sourceButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Lark · Bot: NyxBot")).toBeVisible();
+    expect(screen.getByText("Direct chats")).toBeVisible();
+    expect(screen.queryByText("Channel chat")).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Thread · .*10:16:45/ }));
+    expect(onSelect).toHaveBeenCalledWith(second.id);
+    await user.click(screen.getByRole("button", { name: "Back to workspace" }));
+    expect(onBackToWorkspace).toHaveBeenCalledOnce();
+    await user.type(screen.getByRole("searchbox", { name: "Search threads" }), "Engineering");
+    expect(screen.queryByRole("button", { name: "Morning briefing" })).not.toBeInTheDocument();
+    expect(sourceButton).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("searches every matching source thread beyond the initial five-row limit", async () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-source-${index}`, title: `Topic ${index}`,
+      channel: { platform: "lark", channel_agent_id: "lark-bot", bot_label: "Office", chat_kind: "group",
+        parent_chat_id: "engineering", parent_title: "Engineering", thread_id: `child-${index}` } }));
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows });
+    await userEvent.setup().type(screen.getByRole("searchbox", { name: "Search threads" }), "Lark");
+    expect(screen.getAllByRole("button", { name: /^Topic \d$/ })).toHaveLength(8);
+    expect(screen.getByRole("button", { name: "Engineering on Lark, 8 threads" })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("keeps multiple pinned topics across two parent chats ahead of ordinary siblings", async () => {
     const user = userEvent.setup();
     const rows = ["Engineering", "Support"].flatMap((parent) => Array.from({ length: 4 }, (_, index) => ({

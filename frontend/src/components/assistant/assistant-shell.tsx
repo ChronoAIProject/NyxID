@@ -11,7 +11,7 @@ import { Link, useRouter } from "@tanstack/react-router";
 import { Menu, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { SidebarRailContext } from "./sidebar-rail-context";
-import { AssistantThreadsContext } from "./assistant-threads-context";
+import { AssistantThreadsContext, AssistantMobileThreadsContext } from "./assistant-threads-context";
 import "./assistant-navigation.css";
 import { useAssistantLayoutStore } from "@/stores/assistant-layout-store";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -281,7 +281,7 @@ function AssistantShellLayout({
               />
               <aside
                 data-tour="sidebar"
-                className="relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
+                className="relative flex h-full w-full flex-col bg-sidebar"
                 style={{
                   paddingTop: "var(--sat)",
                   paddingBottom: "var(--sab)",
@@ -320,7 +320,7 @@ function AssistantShellLayout({
                     }
                   }}
                 >
-                  {sidebar}
+                  <AssistantMobileThreadsContext value>{sidebar}</AssistantMobileThreadsContext>
                 </div>
               </aside>
             </div>

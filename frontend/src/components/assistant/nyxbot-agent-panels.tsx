@@ -4,7 +4,9 @@ import { ThreadTitle } from "./thread-title";
 import { useContext, type ComponentProps, type ReactNode } from "react";
 import { MotionConfig, motion } from "motion/react";
 import { ChatHeaderAnimateContext, ChatHeaderCompactContext } from "./chat-header-context";
-import { PanelRightOpen } from "lucide-react";
+import { MessagesSquare, PanelRightOpen } from "lucide-react";
+import { channelSourceTitle } from "@/lib/assistant/channel-thread-presentation";
+import type { Conversation } from "@/types/assistant";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
@@ -126,6 +128,7 @@ export function ThreadHeader({
   agentId,
   destroyed,
   channelPlatform,
+  sourceChannel,
   onOpenDetails,
   controls,
   title,
@@ -149,6 +152,7 @@ export function ThreadHeader({
   readonly destroyed: boolean;
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
+  readonly sourceChannel?: Conversation["channel"];
   readonly onOpenDetails?: () => void;
   /** Additional thread controls. */
   readonly controls?: ReactNode;
@@ -216,6 +220,14 @@ export function ThreadHeader({
           </HeaderItem>
         ) : null}
       </HeaderBar>
+      {sourceChannel?.thread_id ? (
+        <div data-channel-thread-context="" className="flex items-start gap-2 rounded-lg border border-hairline px-3 py-2 type-secondary text-text-tertiary">
+          <MessagesSquare aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{translateUi("{{agent}}’s conversation for a thread in {{chat}} on {{platform}}.", {
+            agent: name, chat: channelSourceTitle(sourceChannel), platform: channelPlatformName(sourceChannel.platform),
+          })}</span>
+        </div>
+      ) : null}
       {destroyed ? (
         <p
           role="status"

@@ -83,18 +83,19 @@ test("an agent's threads can be searched and closed to return home", async ({ pa
   await expect(column).not.toBeVisible();
 });
 
-test("mobile expands in the drawer only when Show more is clicked", async ({ page }) => {
+test("mobile browses an agent's threads in a full-screen list", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openThreadPreview(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Open chats" }).click();
   const drawer = page.locator('aside[data-tour="sidebar"]:visible');
-  await expect(drawer.getByRole("button", { name: /^Thread \d+$/ })).toHaveCount(5);
-  await drawer.getByRole("button", { name: "Show 7 more", exact: true }).click();
+  await drawer.getByRole("button", { name: /^NyxBot —/ }).click();
   await expect(drawer.getByRole("button", { name: /^Thread \d+$/ })).toHaveCount(12);
   await expect(page.getByRole("complementary", { name: "Threads", exact: true })).not.toBeVisible();
-  await drawer.getByRole("button", { name: "Show fewer", exact: true }).click();
-  await expect(drawer.getByRole("button", { name: /^Thread \d+$/ })).toHaveCount(5);
+  await drawer.getByRole("button", { name: "Back to workspace", exact: true }).click();
+  await expect(drawer.getByRole("button", { name: /^Thread \d+$/ })).toHaveCount(0);
+  await drawer.getByRole("button", { name: /^researcher, specialist/ }).click();
+  await expect(drawer.getByRole("heading", { name: "researcher", exact: true })).toBeVisible();
 });
 
 for (const mode of ["light", "dark"] as const) {

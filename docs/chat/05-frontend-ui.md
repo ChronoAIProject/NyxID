@@ -11,6 +11,28 @@ permission to use every listed specialist. The conversation header identifies
 the agent being addressed and offers Working context and Details controls.
 Delegation and specialist replies appear in the conversation's activity cards.
 
+The desktop thread column groups channel conversations by their source chat,
+with the platform and bot connection on the group's secondary line. Each source
+has one level of conversation rows; it does not add another bot tree. The active
+source opens automatically, and searching by thread title, chat name, bot label
+or platform exposes every matching row. Missing chat names use a platform/kind
+fallback, while opaque bot and parent IDs keep distinct sources separate.
+Pins retain their existing order within each bot, including separate pinned
+and ordinary partitions with the parent context repeated when necessary.
+
+On phones, Open chats opens a full-screen navigation view. A selected agent's
+thread list uses the same source groups as desktop; Back to workspace shows the
+agent roster. Browsing another agent loads its threads without navigating away
+from the conversation. Selecting a thread navigates and closes the drawer;
+opening it again restores the current conversation's agent and selection.
+
+Channel child rows use a thread icon and their conversation title. Existing
+generic minute-resolution titles include creation-time seconds in the display,
+formatted in the selected interface language and explicitly marked UTC. User
+titles, persisted titles, conversations and reply routing are unchanged. An open
+child conversation identifies the platform and source chat in its header. These
+labels describe the conversation's origin, not its current follow status.
+
 At desktop widths of 1024px and above, the navigation lists agents only.
 Selecting an agent opens its threads in a separate, independently scrollable
 column within the content area. Selecting a conversation keeps that list open;

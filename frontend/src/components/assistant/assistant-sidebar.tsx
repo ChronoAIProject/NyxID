@@ -9,6 +9,7 @@ import { useShallow } from "zustand/react/shallow";
 import { createPortal } from "react-dom";
 import { AssistantThreadsContext } from "./assistant-threads-context";
 import { AssistantThreadList } from "./assistant-thread-list";
+import { conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useQuery } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -42,6 +43,7 @@ import {
   Loader2,
   MoreHorizontal,
   MessageSquare,
+  MessagesSquare,
   PencilLine,
   Pin,
   PinOff,
@@ -208,7 +210,7 @@ function ConversationRow({
   );
   const draftPreview = draft.replace(/\s+/g, " ").trim().slice(0, 80);
   // A chat app thread is named after its chat (group name, or the person).
-  const shownTitle = conversation.channel?.chat_title ?? conversation.title;
+  const shownTitle = conversationDisplayTitle(conversation);
   const showDraft = !active && draftPreview.length > 0;
   const draftPreviewId = `assistant-draft-${conversation.id}`;
 
@@ -238,13 +240,13 @@ function ConversationRow({
       >
         <span className="flex min-w-0 items-center gap-1.5">
           {!showDetails && pinned ? <PinnedChatMarker /> : null}
-          {!showDetails ? <ChatKindIcon
+          {conversation.channel?.thread_id ? <MessagesSquare aria-hidden="true" className="h-3 w-3 shrink-0 text-text-tertiary" /> : !showDetails ? <ChatKindIcon
             kind={conversation.channel?.chat_kind}
             className="h-3 w-3 shrink-0 text-text-tertiary"
           /> : null}
           <span className={cn("min-w-0 truncate", showDetails && "flex-1")}>{shownTitle}</span>
           {showDetails && pinned ? <PinnedChatMarker /> : null}
-          {showDetails ? <ChatKindIcon kind={conversation.channel?.chat_kind} className="h-3 w-3 shrink-0 text-text-tertiary" /> : null}
+          {showDetails && !conversation.channel?.thread_id ? <ChatKindIcon kind={conversation.channel?.chat_kind} className="h-3 w-3 shrink-0 text-text-tertiary" /> : null}
           {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-12 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
           {unread ? (
             <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
@@ -375,6 +377,8 @@ export interface SidebarAgents {
   /** The NyxBot home is open. */
   readonly homeActive?: boolean;
   readonly onHome?: () => void;
+  readonly mobileThreadList?: boolean;
+  readonly onBackToWorkspace?: () => void;
   /** Threads (including channel chats) with unread notifications. */
   readonly unreadThreadIds?: ReadonlySet<string>;
 }
@@ -542,7 +546,7 @@ function AgentRow({
   // Clicking the selected agent folds its threads away for the thread open at
   // that moment; opening another of its threads unfolds them again.
   const [folded, setFolded] = useState<{ active: string | undefined }>();
-  const expanded = !threadsColumn && selected && !(folded && folded.active === activeThreadId);
+  const expanded = !threadsColumn && !model.onBackToWorkspace && selected && !(folded && folded.active === activeThreadId);
   const separateThreads = Boolean(threadsColumn && threadColumnEnabled && selected && !model.homeActive);
   const highlighted = selected && (!threadsColumn || separateThreads);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
@@ -606,10 +610,8 @@ function AgentRow({
   return (
     <div>
       {separateThreads && threadsColumn ? createPortal(
-        <AssistantThreadList model={model} onClose={model.onHome}
-          renderThread={(thread) => renderThread(thread, true)}
-          renderChannel={(group, searching) => <ChannelThreadsGroup key={group.key} group={group} forceOpen={searching}
-            activeThreadId={activeThreadId} renderThread={(thread) => renderThread(thread, true)} unreadThreadIds={model.unreadThreadIds} />} />,
+        <AssistantThreadList model={model} onClose={model.onHome} activeThreadId={activeThreadId}
+          renderThread={(thread) => renderThread(thread, true)} />,
         threadsColumn,
       ) : null}
       {/* The open agent stays pinned to the top of the list while its threads
@@ -627,7 +629,9 @@ function AgentRow({
           <button
             type="button"
             onClick={() => {
-              if (threadsColumn) {
+              if (model.onBackToWorkspace) {
+                model.onSelectAgent(agent.id);
+              } else if (threadsColumn) {
                 if (!separateThreads) model.onSelectAgent(agent.id);
               } else if (selected) {
                 if (expanded) setShowAllThreads(false);
@@ -642,7 +646,7 @@ function AgentRow({
             aria-controls={separateThreads ? threadsColumn?.id : undefined}
             aria-current={highlighted ? "page" : undefined}
             // Folding is in place; keep the mobile drawer open for it.
-            data-keep-drawer-open={selected ? "" : undefined}
+            data-keep-drawer-open={selected || model.onBackToWorkspace ? "" : undefined}
             className={cn(
               // The whole row highlights (also while its options button is
               // hovered); only its content fades under that button.
@@ -1112,6 +1116,11 @@ export function AssistantSidebar({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar">
+      {agents?.mobileThreadList ? <AssistantThreadList model={agents} activeThreadId={activeConversationId}
+        renderThread={(thread) => renderRow(thread, true)} notice={pinError ? <p role="alert" className="px-2 py-1 type-secondary text-destructive">
+          {pinError === "load" ? translateUi("Could not load pinned chats in this browser. Try reloading the page.")
+            : translateUi("Could not save pinned chats in this browser. Please try again.")}
+        </p> : notice ? <p role="status" className="px-2 py-1 type-secondary text-text-tertiary">{notice}</p> : undefined} /> : <>
       {/* One scroll area for the whole column; the account button stays put. */}
       {/* Always a visible scrollbar, so the column reads as scrollable. */}
       <div data-scroll-fade="" className="min-h-0 flex-1 overflow-y-scroll overscroll-contain">
@@ -1320,6 +1329,7 @@ export function AssistantSidebar({
         </AssistantAccountMenu>
       </div>
 
+      </>}
       <Dialog
         open={deleteTarget !== undefined}
         onOpenChange={(open) => {
@@ -1730,7 +1740,7 @@ function RailAgentChats({
               <button
                 type="button"
                 onClick={() => onPick(chat.id)}
-                aria-label={chat.title || translateUi("New conversation")}
+                aria-label={conversationDisplayTitle(chat) || translateUi("New conversation")}
                 aria-current={chat.id === activeConversationId ? "page" : undefined}
                 className={cn(
                   "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
@@ -1738,7 +1748,13 @@ function RailAgentChats({
                 )}
               >
                 {pinnedIds.has(chat.id) ? <PinnedChatMarker /> : null}
-                <span className="min-w-0 truncate">{chat.title || translateUi("New conversation")}</span>
+                {chat.channel?.thread_id ? <MessagesSquare aria-hidden="true" className="h-3 w-3 shrink-0 text-text-tertiary" /> : null}
+                <span className="min-w-0">
+                  <span className="block truncate">{conversationDisplayTitle(chat) || translateUi("New conversation")}</span>
+                  {chat.channel ? <span className="mt-0.5 block truncate type-secondary text-text-tertiary">
+                    {channelPlatformName(chat.channel.platform)} · {chat.channel.parent_title || chat.channel.bot_label}
+                  </span> : null}
+                </span>
               </button>
             </li>
           ))}

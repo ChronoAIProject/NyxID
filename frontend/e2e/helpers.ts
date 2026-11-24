@@ -73,6 +73,8 @@ export function composerInput(page: Page) {
 export async function openAccountMenu(page: Page): Promise<void> {
   const drawer = page.getByRole("button", { name: "Open chats" });
   if (await drawer.isVisible()) await drawer.click();
+  const workspace = page.getByRole("button", { name: "Back to workspace", exact: true });
+  if (await workspace.isVisible()) await workspace.click();
   await page.getByRole("button", { name: "Account menu" }).click();
 }
 
