@@ -101,6 +101,7 @@ pub struct PoolAttemptSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolAttemptTransportKind {
     Connect,
+    ResolutionUnavailable,
     Timeout,
     AfterDispatch,
     NodeUnsent,
@@ -1156,6 +1157,9 @@ impl AppError {
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
+            Self::PoolAttemptTransport(PoolAttemptTransportKind::ResolutionUnavailable) => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
