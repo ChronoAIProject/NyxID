@@ -1248,6 +1248,7 @@ pub(crate) fn bot() -> ChannelBot {
         poll_error_count: 0,
         last_poll_notice: None,
         error: None,
+        secret_context_versions: Default::default(),
         registration_pin_encrypted: None,
         webhook_secret_encrypted: None,
         managed_setup: None,

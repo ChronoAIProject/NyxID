@@ -500,6 +500,13 @@ async fn manual_token_replacement_repairs_grant_but_preserves_operator_hold() {
     let (state, adapter, server, bot) =
         crate::services::channel_adapters::meta::tests::fixture("instagram").await;
     configure(&state, &bot).await;
+    super::super::channel_registration::bind_fixture_fields(
+        &state.db,
+        &state.encryption_keys,
+        &bot.id,
+        &["bot_token_encrypted"],
+    )
+    .await;
     state
         .db
         .collection::<ChannelBot>(BOTS)
@@ -558,6 +565,18 @@ async fn manual_token_replacement_repairs_grant_but_preserves_operator_hold() {
     .await
     .unwrap();
     server.verify().await;
+    assert!(
+        !updated
+            .secret_context_versions
+            .contains_key("bot_token_encrypted")
+    );
+    assert_eq!(
+        channel_bot_service::decrypt_bot_token(&state.encryption_keys, &updated)
+            .await
+            .unwrap()
+            .as_str(),
+        "replacement-token"
+    );
     let binding = updated.meta_binding.as_ref().unwrap();
     assert!(binding.operator_suspended);
     assert!(!binding.grant_reconnect_required);
@@ -1606,6 +1625,13 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
         doc! {"_id": &bot.id},
         doc! {"$set": {"meta_binding.expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::days(9))}},
     ).await.unwrap();
+    super::super::channel_registration::bind_fixture_fields(
+        &state.db,
+        &state.encryption_keys,
+        &bot.id,
+        &["bot_token_encrypted"],
+    )
+    .await;
     let due = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
@@ -1628,6 +1654,11 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
     let fresh = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
+    assert!(
+        !fresh
+            .secret_context_versions
+            .contains_key("bot_token_encrypted")
+    );
     assert!(
         fresh.meta_binding.as_ref().unwrap().expires_at.unwrap() > Utc::now() + Duration::days(59)
     );
@@ -2278,6 +2309,13 @@ async fn operator_hold_and_deauthorization_preserve_both_repair_states_in_either
         configure(&state, &bot).await;
         instagram(&server).await;
         let service = service(&state, &server);
+        super::super::channel_registration::bind_fixture_fields(
+            &state.db,
+            &state.encryption_keys,
+            &bot.id,
+            &["bot_token_encrypted"],
+        )
+        .await;
         let live = || super::super::channel_bot_service::get_bot(&state.db, &bot.id);
         let granted = Utc::now() - Duration::minutes(2);
         state
@@ -2338,6 +2376,14 @@ async fn operator_hold_and_deauthorization_preserve_both_repair_states_in_either
             .finish(&bot.user_id, &started.session_id, "777", true)
             .await
             .unwrap();
+        assert!(
+            !repaired
+                .secret_context_versions
+                .contains_key("bot_token_encrypted")
+        );
+        assert_eq!(super::super::channel_bot_service::decrypt_bot_token(
+            &state.encryption_keys, &repaired,
+        ).await.unwrap().as_str(), "long-token");
         let binding = repaired.meta_binding.as_ref().unwrap();
         assert!(binding.operator_suspended && !binding.grant_reconnect_required);
         assert_eq!(repaired.status, "suspended");
@@ -2678,4 +2724,39 @@ async fn ownerless_scoped_metadata_erases_only_without_an_unattributed_saved_rep
         }
         assert!(server.received_requests().await.unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn disconnect_retires_contextual_token_and_decoder_marker_together() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    super::super::channel_registration::bind_fixture_fields(
+        &state.db,
+        &state.encryption_keys,
+        &bot.id,
+        &["bot_token_encrypted"],
+    )
+    .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .and(header("authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let current = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    service(&state, &server).disconnect(&current).await.unwrap();
+    let retired = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(!retired.is_active);
+    assert!(retired.bot_token_encrypted.is_empty());
+    assert!(
+        !retired
+            .secret_context_versions
+            .contains_key("bot_token_encrypted")
+    );
+    server.verify().await;
 }

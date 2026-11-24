@@ -141,6 +141,11 @@ async fn write_registration_fields(
             continue;
         }
         if let Some(value) = fields.get(field.name) {
+            if field.secret {
+                // Credential writers remain legacy during the Pending rollout.
+                // Replace the decoder marker atomically with its ciphertext.
+                unset.insert(format!("secret_context_versions.{}", field.storage), "");
+            }
             if value.is_empty() && field.clearable {
                 unset.insert(field.storage, "");
             } else if field.secret {
@@ -407,6 +412,7 @@ pub(crate) async fn persist_verified_bot(
         poll_error_count: 0,
         last_poll_notice: None,
         error: None,
+        secret_context_versions: Default::default(),
         registration_pin_encrypted: match managed {
             Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
             None => None,
@@ -1111,13 +1117,10 @@ pub async fn reregister_managed_bot(
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     let token = decrypt_bot_token(keys, bot).await?;
-    let pin_bytes = keys
-        .decrypt(
-            bot.registration_pin_encrypted
-                .as_deref()
-                .ok_or_else(super::channel_managed::unavailable)?,
-        )
-        .await?;
+    let pin_bytes =
+        super::channel_registration::open_secret(keys, bot, "registration_pin_encrypted")
+            .await?
+            .ok_or_else(super::channel_managed::unavailable)?;
     let pin = std::str::from_utf8(&pin_bytes)
         .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
     let credentials = BotCredentials {
@@ -1162,13 +1165,9 @@ pub async fn repair_managed_bot(
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     let token = decrypt_bot_token(keys, bot).await?;
-    let pin = keys
-        .decrypt(
-            bot.registration_pin_encrypted
-                .as_deref()
-                .ok_or_else(super::channel_managed::unavailable)?,
-        )
-        .await?;
+    let pin = super::channel_registration::open_secret(keys, bot, "registration_pin_encrypted")
+        .await?
+        .ok_or_else(super::channel_managed::unavailable)?;
     let pin = std::str::from_utf8(&pin)
         .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
     let credentials = BotCredentials {
@@ -1196,13 +1195,10 @@ pub async fn repair_managed_bot(
     if !bot.is_active {
         return Err(super::channel_managed::unavailable());
     }
-    let verify_token = keys
-        .decrypt(
-            bot.webhook_secret_encrypted
-                .as_deref()
-                .ok_or_else(super::channel_managed::unavailable)?,
-        )
-        .await?;
+    let verify_token =
+        super::channel_registration::open_secret(keys, &bot, "webhook_secret_encrypted")
+            .await?
+            .ok_or_else(super::channel_managed::unavailable)?;
     let verify_token = std::str::from_utf8(&verify_token)
         .map_err(|_| AppError::Internal("Invalid webhook token encoding".to_string()))?;
     let webhook_url = format!(
@@ -1440,6 +1436,7 @@ async fn update_bot_inner(
         maybe_rebuild_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?;
     let meta_token_replacement = is_meta && rebuilt_bot_token.is_some();
     if let Some(bot_token_encrypted) = rebuilt_bot_token {
+        unset_doc.insert("secret_context_versions.bot_token_encrypted", "");
         set_doc.insert(
             "bot_token_encrypted",
             bson::Binary {
@@ -2367,7 +2364,10 @@ pub async fn decrypt_bot_token(
     encryption_keys: &EncryptionKeys,
     bot: &ChannelBot,
 ) -> AppResult<zeroize::Zeroizing<String>> {
-    let bytes = encryption_keys.decrypt(&bot.bot_token_encrypted).await?;
+    let bytes =
+        super::channel_registration::open_secret(encryption_keys, bot, "bot_token_encrypted")
+            .await?
+            .ok_or_else(|| AppError::Internal("Missing channel bot token".into()))?;
     crate::crypto::guarded_utf8(bytes).map_err(|e| {
         AppError::Internal(format!("bot token decryption produced invalid UTF-8: {e}"))
     })
@@ -2981,6 +2981,7 @@ pub(crate) async fn fence_owner_management(
 
 #[cfg(test)]
 mod tests {
+    mod mixed_records;
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -3108,6 +3109,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

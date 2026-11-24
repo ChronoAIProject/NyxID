@@ -1103,7 +1103,20 @@ async fn repair_recovers_partial_setup_and_reuses_encrypted_secrets() {
     let original = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
         .await
         .unwrap();
-    for _ in 0..2 {
+    for contextual in [false, true] {
+        if contextual {
+            crate::services::channel_registration::bind_fixture_fields(
+                &state.db,
+                &state.encryption_keys,
+                &created.id,
+                &[
+                    "registration_pin_encrypted",
+                    "webhook_secret_encrypted",
+                    "bot_token_encrypted",
+                ],
+            )
+            .await;
+        }
         let Json(setup) =
             managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
                 .await
@@ -1767,4 +1780,57 @@ async fn admin_health_requires_admin() {
         .await
         .unwrap_err();
     assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
+}
+
+/// Registration and hash-only repair, sampled from the actual database and loopback Graph calls.
+pub(crate) async fn mixed_managed_records(
+    keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+) -> Vec<bson::Document> {
+    let (mut state, auth, server) = fixture().await;
+    state.encryption_keys = keys;
+    graph(&server, "444", "333", 200, 200, false).await;
+    let (_, Json(created)) = managed::complete_inner(
+        &state,
+        &auth,
+        "whatsapp",
+        input(),
+        &ManagedProgress::default(),
+    )
+    .await
+    .unwrap();
+    let bots = state.db.collection::<bson::Document>(BOTS);
+    let filter = doc! {"_id": &created.id};
+    let mut snapshots = Vec::new();
+    for repair in [false, true] {
+        if repair {
+            bots.update_one(
+                filter.clone(),
+                doc! {"$unset":{"webhook_secret_encrypted":""}},
+            )
+            .await
+            .unwrap();
+            let Json(_) =
+                managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
+                    .await
+                    .unwrap();
+        }
+        let bodies: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.body_json().ok())
+            .collect();
+        let value = |field: &str| {
+            bodies
+                .iter()
+                .rev()
+                .find_map(|body| body[field].as_str())
+                .unwrap()
+                .to_owned()
+        };
+        snapshots.push(doc!{"row":bots.find_one(filter.clone()).await.unwrap().unwrap(),
+            "expected":{"bot_token_encrypted":"business-token","registration_pin_encrypted":value("pin"),"webhook_secret_encrypted":value("verify_token")}});
+    }
+    snapshots
 }

@@ -1077,6 +1077,9 @@ impl MetaService<'_> {
                         "error": bson::Bson::Null,
                         "diagnostics.failure_reason": preserve_suspension.then_some("meta_delivery_suspended"),
                         "updated_at": bson::DateTime::now(),
+                    }, "$unset": {
+                        "secret_context_versions.bot_token_encrypted": "",
+                        "secret_context_versions.app_secret_encrypted": "",
                     }},
                 ).session(&mut *tx).await?;
                 if changed.matched_count != 1 { return Err(conflict()); }
@@ -1429,7 +1432,8 @@ impl MetaService<'_> {
                 "meta_binding.generation":if current.is_active {generation+1} else {generation}},
                 doc! {"$set":{"meta_binding.subscription":"removed",
                 "bot_token_encrypted":binary(Vec::new()),
-                "updated_at":bson::DateTime::now()}},
+                "updated_at":bson::DateTime::now()},
+                "$unset":{"secret_context_versions.bot_token_encrypted":""}},
             )
             .await?;
 
@@ -1536,7 +1540,7 @@ impl MetaService<'_> {
                 "meta_binding.token_fingerprint": meta::token_fingerprint(&fresh),
                 "meta_binding.expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(ttl)),
                 "updated_at": bson::DateTime::now(),
-            }},
+            }, "$unset": {"secret_context_versions.bot_token_encrypted": ""}},
         ).await?;
         if changed.matched_count != 1 {
             return Err(conflict());

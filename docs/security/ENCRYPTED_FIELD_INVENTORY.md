@@ -85,6 +85,12 @@ compares the exact observed client document before replacing stored material.
 
 ### Production storage for Pending fields
 
+- Channel bot registration and delivery readers select each local credential by bot ID,
+  owner and stored field version. The writers still emit the historical format in both
+  writer modes, so serving these rows requires legacy reads. The registry entry stays
+  Pending through the reader rollout.
+  [Channel bot field reader](../../backend/src/services/channel_registration.rs)
+
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response. CMA
   sandbox recovery opens the sandbox request and checks the creation’s request
   hash. The creation also retains its own encrypted copy until cleanup.
