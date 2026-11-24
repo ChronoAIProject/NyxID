@@ -63,6 +63,7 @@ pub(crate) async fn required(db: &Database, bot: &str, grant: &str) -> AppResult
 fn queued_filter(bot: &str, grant: &str) -> Document {
     let context = doc! {"meta_grant.bot_id":bot,"meta_grant.grant_id":grant};
     doc! {"$or":[
+        {"reply_channel_meta_grant.bot_id":bot,"reply_channel_meta_grant.grant_id":grant},
         {"pending_events":{"$elemMatch":{"channel_contexts":{"$elemMatch":&context}}}},
         {"active_turn.channel_context.meta_grant.bot_id":bot,"active_turn.channel_context.meta_grant.grant_id":grant},
         {"active_turn.events":{"$elemMatch":{"channel_contexts":{"$elemMatch":&context}}}},
@@ -777,6 +778,18 @@ async fn clear_threads(
                 }
             }
         }
+        // Older preferences have no grant stamp. An exact thread, home and partition
+        // still identify the destination previously selected by this consent.
+        if let (Ok(home), Ok(channel), Ok(partition)) = (
+            row.get_str("conversation_id"),
+            row.get_str("channel_id"),
+            row.get_str("partition"),
+        ) {
+            db.collection::<Document>("assistant_conversations").update_one(
+                doc! {"_id":home, "reply_channel.nyxbot_channel_id":channel, "reply_channel.partition":partition, "reply_channel_meta_grant":null},
+                doc! {"$unset":{"reply_channel":""}},
+            ).session(&mut *tx).await?;
+        }
         let mut conditional = exact(scope)?;
         conditional.insert("_id", row.get("_id").cloned());
         for field in [
@@ -1292,6 +1305,30 @@ async fn erase_queued(
             return Err(grants::incomplete());
         }
         let mut fields = doc! {"pending_events":pending};
+        if let Ok(stamp) = row.get_document("reply_channel_meta_grant")
+            && stamp.get_str("bot_id") == Ok(bot)
+            && stamp.get_str("grant_id") == Ok(grant)
+        {
+            let proof: GrantRef =
+                bson::from_document(stamp.clone()).map_err(|_| grants::incomplete())?;
+            reference_in_range(&proof, scope)?;
+            if let Ok(origin) = row.get_document("reply_channel") {
+                let channel = origin
+                    .get_str("nyxbot_channel_id")
+                    .map_err(|_| grants::incomplete())?;
+                if let Some(parent) = db
+                    .collection::<Document>(CHANNELS)
+                    .find_one(doc! {"_id":channel})
+                    .projection(doc! {"channel_bot_id":1})
+                    .session(&mut *tx)
+                    .await?
+                    && parent.get_str("channel_bot_id") != Ok(bot)
+                {
+                    return Err(grants::incomplete());
+                }
+            }
+            fields.extend(doc! {"reply_channel":null, "reply_channel_meta_grant":null});
+        }
         if selected {
             fields.extend(doc! {"active_turn":null,"nyxagent_session_id":null,"nyxagent_last_response_id":null,"nyxagent_instruction_binding":null,
                 "context_reset_at":bson::DateTime::now(),"context_reset_reason":"provider_erasure"});
@@ -2030,6 +2067,7 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             .await?;
     }
     for prefix in [
+        "reply_channel_meta_grant",
         "pending_events.channel_contexts.meta_grant",
         "active_turn.channel_context.meta_grant",
         "active_turn.events.channel_contexts.meta_grant",

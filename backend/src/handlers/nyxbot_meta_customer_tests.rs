@@ -350,6 +350,8 @@ async fn identical_owner_questions_from_two_meta_inboxes_queue_separately_in_one
         inboxes[1].0
     );
 
+    assert_eq!(busy.reply_channel_meta_grant.as_ref(), Some(&inboxes[1].2));
+
     for (event, (channel, _, grant)) in busy.pending_events.iter().zip(&inboxes) {
         assert_eq!(event.source_event_ids.len(), 1);
         assert_eq!(event.channel_contexts.len(), 1);

@@ -948,6 +948,7 @@ async fn create_thread_with_kind(
             b.authority.lane == crate::models::assistant_group_collaboration::Lane::Guest
         }),
         reply_channel: None,
+        reply_channel_meta_grant: None,
         deliver_also: Vec::new(),
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);

@@ -1650,6 +1650,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
+        reply_channel_meta_grant: None,
         deliver_also: Vec::new(),
     }
 }

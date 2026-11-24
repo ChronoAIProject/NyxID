@@ -780,7 +780,7 @@ pub async fn set_reply_channel(
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": id, "user_id": user_id},
-            doc! {"$set": {"reply_channel": origin}},
+            doc! {"$set": {"reply_channel": origin}, "$unset": {"reply_channel_meta_grant": ""}},
         )
         .await?;
     Ok(())
@@ -1203,7 +1203,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
         .collection::<bson::Document>(CONVERSATIONS)
         .update_many(
             doc! {"reply_channel.partition": {"$regex": "^direct_"}},
-            doc! {"$unset": {"reply_channel": ""}},
+            doc! {"$unset": {"reply_channel": "", "reply_channel_meta_grant": ""}},
         )
         .await?
         .modified_count;
@@ -2584,6 +2584,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             event_streak: 0,
             channel: start.channel.clone(),
             reply_channel: None,
+            reply_channel_meta_grant: None,
             deliver_also: Vec::new(),
             group_id: start.group_id.clone(),
             group_request_id: None,
@@ -3167,7 +3168,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         let lost_turn = lost.clone();
         let lost_grants = turn_meta_grants(&lost_turn);
         for grant in &lost_grants {
-            super::channel_meta_service::scopes::fence_reference(db, session, grant, false).await?;
+            super::channel_meta_service::scopes::fence_reference(db, session, grant, false)
+                .await
+                .map_err(|error| match error {
+                    AppError::Conflict(_) => AppError::Conflict(
+                        "The previous inbox reply is unavailable. Try again after inbox cleanup."
+                            .into(),
+                    ),
+                    other => other,
+                })?;
         }
         let mut lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
         lost_metadata.work = Some(super::assistant_real_work::evidence(
@@ -3768,9 +3777,16 @@ pub(crate) async fn begin_owner_turn_in_session(
     // The owner's own thread follows them between the app and their
     // chat apps: asynchronous replies go where they last wrote.
     match start.origin {
-        TurnOrigin::User => row.reply_channel = None,
+        TurnOrigin::User => {
+            row.reply_channel = None;
+            row.reply_channel_meta_grant = None;
+        }
         TurnOrigin::Channel if start.reply_channel.is_some() => {
             row.reply_channel = start.reply_channel.clone();
+            row.reply_channel_meta_grant = start
+                .channel_context
+                .as_ref()
+                .and_then(|context| context.meta_grant.clone());
         }
         _ => {}
     }

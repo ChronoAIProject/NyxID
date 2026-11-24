@@ -955,6 +955,9 @@ pub struct AssistantConversation {
     /// go. Cleared when the owner writes in the NyxID app.
     #[serde(default)]
     pub reply_channel: Option<ChannelOrigin>,
+    /// The consent that selected the current asynchronous reply destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_channel_meta_grant: Option<super::channel_meta::GrantRef>,
     /// Chats still owed the newest turn's answer (they asked the same
     /// question while it ran); taken once by the settlement hook.
     #[serde(default)]

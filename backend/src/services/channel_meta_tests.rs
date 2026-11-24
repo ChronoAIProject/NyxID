@@ -8374,5 +8374,43 @@ async fn meta_owner_turns_keep_neutral_titles_and_reclaimed_replies_retain_their
         reply.get_array("meta_grants").unwrap(),
         &vec![bson::to_bson(&grant).unwrap()]
     );
+    // A lost reply cannot be copied into the home once its inbox is being erased.
+    let current_turn = &current.active_turn.as_ref().unwrap().turn_id;
+    conversations
+        .update_one(
+            doc! {"_id":&home.id,"active_turn.turn_id":current_turn},
+            doc! {"$set":{"active_turn.lease_expires_at":bson::DateTime::from_millis(1)}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .update_one(
+            doc! {"bot_id":&grant.bot_id,"grant_id":&grant.grant_id},
+            doc! {"$set":{"erasure_requested":true}},
+        )
+        .await
+        .unwrap();
+    let refused = engine::begin_turn(
+        &state.db,
+        &bot.user_id,
+        &request(Some(&home.id), "Web question"),
+        &state.encryption_keys,
+    )
+    .await
+    .err();
+    assert!(
+        matches!(refused, Some(AppError::Conflict(ref message)) if message.contains("previous inbox reply is unavailable"))
+    );
+    assert_eq!(
+        messages
+            .count_documents(
+                doc! {"conversation_id":&home.id,"turn_id":current_turn,"role":"assistant"}
+            )
+            .await
+            .unwrap(),
+        0
+    );
     state.db.drop().await.unwrap();
 }

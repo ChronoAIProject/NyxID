@@ -807,7 +807,12 @@ async fn final_positive_inventory_rewinds_behind_the_scope_fence_and_finishes_bo
 
 #[tokio::test]
 async fn final_inventory_revisits_nested_queued_and_active_provenance_before_completion() {
-    for location in ["pending", "active-direct", "active-events"] {
+    for location in [
+        "pending",
+        "active-direct",
+        "active-events",
+        "reply-preference",
+    ] {
         let f = fixture().await;
         let db = &f.state.db;
         let proof = scopes::reference(&f.bot).unwrap();
@@ -815,6 +820,10 @@ async fn final_inventory_revisits_nested_queued_and_active_provenance_before_com
         let context = doc! {"meta_grant":bson::to_bson(&proof).unwrap()};
         let event = doc! {"channel_contexts":[&context],"text":"retained inbox input"};
         match location {
+            "reply-preference" => {
+                parent.insert("reply_channel", doc! {"nyxbot_channel_id":"fixture-channel","platform":"messenger","partition":"chat"});
+                parent.insert("reply_channel_meta_grant", bson::to_bson(&proof).unwrap());
+            }
             "pending" => {
                 parent.insert("pending_events", vec![event]);
             }
@@ -871,6 +880,25 @@ async fn final_inventory_revisits_nested_queued_and_active_provenance_before_com
                 .unwrap()
                 .is_none()
         );
+        if location == "reply-preference" {
+            let homes = db.collection::<Document>("assistant_conversations");
+            let id = parent.get_str("_id").unwrap();
+            let cleared = homes.find_one(doc! {"_id": id}).await.unwrap().unwrap();
+            assert_eq!(cleared.get("reply_channel"), Some(&Bson::Null));
+            let mut successor = proof.clone();
+            successor.grant_id = uuid::Uuid::new_v4().to_string();
+            let preference = doc! {"reply_channel":parent.get("reply_channel").unwrap(), "reply_channel_meta_grant":bson::to_bson(&successor).unwrap()};
+            homes
+                .update_one(doc! {"_id":id}, doc! {"$set":&preference})
+                .await
+                .unwrap();
+            transaction_service::run_db_only(db, &(db, &f.scope), |tx, &(db, scope)| {
+                Box::pin(erase_queued(db, tx, scope, 4))
+            })
+            .await
+            .unwrap();
+            assert_eq!(homes.count_documents(preference).await.unwrap(), 1);
+        }
         db.drop().await.unwrap();
     }
 }

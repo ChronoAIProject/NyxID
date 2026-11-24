@@ -377,7 +377,9 @@ records before their finite-lived sources disappear. Only deletion of the exact
 current grant can remove the live subscription and bot; deleting a superseded
 grant preserves the successor's credentials, assignment, policy and independent
 verification. A thread pointer is cleared only while it still names the erased
-source and grant.
+source and grant. A shared home's asynchronous reply preference records the
+selecting bot, grant and generation on the conversation. Erasing that grant
+clears its preference. A later choice from another inbox or consent survives.
 
 Assistant history carrying grant proof uses this scoped worker even for a
 single consent. Owner DMs and queued message inputs

@@ -361,6 +361,10 @@ pub async fn enqueue(
                         .reply_to
                         .first()
                         .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let source = event.source_event_ids.first().ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let grant = event.channel_contexts.iter().find(|context| &context.source_event_id == source).and_then(|context| context.meta_grant.as_ref())
+                        .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let grant = bson::to_bson(grant).map_err(|_| super::channel_meta_service::grants::incomplete())?;
                     let preference = bson::to_bson(origin)
                         .map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
                     db.collection::<bson::Document>(
@@ -368,7 +372,7 @@ pub async fn enqueue(
                     )
                     .update_one(
                         doc! {"_id": &conversation, "user_id": &owner},
-                        doc! {"$set": {"reply_channel": preference}},
+                        doc! {"$set": {"reply_channel": preference, "reply_channel_meta_grant": grant}},
                     )
                     .session(session)
                     .await?;
