@@ -568,15 +568,13 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::META_OAUTH_DIGEST | previous_labels::META_CHANNEL_KEY_DIGEST) => {
-            project_labels(
-                &row,
-                previous_labels::reconciled().chain(std::iter::once((
-                    "channel_meta_oauth_sessions",
-                    &["assets_encrypted"][..],
-                ))),
-            )?
-        }
+        Some(digest) if previous_labels::META_DIGESTS.contains(&digest) => project_labels(
+            &row,
+            previous_labels::reconciled().chain(std::iter::once((
+                "channel_meta_oauth_sessions",
+                &["assets_encrypted"][..],
+            ))),
+        )?,
         Some(
             previous_labels::EVENT_BINDING_DIGEST
             | previous_labels::CHANNEL_KEY_DIGEST

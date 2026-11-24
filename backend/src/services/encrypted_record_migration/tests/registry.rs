@@ -197,12 +197,13 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
         Some(previous_labels::CHANNEL_KEY_DIGEST),
-        Some(previous_labels::META_OAUTH_DIGEST),
-        Some(previous_labels::META_CHANNEL_KEY_DIGEST),
         Some(previous_labels::EVENT_BINDING_DIGEST),
         Some("unknown"),
         None,
-    ] {
+    ]
+    .into_iter()
+    .chain(previous_labels::META_DIGESTS.map(Some))
+    {
         let mut row = original.clone();
         row.extend(doc! {
             "entry": 30,
@@ -231,11 +232,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 .contains(&"registry_or_primary_provider_changed"),
             digest != Some(live.as_str())
         );
-        let includes_meta = digest == Some(live.as_str())
-            || matches!(
-                digest,
-                Some(previous_labels::META_CHANNEL_KEY_DIGEST | previous_labels::META_OAUTH_DIGEST)
-            );
+        let includes_meta =
+            digest.is_some_and(|v| v == live || previous_labels::META_DIGESTS.contains(&v));
         assert_eq!(
             report
                 .field_outcomes
@@ -251,13 +249,11 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 "delivery_credential_encrypted",
             )),
             Some(value)
-                if value == live
+                if includes_meta
                     || matches!(
                         value,
                         previous_labels::CHANNEL_KEY_DIGEST
-                            | previous_labels::META_CHANNEL_KEY_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST
-                            | previous_labels::META_OAUTH_DIGEST
                             | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST
                             | previous_labels::OAUTH_WEBHOOK_DIGEST

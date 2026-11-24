@@ -216,11 +216,14 @@ pub(super) const WHATSAPP_DIGEST: &str =
 pub(super) const CHANNEL_KEY_DIGEST: &str =
     "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9";
 
-pub(super) const META_OAUTH_DIGEST: &str =
-    "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed";
-
 pub(super) const EVENT_BINDING_DIGEST: &str =
     "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
 
-pub(super) const META_CHANNEL_KEY_DIGEST: &str =
-    "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241";
+// These Meta draft registries share the reconciled field order with consent assets appended.
+pub(super) const META_DIGESTS: [&str; 5] = [
+    "4c651a86c5f4450b911a8052544564ca6659040d1cc429064a5fea1d2f0cb016", // 73318f7de
+    "9a784b1659734c401dbb632bfda793658c1bd612819bef626a622bc87fb92189", // e97018750
+    "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de", // f344f1f8e
+    "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed",
+    "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241", // e42c02795
+];
