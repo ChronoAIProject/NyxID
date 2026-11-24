@@ -2891,15 +2891,22 @@ async fn deletion_without_deauthorization_retries_each_page_and_reaches_later_si
     let pending = jobs.find_one(doc! {"_id": job_id}).await.unwrap().unwrap();
     assert_eq!(pending.get_str("status").unwrap(), "pending");
     assert!(!pending.contains_key("expires_at"));
-    let remaining = pending.get_array("targets").unwrap();
+    use futures::TryStreamExt;
+    let remaining: Vec<bson::Document> = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+        .find(doc! {"request_id":job_id,"status":"pending"})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
     assert_eq!(remaining.len(), 8);
-    assert!(remaining.iter().all(|target| {
-        target
-            .as_document()
-            .unwrap()
-            .get_datetime("retry_at")
-            .is_ok()
-    }));
+    assert!(
+        remaining
+            .iter()
+            .all(|target| target.get_datetime("retry_at").is_ok())
+    );
     assert!(
         bots.find_one(doc! {"_id":last_bot_id})
             .await
@@ -2917,7 +2924,7 @@ async fn deletion_without_deauthorization_retries_each_page_and_reaches_later_si
         .expect(8)
         .mount(&server)
         .await;
-    jobs.update_one(doc! {"_id":job_id}, doc! {"$set":{"next_attempt_at":bson::DateTime::now(), "targets.$[].retry_at":bson::DateTime::now()}}).await.unwrap();
+    retry_meta_job(&state, job_id).await;
     provider::reconcile_with_service(&state, &service)
         .await
         .unwrap();
@@ -3835,8 +3842,7 @@ async fn signed_callback_chronology_repair_rechecks_both_sides_before_effects() 
                     .mount(&server)
                     .await;
             }
-            state.db.collection::<bson::Document>(provider::REQUESTS).update_one(doc! {"_id":code},
-                doc! {"$set":{"next_attempt_at":bson::DateTime::now(),"targets.0.retry_at":bson::DateTime::now()}}).await.unwrap();
+            retry_meta_job(&state, code).await;
             provider::reconcile_with_service(&state, &s).await.unwrap();
             assert_eq!(
                 state
@@ -4553,7 +4559,7 @@ async fn authenticated_replay_restores_legacy_cutoff_and_exact_completed_proof_s
         .expect(1)
         .mount(&server)
         .await;
-    jobs.update_one(doc! {"_id":code},doc! {"$set":{"next_attempt_at":bson::DateTime::now(),"targets.0.retry_at":bson::DateTime::now()}}).await.unwrap();
+    retry_meta_job(&state, code).await;
     provider::reconcile_with_service(&state, &s).await.unwrap();
     assert_eq!(
         request_status(&state.db, "instagram", code).await.unwrap()["status"],
@@ -4861,6 +4867,27 @@ async fn sweep_attributes_rejection_to_the_credential_that_made_the_provider_req
         }
         server.verify().await;
     }
+}
+
+async fn retry_meta_job(state: &crate::AppState, id: &str) {
+    state
+        .db
+        .collection::<bson::Document>(provider::REQUESTS)
+        .update_one(
+            doc! {"_id":id},
+            doc! {"$set":{"next_attempt_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+        .update_many(
+            doc! {"request_id":id,"status":"pending"},
+            doc! {"$set":{"retry_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
 }
 
 async fn grant_source(state: &crate::AppState, bot: &ChannelBot, id: &str) {
@@ -5246,10 +5273,9 @@ async fn messenger_transfer_and_reconsent_preserve_public_id_and_capture_both_gr
             .await
             .unwrap()
             .unwrap();
-        let targets = job.get_array("targets").unwrap();
-        assert_eq!(targets.len(), 1);
-        let target = targets[0].as_document().unwrap();
-        assert_eq!(target.get_str("grant_id"), Ok(a_binding.grant_id.as_str()));
+        assert_eq!(job.get_str("status"), Ok("pending"));
+        let target=state.db.collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+            .find_one(doc! {"request_id":response["confirmation_code"].as_str().unwrap(),"bot_id":&a.id,"grant_id":&a_binding.grant_id}).await.unwrap().unwrap();
         assert_eq!(target.get_str("scope_id"), Ok(old.id.as_str()));
         let unchanged = super::super::channel_bot_service::get_bot(&state.db, &b.id)
             .await
@@ -5307,10 +5333,10 @@ async fn messenger_transfer_and_reconsent_preserve_public_id_and_capture_both_gr
         // A preceding target format cannot bypass the mixed-grant guard.
         state
             .db
-            .collection::<bson::Document>(provider::REQUESTS)
+            .collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
             .update_one(
-                doc! {"_id":response["confirmation_code"].as_str().unwrap()},
-                doc! {"$unset":{"targets.0.scope_id":""}},
+                doc! {"request_id":response["confirmation_code"].as_str().unwrap(),"bot_id":&a.id,"grant_id":&a_binding.grant_id},
+                doc! {"$unset":{"scope_id":""}},
             )
             .await
             .unwrap();
@@ -6021,12 +6047,10 @@ async fn malformed_scope_chronology_keeps_only_its_exact_target_pending() {
         .unwrap()
         .unwrap();
     assert_eq!(job.get_str("status"), Ok("pending"));
-    let targets = job.get_array("targets").unwrap();
-    assert_eq!(targets.len(), 1);
-    assert_eq!(
-        targets[0].as_document().unwrap().get_str("bot_id"),
-        Ok(bad.as_str())
-    );
+    assert_eq!(state.db.collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+        .count_documents(doc! {"request_id":response["confirmation_code"].as_str().unwrap(),"status":"pending"}).await.unwrap(),1);
+    assert!(state.db.collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+        .find_one(doc! {"request_id":response["confirmation_code"].as_str().unwrap(),"bot_id":&bad,"grant_id":&bad_grant,"status":"pending"}).await.unwrap().is_some());
     let healthy = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
@@ -6315,7 +6339,7 @@ async fn predecessor_completed_scope_requires_exact_fence_and_deauth_requires_au
         .await
         .unwrap();
     assert_eq!(replay["confirmation_code"], id);
-    jobs.update_one(doc! {"_id":&id},doc! {"$set":{"next_attempt_at":bson::DateTime::now(),"targets.0.retry_at":bson::DateTime::now()}}).await.unwrap();
+    retry_meta_job(&state, &id).await;
     provider::reconcile_with_service(&state, &s).await.unwrap();
     assert_eq!(
         jobs.find_one(doc! {"_id":&id})
@@ -6435,4 +6459,211 @@ async fn saved_source_compares_coexisting_stamps_and_requires_supported_legacy_r
     .await
     .unwrap();
     assert_eq!(repaired.meta_grant.as_ref(), Some(&grant));
+}
+
+#[tokio::test]
+async fn deferred_first_capture_page_does_not_hold_later_installations_or_completion() {
+    let (state, _, server, mut first) = fixture("messenger").await;
+    configure(&state, &first).await;
+    let bots = state.db.collection::<ChannelBot>(BOTS);
+    bots.delete_one(doc! {"_id":&first.id}).await.unwrap();
+    first.id = "00000000-0000-4000-8000-000000000001".into();
+    first.meta_binding.as_mut().unwrap().authorized_at = None;
+    bots.insert_one(&first).await.unwrap();
+    let mut last = None;
+    for i in 0..100 {
+        let mut bot = first.clone();
+        bot.id = if i == 99 {
+            "ffffffff-ffff-4fff-bfff-ffffffffffff".into()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        bot.platform_bot_id = format!("5000{i}");
+        let binding = bot.meta_binding.as_mut().unwrap();
+        binding.grant_id = uuid::Uuid::new_v4().to_string();
+        binding.authorized_at = Some(Utc::now());
+        bots.insert_one(&bot).await.unwrap();
+        last = Some(bot);
+    }
+    let last = last.unwrap();
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(100)
+        .mount(&server)
+        .await;
+    let s = service(&state, &server);
+    let response = accept_provider_request(
+        &s,
+        "messenger",
+        &provider_request(json!(900), Utc::now().timestamp()),
+        true,
+    )
+    .await
+    .unwrap();
+    let id = response["confirmation_code"].as_str().unwrap();
+    assert!(
+        bots.find_one(doc! {"_id":&last.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+    let jobs = state.db.collection::<bson::Document>(provider::REQUESTS);
+    let initial = jobs.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+    assert_eq!(initial.get_array("targets").unwrap().len(), 100);
+
+    for _ in 0..64 {
+        provider::reconcile_with_service(&state, &s).await.unwrap();
+        if bots
+            .count_documents(doc! {"_id":{"$ne":&first.id}})
+            .await
+            .unwrap()
+            == 0
+        {
+            break;
+        }
+    }
+    assert_eq!(bots.count_documents(doc! {}).await.unwrap(), 1);
+    assert!(
+        bots.find_one(doc! {"_id":&last.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        request_status(&state.db, "messenger", id).await.unwrap()["status"],
+        "pending"
+    );
+    let children = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS);
+    assert_eq!(
+        children
+            .count_documents(doc! {"request_id":id,"status":"completed"})
+            .await
+            .unwrap(),
+        100
+    );
+    assert_eq!(
+        children
+            .count_documents(doc! {"request_id":id,"status":"pending","bot_id":&first.id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        children
+            .count_documents(doc! {"request_id":id,"expires_at":{"$exists":true}})
+            .await
+            .unwrap(),
+        0
+    );
+    let job = jobs.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+    assert_eq!(
+        job.get_document("scope_capture").unwrap().get_bool("done"),
+        Ok(true)
+    );
+    let cutoff = *job.get_datetime("signed_cutoff").unwrap();
+    bots.update_one(doc! {"_id":&first.id},doc! {"$set":{"meta_binding.authorized_at":bson::DateTime::from_millis(cutoff.timestamp_millis()-1)}}).await.unwrap();
+    server.verify().await;
+    server.reset().await;
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    retry_meta_job(&state, id).await;
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(&state.db, "messenger", id).await.unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(bots.count_documents(doc! {}).await.unwrap(), 0);
+    assert_eq!(
+        children
+            .count_documents(doc! {"request_id":id,"status":"pending"})
+            .await
+            .unwrap(),
+        0
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_without_hints() {
+    let (state, _, _server, bot) = fixture("messenger").await;
+    configure(&state, &bot).await;
+    let now = bson::DateTime::now();
+    let wanted = provider::grant_identity("messenger", "111", "900").unwrap();
+    let mut bots = Vec::new();
+    let mut sessions = Vec::new();
+    let mut retired = Vec::new();
+    for i in 0..500 {
+        let mut sibling = bot.clone();
+        sibling.id = uuid::Uuid::new_v4().to_string();
+        sibling.platform_bot_id = format!("6000{i}");
+        sibling.meta_binding.as_mut().unwrap().grant_subject_id = format!("8000{i}");
+        bots.push(sibling);
+        sessions.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"platform":"messenger","app_id":"111","grant_subject_id":format!("8000{i}"),"created_at":now});
+        retired.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"retired_grant":{"identity":format!("other-{i}"),"authorized_at":now,"grant_id":uuid::Uuid::new_v4().to_string()}});
+    }
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .insert_many(bots)
+        .await
+        .unwrap();
+    sessions.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"platform":"messenger","app_id":"111","grant_subject_id":"900","created_at":now});
+    retired.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"retired_grant":{"identity":&wanted,"authorized_at":now,"grant_id":uuid::Uuid::new_v4().to_string()}});
+    state
+        .db
+        .collection::<bson::Document>(SESSIONS)
+        .insert_many(sessions)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .insert_many(retired)
+        .await
+        .unwrap();
+    let cutoff = bson::DateTime::from_millis(now.timestamp_millis() + 1000);
+    for present in [true, false] {
+        let subject = if present {
+            "900"
+        } else {
+            "not-an-installed-subject"
+        };
+        let identity = if present {
+            wanted.as_str()
+        } else {
+            "not-a-retired-grant"
+        };
+        let queries = [
+            doc! {"find":BOTS,"filter":{"platform":"messenger","meta_binding.app_id":"111","meta_binding.grant_subject_id":subject},"sort":{"_id":1},"limit":101},
+            doc! {"find":SESSIONS,"filter":{"platform":"messenger","app_id":"111","grant_subject_id":subject,"created_at":{"$lt":cutoff}},"projection":{"_id":1},"limit":101},
+            doc! {"find":"channel_meta_erasure_fences","filter":{"retired_grant.identity":identity},
+            "projection":{"retired_grant":1,"local_data_erased_at":1,"completed_grant_id":1},"sort":{"_id":1},"limit":101},
+        ];
+        for query in queries {
+            let explain = state
+                .db
+                .run_command(doc! {"explain":query,"verbosity":"executionStats"})
+                .await
+                .unwrap();
+            let stats = explain.get_document("executionStats").unwrap();
+            let count = |field| {
+                stats
+                    .get_i64(field)
+                    .unwrap_or_else(|_| i64::from(stats.get_i32(field).unwrap()))
+            };
+            assert_eq!(count("nReturned"), if present { 1 } else { 0 });
+            assert!(
+                count("totalDocsExamined") <= 2 && count("totalKeysExamined") <= 3,
+                "{stats:?}"
+            );
+        }
+    }
+    state.db.drop().await.unwrap();
 }
