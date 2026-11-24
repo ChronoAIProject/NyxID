@@ -338,6 +338,16 @@ typed completion proof and replay state remain, without a terminal TTL.
 Subjectless manual account retirement removes its unused scope. This additional bookkeeping is excluded from personal export and is registered as
 erasure bookkeeping in the personal-data inventory.
 
+Signed callback confirmation records the keyed subject and cutoff with a
+durable scope cursor. Historical reconnects are captured in indexed pages of
+100 scopes by the existing request worker, with at most one page of unresolved
+targets on a request. Current-installation and retained-draft compatibility
+capture is capped; an overflow uses indexed, restartable pages before the
+request can complete. The request retains no raw subject. Every fresh grant
+write shares the subject fence, so asynchronous capture does not permit writes
+under an already accepted revocation. Erasure has its own cutoff: a later
+deauthorization cannot enlarge an earlier deletion instruction.
+
 Signed requests retain their authenticated authorization cutoff. A missing or
 malformed authorization date keeps that exact target pending without revoking
 its token, unsubscribing it or purging its data. Verified chronology repair is

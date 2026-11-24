@@ -629,6 +629,7 @@ impl MetaService<'_> {
                                         "expires_at":{"$gt":bson::DateTime::now()}},
                                         doc! {"$set":{"status":"assets",
                                         "grant_subject_id":subject,
+                                        "grant_identity":provider::grant_identity(&s.platform,&s.app_id,subject)?,
                                         "assets_encrypted":binary(encrypted.clone())}},
                                     )
                                     .session(&mut *tx)
@@ -1822,6 +1823,20 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
     use mongodb::{IndexModel, options::IndexOptions};
     scopes::ensure_indexes(db).await?;
     db.collection::<OAuthSession>(SESSIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"grant_identity":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<OAuthSession>(SESSIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"app_id":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<OAuthSession>(SESSIONS)
         .create_indexes([
             IndexModel::builder()
                 .keys(doc! {"state_hash":1})
@@ -1836,6 +1851,13 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
                 )
                 .build(),
         ])
+        .await?;
+    db.collection::<ChannelBot>(BOTS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"meta_binding.app_id":1,"_id":1})
+                .build(),
+        )
         .await?;
     db.collection::<ChannelBot>(BOTS)
         .create_index(

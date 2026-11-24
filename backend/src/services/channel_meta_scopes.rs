@@ -35,7 +35,11 @@ pub(crate) async fn ensure_current(
         identity,
         platform: bot.platform.clone(),
         app_id: binding.app_id.clone(),
-        from_generation: if fresh { binding.generation } else { 0 },
+        from_generation: if fresh {
+            binding.generation
+        } else {
+            binding.grant_start_generation
+        },
         to_generation: None,
         legacy_history: !fresh,
         binding_fingerprint: super::meta::binding(bot),
@@ -123,6 +127,13 @@ pub(crate) async fn fence_current(
     if scope.status != "current" || scope.erasure_requested {
         return Err(super::grants::incomplete());
     }
+    fence_subject(
+        db,
+        tx,
+        &bson::to_document(&scope).map_err(|_| super::grants::incomplete())?,
+        true,
+    )
+    .await?;
     let changed = db
         .collection::<GrantScope>(GRANT_SCOPES)
         .update_one(
@@ -213,13 +224,52 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
                 .keys(doc! {"bot_id":1,"from_generation":1})
                 .build(),
             IndexModel::builder()
-                .keys(doc! {"identity":1,"outstanding":1,"authorized_at":1,"_id":1})
+                .keys(doc! {"identity":1,"outstanding":1,"_id":1})
                 .build(),
             IndexModel::builder()
                 .keys(doc! {"platform":1,"app_id":1,"outstanding":1,"_id":1})
                 .build(),
         ])
         .await?;
+    Ok(())
+}
+
+/// Callback acceptance and every admitted grant write share this keyed fence.
+/// The accepted erasure cutoff is independent from later deauthorization.
+async fn fence_subject(
+    db: &Database,
+    tx: &mut ClientSession,
+    scope: &Document,
+    fresh: bool,
+) -> AppResult<()> {
+    let Some(identity) = scope.get("identity") else {
+        return Ok(());
+    };
+    if identity == &bson::Bson::Null {
+        return Ok(());
+    }
+    let identity = identity.as_str().ok_or_else(super::grants::incomplete)?;
+    let row=db.collection::<Document>("channel_meta_grant_authority").find_one_and_update(doc! {"identity":identity},
+        doc! {"$inc":{"revision":1_i64},"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"identity":identity,
+            "platform":scope.get("platform").cloned(),"app_id":scope.get("app_id").cloned(),"outstanding":true}})
+        .upsert(true).return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
+        .ok_or_else(super::grants::incomplete)?;
+    let revoked = if fresh {
+        row.get_datetime("revoked_at")
+            .ok()
+            .map(|at| bson::DateTime::from_millis(at.timestamp_millis() + 1000))
+    } else {
+        None
+    };
+    let erased = row.get_datetime("erasure_cutoff").ok().copied();
+    for cutoff in [revoked, erased].into_iter().flatten() {
+        let authorized = scope
+            .get_datetime("authorized_at")
+            .map_err(|_| super::grants::incomplete())?;
+        if authorized < &cutoff {
+            return Err(super::grants::incomplete());
+        }
+    }
     Ok(())
 }
 
@@ -267,6 +317,13 @@ pub(crate) async fn fence_reference(
             .ok_or_else(super::grants::incomplete)?;
         ensure_current(db, tx, &live, false).await?;
     }
+    let scope = db
+        .collection::<Document>(GRANT_SCOPES)
+        .find_one(filter.clone())
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(super::grants::incomplete)?;
+    fence_subject(db, tx, &scope, fresh).await?;
     if db
         .collection::<Document>(GRANT_SCOPES)
         .update_one(filter, doc! {"$inc":{"revision":1_i64}})
