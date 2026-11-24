@@ -94,6 +94,7 @@ function toolCalls(
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
+      ...(activity.memory_recovery ? { memoryRecovery: activity.memory_recovery } : {}),
       decision: activity.decision,
     })),
   };

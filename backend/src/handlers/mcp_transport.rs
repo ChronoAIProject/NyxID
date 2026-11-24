@@ -2690,9 +2690,8 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
     )
 }
 
-/// Schedule creation has no client-generated object ID. Approval handles and
-/// the universal-tool wrapper are transport, not a different creation. Keep the
-/// old digest as a lookup candidate for replies written by older replicas.
+/// Approval handles, memory recovery links and the universal-tool wrapper do
+/// not change what the tool writes. Keep the exact digest for older replicas.
 fn chat_retry_digest(params: &serde_json::Value) -> String {
     let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
         let arguments = params["arguments"]["arguments_json"]
@@ -2702,13 +2701,19 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     } else {
         (params["name"].as_str(), params.get("arguments").cloned())
     };
-    if name == Some("nyxid__create_schedule")
-        && let Some(arguments) = arguments
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
+    if let Some(arguments) = arguments
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
     {
-        arguments.remove("acknowledgement_id");
-        return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        let field = match name {
+            Some("nyxid__create_schedule") => Some("acknowledgement_id"),
+            Some("nyxid__remember") => Some("recovery"),
+            _ => None,
+        };
+        if let Some(field) = field {
+            arguments.remove(field);
+            return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        }
     }
     chat_activity_digest(params)
 }
@@ -5103,6 +5108,21 @@ fn native_team_tool_result(
     is_error: bool,
 ) -> Response {
     let mut response = tool_result(request_id, &value.to_string(), is_error);
+    if name == "nyxid__remember" && value["details"]["failed_activity_id"].is_string() {
+        // The reference identifies this activity, so identical rejections
+        // still count as the same result for continuation progress.
+        let mut stable = value.clone();
+        stable["details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_activity_id");
+        response
+            .extensions_mut()
+            .insert(result_digest(&serde_json::json!({
+                "content": [{"type":"text","text":stable.to_string()}],
+                "isError": is_error,
+            })));
+    }
     // Only a trusted native remember diagnostic may enrich persisted activity.
     // Never interpret arbitrary downstream result text as safe UI metadata.
     if name == "nyxid__remember"

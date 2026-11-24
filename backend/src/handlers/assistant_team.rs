@@ -1429,7 +1429,10 @@ async fn execute_authorized_tool_impl(
     tool_name: &str,
     args: &Value,
 ) -> (Value, bool) {
+    use crate::services::assistant_memory_recovery as memory_recovery;
+
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
+    let mut memory_arguments = None;
     let result = async {
         // Outline arguments are valid only where discovery advertised them:
         // owner chats with `assistant:skill-runs` on. Ordinary calls skip the
@@ -1449,6 +1452,14 @@ async fn execute_authorized_tool_impl(
         } else {
             assistant_team_tools::validate(name, args)?;
         }
+        let recovery = if name == "remember" && args.get("recovery").is_some() {
+            let Some(part) = memory_recovery::part(args) else {
+                return Ok(memory_recovery::unavailable());
+            };
+            Some(part)
+        } else {
+            None
+        };
         let (caller_agent, access) = Box::pin(
             crate::services::org_agent_service::chat_agent_with_access(&state.db, chat),
         )
@@ -1486,6 +1497,10 @@ async fn execute_authorized_tool_impl(
                 }
             }
         }
+        if name == "remember" {
+            Box::pin(team::normalize_memory_agent(&state.db, chat, &mut normalized)).await?;
+            memory_arguments = Some(normalized.clone());
+        }
         let args = &normalized;
         if matches!(
             name,
@@ -1512,6 +1527,7 @@ async fn execute_authorized_tool_impl(
         let channel_preview = Box::pin(channel_connect_preview(state, &chat.user_id, name, args)).await?;
         let mut auto_allowed = None;
         let mut delegation_approved = false;
+        let mut approved_memory = false;
         let sharing_preview = if name == "set_agent_sharing" {
             let target =
                 team::specialist(&state.db, &chat.user_id, text_arg(args, "agent")).await?;
@@ -1569,6 +1585,12 @@ async fn execute_authorized_tool_impl(
                 Some(facts)
             } else { None };
             if let Some(need) = gate.ask() {
+                if let Some(part) = &recovery
+                    && args.get("acknowledgement_id").is_none()
+                    && !Box::pin(memory_recovery::eligible(state, chat, args, part)).await
+                {
+                    return Ok(memory_recovery::unavailable());
+                }
                 if (group_delegation || sharing_preview
                     .as_ref()
                     .is_some_and(|preview| preview.widening))
@@ -1594,10 +1616,39 @@ async fn execute_authorized_tool_impl(
                     }
                     return Ok((refusal, true));
                 }
+                if recovery.is_some() {
+                    // Reaching here consumed the exact action confirmation.
+                    approved_memory = args["acknowledgement_id"].is_string();
+                }
+            } else if recovery.is_some()
+                && let Some(id) = args["acknowledgement_id"].as_str()
+            {
+                // An allowed card can resume after the access mode changes.
+                // Honor the same exact receipt for the independent-save path.
+                approved_memory = Box::pin(acks::consume_action(
+                    &state.db, chat, id, tool_name, args,
+                )).await?;
             }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        let mut outcome = dispatch(state, chat, name, args, delegation_approved).await?;
+        let mut outcome = if let Some(part) = recovery {
+            Box::pin(memory_recovery::run(
+                state, chat, args, part, approved_memory,
+                || async {
+                    match dispatch(state, chat, name, args, delegation_approved).await {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            let tool = crate::services::assistant_account_tools::memory_error_result_for(
+                                error, Some(chat), &state.config.frontend_url,
+                            );
+                            (tool.value, true)
+                        }
+                    }
+                },
+            )).await
+        } else {
+            dispatch(state, chat, name, args, delegation_approved).await?
+        };
         if let Some(preview) = &channel_preview { outcome.0["channel_preview"] = json!(preview); }
         if !outcome.1
             && let Some(auto) = auto_allowed
@@ -1615,7 +1666,7 @@ async fn execute_authorized_tool_impl(
         Ok(outcome)
     }
     .await;
-    let outcome = match result {
+    let mut outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
             let project_error = if name == "remember" {
@@ -1627,6 +1678,16 @@ async fn execute_authorized_tool_impl(
             (tool.value, true)
         }
     };
+    if name == "remember" && outcome.1 {
+        Box::pin(memory_recovery::record_rejection(
+            state,
+            chat,
+            args,
+            memory_arguments.as_ref(),
+            &mut outcome.0,
+        ))
+        .await;
+    }
     let outcome = (
         crate::services::assistant_access_policy::with_frontend(
             outcome.0,

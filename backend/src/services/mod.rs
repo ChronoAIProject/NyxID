@@ -39,6 +39,7 @@ pub mod assistant_feedback_service;
 pub(crate) mod assistant_guest_model_setup;
 mod assistant_learning_publication;
 pub mod assistant_links;
+pub mod assistant_memory_recovery;
 pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
 pub mod assistant_real_work;
