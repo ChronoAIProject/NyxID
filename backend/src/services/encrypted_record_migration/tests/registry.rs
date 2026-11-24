@@ -198,6 +198,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
         Some(previous_labels::RECONCILED_DIGEST),
+        Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -235,11 +236,17 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 "target_ciphertext",
                 "delivery_credential_encrypted",
             )),
-            Some(value) if value == live || value == previous_labels::RECONCILED_DIGEST => Some((
-                "mobile_social_deliveries",
-                "ciphertext",
-                "agent_key_grant.delivery_credential_encrypted",
-            )),
+            Some(value)
+                if value == live
+                    || value == previous_labels::RECONCILED_DIGEST
+                    || value == previous_labels::OAUTH_WEBHOOK_DIGEST =>
+            {
+                Some((
+                    "mobile_social_deliveries",
+                    "ciphertext",
+                    "agent_key_grant.delivery_credential_encrypted",
+                ))
+            }
             _ => None,
         };
         if let Some((collection, field, grant)) = expected {
@@ -366,5 +373,69 @@ async fn pending_sources_are_reported_and_preserved_by_both_walk_modes() {
             }
         }
     }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn status_preserves_2897_checkpoint_field_labels_without_advancing_the_old_registry() {
+    let db = crate::test_utils::connect_transaction_test_database("registry_2897_checkpoint").await;
+    let keys = crate::test_utils::test_encryption_keys();
+    let generation = start(&db, &keys, Mode::Verify, None).await.unwrap();
+    let runs = db.collection::<Document>(RUNS);
+    // This is the exact live registry digest from dev commit 0fcb789bf, before
+    // Meta consent assets were appended. Its OAuth webhook adapter is already
+    // implemented; the older #2896 and original mappings remain independent.
+    runs.update_one(
+        doc! {"_id": RUN_ID},
+        doc! {"$set": {
+            "registry_digest": previous_labels::OAUTH_WEBHOOK_DIGEST,
+            "phase": "running", "entry": 32, "scanned": 17_i64, "rewritten": 4_i64,
+            "field_outcomes": {"32": {
+                "0": {"source_removed_observed": 11_i64},
+                "1": {"authenticated_current": 13_i64},
+            }},
+        }},
+    )
+    .await
+    .unwrap();
+    let checkpoint = runs.find_one(doc! {"_id": RUN_ID}).await.unwrap().unwrap();
+    let report = status(&db, &keys).await.unwrap().unwrap();
+    assert_eq!(report.collection, Some("oauth_clients"));
+    assert_eq!((report.scanned, report.rewritten), (17, 4));
+    assert!(
+        report
+            .field_outcomes
+            .iter()
+            .any(|field| field.collection == "oauth_clients"
+                && field.field == "revocation_webhook_secret_encrypted"
+                && field.source_removed_observed == 11)
+    );
+    assert!(
+        report
+            .field_outcomes
+            .iter()
+            .any(|field| field.collection == "oauth_clients"
+                && field.field == "connection_webhook_secret_encrypted"
+                && field.authenticated_current == 13)
+    );
+    assert!(
+        !report
+            .field_outcomes
+            .iter()
+            .any(|field| field.collection == "channel_meta_oauth_sessions")
+    );
+    assert!(
+        report
+            .blockers
+            .contains(&"registry_or_primary_provider_changed")
+    );
+    assert!(matches!(
+        advance(&db, &keys, &generation).await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        runs.find_one(doc! {"_id": RUN_ID}).await.unwrap().unwrap(),
+        checkpoint
+    );
     db.drop().await.unwrap();
 }

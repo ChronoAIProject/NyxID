@@ -571,7 +571,7 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::RECONCILED_DIGEST) => {
+        Some(previous_labels::RECONCILED_DIGEST | previous_labels::OAUTH_WEBHOOK_DIGEST) => {
             project_labels(&row, previous_labels::reconciled())?
         }
         Some(previous_labels::DIGEST) => {

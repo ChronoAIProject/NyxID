@@ -142,6 +142,11 @@ pub(super) const LABELS: &[super::FieldLabels] = &[
 // of future live-registry edits so retained counters keep their original names.
 pub(super) const RECONCILED_DIGEST: &str =
     "97d55ec8edff7d0599c59dc342e6a46fb5d580650d4be4b6e9cad693773d3b4c";
+// #2897 (0fcb789bf) changed the OAuth webhook adapter's entry contract without
+// changing any report labels. The Meta consent entry subsequently changed the
+// live digest; retain the exact former digest against this frozen label view.
+pub(super) const OAUTH_WEBHOOK_DIGEST: &str =
+    "b87c6a8c242ec34ae73c327f2ff7ed8ab332f07985afb8ed50ce2693d6270892";
 pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
     const ADDED: &[super::FieldLabels] = &[
         ("assistant_cma_sandboxes", &["request_ciphertext"]),
