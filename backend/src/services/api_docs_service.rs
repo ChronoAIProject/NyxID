@@ -882,7 +882,7 @@ async fn fetch_json_spec_internal(
         .send()
         .await
         .map_err(|error| {
-            if super::proxy_destination::http::refused_connection(&error) {
+            if super::proxy_destination::http::denied_address(&error) {
                 return AppError::BadRequest("Spec URL must resolve to public addresses".into());
             }
             tracing::warn!(url = %log_url, "Failed to fetch downstream API spec");

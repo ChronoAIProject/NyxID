@@ -7616,6 +7616,12 @@ async fn execute_tool_resolved_inner(
                 billing
                     .reject_before_send(&metered, "assistant_authority_changed", false)
                     .await?;
+                if matches!(error, AppError::PoolAttemptTransport(crate::errors::PoolAttemptTransportKind::ResolutionUnavailable)) {
+                    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+                        admission.record_unavailable(db, chat, "pre_dispatch").await?;
+                    }
+                    return Ok(McpToolExecutionOutcome::ProviderUnreachable(error));
+                }
                 return Err(error);
             }
             Err(proxy_service::ForwardRequestError::Application(error)) => {

@@ -9,6 +9,7 @@ use crate::{
         },
         assistant_acknowledgement_service::{self as acks, ChatAuthority},
         assistant_team_service as team,
+        proxy_destination::INTERNAL_CALLER,
     },
 };
 
@@ -527,15 +528,17 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         request.extensions_mut().insert(dispatch);
     }
     let mut slug = String::new();
-    let response = match Box::pin(super::proxy::proxy_request_inner(
+    let proxy_request = Box::pin(super::proxy::proxy_request_inner(
         state,
         &auth,
         &service.id,
         path.split('?').next().unwrap_or(path),
         request,
         &mut slug,
-    ))
-    .await
+    ));
+    let response = match INTERNAL_CALLER
+        .scope("agent_skill_ornn", proxy_request)
+        .await
     {
         Ok(response) => response,
         // The caller separately proves a refusal while the fence is still available.

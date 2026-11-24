@@ -127,13 +127,11 @@ pub async fn parse_openapi_spec(
         .send()
         .await
         .map_err(|error| {
-            AppError::BadRequest(
-                if super::proxy_destination::http::refused_connection(&error) {
-                    "Spec destination is not permitted".into()
-                } else {
-                    "Failed to fetch OpenAPI spec".into()
-                },
-            )
+            AppError::BadRequest(if super::proxy_destination::http::denied_address(&error) {
+                "Spec destination is not permitted".into()
+            } else {
+                "Failed to fetch OpenAPI spec".into()
+            })
         })?;
 
     if !resp.status().is_success() {
