@@ -122,6 +122,19 @@ export function beginSkillSetupSso(returnTo: string | undefined) {
   }
 }
 
+/** Returning to the auth form ends this provider attempt. The explicit return can still be retried. */
+export function endSkillSetupSsoOnAuthBack() {
+  if (location.pathname !== "/login" && location.pathname !== "/register") return;
+  const pending = readPending();
+  const returnTo = new URLSearchParams(location.search).get("return_to") ?? undefined;
+  if (!pending?.ssoStarted || !matchesSetup(pending, skillSetupReturn(returnTo))) return;
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ ...pending, ssoStarted: false }));
+  } catch {
+    clearPendingSkillSetup();
+  }
+}
+
 /** Use the tab's pending selection only on a fresh, ordinary SSO landing. */
 export function pendingSkillSetupLanding(): SkillSetupSearch | undefined {
   const pending = readPending();

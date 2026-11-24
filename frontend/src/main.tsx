@@ -15,7 +15,7 @@ import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { announceAssistantAccount } from "./lib/assistant/account-session";
-import { discardUnrelatedSkillSetup, pendingSkillSetupLanding, skillSetupReturn } from "./lib/assistant/skill-template-handoff";
+import { discardUnrelatedSkillSetup, endSkillSetupSsoOnAuthBack, pendingSkillSetupLanding, skillSetupReturn } from "./lib/assistant/skill-template-handoff";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
@@ -108,6 +108,16 @@ function Root() {
   const { data: publicConfig } = usePublicConfig({
     enabled: telemetryMightInit && !agentKeyLogin,
   });
+
+  useEffect(() => {
+    const [navigation] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
+    if (navigation?.type === "back_forward") endSkillSetupSsoOnAuthBack();
+    function onPageShow(event: PageTransitionEvent) {
+      if (event.persisted) endSkillSetupSsoOnAuthBack();
+    }
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
 
   useEffect(() => {
     useAuthStore

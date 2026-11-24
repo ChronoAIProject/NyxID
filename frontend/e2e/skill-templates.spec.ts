@@ -47,6 +47,7 @@ async function fixture(page: Page, options: {
   signedIn?: boolean;
   callbackPath?: string;
   confirmName?: boolean;
+  pauseAtProvider?: boolean;
   unavailable?: boolean;
   conflict?: boolean;
   badPreview?: boolean;
@@ -128,6 +129,9 @@ async function fixture(page: Page, options: {
     }
     if (path === "/auth/social/google") {
       socialRequests.push(url);
+      if (options.pauseAtProvider) {
+        return route.fulfill({ contentType: "text/html", body: "<h1>Provider sign-in</h1>" });
+      }
       signedIn = true;
       const returnTo = url.searchParams.get("return_to") ?? "/";
       const destination = options.confirmName
@@ -211,7 +215,7 @@ async function fixture(page: Page, options: {
     if (path === "/assistant/nyxagent/onboarding") return ok({ show_intro: true });
     return route.fulfill({ status: 404, json: {} });
   });
-  return { agentReads, previewRequests, socialRequests, writes, turns };
+  return { agentReads, previewRequests, socialRequests, writes, turns, restoreSession: () => { signedIn = true; } };
 }
 
 async function openWelcome(page: Page, title = "Strengthen a research paper") {
@@ -299,6 +303,24 @@ test("leaving a template setup for ordinary login opens the regular NyxBot home"
   await composerInput(page).fill("A regular NyxBot chat");
   await sendButton(page).click();
   await expect.poll(() => state.turns[0]?.text).toBe("A regular NyxBot chat");
+});
+
+test("returning from an abandoned provider clears the fallback before a later session is restored", async ({ page }) => {
+  const state = await fixture(page, { signedIn: false, pauseAtProvider: true });
+  await page.goto("/testing");
+  await openWelcome(page);
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await page.getByRole("button", { name: "Continue with Google" }).click();
+  await expect(page.getByRole("heading", { name: "Provider sign-in" })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("button", { name: "Continue with Google" })).toBeVisible();
+  // The account is signed in from another tab while this tab is idle on Login.
+  state.restoreSession();
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/assistant$/);
+  await expect(composerInput(page)).toBeVisible({ timeout: 15_000 });
+  expect(state.previewRequests).toEqual([]);
+  expect(state.writes).toEqual([]);
 });
 
 for (const [label, path, callbackPath] of [
