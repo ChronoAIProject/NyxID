@@ -206,65 +206,6 @@ pub(super) async fn open_secret(
     }
 }
 
-/// Ownership transfer authenticates marked fields under their source identity
-/// and uses the common staged/strict writer mode for the destination. Legacy
-/// fields retain their original bytes and decoder; Pending channel writers
-/// are not enabled by this ownership operation.
-pub(crate) async fn rebind_marked_owner(
-    keys: &EncryptionKeys,
-    bot: &ChannelBot,
-    destination: &str,
-) -> AppResult<bson::Document> {
-    let mut versions = bot.secret_context_versions.clone();
-    let mut set = bson::Document::new();
-    for field in bot.secret_context_versions.keys() {
-        let plaintext = open_secret(keys, bot, field)
-            .await?
-            .ok_or_else(|| AppError::Internal("Missing versioned channel bot credential".into()))?;
-        let encrypted = crate::crypto::record_field::encrypt(
-            keys,
-            crate::models::channel_bot::COLLECTION_NAME,
-            &bot.id,
-            destination,
-            field,
-            &plaintext,
-        )
-        .await?;
-        super::credential_record_service::mark_version(&mut versions, keys, field);
-        set.insert(
-            field,
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: encrypted,
-            },
-        );
-    }
-    set.insert(
-        "secret_context_versions",
-        bson::to_bson(&versions)
-            .map_err(|_| AppError::Internal("Invalid channel bot credential versions".into()))?,
-    );
-    Ok(set)
-}
-
-pub(crate) fn transfer_source_predicate(source: &bson::Document) -> bson::Document {
-    super::record_storage::source_predicate(
-        source,
-        &[
-            "user_id",
-            "ownership_version",
-            "credential_continuity",
-            "secret_context_versions",
-            "bot_token_encrypted",
-            "registration_pin_encrypted",
-            "webhook_secret_encrypted",
-            "app_secret_encrypted",
-            "lark_verification_token_encrypted",
-            "lark_encrypt_key_encrypted",
-        ],
-    )
-}
-
 impl RegistrationDescriptor {
     pub fn all_fields(&self) -> impl Iterator<Item = &RegistrationField> {
         self.fields.iter().chain(
@@ -393,32 +334,8 @@ pub(crate) async fn bind_fixture_fields(
     id: &str,
     fields: &[&str],
 ) {
-    use bson::{Document, doc};
-    let collection = crate::models::channel_bot::COLLECTION_NAME;
-    let rows = db.collection::<Document>(collection);
-    let row = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
-    let owner = row.get_str("user_id").unwrap();
-    let mut set = Document::new();
-    for &field in fields {
-        let plain = keys
-            .decrypt(row.get_binary_generic(field).unwrap())
-            .await
-            .unwrap();
-        let path = [field];
-        let context =
-            crate::crypto::record_field::RecordContext::new(collection, id, owner, &path).unwrap();
-        set.insert(
-            field,
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: keys.encrypt_record(&plain, &context).await.unwrap(),
-            },
-        );
-        set.insert(format!("secret_context_versions.{field}"), 3);
-    }
-    rows.update_one(doc! {"_id":id}, doc! {"$set":set})
-        .await
-        .unwrap();
+    let bot = super::channel_bot_service::get_bot(db, id).await.unwrap();
+    super::channel_credential_continuity::rewrap_fixture(db, keys, &bot, fields).await;
 }
 
 #[cfg(test)]

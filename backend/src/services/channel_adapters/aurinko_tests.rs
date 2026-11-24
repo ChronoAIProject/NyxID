@@ -62,6 +62,7 @@ struct Mock {
     callbacks: Vec<Value>,
     replies: Vec<Value>,
     requests: Vec<(String, String)>,
+    revoked: bool,
     callback_status: u16,
     send_status: u16,
     send_body: Value,
@@ -78,6 +79,7 @@ impl Default for Mock {
             callbacks: vec![],
             replies: vec![],
             requests: vec![],
+            revoked: false,
             callback_status: 202,
             send_status: 200,
             send_body: json!({"status":"Ok", "id":"sent-1"}),
@@ -101,7 +103,7 @@ async fn mock_request(
             .unwrap()
             .into_response();
     }
-    if headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer revoked") {
+    if mock.revoked {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if path == "/v1/account" {
@@ -220,6 +222,10 @@ impl Fixture {
     }
 
     async fn new() -> Self {
+        Self::with_writer(true).await
+    }
+
+    async fn with_writer(contextual: bool) -> Self {
         let db = crate::test_utils::connect_test_database("aurinko")
             .await
             .expect("Aurinko tests require NYXID_TEST_DATABASE_URL and a real MongoDB");
@@ -231,6 +237,8 @@ impl Fixture {
             [2u8; 32],
         ));
         let state = crate::test_utils::test_app_state(db.clone());
+        let mut writer_keys = crate::test_utils::test_encryption_keys();
+        writer_keys.set_contextual_record_writes(contextual);
         let mock = Arc::new(Mutex::new(Mock::default()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -255,7 +263,7 @@ impl Fixture {
         let created = bots::create_bot(
             &db,
             &state.config,
-            &state.encryption_keys,
+            &writer_keys,
             &state.http_client,
             &adapter,
             &owner,
@@ -941,8 +949,16 @@ async fn aurinko_registration_rotation_repair_delete_and_owner_fences() {
 #[tokio::test]
 async fn aurinko_failed_setup_delete_with_revoked_token_deactivates_locally() {
     let f = Fixture::new().await;
-    let encrypted = f.state.encryption_keys.encrypt(b"revoked").await.unwrap();
-    f.state.db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc!{"_id":&f.bot.id},doc!{"$set":{"status":"failed","webhook_registered":false,"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    f.mock.lock().await.revoked = true;
+    f.state
+        .db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.bot.id},
+            doc! {"$set":{"status":"failed","webhook_registered":false}},
+        )
+        .await
+        .unwrap();
     assert_eq!(
         bots::delete_bot(
             &f.state.db,
@@ -967,7 +983,7 @@ async fn aurinko_failed_setup_delete_with_revoked_token_deactivates_locally() {
 
 #[tokio::test]
 async fn aurinko_repair_replaces_signal_subscription_and_recovers_unknown_creation() {
-    let f = Fixture::new().await;
+    let f = Fixture::with_writer(false).await;
     let writes = f
         .mock
         .lock()
@@ -976,13 +992,20 @@ async fn aurinko_repair_replaces_signal_subscription_and_recovers_unknown_creati
         .iter()
         .filter(|(method, url)| method == "POST" && url.starts_with("/v1/subscriptions"))
         .count();
-    crate::services::channel_credential_continuity::rewrap_fixture(
-        &f.state.db,
-        &f.state.encryption_keys,
-        &f.bot,
-        &["app_secret_encrypted"],
-    )
-    .await;
+    let active = crate::test_utils::test_encryption_keys();
+    let source = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.bot.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::services::channel_bot_record::migrate(&f.state.db, &active, &source)
+            .await
+            .unwrap()
+    );
     bots::verify_serialized_bot(
         &f.state.db,
         &f.state.encryption_keys,

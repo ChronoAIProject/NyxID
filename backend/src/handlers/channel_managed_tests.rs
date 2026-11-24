@@ -300,19 +300,35 @@ async fn managed_completion_success_encrypts_pin_and_reuses_registration() {
     assert_eq!(bot.app_id.as_deref(), Some("444"));
     assert!(bot.app_secret_encrypted.is_none());
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(&bot.bot_token_encrypted)
-            .await
-            .unwrap()
-            .as_slice(),
+        crate::crypto::record_field::decrypt(
+            &state.encryption_keys,
+            BOTS,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            bot.secret_context_versions
+                .get("bot_token_encrypted")
+                .copied(),
+            &bot.bot_token_encrypted
+        )
+        .await
+        .unwrap()
+        .as_slice(),
         b"business-token"
     );
-    let pin = state
-        .encryption_keys
-        .decrypt(bot.registration_pin_encrypted.as_ref().unwrap())
-        .await
-        .unwrap();
+    let pin = crate::crypto::record_field::decrypt(
+        &state.encryption_keys,
+        BOTS,
+        &bot.id,
+        &bot.user_id,
+        "registration_pin_encrypted",
+        bot.secret_context_versions
+            .get("registration_pin_encrypted")
+            .copied(),
+        bot.registration_pin_encrypted.as_ref().unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(pin.len(), 6);
     assert!(pin.iter().all(u8::is_ascii_digit));
     assert_eq!(
@@ -1103,20 +1119,14 @@ async fn repair_recovers_partial_setup_and_reuses_encrypted_secrets() {
     let original = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
         .await
         .unwrap();
-    for contextual in [false, true] {
-        if contextual {
-            crate::services::channel_registration::bind_fixture_fields(
-                &state.db,
-                &state.encryption_keys,
-                &created.id,
-                &[
-                    "registration_pin_encrypted",
-                    "webhook_secret_encrypted",
-                    "bot_token_encrypted",
-                ],
-            )
-            .await;
-        }
+    for field in [
+        "registration_pin_encrypted",
+        "webhook_secret_encrypted",
+        "bot_token_encrypted",
+    ] {
+        assert_eq!(original.secret_context_versions.get(field), Some(&3));
+    }
+    for _ in 0..2 {
         let Json(setup) =
             managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
                 .await
@@ -1167,7 +1177,11 @@ async fn repair_recovers_partial_setup_and_reuses_encrypted_secrets() {
 
 #[tokio::test]
 async fn repair_migrates_hash_only_token_and_does_not_repeat_successful_coexistence_sync() {
-    let (state, auth, server) = fixture().await;
+    let (mut state, auth, server) = fixture().await;
+    let current_keys = state.encryption_keys.clone();
+    let mut legacy_keys = crate::test_utils::test_encryption_keys();
+    legacy_keys.set_contextual_record_writes(false);
+    state.encryption_keys = std::sync::Arc::new(legacy_keys);
     graph(&server, "444", "333", 200, 200, true).await;
     Mock::given(method("POST"))
         .and(path("/v25.0/333/smb_app_data"))
@@ -1193,6 +1207,7 @@ async fn repair_migrates_hash_only_token_and_does_not_repeat_successful_coexiste
         )
         .await
         .unwrap();
+    state.encryption_keys = current_keys;
     for _ in 0..2 {
         let Json(setup) =
             managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
@@ -1786,22 +1801,29 @@ async fn admin_health_requires_admin() {
 pub(crate) async fn mixed_managed_records(
     keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
 ) -> Vec<bson::Document> {
-    let (mut state, auth, server) = fixture().await;
-    state.encryption_keys = keys;
-    graph(&server, "444", "333", 200, 200, false).await;
-    let (_, Json(created)) = managed::complete_inner(
-        &state,
-        &auth,
-        "whatsapp",
-        input(),
-        &ManagedProgress::default(),
-    )
-    .await
-    .unwrap();
-    let bots = state.db.collection::<bson::Document>(BOTS);
-    let filter = doc! {"_id": &created.id};
     let mut snapshots = Vec::new();
     for repair in [false, true] {
+        let (mut state, auth, server) = fixture().await;
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        state.encryption_keys = if repair {
+            std::sync::Arc::new(legacy)
+        } else {
+            keys.clone()
+        };
+        graph(&server, "444", "333", 200, 200, false).await;
+        let (_, Json(created)) = managed::complete_inner(
+            &state,
+            &auth,
+            "whatsapp",
+            input(),
+            &ManagedProgress::default(),
+        )
+        .await
+        .unwrap();
+        state.encryption_keys = keys.clone();
+        let bots = state.db.collection::<bson::Document>(BOTS);
+        let filter = doc! {"_id": &created.id};
         if repair {
             bots.update_one(
                 filter.clone(),
@@ -1809,6 +1831,14 @@ pub(crate) async fn mixed_managed_records(
             )
             .await
             .unwrap();
+            if keys.contextual_record_writes() {
+                let raw = bots.find_one(filter.clone()).await.unwrap().unwrap();
+                assert!(
+                    crate::services::channel_bot_record::migrate(&state.db, &keys, &raw)
+                        .await
+                        .unwrap()
+                );
+            }
             let Json(_) =
                 managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
                     .await

@@ -92,17 +92,22 @@ fn conflict() -> AppError {
 fn fingerprint(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
-/// Keep a prepared bot's credential evidence in sync with every provider
-/// token replacement. A concurrent storage rewrap forces the caller to reload.
-fn credential_update(
+/// Join upstream record-bound credential preparation to Meta's existing
+/// authorization transaction, including the exact raw BSON and signer fence.
+async fn credential_update(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    keys: &crate::crypto::aes::EncryptionKeys,
     bot: &ChannelBot,
-    mut filter: bson::Document,
-    mut set: bson::Document,
-    mut unset: bson::Document,
-) -> AppResult<(bson::Document, bson::Document)> {
-    filter.extend(super::channel_credential_continuity::physical_filter(bot)?);
-    super::channel_credential_continuity::replacement(bot, &mut set, &mut unset)?;
-    Ok((filter, doc! {"$set":set, "$unset":unset}))
+    filter: bson::Document,
+    set: bson::Document,
+    unset: bson::Document,
+) -> AppResult<bool> {
+    let adapter = adapter(&bot.platform)?;
+    super::channel_credential_continuity::update_credentials_in_session(
+        db, tx, keys, &adapter, bot, filter, set, unset,
+    )
+    .await
 }
 
 fn binary(bytes: Vec<u8>) -> bson::Bson {
@@ -1011,12 +1016,13 @@ impl MetaService<'_> {
             let bot_id = s.bot_id.as_deref().ok_or_else(conflict)?;
             let document = doc! {
                 "_id":bot_id,"user_id":&s.owner_id,"ownership_version":0_i64,"platform":&s.platform,"label":&s.label,
-                "credential_source":"platform","bot_token_encrypted":binary(self.keys.encrypt(asset.token.as_bytes()).await?),
+                "credential_source":"platform","bot_token_encrypted":binary(super::channel_bot_record::encrypt(self.keys,bot_id,&s.owner_id,"bot_token_encrypted",&asset.token).await?),
                 "platform_bot_id":&asset.id,"platform_bot_username":&identity.platform_bot_username,"webhook_registered":false,
                 "webhook_secret_hash":"","app_id":&s.app_id,"meta_binding":bson::to_bson(&binding).map_err(|_|conflict())?,
                 "status":"pending_webhook","is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
             };
-            let bot: ChannelBot = bson::from_document(document).map_err(|_| conflict())?;
+            let mut bot: ChannelBot = bson::from_document(document).map_err(|_| conflict())?;
+            super::channel_bot_record::mark_new(&mut bot, self.keys)?;
             super::channel_bot_service::insert_meta_bot(
                 self.db,
                 &bot,
@@ -1055,15 +1061,23 @@ impl MetaService<'_> {
         asset: &str,
         token: &str,
     ) -> AppResult<()> {
-        let encrypted = self.keys.encrypt(token.as_bytes()).await?;
+        let encrypted = super::channel_bot_record::encrypt(
+            self.keys,
+            s.reconnect_bot_id.as_deref().ok_or_else(conflict)?,
+            &s.owner_id,
+            "bot_token_encrypted",
+            token,
+        )
+        .await?;
         let args = (
             self.db.clone(),
+            self.keys,
             s.clone(),
             binding.clone(),
             asset.to_owned(),
             encrypted,
         );
-        super::transaction_service::run_db_only(self.db, &args, |tx, (db, s, binding, asset, encrypted)| {
+        super::transaction_service::run_db_only(self.db, &args, |tx, (db, keys, s, binding, asset, encrypted)| {
             Box::pin(async move {
                 let session = db.collection::<OAuthSession>(SESSIONS).find_one(doc! {
                     "_id": &s.id, "actor_id": &s.actor_id, "selected_asset_id": asset,
@@ -1115,8 +1129,8 @@ impl MetaService<'_> {
                 // Participant observations remain on their original rows. Their
                 // admitted grant/range prevents a prior grant from authorizing B;
                 // B replaces a participant row only after fresh provider proof.
-                let (filter, update) = credential_update(
-                    &old,
+                let changed = credential_update(
+                    db,tx,keys,&old,
                     doc! {"_id": bot_id, "user_id": &s.owner_id, "is_active": true,
                         "meta_binding.generation": s.expected_generation},
                     doc! {
@@ -1132,10 +1146,8 @@ impl MetaService<'_> {
                         "secret_context_versions.bot_token_encrypted": "",
                         "secret_context_versions.app_secret_encrypted": "",
                     },
-                )?;
-                let changed = db.collection::<ChannelBot>(BOTS)
-                    .update_one(filter, update).session(&mut *tx).await?;
-                if changed.matched_count != 1 { return Err(conflict()); }
+                ).await?;
+                if !changed { return Err(conflict()); }
                 if old.credential_source != "platform" {
                     super::channel_signing_migration::prepare_observed(db, tx, bot_id).await?;
                 }
@@ -1432,7 +1444,7 @@ impl MetaService<'_> {
         mut filter: bson::Document,
         set: bson::Document,
     ) -> AppResult<()> {
-        use super::channel_credential_continuity::{TOKEN, field_pin, replacement};
+        use super::channel_credential_continuity::{TOKEN, field_pin};
         let binding = observed.meta_binding.as_ref().ok_or_else(conflict)?;
         filter.extend(doc! {
             "_id": &observed.id, "user_id": &observed.user_id, "platform": &observed.platform,
@@ -1443,6 +1455,7 @@ impl MetaService<'_> {
         let expected_pin = field_pin(observed, TOKEN)?;
         let args = (
             self.db,
+            self.keys,
             self.db.collection::<ChannelBot>(BOTS),
             enabling,
             filter,
@@ -1453,7 +1466,7 @@ impl MetaService<'_> {
         super::transaction_service::run_db_only(
             self.db,
             &args,
-            |tx, (db, bots, enabling, filter, pin, ownership_version, set)| {
+            |tx, (db, keys, bots, enabling, filter, pin, ownership_version, set)| {
                 Box::pin(async move {
                     let live = bots
                         .find_one(filter.clone())
@@ -1468,14 +1481,9 @@ impl MetaService<'_> {
                     if *enabling {
                         scopes::fence_current(db, tx, &live).await?;
                     }
-                    let mut set = set.clone();
-                    let mut unset = doc! {"secret_context_versions.bot_token_encrypted": ""};
-                    replacement(&live, &mut set, &mut unset)?;
-                    let result = bots
-                        .update_one(doc! {"_id": &live.id}, doc! {"$set": set, "$unset": unset})
-                        .session(&mut *tx)
-                        .await?;
-                    if result.matched_count != 1 {
+                    if !credential_update(db, tx, keys, &live, filter.clone(), set.clone(), doc! {})
+                        .await?
+                    {
                         return Err(conflict());
                     }
                     Ok(())
@@ -1760,7 +1768,7 @@ impl MetaService<'_> {
             doc! {"is_active":true, "meta_binding.generation":binding.generation,
                 "meta_binding.subscription":&live.subscription},
             doc! {
-                "bot_token_encrypted": binary(self.keys.encrypt(fresh.as_bytes()).await?),
+                "bot_token_encrypted": binary(super::channel_bot_record::encrypt(self.keys,&current.id,&current.user_id,"bot_token_encrypted",&fresh).await?),
                 "meta_binding.token_fingerprint": meta::token_fingerprint(&fresh),
                 "meta_binding.expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(ttl)),
                 "updated_at": bson::DateTime::now(),

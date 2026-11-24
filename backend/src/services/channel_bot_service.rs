@@ -125,11 +125,21 @@ async fn maybe_rebuild_bot_token(
         )
         .await
         .map_err(|error| adapter.updated_token_error(error))?;
-    Ok(Some(encryption_keys.encrypt(token.as_bytes()).await?))
+    Ok(Some(
+        super::channel_bot_record::encrypt(
+            encryption_keys,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            &token,
+        )
+        .await?,
+    ))
 }
 
 async fn write_registration_fields(
     keys: &EncryptionKeys,
+    bot: &ChannelBot,
     descriptor: &RegistrationDescriptor,
     fields: &RegistrationValues<'_>,
     set: &mut bson::Document,
@@ -142,8 +152,8 @@ async fn write_registration_fields(
         }
         if let Some(value) = fields.get(field.name) {
             if field.secret {
-                // Credential writers remain legacy during the Pending rollout.
-                // Replace the decoder marker atomically with its ciphertext.
+                // The shared record update authors the replacement marker
+                // atomically with its ciphertext and continuity generation.
                 unset.insert(format!("secret_context_versions.{}", field.storage), "");
             }
             if value.is_empty() && field.clearable {
@@ -153,7 +163,14 @@ async fn write_registration_fields(
                     field.storage,
                     bson::Binary {
                         subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: keys.encrypt(value.as_bytes()).await?,
+                        bytes: super::channel_bot_record::encrypt(
+                            keys,
+                            &bot.id,
+                            &bot.user_id,
+                            field.storage,
+                            value,
+                        )
+                        .await?,
                     },
                 );
             } else {
@@ -353,10 +370,20 @@ pub(crate) async fn persist_verified_bot(
         String::new()
     };
 
+    let id = link_claim
+        .map(|claim| claim.link.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let bot_token_encrypted = if connection.is_some() {
         Vec::new()
     } else {
-        encryption_keys.encrypt(effective_token.as_bytes()).await?
+        super::channel_bot_record::encrypt(
+            encryption_keys,
+            &id,
+            user_id,
+            "bot_token_encrypted",
+            effective_token,
+        )
+        .await?
     };
 
     let now = Utc::now();
@@ -389,9 +416,7 @@ pub(crate) async fn persist_verified_bot(
         x_events: None,
         last_verification: None,
         ownership_version: 0,
-        id: link_claim
-            .map(|claim| claim.link.id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        id: id.clone(),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
         label: label.to_string(),
@@ -416,11 +441,29 @@ pub(crate) async fn persist_verified_bot(
         credential_continuity: None,
         secret_context_versions: Default::default(),
         registration_pin_encrypted: match managed {
-            Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
+            Some((pin, _)) => Some(
+                super::channel_bot_record::encrypt(
+                    encryption_keys,
+                    &id,
+                    user_id,
+                    "registration_pin_encrypted",
+                    pin,
+                )
+                .await?,
+            ),
             None => None,
         },
         webhook_secret_encrypted: if managed.is_some() {
-            Some(encryption_keys.encrypt(raw_secret.as_bytes()).await?)
+            Some(
+                super::channel_bot_record::encrypt(
+                    encryption_keys,
+                    &id,
+                    user_id,
+                    "webhook_secret_encrypted",
+                    &raw_secret,
+                )
+                .await?,
+            )
         } else {
             None
         },
@@ -452,14 +495,16 @@ pub(crate) async fn persist_verified_bot(
         .map_err(|_| AppError::Internal("Unable to serialize channel bot".to_string()))?;
     write_registration_fields(
         encryption_keys,
+        &bot,
         &descriptor,
         fields,
         &mut document,
         &mut doc! {},
     )
     .await?;
-    let bot: ChannelBot = bson::from_document(document)
+    let mut bot: ChannelBot = bson::from_document(document)
         .map_err(|_| AppError::Internal("Invalid channel bot storage fields".to_string()))?;
+    super::channel_bot_record::mark_new(&mut bot, encryption_keys)?;
     insert_registered_bot_linked(
         db,
         &bot,
@@ -871,6 +916,7 @@ async fn insert_registered_bot_inner(
                 bot.credential_source = "telegram_manager".into();
                 bot.manager_instance = (manager.provider != "telegram-new").then(|| bot.platform_bot_id.parse().ok()).flatten();
                 bot.bot_token_encrypted.clear();
+                bot.secret_context_versions.remove("bot_token_encrypted");
                 bot.webhook_secret_hash.clear();
             }
             if bots.count_documents(doc! {"user_id": &bot.user_id, "is_active": true}).session(&mut *session).await? >= u64::from(capacity) {
@@ -917,7 +963,10 @@ async fn insert_registered_bot_inner(
                 super::channel_meta_service::fence_grant_in_session(&db,session,&bot.platform,&binding.app_id,&binding.grant_subject_id,meta.created_at).await?;
             }
             let mut inserted = bot.clone();
-            if let Some(value) = super::channel_signing_migration::capture_attachment(&db,session,&bot).await? {
+            if !inserted.secret_context_versions.is_empty() && inserted.credential_continuity.is_none() {
+                super::channel_credential_continuity::initialize(&mut inserted)?;
+            }
+            if let Some(value) = super::channel_signing_migration::capture_attachment(&db,session,&inserted).await? {
                 inserted.credential_continuity = Some(value);
             }
             bots.insert_one(&inserted).session(&mut *session).await?;
@@ -1191,25 +1240,36 @@ pub async fn repair_managed_bot(
     // encrypted token before Meta can perform the callback handshake.
     if bot.webhook_secret_encrypted.is_none() {
         let secret = zeroize::Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
-        let encrypted = keys.encrypt(secret.as_bytes()).await?;
-        let mut filter = doc! { "_id": &bot.id, "is_active": true, "webhook_secret_encrypted": bson::Bson::Null };
-        filter.extend(super::channel_credential_continuity::physical_filter(bot)?);
-        let mut set = doc! {
-                "webhook_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
-                "webhook_secret_hash": hex::encode(Sha256::digest(secret.as_bytes())),
-                "updated_at": bson::DateTime::now(),
+        let encrypted = super::channel_bot_record::encrypt(
+            keys,
+            &bot.id,
+            &bot.user_id,
+            "webhook_secret_encrypted",
+            &secret,
+        )
+        .await?;
+        let filter = doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true };
+        let set = doc! {
+            "webhook_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
+            "webhook_secret_hash": hex::encode(Sha256::digest(secret.as_bytes())),
+            "updated_at": bson::DateTime::now(),
         };
-        let mut unset = bson::Document::new();
-        super::channel_credential_continuity::replacement(bot, &mut set, &mut unset)?;
-        let mut update = doc! {"$set":set};
-        if !unset.is_empty() {
-            update.insert("$unset", unset);
-        }
-        db.collection::<ChannelBot>(COLLECTION_NAME)
-            .update_one(filter, update)
-            .await?;
+        Box::pin(super::channel_credential_continuity::update_credentials(
+            db,
+            keys,
+            adapter,
+            bot,
+            filter,
+            set,
+            doc! {},
+        ))
+        .await?;
     }
-    let bot = get_bot(db, &bot.id).await?;
+    let current = get_bot(db, &bot.id).await?;
+    if current.user_id != bot.user_id || current.ownership_version != bot.ownership_version {
+        return Err(super::channel_managed::unavailable());
+    }
+    let bot = current;
     if !bot.is_active {
         return Err(super::channel_managed::unavailable());
     }
@@ -1452,6 +1512,7 @@ async fn update_bot_inner(
 
     write_registration_fields(
         encryption_keys,
+        &bot,
         &descriptor,
         &fields,
         &mut set_doc,
@@ -1545,17 +1606,8 @@ async fn update_bot_inner(
     let mut filter = doc! {"_id":bot_id,"user_id":owner_id};
     if !fields.0.is_empty() {
         filter.extend(super::channel_credential_continuity::physical_filter(&bot)?);
-        super::channel_credential_continuity::replacement(&bot, &mut set_doc, &mut unset_doc)?;
     }
-    let mut update_doc = doc! { "$set": set_doc };
-    if meta_rotation {
-        update_doc.insert("$inc", doc! {"meta_binding.generation":1_i64});
-    }
-    if !unset_doc.is_empty() {
-        update_doc.insert("$unset", unset_doc);
-    }
-
-    if is_meta {
+    let changed = if is_meta {
         filter.insert("is_active", true);
         if !filter.contains_key("ownership_version") {
             filter.insert("ownership_version", bot.ownership_version);
@@ -1565,60 +1617,74 @@ async fn update_bot_inner(
             "meta_binding.generation",
             bot.meta_binding.as_ref().map(|binding| binding.generation),
         );
+        if meta_rotation {
+            set_doc.insert(
+                "meta_binding.generation",
+                bot.meta_binding
+                    .as_ref()
+                    .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::Conflict("Inbox generation exhausted".into()))?,
+            );
+        }
         let context = (
             db.clone(),
+            encryption_keys,
+            adapter,
             actor_id.to_owned(),
             owner_id.to_owned(),
-            bot.platform.clone(),
+            bot.clone(),
             meta_rotation,
             filter,
-            update_doc,
+            set_doc,
+            unset_doc,
         );
         super::transaction_service::run_db_only(
             db,
             &context,
-            |tx, (db, actor, owner, platform, rotating, filter, update)| {
+            |tx, (db, keys, adapter, actor, owner, bot, rotating, filter, set, unset)| {
                 Box::pin(async move {
                     super::channel_meta_service::MetaService::fence_installation_authority(
-                        db, tx, actor, owner, platform, false,
+                        db,
+                        tx,
+                        actor,
+                        owner,
+                        &bot.platform,
+                        false,
                     )
                     .await?;
                     if *rotating {
-                        let live = db
-                            .collection::<ChannelBot>(COLLECTION_NAME)
-                            .find_one(filter.clone())
-                            .session(&mut *tx)
-                            .await?
-                            .ok_or_else(|| {
-                                AppError::Conflict(
-                                    "Inbox credential authority changed; refresh before updating"
-                                        .into(),
-                                )
-                            })?;
-                        super::channel_meta_service::scopes::fence_reconnect(db, tx, &live).await?;
+                        super::channel_meta_service::scopes::fence_reconnect(db, tx, bot).await?;
                     }
-                    let changed = db
-                        .collection::<ChannelBot>(COLLECTION_NAME)
-                        .update_one(filter.clone(), update.clone())
-                        .session(&mut *tx)
-                        .await?;
-                    if changed.matched_count != 1 {
-                        return Err(AppError::Conflict(
-                            "Inbox credential authority changed; refresh before updating".into(),
-                        ));
-                    }
-                    Ok(())
+                    super::channel_credential_continuity::update_credentials_in_session(
+                        db,
+                        tx,
+                        keys,
+                        *adapter,
+                        bot,
+                        filter.clone(),
+                        set.clone(),
+                        unset.clone(),
+                    )
+                    .await
                 })
             },
         )
-        .await?;
-    } else if db
-        .collection::<ChannelBot>(COLLECTION_NAME)
-        .update_one(filter, update_doc)
         .await?
-        .matched_count
-        != 1
-    {
+    } else {
+        Box::pin(super::channel_credential_continuity::update_credentials(
+            db,
+            encryption_keys,
+            adapter,
+            &bot,
+            filter,
+            set_doc,
+            unset_doc,
+        ))
+        .await?
+    };
+    if !changed {
         return Err(AppError::Conflict(
             "Bot credentials or verification changed. Run verification again.".into(),
         ));
@@ -3395,7 +3461,17 @@ mod tests {
             seen_tokens.lock().unwrap().as_slice(),
             &["new_app:old_secret".to_string()]
         );
-        let decrypted = encryption_keys.decrypt(&rebuilt).await.unwrap();
+        let decrypted = crate::crypto::record_field::decrypt(
+            &encryption_keys,
+            COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            Some(3),
+            &rebuilt,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::str::from_utf8(&decrypted).unwrap(),
             "new_app:old_secret"
@@ -3431,7 +3507,17 @@ mod tests {
             seen_tokens.lock().unwrap().as_slice(),
             &["old_app:new_secret".to_string()]
         );
-        let decrypted = encryption_keys.decrypt(&rebuilt).await.unwrap();
+        let decrypted = crate::crypto::record_field::decrypt(
+            &encryption_keys,
+            COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            Some(3),
+            &rebuilt,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::str::from_utf8(&decrypted).unwrap(),
             "old_app:new_secret"
@@ -3467,7 +3553,17 @@ mod tests {
             seen_tokens.lock().unwrap().as_slice(),
             &["new_app:new_secret".to_string()]
         );
-        let decrypted = encryption_keys.decrypt(&rebuilt).await.unwrap();
+        let decrypted = crate::crypto::record_field::decrypt(
+            &encryption_keys,
+            COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            Some(3),
+            &rebuilt,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::str::from_utf8(&decrypted).unwrap(),
             "new_app:new_secret"

@@ -619,16 +619,12 @@ async fn telegram_new_failed_webhook_resumes_same_saved_bot_after_expiry() {
         .await
         .unwrap_err();
     assert!(!error.to_string().contains(CHILD));
-    crate::services::channel_registration::bind_fixture_fields(
-        &state.db,
-        &state.encryption_keys,
-        &ready.id,
-        &["webhook_secret_encrypted", "bot_token_encrypted"],
-    )
-    .await;
     let saved = super::channel_bot_service::get_bot(&state.db, &ready.id)
         .await
         .unwrap();
+    for field in ["bot_token_encrypted", "webhook_secret_encrypted"] {
+        assert_eq!(saved.secret_context_versions.get(field), Some(&3));
+    }
     assert_eq!(saved.status, "pending");
     state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &ready.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::hours(1))}}).await.unwrap();
     assert_eq!(

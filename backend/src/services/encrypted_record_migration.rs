@@ -51,6 +51,7 @@ enum Adapter {
     OracleLoginOuter,
     Broker,
     OAuthWebhook,
+    ChannelBot,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -217,15 +218,8 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "channel_bots",
-        adapter: Adapter::Pending,
-        fields: &[
-            "registration_pin_encrypted",
-            "webhook_secret_encrypted",
-            "bot_token_encrypted",
-            "app_secret_encrypted",
-            "lark_verification_token_encrypted",
-            "lark_encrypt_key_encrypted",
-        ],
+        adapter: Adapter::ChannelBot,
+        fields: super::channel_bot_record::FIELDS,
     },
     Entry {
         collection: "channel_connect_links",
@@ -769,6 +763,7 @@ async fn verify(
             super::oracle_login_record_service::verify_current_snapshot(keys, entry.collection, row)
                 .await
         }
+        Adapter::ChannelBot => super::channel_bot_record::verify(keys, row).await,
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::verify(keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::verify_current_snapshot(keys, row).await
@@ -894,6 +889,7 @@ async fn migrate(
             super::oracle_login_record_service::migrate_snapshot(db, keys, entry.collection, row)
                 .await
         }
+        Adapter::ChannelBot => Box::pin(super::channel_bot_record::migrate(db, keys, row)).await,
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::migrate(db, keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::migrate_snapshot(db, keys, row).await
@@ -1439,6 +1435,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    mod channel_bots;
     mod registry;
     mod swaps;
     mod webhooks;
