@@ -122,6 +122,174 @@ async fn retire(
 }
 
 #[tokio::test]
+async fn connected_observation_concurrent_readers_publish_one_durable_sequence_per_content() {
+    let f = Fixture::new("connected_sequence").await;
+    f.enroll(true).await;
+    enable_observation(&f, true).await;
+    approval_timeout(&f, 30).await;
+    let key = Uuid::new_v4().to_string();
+    let waiter = waiting(&f, &key).await;
+    let pending = pending_observation(&f, &key).await;
+    assert_eq!(pending["observation_sequence"], 1);
+    let original = row(&f).await;
+    let mut decision = choice(&original, "operation");
+    decision.approved = false;
+    proposals::decide(&f.state, &f.owner, &original.id, &decision)
+        .await
+        .unwrap();
+
+    // Decision replaces the typed proposal. It must preserve the durable
+    // publication record while changing the receipt's decision and state.
+    let decided = row(&f).await;
+    assert_eq!(
+        v2::proposal(&decided)
+            .unwrap()
+            .connected_observation
+            .as_ref()
+            .unwrap()
+            .sequence,
+        1
+    );
+    let responses = futures::future::join_all((0..12).map(|_| observe_http(&f, &key))).await;
+    let expected = &responses[0].1;
+    assert_eq!(expected["observation_sequence"], 2);
+    assert_eq!(expected["decision"], "rejected");
+    for (status, receipt) in &responses {
+        assert_eq!(*status, StatusCode::OK, "{receipt}");
+        assert_eq!(receipt, expected);
+    }
+    assert_eq!(retire(&f, &key, &pending).await.1, *expected);
+
+    // Reconstruct from BSON, without a process cache or in-flight observer.
+    let restored: ApprovalRequest = bson::from_document(
+        f.state
+            .db
+            .collection::<Document>("approval_requests")
+            .find_one(doc! {"_id": &original.id})
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let replay = connected::record_observation(&f.state.db, &restored, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_value(replay).unwrap(), *expected);
+    let late = connected::record_observation(&f.state.db, &original, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_value(late).unwrap(), pending);
+    assert!(!waiter.await.unwrap().unwrap().status().is_success());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn connected_observation_stale_unpublished_read_cannot_publish_after_retirement() {
+    let f = Fixture::new("connected_stale_sequence").await;
+    f.enroll(true).await;
+    enable_observation(&f, true).await;
+    approval_timeout(&f, 30).await;
+    let key = Uuid::new_v4().to_string();
+    let waiter = waiting(&f, &key).await;
+    let original = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(row) = f
+                .state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find_one(doc! {"execution_proposal.version": 2})
+                .await
+                .unwrap()
+            {
+                break row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Historical rows without the additive field retain the same empty state.
+    let mut document = bson::to_document(&original).unwrap();
+    document
+        .get_document_mut("execution_proposal")
+        .unwrap()
+        .get_document_mut("v2")
+        .unwrap()
+        .remove("connected_observation");
+    let original: ApprovalRequest = bson::from_document(document).unwrap();
+    assert!(
+        v2::proposal(&original)
+            .unwrap()
+            .connected_observation
+            .is_none()
+    );
+    v2::blocking::abandon(&f.state.db, &original.id, "approval_wait_cancelled")
+        .await
+        .unwrap();
+    assert!(
+        connected::record_observation(&f.state.db, &original, &key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (status, receipt) = observe_http(&f, &key).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["observation_sequence"], 1);
+    assert_eq!(receipt["effect"], "not_sent");
+    assert_eq!(observe_http(&f, &key).await.1, receipt);
+    assert!(!waiter.await.unwrap().unwrap().status().is_success());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn connected_observation_invalid_or_exhausted_sequence_never_resets() {
+    let f = Fixture::new("connected_sequence_exhausted").await;
+    f.enroll(true).await;
+    enable_observation(&f, true).await;
+    approval_timeout(&f, 30).await;
+    let key = Uuid::new_v4().to_string();
+    let waiter = waiting(&f, &key).await;
+    let pending = pending_observation(&f, &key).await;
+    for sequence in [-1_i64, 0, i64::MAX] {
+        f.state
+            .db
+            .collection::<Document>("approval_requests")
+            .update_one(
+                doc! {"_id": pending["request_id"].as_str().unwrap()},
+                doc! {"$set": {"execution_proposal.v2.connected_observation": {
+                    "sequence": sequence, "digest": "different-snapshot"
+                }}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(observe_http(&f, &key).await.0, StatusCode::CONFLICT);
+        assert_eq!(
+            v2::proposal(&row(&f).await)
+                .unwrap()
+                .connected_observation
+                .as_ref()
+                .unwrap()
+                .sequence,
+            sequence
+        );
+    }
+    v2::blocking::abandon(
+        &f.state.db,
+        pending["request_id"].as_str().unwrap(),
+        "approval_wait_cancelled",
+    )
+    .await
+    .unwrap();
+    assert!(!waiter.await.unwrap().unwrap().status().is_success());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn connected_observation_default_off_refuses_before_review_or_model_send() {
     let f = Fixture::new("connected_off").await;
     f.enroll(true).await;
@@ -178,6 +346,7 @@ async fn connected_observation_exposes_early_bound_receipt_without_replacing_the
     assert_eq!(observed["decision"], "pending");
     assert_eq!(observed["execution_state"], "pending");
     assert_eq!(observed["effect"], "unclaimed");
+    assert_eq!(observed["observation_sequence"], 1);
     assert_eq!(
         observed["review_path"],
         crate::services::assistant_links::AssistantPage::Approvals.path()
@@ -220,6 +389,7 @@ async fn connected_observation_exposes_early_bound_receipt_without_replacing_the
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
     let completed = observe_http(&f, &key).await.1;
     assert_eq!(completed["effect"], "response_received");
+    assert!(completed["observation_sequence"].as_i64().unwrap() > 1);
     assert_ne!(completed["receipt_revision"], observed["receipt_revision"]);
     assert_eq!(completed["expires_at"], observed["expires_at"]);
     assert_eq!(
@@ -244,6 +414,7 @@ async fn connected_observation_cancel_wins_and_remains_readable_with_producer_di
     let (status, cancelled) = retire(&f, &key, &observed).await;
     assert_eq!(status, StatusCode::OK, "{cancelled}");
     assert_eq!(cancelled["effect"], "not_sent");
+    assert_eq!(cancelled["observation_sequence"], 2);
     assert_eq!(cancelled["failure_code"], "approval_wait_cancelled");
     assert_eq!(cancelled["expires_at"], observed["expires_at"]);
     assert_eq!(retire(&f, &key, &observed).await.1, cancelled);

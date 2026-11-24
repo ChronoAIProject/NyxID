@@ -2,6 +2,7 @@
 use super::*;
 use crate::mw::auth::{AuthMethod, AuthUser};
 use axum::http::HeaderMap;
+use mongodb::options::{ReadConcern, ReadPreference, SelectionCriteria, WriteConcern};
 
 pub(crate) const READINESS: &str = "permissions:connected-approval-v1";
 pub(crate) const HEADER: &str = "x-nyxid-connected-approval";
@@ -104,6 +105,7 @@ pub struct Observation {
     pub operation_key: String,
     pub request_id: String,
     pub provider_operation_id: String,
+    pub observation_sequence: i64,
     pub receipt_revision: String,
     pub created_at: String,
     pub expires_at: String,
@@ -128,6 +130,7 @@ pub(crate) fn view(row: &ApprovalRequest, key: &str) -> AppResult<Observation> {
         operation_key: key.into(),
         request_id: row.id.clone(),
         provider_operation_id: p.effect_id.clone(),
+        observation_sequence: 0,
         receipt_revision: fingerprint(
             &json!({"request":row.id,"revision":p.revision,"state":p.state,"decision":row.status,"expires":row.expires_at,"failure":p.failure_code,"abandoned":p.delivery_abandoned,"claim":p.claim_id}),
         )?,
@@ -162,6 +165,8 @@ async fn load(
         .db
         .collection::<ApprovalRequest>(REQUESTS)
         .find_one(doc! {"execution_proposal.version":2,"execution_proposal.v2.locator":locator})
+        .read_concern(ReadConcern::majority())
+        .selection_criteria(SelectionCriteria::ReadPreference(ReadPreference::Primary))
         .await?
         .ok_or_else(missing)?;
     let p = proposal(&row)?;
@@ -195,7 +200,62 @@ pub(crate) async fn observe(
     auth: &AuthUser,
     key: &str,
 ) -> AppResult<Observation> {
-    view(&load(state, auth, key).await?.0, key)
+    for _ in 0..3 {
+        let (row, _) = load(state, auth, key).await?;
+        if let Some(observation) = record_observation(&state.db, &row, key).await? {
+            return Ok(observation);
+        }
+    }
+    Err(conflict())
+}
+
+pub(in crate::services::execution_permission_dispatch) async fn record_observation(
+    db: &Database,
+    row: &ApprovalRequest,
+    key: &str,
+) -> AppResult<Option<Observation>> {
+    use crate::models::execution_proposal::ConnectedObservation;
+
+    let p = proposal(row)?;
+    let mut observation = view(row, key)?;
+    let digest = fingerprint(&serde_json::to_value(&observation).map_err(encoding)?)?;
+    let sequence = match &p.connected_observation {
+        Some(recorded) if recorded.sequence <= 0 => return Err(conflict()),
+        Some(recorded) if recorded.digest == digest => {
+            observation.observation_sequence = recorded.sequence;
+            return Ok(Some(observation));
+        }
+        Some(recorded) => recorded.sequence.checked_add(1).ok_or_else(conflict)?,
+        None => 1,
+    };
+    // Serialize publication against both other observers and every field in
+    // the receipt. An old read must never assign a new sequence to old state.
+    let filter = doc! {
+        "_id": &row.id,
+        "status": &row.status,
+        "created_at": bson::DateTime::from_chrono(row.created_at),
+        "expires_at": bson::DateTime::from_chrono(row.expires_at),
+        "execution_proposal.version": 2,
+        "execution_proposal.v2.locator": &p.locator,
+        "execution_proposal.v2.effect_id": &p.effect_id,
+        "execution_proposal.v2.revision": p.revision,
+        "execution_proposal.v2.state": &p.state,
+        "execution_proposal.v2.waiter_until": p.waiter_until.map(bson::DateTime::from_chrono),
+        "execution_proposal.v2.failure_code": &p.failure_code,
+        "execution_proposal.v2.delivery_abandoned": p.delivery_abandoned,
+        "execution_proposal.v2.claim_id": &p.claim_id,
+        "execution_proposal.v2.connected_observation": bson::to_bson(&p.connected_observation).map_err(encoding)?,
+    };
+    let recorded = ConnectedObservation { sequence, digest };
+    let changed = db.collection::<Document>(REQUESTS).update_one(
+        filter,
+        doc! {"$set": {"execution_proposal.v2.connected_observation": bson::to_bson(&recorded).map_err(encoding)?}},
+    ).write_concern(WriteConcern::majority()).await?;
+    if changed.matched_count == 0 {
+        return Ok(None);
+    }
+    observation.observation_sequence = sequence;
+    Ok(Some(observation))
 }
 
 #[derive(Deserialize)]
@@ -220,7 +280,7 @@ pub(crate) async fn cancel(
         before.execution_state.as_str(),
         "pending" | "queued" | "preparing" | "waiting"
     ) {
-        return Ok(before);
+        return observe(state, auth, key).await;
     }
     if before.receipt_revision != expected.receipt_revision {
         return Err(conflict());

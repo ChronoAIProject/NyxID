@@ -320,6 +320,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         })
         .collect::<AppResult<Vec<_>>>()?;
     let p = ProposalV2 {
+        connected_observation: None,
         background_allowed,
         waiter_until: (!background_allowed).then_some(end),
         source,
