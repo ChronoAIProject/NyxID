@@ -311,7 +311,9 @@ guest-only selector.
 
 With adopted Grants and `assistant:guest-operation-scopes` available to the
 acting administrator, use an explicit **empty guest operation selection** for
-the Workspace connection. A specialist grant with no guest level defaults to
+the Workspace connection. Before enabling authoring, verify that every serving
+replica can enforce guest operation scopes. Saved limits remain active when
+authoring is disabled. A specialist grant with no guest level defaults to
 `use`, and no operation selection means all eligible operations. Grant the
 standalone `api-google-sheets` connection at `use` for guests. Check the
 channel's effective guest services and guest tool discovery. This replaces the
@@ -319,10 +321,15 @@ guest's Workspace access with Sheets operations while preserving the owner's
 Workspace grant and policy. Guests lose the Drive, Gmail, Calendar and other
 operations they previously accessed through that Workspace connection.
 
-If guest operation authoring is unavailable, use a separate guest-facing
-specialist granted only the standalone Sheets connection. Keep Workspace on
-the owner specialist. Review the guest-facing specialist's effective Grants
-before exposing it on a channel.
+If guest operation authoring is unavailable, a separate guest-facing specialist
+can hold only the standalone Sheets grant. This fallback is documented here.
+The fixture exercises the empty guest operation selection on the existing
+specialist. A channel has one bound specialist for all senders, so rebinding
+also moves owner, admin and member channel turns to the Sheets-only specialist.
+Continue owner Workspace work through the original specialist elsewhere.
+Changing the bound specialist resets sender verification and guest service
+authority. Re-verify the senders who need member or owner access and review
+the effective guest Grants for the new binding before relying on it.
 
 On the separate Sheets catalog, set the explicit default `require_approval`
 for unmatched operations. The fixture auto-allows `GET` reads and the exact
