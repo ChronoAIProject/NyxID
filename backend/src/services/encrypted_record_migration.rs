@@ -50,6 +50,7 @@ enum Adapter {
     ChannelReceiver,
     OracleLoginOuter,
     Broker,
+    OAuthWebhook,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -272,7 +273,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "oauth_clients",
-        adapter: Adapter::Pending,
+        adapter: Adapter::OAuthWebhook,
         fields: &[
             "revocation_webhook_secret_encrypted",
             "connection_webhook_secret_encrypted",
@@ -570,6 +571,9 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
+        Some(previous_labels::RECONCILED_DIGEST) => {
+            project_labels(&row, previous_labels::reconciled())?
+        }
         Some(previous_labels::DIGEST) => {
             project_labels(&row, previous_labels::LABELS.iter().copied())?
         }
@@ -759,6 +763,7 @@ async fn verify(
             super::oracle_login_record_service::verify_current_snapshot(keys, entry.collection, row)
                 .await
         }
+        Adapter::OAuthWebhook => super::oauth_client_webhook_record::verify(keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::verify_current_snapshot(keys, row).await
         }
@@ -866,6 +871,7 @@ async fn migrate(
             super::oracle_login_record_service::migrate_snapshot(db, keys, entry.collection, row)
                 .await
         }
+        Adapter::OAuthWebhook => super::oauth_client_webhook_record::migrate(db, keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::migrate_snapshot(db, keys, row).await
         }
@@ -1377,6 +1383,8 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 #[cfg(test)]
 mod tests {
     mod registry;
+    mod swaps;
+    mod webhooks;
 
     use super::*;
     use crate::crypto::{
@@ -1829,3 +1837,7 @@ mod tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "encrypted_record_migration/tests/mixed_webhooks.rs"]
+mod mixed_webhooks;

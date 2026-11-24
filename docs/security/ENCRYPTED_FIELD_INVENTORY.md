@@ -58,7 +58,7 @@ A collection may use separate adapters for different fields.
 | `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload` | — | Pending |
 | `mobile_social_deliveries` | `ciphertext` | — | Pending |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
-| `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | — | Pending |
+| `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
 | `oracle_login_profiles` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `oracle_login_snapshots` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `platform_entry_gateway_transports` | `request_ciphertext` | — | Pending |
@@ -76,6 +76,13 @@ A collection may use separate adapters for different fields.
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | — | Pending |
 | `channel_meta_oauth_sessions` | `assets_encrypted` | — | Pending |
+
+OAuth client webhook signing keys use the registration ID, the persisted creator
+and a separate field path for each webhook. System, dynamic and ownerless
+registrations have distinct scopes. Compatible writers preserve legacy binary
+storage. Contextual writers set the replaced field’s version atomically, and
+disabling the connection webhook clears its material and marker. The migration
+compares the exact observed client document before replacing stored material.
 
 ### Production storage for Pending fields
 
@@ -201,7 +208,7 @@ reported separately from authenticated ciphertext.
 
 After all serving replicas upgrade, start a fresh verification generation.
 Status uses the stored registry digest to select field and collection labels.
-For the previous registry it reports the original spellings and positions.
+For the two known previous registries it reports their original spellings and positions.
 An unknown or missing digest returns aggregate totals, the mismatch blocker,
 a null current collection and an empty field list. Resume, rewrap and finding
 resolution require the live registry contract.

@@ -81,6 +81,16 @@ fn previous_labels_match_the_ordered_base_registry() {
 }
 
 #[test]
+fn reconciled_labels_match_the_2896_registry() {
+    use sha2::{Digest, Sha256};
+    let labels: Vec<_> = previous_labels::reconciled().collect();
+    assert_eq!(
+        hex::encode(Sha256::digest(serde_json::to_vec(&labels).unwrap())),
+        "9352caebc6856a8ae5f3ccb930dec0ae47ebb42ab5bd94339f06569c392ed674"
+    );
+}
+
+#[test]
 fn registered_paths_match_stored_material_and_the_documented_inventory() {
     let inventory = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -187,6 +197,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     for digest in [
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
+        Some(previous_labels::RECONCILED_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -224,7 +235,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 "target_ciphertext",
                 "delivery_credential_encrypted",
             )),
-            Some(value) if value == live => Some((
+            Some(value) if value == live || value == previous_labels::RECONCILED_DIGEST => Some((
                 "mobile_social_deliveries",
                 "ciphertext",
                 "agent_key_grant.delivery_credential_encrypted",
