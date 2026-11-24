@@ -1475,6 +1475,12 @@ async fn shared_turn_erases_real_cards_and_bindings_and_refuses_late_publication
     };
     let card = acks::request(db, &chat, request()).await.unwrap();
     assert_eq!(card.creation_turn_id.as_deref(), Some(turn.as_str()));
+    let notification = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"kind":"needs_decision",
+    "source":{"card_id":&card.id,"conversation_id":&row.id,"turn_id":"different-creation-turn"}};
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .insert_one(&notification)
+        .await
+        .unwrap();
     let binding = doc! {"kind":"card_binding","user_id":&f.bot.user_id,"conversation_id":&row.id,
     "api_key_id":&chat.api_key_id,"turn_id":turn,"operation":{"private":"binding"}};
     execution::publish_card_binding(db, &chat, &card.id, binding.clone())
@@ -1510,6 +1516,13 @@ async fn shared_turn_erases_real_cards_and_bindings_and_refuses_late_publication
     }
     assert_eq!(progress.get_i32("phase"), Ok(7));
     assert!(
+        db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+            .find_one(doc! {"_id":notification.get("_id").cloned()})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
         db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
             .find_one(doc! {"_id":&card.id})
             .await
@@ -1537,6 +1550,61 @@ async fn shared_turn_erases_real_cards_and_bindings_and_refuses_late_publication
             .is_err()
     );
     assert!(acks::request(db, &chat, request()).await.is_err());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn contradictory_setup_link_proofs_remain_pending_in_both_deletion_orders() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    let a = scopes::reference(&f.bot).unwrap();
+    let mut b = a.clone();
+    b.grant_id = uuid::Uuid::new_v4().to_string();
+    let mut b_scope = f.scope.clone();
+    b_scope.insert("grant_id", &b.grant_id);
+    let rows = db.collection::<Document>(crate::models::channel_connect_link::COLLECTION_NAME);
+    for proof in [&a, &b] {
+        let connection = if proof == &a {
+            &b.grant_id
+        } else {
+            &a.grant_id
+        };
+        let link = doc! {"_id":uuid::Uuid::new_v4().to_string(),"bot_id":&f.bot.id,"flow":"meta_oauth",
+        "connection_id":connection,"meta_grant":bson::to_bson(proof).unwrap()};
+        rows.insert_one(&link).await.unwrap();
+        for scope in [&f.scope, &b_scope] {
+            let grant = scope.get_str("grant_id").unwrap();
+            let filter = setup_links(&f.bot.id, grant);
+            assert!(
+                transaction_service::run_db_only(
+                    db,
+                    &(db, scope, &filter),
+                    |tx, &(db, scope, filter)| {
+                        Box::pin(erase_page(
+                            db,
+                            tx,
+                            scope,
+                            crate::models::channel_connect_link::COLLECTION_NAME,
+                            filter.clone(),
+                            17,
+                        ))
+                    }
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                rows.find_one(doc! {"_id":link.get("_id").cloned()})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                link
+            );
+        }
+        rows.delete_one(doc! {"_id":link.get("_id").cloned()})
+            .await
+            .unwrap();
+    }
     db.drop().await.unwrap();
 }
 
