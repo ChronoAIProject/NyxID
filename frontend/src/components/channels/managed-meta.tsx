@@ -44,19 +44,33 @@ function MetaConnectForm({
 }) {
   const { t } = useUiTranslation();
   const [sessionId, setSessionId] = useState<string | null>(() => {
+    if (link) return link.connectionId ?? null;
     try {
-      return link?.connectionId ?? sessionStorage.getItem(storageKey);
+      return sessionStorage.getItem(storageKey);
     } catch {
-      return link?.connectionId ?? null;
+      return null;
     }
   });
   const [selected, setSelected] = useState("");
   const [exclusive, setExclusive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [popupClosed, setPopupClosed] = useState(false);
+  const [observedLinkSession, setObservedLinkSession] = useState(link?.connectionId);
   const popup = useRef<Window | null>(null);
+  const popupSession = useRef<string | null>(null);
   const mounted = useRef(false);
+  const activeSession = useRef(sessionId);
   const connection = useMetaConnection(platform, sessionId);
+  if (observedLinkSession !== link?.connectionId) {
+    setObservedLinkSession(link?.connectionId);
+    if (sessionId !== (link?.connectionId ?? null)) {
+      setSessionId(link?.connectionId ?? null);
+      setSelected("");
+      setExclusive(false);
+      setPopupClosed(false);
+      setError(null);
+    }
+  }
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -64,6 +78,9 @@ function MetaConnectForm({
       popup.current?.close();
     };
   }, []);
+  useEffect(() => {
+    activeSession.current = sessionId;
+  }, [sessionId]);
   useEffect(() => {
     try {
       if (sessionId) sessionStorage.setItem(storageKey, sessionId);
@@ -75,16 +92,20 @@ function MetaConnectForm({
   useEffect(() => {
     if (!sessionId || connection.progress.data?.status !== "pending") return;
     const timer = window.setInterval(() => {
-      if (popup.current?.closed) setPopupClosed(true);
+      if (popupSession.current === sessionId && popup.current?.closed) setPopupClosed(true);
     }, 1000);
     return () => window.clearInterval(timer);
   }, [sessionId, connection.progress.data?.status]);
   useEffect(() => {
-    if (connection.progress.data?.status === "assets") popup.current?.close();
-  }, [connection.progress.data?.status]);
+    if (popupSession.current === sessionId && connection.progress.data?.status === "assets")
+      popup.current?.close();
+  }, [connection.progress.data?.status, sessionId]);
 
   async function start() {
     setError(null);
+    setSelected("");
+    setExclusive(false);
+    popupSession.current = null;
     popup.current = window.open(
       "about:blank",
       "nyxid-meta-consent",
@@ -104,12 +125,18 @@ function MetaConnectForm({
         setup_token: link?.token,
       });
       if (!mounted.current) return;
+      if (link && activeSession.current !== sessionId && activeSession.current !== result.session_id) {
+        popup.current.close();
+        void link.refresh();
+        return;
+      }
+      popupSession.current = result.session_id;
       setSessionId(result.session_id);
       setPopupClosed(false);
-      setSelected("");
-      setExclusive(false);
       popup.current.location.href = result.authorization_url;
+      void link?.refresh();
     } catch (failure) {
+      if (!mounted.current) return;
       popup.current.close();
       setError(
         failure instanceof Error
@@ -125,9 +152,9 @@ function MetaConnectForm({
         asset_id: assetId,
         exclusive_routing_verified: confirmed,
       });
-      if (!mounted.current) return;
+      if (!mounted.current || activeSession.current !== sessionId) return;
       await link?.refresh();
-      if (!mounted.current) return;
+      if (!mounted.current || activeSession.current !== sessionId) return;
       if (result.status === "suspended") {
         await connection.progress.refetch();
         return;
@@ -140,7 +167,7 @@ function MetaConnectForm({
         webhook_secret_label: null,
       } as CreateChannelBotResponse);
     } catch (failure) {
-      if (!mounted.current) return;
+      if (!mounted.current || activeSession.current !== sessionId) return;
       setError(
         failure instanceof Error
           ? failure.message
@@ -179,6 +206,7 @@ function MetaConnectForm({
       {progress?.status === "pending" && (
         <Button
           type="button"
+          disabled={connection.start.isPending}
           onClick={() => {
             popup.current?.close();
             setSessionId(null);
@@ -215,7 +243,7 @@ function MetaConnectForm({
           <Button
             type="button"
             variant="primary"
-            disabled={connection.finish.isPending}
+            disabled={connection.start.isPending || connection.finish.isPending}
             onClick={() => void finish(retryAsset, true)}
           >
             {t("Retry verification")}
@@ -223,7 +251,7 @@ function MetaConnectForm({
         </div>
       )}
       {progress?.status === "assets" && (
-        <fieldset className="space-y-3">
+        <fieldset className="space-y-3" disabled={connection.start.isPending || connection.finish.isPending}>
           <Label asChild>
             <legend>{t("Select the inbox to connect")}</legend>
           </Label>

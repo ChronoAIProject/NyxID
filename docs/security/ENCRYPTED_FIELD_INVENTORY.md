@@ -20,8 +20,7 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 30 implemented adapters
-and 19 Pending entries. Each row lists the exact BSON paths for one adapter.
+Each row lists the exact BSON paths and migration status for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -208,7 +207,8 @@ reported separately from authenticated ciphertext.
 
 After all serving replicas upgrade, start a fresh verification generation.
 Status uses the stored registry digest to select field and collection labels.
-For the two known previous registries it reports their original spellings and positions.
+For recognized historical registries it reports their original spellings and positions.
+Digests with identical field names and positions share the same label mapping.
 An unknown or missing digest returns aggregate totals, the mismatch blocker,
 a null current collection and an empty field list. Resume, rewrap and finding
 resolution require the live registry contract.
