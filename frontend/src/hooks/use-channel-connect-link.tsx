@@ -1,14 +1,14 @@
 import { createContext, useContext } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import { channelConnectLinkSchema } from "@/schemas/channel-connect-links";
+import { channelConnectLinkSchema, type ChannelConnectLink } from "@/schemas/channel-connect-links";
 
 export const ChannelConnectLinkContext = createContext<{
   token: string;
   id: string;
   telegramRequestId?: string;
   connectionId?: string;
-  refresh: () => Promise<unknown>;
+  refresh: () => Promise<string | null | void>;
 } | null>(null);
 
 export const useChannelConnectLinkContext = () =>
@@ -39,8 +39,14 @@ export function useChannelConnectLink(token: string, actor?: string) {
     retry: false,
     gcTime: 0,
   });
-  const refresh = () =>
-    client.invalidateQueries({ queryKey: ["channel-connect-link"] });
+  const refresh = async () => {
+    await client.invalidateQueries({ queryKey: ["channel-connect-link"] });
+    const current = client.getQueryState<ChannelConnectLink>(key);
+    if (current?.status !== "success" || current.isInvalidated || current.data?.status !== "pending") {
+      return null;
+    }
+    return current.data.connection_id;
+  };
   const action = useMutation({
     mutationFn: async (name: "decline" | "retry") =>
       channelConnectLinkSchema.parse(

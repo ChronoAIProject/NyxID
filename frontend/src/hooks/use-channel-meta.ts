@@ -6,9 +6,11 @@ import {
   metaConnectedSchema,
 } from "@/schemas/channel-meta";
 import { useAuthStore } from "@/stores/auth-store";
+import { useChannelConnectLinkContext } from "./use-channel-connect-link";
 
 export function useMetaConnection(platform: string, sessionId: string | null) {
   const actor = useAuthStore((s) => s.user?.id);
+  const link = useChannelConnectLinkContext();
   const start = useMutation({
     retry: false,
     gcTime: 0,
@@ -17,10 +19,15 @@ export function useMetaConnection(platform: string, sessionId: string | null) {
       target_org_id?: string;
       reconnect_bot_id?: string;
       setup_token?: string;
-    }) =>
-      metaStartedSchema.parse(
+    }) => {
+      const started = metaStartedSchema.parse(
         await api.post(`/channel-bots/meta/${platform}/start`, input),
-      ),
+      );
+      // A poll in this tab can still describe an earlier start from another tab.
+      // Read the tracked link after the server has committed this start.
+      if (link && (await link.refresh()) !== started.session_id) return null;
+      return started;
+    },
   });
   const progress = useQuery({
     queryKey: ["meta-connection", actor, sessionId],

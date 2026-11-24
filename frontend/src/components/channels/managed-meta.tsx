@@ -125,16 +125,14 @@ function MetaConnectForm({
         setup_token: link?.token,
       });
       if (!mounted.current) return;
-      if (link && activeSession.current !== sessionId && activeSession.current !== result.session_id) {
+      if (!result) {
         popup.current.close();
-        void link.refresh();
         return;
       }
       popupSession.current = result.session_id;
       setSessionId(result.session_id);
       setPopupClosed(false);
       popup.current.location.href = result.authorization_url;
-      void link?.refresh();
     } catch (failure) {
       if (!mounted.current) return;
       popup.current.close();
