@@ -4,12 +4,12 @@ use crate::{
     services::{assistant_acknowledgement_service as acks, assistant_nyxagent as engine},
 };
 
-fn context(bot: &ChannelBot) -> ChannelTurnContext {
+pub(super) fn context(bot: &ChannelBot) -> ChannelTurnContext {
     bson::from_document(doc! {"meta_grant":bson::to_bson(&scopes::reference(bot).unwrap()).unwrap(),
         "source_event_id":uuid::Uuid::new_v4().to_string(),"channel_id":uuid::Uuid::new_v4().to_string(),"channel_bot_id":&bot.id,
         "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true}).unwrap()
 }
-async fn begin(
+pub(super) async fn begin(
     f: &Fixture,
     home: Option<&str>,
     meta: Option<ChannelTurnContext>,

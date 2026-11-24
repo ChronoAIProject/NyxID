@@ -7,6 +7,9 @@ use crate::{
 #[path = "channel_meta_card_source_tests.rs"]
 mod card_sources;
 
+#[path = "channel_meta_async_lifecycle_tests.rs"]
+mod async_lifecycle;
+
 struct Fixture {
     state: crate::AppState,
     bot: ChannelBot,
@@ -1793,7 +1796,7 @@ async fn async_result_inherits_original_grant_through_reserve_queue_input_reply_
         )
         .await
         .unwrap();
-    assert!(watches::enqueue(db, &meta_ready.unwrap()).await.is_err());
+    assert!(!watches::enqueue(db, &meta_ready.unwrap()).await.unwrap());
     let mut progress = Document::new();
     for _ in 0..32 {
         let step = transaction_service::run_db_only(

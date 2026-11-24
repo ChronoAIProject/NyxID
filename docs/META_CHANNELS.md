@@ -423,6 +423,15 @@ provenance after the inbound event or encrypted result expires. These fields
 follow the watch's existing retention, and scoped cleanup cancels and drains
 any remaining exact watches before completion. Web watches keep empty Meta
 provenance and preserve their ordinary behavior.
+For a Meta watch, a positively established generation change, grant closure or
+delivery expiry ends local result delivery, releases watch quota and removes
+only that watch's queued result/approval events. The terminal reason distinguishes
+authority loss, timeout and result expiry. This does not assert that the remote
+operation was cancelled. Queued Meta watches remain in the bounded polling
+inventory until admitted or retired. Database read failures and unresolved
+scope proof keep the encrypted result for retry or verified repair; they do
+not become evidence of authority loss. Ordinary web-watch delivery keeps its
+existing lifecycle.
 
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved
