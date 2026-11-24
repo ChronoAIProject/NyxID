@@ -108,12 +108,12 @@ pub(crate) async fn meta_default_matches(
         return Ok(false);
     }
     let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
-    let key = db
-        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
-        .find_one(
-            doc! {"_id": &row.route_api_key_id, "user_id": owner, "is_active": true,
-            "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}},
-        );
+    let keys =
+        db.collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME);
+    let key = keys.find_one(
+        doc! {"_id": &row.route_api_key_id, "user_id": owner, "is_active": true,
+        "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}},
+    );
     let key = if let Some(tx) = tx.as_deref_mut() {
         key.session(tx).await?
     } else {
@@ -126,10 +126,8 @@ pub(crate) async fn meta_default_matches(
         return Ok(false);
     }
     if let Some(id) = &row.agent_api_key_id {
-        let agent = db
-            .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
-            .find_one(doc! {"_id": id, "user_id": &row.user_id, "is_active": true,
-            "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}});
+        let agent = keys.find_one(doc! {"_id": id, "user_id": &row.user_id, "is_active": true,
+        "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}});
         let agent = if let Some(tx) = tx.as_deref_mut() {
             agent.session(tx).await?
         } else {
@@ -145,8 +143,9 @@ pub(crate) async fn meta_default_matches(
     let Some(route) = row.route_id.as_deref() else {
         return Ok(false);
     };
-    let found = db
-        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+    let routes =
+        db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME);
+    let found = routes
         .find_one(
             doc! {"_id": route, "user_id": owner, "channel_bot_id": &row.channel_bot_id,
             "platform": &row.platform, "is_active": true, "default_agent": true,

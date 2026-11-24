@@ -660,6 +660,14 @@ mod tests {
         }
     }
 
+    fn query_counter(stats: &Document, name: &str) -> i64 {
+        match stats.get(name).unwrap() {
+            bson::Bson::Int32(value) => i64::from(*value),
+            bson::Bson::Int64(value) => *value,
+            _ => panic!("unexpected query-plan counter"),
+        }
+    }
+
     #[tokio::test]
     async fn legacy_erasure_uses_bounded_source_batches_and_parented_plans_need_no_source_scan() {
         let (state, _, _server, bot) = fixture("instagram").await;
@@ -716,6 +724,19 @@ mod tests {
         plans.insert_many(parented).await.unwrap();
         messages.insert_many(sources).await.unwrap();
         let (db, commands) = super::super::durable_wake_tests::monitored(&state.db).await;
+        let empty = state
+            .db
+            .run_command(doc! {
+                "explain": {"find": crate::models::channel_text_delivery::COLLECTION_NAME,
+                    "filter": {"user_id": {"$in": [&bot.user_id]}, "channel_bot_id": null},
+                    "sort": {"_id": 1}, "projection": attribution_fields(), "limit": 100},
+                "verbosity": "executionStats",
+            })
+            .await
+            .unwrap();
+        let stats = empty.get_document("executionStats").unwrap();
+        assert_eq!(query_counter(stats, "nReturned"), 0);
+        assert_eq!(query_counter(stats, "totalDocsExamined"), 0);
         erase_legacy(&db, &bot).await.unwrap();
         let observed = super::super::durable_wake_tests::take(&commands);
         assert_eq!(
@@ -769,27 +790,48 @@ mod tests {
             .insert_many(receipts)
             .await
             .unwrap();
-        let explanation = state.db.run_command(doc! {
-            "explain": {"find": crate::models::channel_text_delivery::COLLECTION_NAME,
-                "filter": {"user_id": {"$in": [&bot.user_id]}, "channel_bot_id": null, "_id": {"$gt": ""}},
-                "sort": {"_id": 1}, "projection": attribution_fields(), "limit": 100,
-                "hint": {"user_id": 1, "channel_bot_id": 1, "_id": 1}},
-            "verbosity": "executionStats",
-        }).await.unwrap();
-        let stats = explanation.get_document("executionStats").unwrap();
-        let metric = |name| match stats.get(name).unwrap() {
-            bson::Bson::Int32(value) => i64::from(*value),
-            bson::Bson::Int64(value) => *value,
-            _ => panic!("unexpected query-plan counter"),
-        };
-        assert_eq!(metric("nReturned"), 100);
-        assert!(metric("totalDocsExamined") <= 100);
-        assert!(metric("totalKeysExamined") <= 101);
-        eprintln!(
-            "legacy attribution page: 100 returned, {} documents and {} index keys examined",
-            metric("totalDocsExamined"),
-            metric("totalKeysExamined")
-        );
+        // Match production's unhinted first and continuation pages, including
+        // its attribution-only projection. A forced hint would hide bad plans.
+        let mut after = None;
+        for page in 0..2 {
+            let mut filter = doc! {"user_id": {"$in": [&bot.user_id]}, "channel_bot_id": null};
+            if let Some(id) = &after {
+                filter.insert("_id", doc! {"$gt": id});
+            }
+            let explanation = state
+                .db
+                .run_command(doc! {
+                    "explain": {"find": crate::models::channel_text_delivery::COLLECTION_NAME,
+                        "filter": filter.clone(), "sort": {"_id": 1},
+                        "projection": attribution_fields(), "limit": 100},
+                    "verbosity": "executionStats",
+                })
+                .await
+                .unwrap();
+            let stats = explanation.get_document("executionStats").unwrap();
+            let metric = |name| query_counter(stats, name);
+            assert_eq!(metric("nReturned"), 100);
+            assert!(metric("totalDocsExamined") <= 100, "page {page}: {stats:?}");
+            assert!(metric("totalKeysExamined") <= 101, "page {page}: {stats:?}");
+            // An equally bounded _id plan is valid when every visited row
+            // matches. Verify observed work, not one optimizer's plan name.
+            eprintln!(
+                "unhinted legacy attribution page {page}: 100 returned, {} documents and {} index keys examined",
+                metric("totalDocsExamined"),
+                metric("totalKeysExamined")
+            );
+            let actual: Vec<Document> = plans
+                .find(filter)
+                .projection(attribution_fields())
+                .sort(doc! {"_id": 1})
+                .limit(100)
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            after = Some(actual.last().unwrap().get_str("_id").unwrap().to_owned());
+        }
         erase_legacy(&db, &bot).await.unwrap();
         let observed = super::super::durable_wake_tests::take(&commands);
         assert_eq!(
