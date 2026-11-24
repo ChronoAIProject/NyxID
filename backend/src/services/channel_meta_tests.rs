@@ -6416,6 +6416,26 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
             .unwrap(),
         owner_home
     );
+    state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id": &current.id},
+            doc! {"$set":{"last_message_id":"newer-same-grant-message"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scopes::bind_thread_conversation(&state.db, &b_ref, &current, Some(&owner_home))
+            .await
+            .unwrap(),
+        owner_home
+    );
+    assert!(
+        scopes::bind_thread_conversation(&state.db, &b_ref, &current, Some("a-different-home"))
+            .await
+            .is_err()
+    );
     for destination in [None, Some(old_session.as_str())] {
         assert!(
             scopes::bind_thread_conversation(&state.db, &a_ref, &thread, destination)
@@ -8268,4 +8288,88 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
                 .is_some()
         );
     }
+}
+
+#[tokio::test]
+async fn meta_owner_turns_keep_neutral_titles_and_reclaimed_replies_retain_their_grant() {
+    use crate::models::assistant_conversation::{ChannelTurnContext, TurnOrigin};
+    use crate::services::{assistant_nyxagent as engine, assistant_team_service as team};
+
+    let (state, adapter, _server, bot, key) = scoped_reply_fixture().await;
+    let source = admit_page_message(
+        &state,
+        &adapter,
+        &bot,
+        &key,
+        "mid.first-owner-turn",
+        "fixture-token",
+    )
+    .await;
+    let grant = scopes::reference(&bot).unwrap();
+    let context: ChannelTurnContext = bson::from_document(doc! {
+        "meta_grant":bson::to_bson(&grant).unwrap(), "source_event_id":&source.id,
+        "channel_id":"owner-inbox","channel_bot_id":&bot.id,
+        "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true,
+    })
+    .unwrap();
+    let request = |conversation: Option<&str>, text: &str| -> engine::TurnRequest {
+        serde_json::from_value(json!({"conversation_id":conversation,"text":text})).unwrap()
+    };
+    let mut first = engine::TurnStart::from(&request(None, "Private details from the owner"));
+    first.origin = TurnOrigin::Channel;
+    first.channel_context = Some(context.clone());
+    let home = engine::begin_turn(&state.db, &bot.user_id, first, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(home.title, "New chat");
+    let lost = &home.active_turn.as_ref().unwrap().turn_id;
+    let conversations = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    conversations.update_one(doc! {"_id":&home.id,"active_turn.turn_id":lost}, doc! {"$set":{
+        "active_turn.lease_expires_at":bson::DateTime::from_millis(1),
+        "active_turn.reply":{"message_id":"partial","block_id":"text","cursor":1,"text":"Private partial answer"},
+        "title":"Owner rename",
+    }}).await.unwrap();
+    let notice = team::event("action_denied", "Independent system notice".into(), None);
+    engine::push_events(&state.db, &bot.user_id, &home.id, vec![notice.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next = engine::TurnStart::from(&request(Some(&home.id), "Second inbox question"));
+    next.origin = TurnOrigin::Channel;
+    next.channel_context = Some(context);
+    let current = engine::begin_turn(&state.db, &bot.user_id, next, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(current.title, "Owner rename");
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.id == notice.id)
+    );
+    assert!(
+        current
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| event.id != notice.id)
+    );
+    let messages = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    let reply = messages
+        .find_one(doc! {"conversation_id":&home.id,"turn_id":lost,"role":"assistant"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.get_str("text"), Ok("Private partial answer"));
+    assert_eq!(
+        reply.get_array("meta_grants").unwrap(),
+        &vec![bson::to_bson(&grant).unwrap()]
+    );
+    state.db.drop().await.unwrap();
 }
