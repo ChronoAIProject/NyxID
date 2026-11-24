@@ -86,7 +86,11 @@ async fn send_reply_inner(
     {
         return Err(ReplyError::target(unavailable()));
     }
-    let components = components(reply, adapter.platform_id())?;
+    let components = components(
+        reply,
+        adapter.platform_id(),
+        matches!(&authority, ReplyAuthority::Bound),
+    )?;
     let http = resolution::client()?;
     let mut result = ThreadDelivery {
         message_ids: Vec::new(),
@@ -304,7 +308,11 @@ async fn validate_target(
     Ok(())
 }
 
-fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundReply>> {
+fn components(
+    reply: &OutboundReply,
+    platform: &str,
+    allow_pre_rendered: bool,
+) -> AppResult<Vec<OutboundReply>> {
     if reply.attachments.len() > 64 {
         return Err(unavailable());
     }
@@ -327,10 +335,17 @@ fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundRe
         }
         Ok(())
     };
-    push_text(
-        reply.text.as_deref().unwrap_or_default(),
-        reply.metadata.clone(),
-    )?;
+    let mut metadata = reply.metadata.clone();
+    // Only NyxID-owned callers can pass parts rendered before thread delivery.
+    // Public callers can ask this planner to render their CommonMark here.
+    if !allow_pre_rendered
+        && matches!(platform, "telegram" | "telegram-new")
+        && let Some(object) = metadata.as_mut().and_then(serde_json::Value::as_object_mut)
+        && object.get("text_format").and_then(serde_json::Value::as_str) == Some("telegram_entities")
+    {
+        object.remove("text_format");
+    }
+    push_text(reply.text.as_deref().unwrap_or_default(), metadata)?;
     for attachment in &reply.attachments {
         if let Some(caption) = &attachment.caption {
             push_text(caption, None)?;
@@ -361,6 +376,10 @@ fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundRe
 }
 
 #[cfg(test)]
+#[path = "telegram_formatting_tests.rs"]
+mod telegram_formatting_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -379,7 +398,7 @@ mod tests {
             "{}\n\n[Event details](https://example.com/events/agent-meetup)",
             "活动安排。".repeat(500)
         );
-        let parts = components(&reply(text.clone()), "lark").unwrap();
+        let parts = components(&reply(text.clone()), "lark", false).unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].text.as_deref(), Some(text.as_str()));
     }
@@ -387,7 +406,7 @@ mod tests {
     #[test]
     fn lark_parts_fit_serialized_content_even_with_json_escaping() {
         let text = "\"\\\n\t\u{01}🦉活动".repeat(4000);
-        let parts = components(&reply(text.clone()), "lark").unwrap();
+        let parts = components(&reply(text.clone()), "lark", false).unwrap();
         assert!(parts.len() > 1);
         let mut reassembled = String::new();
         for part in parts {
@@ -399,7 +418,7 @@ mod tests {
     }
 
     fn assert_malformed_components(reply: &OutboundReply, expected_code: u32) {
-        let failure = ReplyError::from(components(reply, "telegram").err().unwrap());
+        let failure = ReplyError::from(components(reply, "telegram", false).err().unwrap());
         assert_eq!(failure.error.error_code(), expected_code);
         if expected_code == 10011 {
             assert_eq!(
