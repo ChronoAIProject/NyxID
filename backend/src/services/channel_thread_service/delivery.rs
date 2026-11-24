@@ -342,7 +342,10 @@ fn components(
     if !allow_pre_rendered
         && telegram
         && let Some(object) = metadata.as_mut().and_then(serde_json::Value::as_object_mut)
-        && object.get("text_format").and_then(serde_json::Value::as_str) == Some("telegram_entities")
+        && object
+            .get("text_format")
+            .and_then(serde_json::Value::as_str)
+            == Some("telegram_entities")
     {
         object.remove("text_format");
     }
