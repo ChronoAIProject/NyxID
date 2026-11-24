@@ -48,7 +48,7 @@ A collection may use separate adapters for different fields.
 | `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | — | Pending |
+| `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | [channel_bot_record.rs](../../backend/src/services/channel_bot_record.rs) | Implemented |
 | `channel_connect_links` | `receiver.secret_encrypted` | [channel_connect_link_service.rs](../../backend/src/services/channel_connect_link_service.rs) | Implemented |
 | `downstream_services` | `credential_encrypted` | [catalog_credential_record_service.rs](../../backend/src/services/catalog_credential_record_service.rs) | Implemented |
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
@@ -83,20 +83,25 @@ storage. Contextual writers set the replaced field’s version atomically, and
 disabling the connection webhook clears its material and marker. The migration
 compares the exact observed client document before replacing stored material.
 
-### Production storage for Pending fields
+Channel bot writers bind each local credential to its bot ID, owner and field when
+contextual writes are enabled. The adapter verifies the six fields and preserves
+verification, native-entry, Discord resume and Aurinko pins across storage rewrites.
+Telegram manager, connection-backed and exactly revoked/removed Meta bots can
+retain an unmarked empty local token. The adapter preserves that retired sentinel;
+strict readers never interpret it as a contextual envelope. Shared signing
+producers prepare their dependent bots before rewrap. A real replacement starts a
+new field generation. Owner transfer rebinds local credentials and retires the old
+generations in the transaction that moves the bot and its routes.
+Meta manual credential PATCH, OAuth installation/reconnect and confirmed
+Instagram refresh use this same record writer. Disconnect and signed
+deauthorization retire only the captured current grant's token, clear its
+decoder marker and advance its credential generation. Meta's grant/owner
+transaction also owns the raw BSON credential write and any newly captured
+shared signer fence. Storage rewrap preserves the retained logical pins;
+transfer authenticates and rebinds the current transaction's source row.
+[Bot record adapter](../../backend/src/services/channel_bot_record.rs) · [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
 
-- A bot-local storage rewrite retains its verification, native-entry, Discord resume
-  and Aurinko subscription fingerprints for the same credential generation. The
-  producer authenticates each retained value and its dependencies. A real replacement
-  invalidates the affected pins. Lifecycle previews compare physical snapshots.
-  Migrations of shared signing credentials used by a channel bot record a blocked
-  finding until the shared producer can prepare its dependants.
-  [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
-- Channel bot registration and delivery readers select each local credential by bot ID,
-  owner and stored field version. The writers still emit the historical format in both
-  writer modes, so serving these rows requires legacy reads. The registry entry stays
-  Pending through the reader rollout.
-  [Channel bot field reader](../../backend/src/services/channel_registration.rs)
+### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response. CMA
   sandbox recovery opens the sandbox request and checks the creation’s request
@@ -145,8 +150,7 @@ version-map validation and exact-source migration stay in services.
   mutation. SSH CA context remains platform/service/public-key bound across
   owner transfer.
 - Fields bound to an owner must authenticate and re-encrypt for the new owner
-  in the same fenced transfer transaction. This remains required follow-up work
-  for the pending channel bot family. Oracle pool transfer must preserve the
+  in the same fenced transfer transaction. Oracle pool transfer must preserve the
   established pool-bound outer envelope contract.
 - Oracle profile and snapshot adapters authenticate and rewrap only the outer
   server envelope, preserving their established pool/profile/generation/revision

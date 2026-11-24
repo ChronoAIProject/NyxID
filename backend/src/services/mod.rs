@@ -78,6 +78,7 @@ pub mod channel_adapters;
 pub mod channel_admission_service;
 pub mod channel_billing_service;
 pub mod channel_bot_health;
+pub(crate) mod channel_bot_record;
 pub mod channel_bot_service;
 pub mod channel_bot_turn_service;
 pub mod channel_capability;

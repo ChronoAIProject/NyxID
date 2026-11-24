@@ -572,10 +572,9 @@ async fn manual_token_replacement_repairs_grant_but_preserves_operator_hold() {
     .await
     .unwrap();
     server.verify().await;
-    assert!(
-        !updated
-            .secret_context_versions
-            .contains_key("bot_token_encrypted")
+    assert_eq!(
+        updated.secret_context_versions.get("bot_token_encrypted"),
+        Some(&3)
     );
     assert_eq!(
         channel_bot_service::decrypt_bot_token(&state.encryption_keys, &updated)
@@ -662,10 +661,9 @@ async fn manual_signing_secret_patch_does_not_repair_failed_grant() {
     )
     .await
     .unwrap();
-    assert!(
-        !updated
-            .secret_context_versions
-            .contains_key("app_secret_encrypted")
+    assert_eq!(
+        updated.secret_context_versions.get("app_secret_encrypted"),
+        Some(&3)
     );
     assert_eq!(
         updated.secret_context_versions.get("bot_token_encrypted"),
@@ -2173,6 +2171,7 @@ async fn prepared_meta_credentials_transfer_before_and_after_signed_deauthorizat
             doc! {"$set": {
                 "credential_source":"platform",
                 secret: binary(keys.encrypt(b"webhook-secret").await.unwrap()),
+                "webhook_secret_hash":fingerprint("webhook-secret"),
             }},
         )
         .await
@@ -2596,10 +2595,9 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
             .unwrap(),
         before
     );
-    assert!(
-        !fresh
-            .secret_context_versions
-            .contains_key("bot_token_encrypted")
+    assert_eq!(
+        fresh.secret_context_versions.get("bot_token_encrypted"),
+        Some(&3)
     );
     assert!(
         fresh.meta_binding.as_ref().unwrap().expires_at.unwrap() > Utc::now() + Duration::days(59)
@@ -3331,10 +3329,9 @@ async fn operator_hold_and_deauthorization_preserve_both_repair_states_in_either
             .finish(&bot.user_id, &started.session_id, "777", true)
             .await
             .unwrap();
-        assert!(
-            !repaired
-                .secret_context_versions
-                .contains_key("bot_token_encrypted")
+        assert_eq!(
+            repaired.secret_context_versions.get("bot_token_encrypted"),
+            Some(&3)
         );
         assert_eq!(super::super::channel_bot_service::decrypt_bot_token(
             &state.encryption_keys, &repaired,

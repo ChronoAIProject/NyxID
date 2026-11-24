@@ -770,25 +770,6 @@ pub async fn transfer_with_keys(
         }
         // SSH CA authority is platform/service-bound and does not change owner.
         Some((source, set))
-    } else if kind == ResourceKind::ChannelBot {
-        let source = db
-            .collection::<Document>(BOTS)
-            .find_one(doc! {"_id": &resource_id, "is_active": true})
-            .await?
-            .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
-        let bot: ChannelBot = bson::from_document(source.clone())
-            .map_err(|_| AppError::Internal("Invalid channel transfer storage".into()))?;
-        let rebound = if bot.credential_continuity.is_some() {
-            super::channel_credential_continuity::transfer(&bot, &destination, keys).await?
-        } else if bot.secret_context_versions.is_empty() {
-            Document::new()
-        } else {
-            let keys = keys.ok_or_else(|| {
-                AppError::Conflict("Credential encryption is required for this transfer".into())
-            })?;
-            super::channel_registration::rebind_marked_owner(keys, &bot, &destination).await?
-        };
-        Some((source, rebound))
     } else {
         None
     };
@@ -981,6 +962,17 @@ pub async fn transfer_with_keys(
                     "user_id"
                 }
             };
+            let credential_rebind = if kind == ResourceKind::ChannelBot {
+                let source = db.collection::<Document>(BOTS)
+                    .find_one(doc! {"_id":&resource_id, "user_id":&reviewed.previous_owner_user_id, "is_active":true})
+                    .session(&mut **transaction).await?
+                    .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
+                let bot = super::channel_bot_record::decode(&source)?;
+                let set = super::channel_credential_continuity::transfer(&bot, &destination, keys).await?;
+                Some((source, set))
+            } else {
+                credential_rebind
+            };
             let mut set = doc! { "updated_at": now };
             set.insert(owner_field, &destination);
             if let Some((_, rebound)) = &credential_rebind {
@@ -1013,11 +1005,7 @@ pub async fn transfer_with_keys(
                 }
             }
             if let Some((source, _)) = &credential_rebind {
-                let mut exact = if kind == ResourceKind::ChannelBot {
-                    super::channel_registration::transfer_source_predicate(source)
-                } else {
-                    super::record_storage::exact_document_predicate(source)
-                };
+                let mut exact = super::record_storage::exact_document_predicate(source);
                 resource_filter.insert("$expr", exact.remove("$expr").ok_or_else(||
                     AppError::Internal("Credential transfer source is invalid".into()))?);
             }

@@ -187,16 +187,192 @@ fn sign(bot: &ChannelBot, evidence: &mut CredentialContinuity) -> AppResult<()> 
     Ok(())
 }
 
-/// Prepared rows can still be updated with compatible legacy envelopes after writer rollback.
-pub(super) fn replacement(
+fn fresh() -> CredentialContinuity {
+    CredentialContinuity {
+        version: 1,
+        generations: FIELDS
+            .iter()
+            .map(|name| (name.to_string(), uuid::Uuid::new_v4().to_string()))
+            .collect(),
+        pins: BTreeMap::new(),
+        shared_producers: BTreeMap::new(),
+        authentication: String::new(),
+    }
+}
+
+pub(super) fn initialize(bot: &mut ChannelBot) -> AppResult<()> {
+    let mut evidence = fresh();
+    sign(bot, &mut evidence)?;
+    bot.credential_continuity = Some(evidence);
+    Ok(())
+}
+
+/// One prepared raw-record mutation. Both ordinary writers and Meta's
+/// authorized transactions use this exact BSON predicate and source fence.
+struct CredentialUpdate {
+    filter: Document,
+    update: Document,
+    snapshot: Option<super::platform_entry_credentials::EntryCredentialSnapshot>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_update(
+    db: &mongodb::Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
     bot: &ChannelBot,
+    mut filter: Document,
+    mut set: Document,
+    mut unset: Document,
+    mut tx: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Option<CredentialUpdate>> {
+    let rows = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let touches_secret = FIELDS
+        .iter()
+        .any(|field| set.contains_key(*field) || unset.contains_key(*field));
+    let mut snapshot = None;
+    if touches_secret {
+        filter.extend(physical_filter(bot)?);
+        // Read the actual representation (Binary or the legacy byte array).
+        // Never compare a reserialized model to the stored BSON envelope.
+        for field in FIELDS {
+            filter.remove(field);
+        }
+        let query = rows.find_one(filter.clone());
+        let raw = if let Some(tx) = tx.as_deref_mut() {
+            query.session(tx).await?
+        } else {
+            query.await?
+        };
+        let Some(raw) = raw else { return Ok(None) };
+        let current = super::channel_bot_record::decode(&raw)?;
+        if bson::to_document(&current).map_err(|_| invalid())?
+            != bson::to_document(bot).map_err(|_| invalid())?
+        {
+            return Ok(None);
+        }
+        filter = super::record_storage::exact_document_predicate(&raw);
+        // Secret null clears a column. Version markers are authored once as a
+        // whole map below, avoiding overlapping parent/dotted Mongo updates.
+        for field in FIELDS {
+            if matches!(set.get(field), Some(Bson::Null)) {
+                set.remove(field);
+                unset.insert(field, "");
+            }
+            set.remove(&format!("secret_context_versions.{field}"));
+            unset.remove(&format!("secret_context_versions.{field}"));
+        }
+        let evidence = match verified(bot)? {
+            Some(previous) => Some(previous.clone()),
+            None if keys.contextual_record_writes() || !bot.secret_context_versions.is_empty() => {
+                let entry = super::platform_entry_credentials::EntryCredentialSnapshot::load(
+                    db, adapter, bot,
+                )
+                .await?;
+                let evidence = capture(&entry, None)?;
+                snapshot = Some(entry);
+                Some(evidence)
+            }
+            None => None,
+        };
+        if let Some(evidence) = evidence {
+            replacement(keys, bot, evidence, &mut set, &mut unset)?;
+        }
+    }
+    let mut update = doc! {"$set":set};
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
+    Ok(Some(CredentialUpdate {
+        filter,
+        update,
+        snapshot,
+    }))
+}
+
+impl CredentialUpdate {
+    async fn apply(
+        &self,
+        db: &mongodb::Database,
+        tx: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        let changed = db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(self.filter.clone(), self.update.clone())
+            .session(&mut *tx)
+            .await?
+            .matched_count
+            == 1;
+        if changed
+            && let Some(entry) = &self.snapshot
+            && !entry.fence_sources_for_rewrap(db, tx).await?
+        {
+            return Err(invalid());
+        }
+        Ok(changed)
+    }
+}
+
+/// Prepared rows remain writable with compatible envelopes after writer rollback.
+pub(super) async fn update_credentials(
+    db: &mongodb::Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    bot: &ChannelBot,
+    filter: Document,
+    set: Document,
+    unset: Document,
+) -> AppResult<bool> {
+    let Some(prepared) = prepare_update(db, keys, adapter, bot, filter, set, unset, None).await?
+    else {
+        return Ok(false);
+    };
+    if prepared.snapshot.is_some() {
+        let db = super::transaction_service::durable_database(db);
+        return super::transaction_service::run_db_only(
+            &db,
+            &(&db, prepared),
+            |tx, (db, prepared)| Box::pin(prepared.apply(db, tx)),
+        )
+        .await;
+    }
+    Ok(db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(prepared.filter, prepared.update)
+        .await?
+        .matched_count
+        == 1)
+}
+
+/// Join record preparation, the raw write and shared signer fence to the
+/// caller's grant/owner transaction. Provider I/O stays outside its retries.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn update_credentials_in_session(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    bot: &ChannelBot,
+    filter: Document,
+    set: Document,
+    unset: Document,
+) -> AppResult<bool> {
+    let Some(prepared) =
+        prepare_update(db, keys, adapter, bot, filter, set, unset, Some(&mut *tx)).await?
+    else {
+        return Ok(false);
+    };
+    prepared.apply(db, tx).await
+}
+
+fn replacement(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    bot: &ChannelBot,
+    mut evidence: CredentialContinuity,
     set: &mut Document,
     unset: &mut Document,
 ) -> AppResult<()> {
-    let Some(previous) = verified(bot)? else {
-        return Ok(());
-    };
-    let mut evidence = previous.clone();
+    let mut versions = bot.secret_context_versions.clone();
     let mut target = bson::to_document(bot).map_err(|_| invalid())?;
     for field in FIELDS {
         if !set.contains_key(field) && !unset.contains_key(field) {
@@ -210,10 +386,24 @@ pub(super) fn replacement(
         evidence
             .generations
             .insert(field.into(), uuid::Uuid::new_v4().to_string());
-        if let Ok(versions) = target.get_document_mut("secret_context_versions") {
+        if keys.contextual_record_writes()
+            && set.get(field).is_some_and(|value| {
+                !(field == TOKEN && matches!(value,Bson::Binary(bytes) if bytes.bytes.is_empty()))
+            })
+        {
+            versions.insert(field.to_owned(), 3);
+        } else {
             versions.remove(field);
         }
-        unset.insert(format!("secret_context_versions.{field}"), "");
+    }
+    let value = bson::to_bson(&versions).map_err(|_| invalid())?;
+    target.insert("secret_context_versions", value.clone());
+    set.remove("secret_context_versions");
+    unset.remove("secret_context_versions");
+    if versions.is_empty() {
+        unset.insert("secret_context_versions", "");
+    } else {
+        set.insert("secret_context_versions", value);
     }
     let updated = bson::from_document(target).map_err(|_| invalid())?;
     sign(&updated, &mut evidence)?;
@@ -234,16 +424,7 @@ pub(super) fn capture(
     let mut evidence = match verified(bot)? {
         Some(previous) => previous.clone(),
         None => {
-            let mut evidence = CredentialContinuity {
-                version: 1,
-                generations: FIELDS
-                    .iter()
-                    .map(|name| (name.to_string(), uuid::Uuid::new_v4().to_string()))
-                    .collect(),
-                pins: BTreeMap::new(),
-                shared_producers: BTreeMap::new(),
-                authentication: String::new(),
-            };
+            let mut evidence = fresh();
             for name in [TOKEN, APP] {
                 if super::channel_registration::stored_secret(bot, name)?.is_some() {
                     evidence.pins.insert(
@@ -289,8 +470,7 @@ pub(super) fn capture(
     Ok(evidence)
 }
 
-/// Run inside the exact-source write transaction. The registry keeps channel_bots
-/// pending until all business writers and owner transfer can seal contextual rows.
+/// Publish the captured identities with the rewrapped envelopes under the exact source fence.
 pub(super) async fn publish_rewrap(
     db: &mongodb::Database,
     keys: &crate::crypto::aes::EncryptionKeys,
@@ -321,7 +501,7 @@ pub(super) async fn publish_rewrap(
         target.extend(set.clone());
         let updated: ChannelBot = bson::from_document(target).map_err(|_| invalid())?;
         for name in FIELDS {
-            if name == TOKEN && has_empty_token(&bot) && !set.contains_key(name) {
+            if super::channel_bot_record::external_token(&bot, name) && !set.contains_key(name) {
                 continue;
             }
             let before = super::channel_registration::open_secret(keys, &bot, name).await?;
@@ -361,7 +541,7 @@ pub(super) async fn transfer(
     destination: &str,
     keys: Option<&crate::crypto::aes::EncryptionKeys>,
 ) -> AppResult<Document> {
-    let mut evidence = verified(bot)?.cloned().ok_or_else(invalid)?;
+    let mut evidence = verified(bot)?.cloned();
     let keys = keys.ok_or_else(|| {
         AppError::Conflict("Credential encryption is required for this transfer".into())
     })?;
@@ -374,13 +554,7 @@ pub(super) async fn transfer(
     let mut set = Document::new();
     let mut versions = Document::new();
     for name in FIELDS {
-        evidence
-            .generations
-            .insert(name.into(), uuid::Uuid::new_v4().to_string());
-        if name == TOKEN && has_empty_token(bot) {
-            continue;
-        }
-        if let Some(plain) = super::channel_registration::open_secret(keys, bot, name).await? {
+        if let Some(plain) = super::channel_bot_record::plaintext(keys, bot, name).await? {
             let encrypted = crate::crypto::record_field::encrypt(
                 keys,
                 "channel_bots",
@@ -402,17 +576,26 @@ pub(super) async fn transfer(
             }
         }
     }
-    set.insert("secret_context_versions", versions);
-    target.extend(set.clone());
-    evidence.pins.clear();
-    sign(
-        &bson::from_document(target).map_err(|_| invalid())?,
-        &mut evidence,
-    )?;
-    set.insert(
-        "credential_continuity",
-        bson::to_bson(&evidence).map_err(|_| invalid())?,
-    );
+    // A transfer retires every old generation, including currently absent fields.
+    if keys.contextual_record_writes() || evidence.is_some() {
+        let mut next = fresh();
+        if let Some(previous) = evidence.take() {
+            next.version = previous.version;
+            next.shared_producers = previous.shared_producers;
+        }
+        set.insert("secret_context_versions", versions);
+        target.extend(set.clone());
+        sign(
+            &bson::from_document(target).map_err(|_| invalid())?,
+            &mut next,
+        )?;
+        set.insert(
+            "credential_continuity",
+            bson::to_bson(&next).map_err(|_| invalid())?,
+        );
+    } else if !bot.secret_context_versions.is_empty() {
+        set.insert("secret_context_versions", versions);
+    }
     Ok(set)
 }
 
@@ -427,6 +610,17 @@ pub(super) async fn rewrap_fixture(
     let coll = crate::models::channel_bot::COLLECTION_NAME;
     let rows = db.collection::<Document>(coll);
     let source = rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+    let current = super::channel_bot_record::decode(&source).unwrap();
+    let mut fields: Vec<_> = fields
+        .iter()
+        .copied()
+        .filter(|field| !super::channel_bot_record::external_token(&current, field))
+        .collect();
+    for field in current.secret_context_versions.keys() {
+        if !fields.contains(&field.as_str()) {
+            fields.push(field.as_str());
+        }
+    }
     assert!(
         super::record_field_service::migrate_snapshot(
             db,
@@ -434,7 +628,7 @@ pub(super) async fn rewrap_fixture(
             coll,
             &source,
             &bot.user_id,
-            fields
+            &fields
         )
         .await
         .unwrap()
