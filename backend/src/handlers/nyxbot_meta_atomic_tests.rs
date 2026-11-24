@@ -538,16 +538,17 @@ async fn reused_meta_connect_returns_its_committed_assignment_and_challenge_duri
             let bot = row.channel_bot_id.clone();
             let agent = second.id.clone();
             tokio::spawn(async move {
-                connect_channel(
+                let Json(response) = connect_channel(
                     State(state),
                     crate::test_utils::test_auth_user(OWNER),
                     Json(ConnectRequest {
                         bot_id: bot,
-                        agent_id: Some(agent),
+                        agent_id: Some(agent.clone()),
                     }),
                 )
                 .await
                 .unwrap();
+                assert_eq!(response["channel_agent"]["agent_id"], agent);
             })
             .await
             .unwrap();
@@ -705,7 +706,7 @@ async fn combined_org_meta_patch_shares_authority_and_preserves_old_and_new_bind
             .unwrap()
             .get_i64("org_channel_fence")
             .unwrap_or(0);
-        link_channel(
+        let Json(response) = link_channel(
             State(state.clone()),
             crate::test_utils::test_auth_user(OWNER),
             Path(row.id.clone()),
@@ -718,6 +719,7 @@ async fn combined_org_meta_patch_shares_authority_and_preserves_old_and_new_bind
         )
         .await
         .unwrap();
+        assert_eq!(response["private_chats"], "owner");
         let after = load_channel(&state, OWNER, &row.id).await.unwrap();
         assert_eq!(after.agent_id.as_deref(), Some(second.id.as_str()));
         assert_eq!(after.private_chats.as_deref(), Some("owner"));
