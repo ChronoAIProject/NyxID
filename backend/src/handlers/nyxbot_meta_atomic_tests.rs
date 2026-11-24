@@ -305,18 +305,22 @@ async fn personal_meta_guest_enable_rechecks_the_route_key_after_readiness_prefl
     }
 }
 
+async fn provision_org_wallet(state: &AppState, org: &str) {
+    let billing = crate::billing_integration_tests::billing_service(
+        &state.db,
+        Arc::new(crate::billing_integration_tests::FakeLago::default()),
+        1000,
+    );
+    billing.ensure_wallet(org).await.unwrap();
+}
+
 #[tokio::test]
 async fn org_meta_guest_enable_rechecks_callback_and_live_admin_before_opening_access() {
     for fault in ["callback", "demotion"] {
         let (state, _calls, _server) = setup("meta_guest_atomic_org").await;
         let (row, agent, org) = org_meta(&state).await;
         let (router, token) = app(&state).await;
-        let billing = crate::billing_integration_tests::billing_service(
-            &state.db,
-            Arc::new(crate::billing_integration_tests::FakeLago::default()),
-            1000,
-        );
-        billing.ensure_wallet(&org).await.unwrap();
+        provision_org_wallet(&state, &org).await;
         let before = load_channel(&state, OWNER, &row.id).await.unwrap();
         crate::services::durable_wake_tests::resume_after(
             "org_guest_before_meta_write",
@@ -380,6 +384,7 @@ async fn org_meta_guest_enable_rechecks_callback_and_live_admin_before_opening_a
 async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_refusal() {
     let (state, _calls, _server) = setup("meta_atomic_enabled_org").await;
     let (row, _first, org) = org_meta(&state).await;
+    provision_org_wallet(&state, &org).await;
     let (second, _) = crate::services::assistant_team_service::create_specialist_for(
         &state.db,
         &state.encryption_keys,

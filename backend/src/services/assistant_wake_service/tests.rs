@@ -691,7 +691,7 @@ async fn hosted_meta_wake_rechecks_its_trusted_callback_before_issuing_an_owner_
         f.state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
             .insert_one(doc! {"_id":&bot,"user_id":&f.owner,"platform":"instagram","label":"Hosted inbox",
                 "credential_source":"user","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
-                "platform_bot_id":"222","webhook_registered":false,"webhook_secret_hash":"",
+                "platform_bot_id":"222","platform_bot_username":"hosted_inbox","webhook_registered":true,"webhook_secret_hash":"",
                 "is_active":true,"status":"active","created_at":now,"updated_at":now}).await.unwrap();
         let agent = crate::services::assistant_team_service::agent(
             &f.state.db,
