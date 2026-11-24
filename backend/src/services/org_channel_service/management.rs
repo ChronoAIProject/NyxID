@@ -71,6 +71,7 @@ pub(crate) async fn patch(
         callback,
     )
     .await
+    .map(|_| ())
 }
 
 pub(crate) fn service_digest(agent: &AssistantAgent, id: &str) -> String {
@@ -177,7 +178,9 @@ pub(crate) async fn update(
     input: GuestSettings,
     callback: Option<&str>,
 ) -> AppResult<()> {
-    update_choice(db, actor, row, input, true, false, callback).await
+    update_choice(db, actor, row, input, true, false, callback)
+        .await
+        .map(|_| ())
 }
 
 pub(crate) async fn enable_customer_dms(
@@ -186,7 +189,7 @@ pub(crate) async fn enable_customer_dms(
     row: &NyxbotChannel,
     input: GuestSettings,
     callback: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<NyxbotChannel> {
     update_choice(db, actor, row, input, true, true, callback).await
 }
 
@@ -198,7 +201,7 @@ async fn update_choice(
     explicit_enabled: bool,
     open_private_chats: bool,
     callback: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<NyxbotChannel> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
     super::require_admin(db, actor, &b.org_id).await?;
     super::enabled(db, &row.user_id).await?;
@@ -336,14 +339,15 @@ async fn update_choice(
         author_services,
         open_private_chats,
         widening,
-        require_grants,
         direct_meta,
         callback.map(str::to_owned),
     );
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,widening,require_grants,direct_meta,callback)|Box::pin(async move{
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,widening,direct_meta,callback)|Box::pin(async move{
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;
         super::fence_management(db,tx,row,actor).await?;
-        if (*ready || *require_grants) && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }
+        if (*ready || *direct_meta) && super::guest_grants_ready(db).await? != *ready {
+            return Err(if *ready { AppError::SecurityReadinessUnavailable } else { settings_changed() });
+        }
         let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
         let newly_eligible = *direct_meta && !*ready
             && !legacy_eligible(&b.guests,&live) && legacy_eligible(policy,&live);
@@ -366,21 +370,24 @@ async fn update_choice(
             filter.remove("org_specialist.guests.revision");
             filter.insert("$or",bson::bson!([{"org_specialist.guests.revision":&b.guests.revision},{"org_specialist.guests.revision":revision}]));
         }
+        let channels = db.collection::<NyxbotChannel>("nyxbot_channels");
         if *unchanged {
-            if db.collection::<Document>("nyxbot_channels").find_one(filter).session(&mut *tx).await?.is_none() { return Err(settings_changed()); }
-            return crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await;
+            let current = channels.find_one(filter).session(&mut *tx).await?.ok_or_else(settings_changed)?;
+            crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await?;
+            return Ok(current);
         }
         let mut fields=doc!{"org_specialist.guests":bson::to_bson(policy).map_err(|_|super::denied())?,"updated_at":bson::DateTime::now()};
         // Explicitly enabling guests opens private guest admission too. Editing
         // a budget or delegation must not broaden a saved private-chat limit.
         if *open_private_chats || (policy.enabled && !b.guests.enabled) {fields.insert("private_chats","everyone");}
-        let changed=db.collection::<Document>("nyxbot_channels").update_one(filter,
-            doc!{"$set":fields}).session(&mut *tx).await?;
-        if changed.matched_count!=1 {return Err(settings_changed());}
+        let committed = channels.find_one_and_update(filter, doc!{"$set":fields})
+            .return_document(mongodb::options::ReturnDocument::After)
+            .session(&mut *tx).await?.ok_or_else(settings_changed)?;
         // Every exposure revision retires its old guest lanes immediately.
         // Members keep their own keys and turns; settlement retains its holds.
         super::lifecycle::retire_in_session(db,tx,&row.id,Some(&b.org_id)).await?;
-        crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await
+        crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await?;
+        Ok(committed)
     })).await
 }
 

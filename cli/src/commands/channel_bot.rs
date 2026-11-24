@@ -848,7 +848,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
                 OutputFormat::Table if result["local_delivery_stopped"] == true => {
                     if result["webhook_cleanup"] == "removed" {
-                        eprintln!("Inbox delivery stopped and the subscription was removed.");
+                        eprintln!("Inbox delivery stopped. Subscription cleanup for this inbox is complete.");
                     }
                 }
                 OutputFormat::Table => eprintln!("Bot deleted."),

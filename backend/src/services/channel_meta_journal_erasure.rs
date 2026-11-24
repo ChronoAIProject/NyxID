@@ -232,13 +232,15 @@ async fn erase_attributed(
             ])
             .max_time(std::time::Duration::from_secs(5))
             .await?.try_collect().await?;
-        // Native saved plans use the original event UUID as their source.
+        // Native saved plans use the hashed gateway event ID as their source.
         // Personal conversation deletion may remove the handoff while this
         // independent delivery origin and channel parent remain available.
         let native: Vec<Document> = db
             .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
             .find(doc! {"_id":{"$in":&sources}})
-            .projection(doc! {"user_id":1,"channel_id":1,"partition":1,"delivery.origin":1})
+            .projection(
+                doc! {"user_id":1,"channel_id":1,"delivery.transport":1,"delivery.origin":1},
+            )
             .max_time(std::time::Duration::from_secs(5))
             .await?
             .try_collect()
@@ -357,17 +359,15 @@ fn native_target(
     if event.get_str("user_id") != Ok(plan.user_id.as_str()) {
         return Ok(None);
     }
-    let origin = event
-        .get_document("delivery")
-        .and_then(|delivery| delivery.get_document("origin"))
-        .map_err(|_| ())?;
+    let delivery = event.get_document("delivery").map_err(|_| ())?;
+    if delivery.get_str("transport") != Ok("gateway") {
+        return Err(());
+    }
+    let origin = delivery.get_document("origin").map_err(|_| ())?;
     let origin: crate::models::assistant_conversation::ChannelOrigin =
         bson::from_document(origin.clone()).map_err(|_| ())?;
     if event.get_str("channel_id") != Ok(origin.nyxbot_channel_id.as_str())
-        || origin
-            .native_event_id
-            .as_deref()
-            .is_some_and(|id| id != plan.source_id)
+        || origin.native_event_id.as_deref() != Some(plan.source_id.as_str())
     {
         return Err(());
     }
@@ -985,6 +985,26 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let events = state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME);
+        for (field, original) in [
+            ("delivery.transport", "gateway"),
+            ("delivery.origin.native_event_id", event.as_str()),
+        ] {
+            events
+                .update_one(doc! {"_id": &event}, doc! {"$unset": {field: ""}})
+                .await
+                .unwrap();
+            assert!(matches!(
+                erase_legacy(&state.db, &bot, &state.token_exchange_cache).await,
+                Err(AppError::Conflict(_))
+            ));
+            events
+                .update_one(doc! {"_id": &event}, doc! {"$set": {field: original}})
+                .await
+                .unwrap();
+        }
         let unknown_source = uuid::Uuid::new_v4().to_string();
         let unknown_key = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "a".repeat(64));
         channel_text_delivery::begin(

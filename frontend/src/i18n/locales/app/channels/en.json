@@ -279,7 +279,7 @@
   "Inbound test": "Inbound test",
   "Inbox access was restored. Resume delivery to complete setup.": "Inbox access was restored. Resume delivery to complete setup.",
   "Inbox consent was revoked. Return to setup and reconnect.": "Inbox consent was revoked. Return to setup and reconnect.",
-  "Inbox delivery stopped and the subscription was removed.": "Inbox delivery stopped and the subscription was removed.",
+  "Inbox delivery stopped. Subscription cleanup for this inbox is complete.": "Inbox delivery stopped. Subscription cleanup for this inbox is complete.",
   "Inbox delivery stopped. NyxID will retry removing the subscription.": "Inbox delivery stopped. NyxID will retry removing the subscription.",
   "Inbox setup needs attention. Select Verify to retry.": "Inbox setup needs attention. Select Verify to retry.",
   "Ingestion": "Ingestion",

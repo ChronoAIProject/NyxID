@@ -279,7 +279,7 @@
   "Inbound test": "傳入測試",
   "Inbox access was restored. Resume delivery to complete setup.": "收件匣存取權已恢復。請恢復訊息傳送以完成設定。",
   "Inbox consent was revoked. Return to setup and reconnect.": "收件匣授權已撤銷。請返回設定並重新連線。",
-  "Inbox delivery stopped and the subscription was removed.": "收件匣已停止收發訊息，訂閱已移除。",
+  "Inbox delivery stopped. Subscription cleanup for this inbox is complete.": "收件匣已停止收發訊息。此收件匣的訂閱清理已完成。",
   "Inbox delivery stopped. NyxID will retry removing the subscription.": "收件匣已停止收發訊息。NyxID 會重試移除訂閱。",
   "Inbox setup needs attention. Select Verify to retry.": "收件匣設定需要處理。請選擇「驗證」重試。",
   "Ingestion": "接收方式",

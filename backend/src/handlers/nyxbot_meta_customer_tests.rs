@@ -433,9 +433,15 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
                 action(&router, &token, bot_id, &agent.id, "enable_guests").await;
             assert_eq!(status, StatusCode::OK, "{enabled}");
             assert_eq!(enabled["guests_enabled"], true);
+            assert_eq!(enabled["readiness"]["guest_enabled"], true);
+            assert_eq!(enabled["readiness"]["private_chats"], "everyone");
             let (status, checked) = action(&router, &token, bot_id, &agent.id, "check").await;
             assert_eq!(status, StatusCode::OK, "{checked}");
             assert_eq!(checked["guests_enabled"], true);
+            assert_eq!(
+                enabled["readiness"]["guest_revision"],
+                checked["readiness"]["guest_revision"]
+            );
             let committed = load_channel(&state, OWNER, checked["channel_id"].as_str().unwrap())
                 .await
                 .unwrap();

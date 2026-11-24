@@ -51,7 +51,7 @@ export function channelDeleteMessage(result?: { webhook_cleanup?: string; local_
   if (result?.local_delivery_stopped) {
     return result.webhook_cleanup === "failed"
       ? translateUi("Inbox delivery stopped. NyxID will retry removing the subscription.")
-      : translateUi("Inbox delivery stopped and the subscription was removed.");
+      : translateUi("Inbox delivery stopped. Subscription cleanup for this inbox is complete.");
   }
   return result?.webhook_cleanup === "failed"
     ? translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard.")

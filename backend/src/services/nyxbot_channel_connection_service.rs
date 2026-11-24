@@ -62,6 +62,8 @@ tokio::task_local! {
 pub(crate) const RESTORE_FAIL_ROUTE: u8 = 1;
 #[cfg(test)]
 pub(crate) const RESTORE_FAIL_ACTIVATION: u8 = 2;
+#[cfg(test)]
+pub(crate) const META_ACTIVATION_ACK_LOST: u8 = 3;
 
 pub(crate) struct ConnectionRequest<'a> {
     pub owner: &'a str,
@@ -772,6 +774,20 @@ pub(crate) async fn connect(
                 },
             )
             .await;
+            #[cfg(test)]
+            let activation = if guarded_default
+                && activation.is_ok()
+                && RESTORE_CONNECT_FAIL_STAGE
+                    .try_with(|stage| *stage == META_ACTIVATION_ACK_LOST)
+                    .unwrap_or(false)
+            {
+                super::durable_wake_tests::after("meta_activation_ack_lost").await;
+                Err(AppError::Internal(
+                    "Test activation acknowledgement lost".into(),
+                ))
+            } else {
+                activation
+            };
             let row = match activation {
                 Ok(row) => row,
                 Err(error) => {
@@ -793,6 +809,21 @@ pub(crate) async fn connect(
                         .await?;
                         releases::try_inline(state, &ids).await;
                         return Err(error);
+                    }
+                    // Activation advances the policy revision once, plus once if it
+                    // imports predecessor settings. A later relink can preserve the
+                    // owner code, even when it switches away and back to this agent.
+                    let restored = row.continuity_from_channel_id.is_none()
+                        && current.continuity_from_channel_id.is_some();
+                    if guarded_default
+                        && (current.agent_id != row.agent_id
+                            || current.route_id.as_deref() != Some(route_id.as_str())
+                            || current
+                                .execution_policy_revision
+                                .checked_sub(row.execution_policy_revision)
+                                != Some(1 + i64::from(restored)))
+                    {
+                        return Err(AppError::Conflict("The inbox assignment changed after activation; check the current specialist".into()));
                     }
                     if current.link_code_hash.as_deref() != Some(&sha256_hex(code.as_bytes())) {
                         return Err(AppError::Conflict(

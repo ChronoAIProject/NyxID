@@ -460,6 +460,14 @@ pub(crate) async fn audience_readiness(
     channel_id: &str,
 ) -> AppResult<crate::services::assistant_service_execution::readiness::AudienceReadiness> {
     let row = load_channel(state, owner, channel_id).await?;
+    audience_readiness_for_channel(state, owner, &row).await
+}
+
+pub(crate) async fn audience_readiness_for_channel(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+) -> AppResult<crate::services::assistant_service_execution::readiness::AudienceReadiness> {
     if let Some(org) = row.bot_owner_id.as_deref()
         && !manages_bot_owner(state, owner, org).await?
     {

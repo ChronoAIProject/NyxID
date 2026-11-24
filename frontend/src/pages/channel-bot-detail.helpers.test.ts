@@ -79,7 +79,7 @@ describe("conversationTypeLabel", () => {
 
 it.each([
   [{ local_delivery_stopped: true, webhook_cleanup: "failed" }, "Inbox delivery stopped. NyxID will retry removing the subscription."],
-  [{ local_delivery_stopped: true, webhook_cleanup: "removed" }, "Inbox delivery stopped and the subscription was removed."],
+  [{ local_delivery_stopped: true, webhook_cleanup: "removed" }, "Inbox delivery stopped. Subscription cleanup for this inbox is complete."],
   [{ webhook_cleanup: "failed" }, "Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."],
   [undefined, "Bot deleted"],
 ] as const)("reports the deletion result for %j", (result, expected) => {
