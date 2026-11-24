@@ -697,6 +697,11 @@ async fn erase_page(
             if let Some(proof) = row.get("meta_grant").filter(|value| **value != Bson::Null) {
                 let proof: GrantRef =
                     bson::from_bson(proof.clone()).map_err(|_| grants::incomplete())?;
+                match row.get("connection_id") {
+                    None | Some(Bson::Null) => {}
+                    Some(Bson::String(connection)) if connection == &proof.grant_id => {}
+                    _ => return Err(grants::incomplete()),
+                }
                 reference_in_range(&proof, scope)?;
             }
         } else if collection == "assistant_messages" {
@@ -1539,6 +1544,12 @@ async fn erase_turn(
         db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
             .delete_many(doc! {"_id":{"$in":&ids},"kind":"card_binding","user_id":owner,"conversation_id":conversation})
             .session(&mut *tx).await?;
+        db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+            .delete_many(
+                doc! {"user_id":owner,"kind":"needs_decision","source.card_id":{"$in":&ids}},
+            )
+            .session(&mut *tx)
+            .await?;
         db.collection::<Document>(cards)
             .delete_many(doc! {"$and":[card_filter,{"_id":{"$in":ids}}]})
             .session(&mut *tx)
@@ -2040,6 +2051,13 @@ async fn step(
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::IndexModel;
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"kind":1,"source.card_id":1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(crate::models::async_service_operation::COLLECTION_NAME)
         .create_index(IndexModel::builder().keys(doc! {"meta_contexts.meta_grant.bot_id":1,"meta_contexts.meta_grant.grant_id":1,"_id":1}).build()).await?;
     for field in ["creation_turn_id", "requested_turn_id"] {
