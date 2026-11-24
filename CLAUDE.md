@@ -780,7 +780,7 @@ Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop 
 standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
-Account data (Settings with all six tabs, Billing & Usage when available, and
+Account data (Settings with all seven tabs, Billing & Usage when available, and
 NyxBot settings for the NyxAgent engine) opens as URL-driven modals over the
 current assistant view using `?panel=` and namespaced `panelTab`/filter keys,
 never as in-shell pages. The assistant has no desktop top bar: the sidebar column
@@ -790,7 +790,7 @@ settings links.
 Opening pushes history; Settings tab changes replace, Billing user changes push
 and automatic cleanup replaces. Back immediately after opening closes the panel;
 Back after an explicit close reopens it with any pending top-up already consumed.
-Notification settings links to Studio. The agent details sheet and in-chat
+Notifications is a tab in Account Settings. The assistant account menu shows the linked email, Settings, Billing and Usage when available, Open Studio, and Log out. Profile also contains Log out. The agent details sheet and in-chat
 connection/setup flows keep their existing presentation. Studio `/settings` and
 `/billing` remain available. Lago checkout returns to `/billing` (as configured in
 `docs/LAGO_SETUP.md`), even when started in the assistant.

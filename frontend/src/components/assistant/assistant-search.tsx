@@ -216,7 +216,7 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
           { id: "usage", label: "Usage", icon: ChartNoAxesCombined, keywords: ["cost", "tokens"], run: () => panel("billing", { panelTab: "usage" }) },
         ]
       : []),
-    { id: "notifications", label: "Notification settings", icon: Bell, hint: "Studio", run: () => go("/approvals/settings") },
+    { id: "notifications", label: "Notification settings", icon: Bell, keywords: ["approvals", "push", "telegram"], run: () => panel("settings", { panelTab: "notifications" }) },
     { id: "studio", label: "Open Studio", icon: SlidersHorizontal, keywords: ["dashboard"], run: () => go("/dashboard") },
   ];
   const appearance: Entry[] = [

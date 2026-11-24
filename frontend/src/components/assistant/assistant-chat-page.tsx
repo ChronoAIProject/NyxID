@@ -97,7 +97,6 @@ import {
   useAssistantOnboarding,
   useHideSuggestions,
   useShowSuggestions,
-  useIntroReplay,
 } from "@/hooks/use-assistant-onboarding";
 import { FirstRunIntro } from "./onboarding/first-run-intro";
 import { GuidedTour } from "./onboarding/guided-tour";
@@ -934,23 +933,16 @@ function NyxAgentThreadPage() {
   const onboarding = useAssistantOnboarding(onChatRoute && !search.mock);
   const hideSuggestions = useHideSuggestions();
   const showSuggestions = useShowSuggestions();
-  const replayPending = useIntroReplay((state) => state.pending);
-  const consumeReplay = useIntroReplay((state) => state.consume);
-  const [intro, setIntro] = useState<"first_run" | "account_menu">();
+  const [introOpen, setIntroOpen] = useState(false);
   const [touring, setTouring] = useState(false);
   const introShown = useRef(false);
   const pendingStep = useRef<{ readonly step: NextStep; readonly at: number } | undefined>(undefined);
   useEffect(() => {
     if (onboarding.data?.show_intro && home && !introShown.current) {
       introShown.current = true;
-      setIntro("first_run");
+      setIntroOpen(true);
     }
   }, [onboarding.data?.show_intro, home]);
-  useEffect(() => {
-    if (!replayPending || !home || !onboarding.data) return;
-    consumeReplay();
-    setIntro("account_menu");
-  }, [replayPending, home, onboarding.data, consumeReplay]);
   function startNextStep(step: NextStep) {
     if (chat.isStreaming) {
       toast.info(translateUi("NyxBot is still replying"), {
@@ -1192,14 +1184,11 @@ function NyxAgentThreadPage() {
             }}
           />
         ) : null}
-        {intro && onboarding.data ? (
+        {introOpen && onboarding.data ? (
           <FirstRunIntro
             open
             state={onboarding.data}
-            entryPoint={intro}
-            onOpenChange={(open) => {
-              if (!open) setIntro(undefined);
-            }}
+            onOpenChange={setIntroOpen}
             onStart={startNextStep}
             onTour={() => setTouring(true)}
           />
@@ -1239,7 +1228,6 @@ function NyxAgentThreadPage() {
               hideSuggestions.reset();
               showSuggestions.mutate();
             }}
-            onReplayIntro={() => setIntro("account_menu")}
           />
         ) : chat.isLoading && !chat.session.messages.length ? (
           <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading conversation...")}</div>

@@ -25,6 +25,7 @@ const { securityUser, mockDisable, toastSuccess, toastError } = vi.hoisted(() =>
 }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 vi.mock("@/hooks/use-auth", () => ({
+  useLogout: () => ({ mutateAsync: vi.fn() }),
   useUser: () => ({ data: securityUser }),
   useMfaDisable: () => ({ mutateAsync: mockDisable }),
   useRevokeSession: () => ({ mutateAsync: vi.fn() }),
@@ -92,6 +93,13 @@ async function open(
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
   client.setQueryData(["sessions"], []);
+  client.setQueryData(["notifications", "settings"], {
+    telegram_connected: false, telegram_enabled: false, push_enabled: true,
+    approval_required: true, approval_timeout_secs: 60, grant_expiry_days: 30,
+  });
+  client.setQueryData(["notifications", "devices"], { devices: [] });
+  client.setQueryData(["approvals", "service-configs", "personal"], { configs: [] });
+  client.setQueryData(["user-services"], []);
   render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
@@ -115,7 +123,7 @@ async function saveSettings() {
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
-    it("uses sibling groups across all six tabs with no nested cards or groups", async () => {
+    it("uses sibling groups for profile, security, sessions, MCP, display and privacy", async () => {
       await open(route);
       for (const label of ["Profile", "Security", "Sessions", "MCP", "Display", "Privacy"]) {
         await userEvent.click(screen.getByRole("tab", { name: label }));
@@ -624,6 +632,8 @@ describe.each(["/settings", "/assistant"] as const)(
           expect(
             screen.getByRole("link", { name: "Generate terminal login code" }),
           ).toHaveAttribute("href", "/login/code");
+        if (tab === "notifications")
+          expect(await screen.findByRole("switch", { name: "Mentions in groups" })).toBeVisible();
         if (tab === "privacy")
           expect(
             screen.getByRole("link", { name: "privacy policy" }),

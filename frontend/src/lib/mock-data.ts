@@ -1068,10 +1068,11 @@ const MOCK_SESSIONS = [
 
 // ── Push Devices ──
 const MOCK_PUSH_DEVICES = {
+  push_enabled: true,
   devices: [
     {
-      id: "dev-0001",
-      platform: "ios",
+      device_id: "dev-0001",
+      platform: "apns",
       device_name: "iPhone 15 Pro",
       registered_at: "2026-04-01T09:00:00Z",
       last_used_at: "2026-05-06T14:00:00Z",

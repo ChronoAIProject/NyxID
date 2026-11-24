@@ -5,13 +5,10 @@ import type { AccountPanel, AccountPanelParams } from "@/lib/assistant/account-p
 import { useRef, type MouseEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  Bell,
   ChartNoAxesCombined,
   LogOut,
   Settings,
-  Settings2,
   SlidersHorizontal,
-  Sparkles,
   WalletCards,
 } from "lucide-react";
 import {
@@ -23,9 +20,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAssistantDrawerDismiss } from "@/components/assistant/assistant-drawer-context";
 import { useLogout } from "@/hooks/use-auth";
-import { useFeature } from "@/hooks/use-feature-flag";
-import { useIntroReplay } from "@/hooks/use-assistant-onboarding";
-import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { isBillingAvailable } from "@/types/api";
 
@@ -33,11 +27,15 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
   useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const billingAvailable = isBillingAvailable(user);
-  const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const dismissDrawer = useAssistantDrawerDismiss();
-  const replayIntro = useIntroReplay((state) => state.replay);
   const logout = useLogout();
   const navigate = useNavigate();
+
+  async function handleLogout() {
+    await logout.mutateAsync();
+    dismissDrawer();
+    void navigate({ to: "/login" });
+  }
 
   function activateLink(event: MouseEvent<HTMLAnchorElement>) {
     if (
@@ -52,22 +50,13 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
     }
   }
 
-  async function handleLogout() {
-    await logout.mutateAsync();
-    dismissDrawer();
-    void navigate({ to: "/login" });
-  }
-
   return (
     <>
-      <div className="shell-account-heading">
-        <p className="truncate shell-user-name">
-          {user?.display_name ?? translateUi("User")}
-        </p>
-        <p className="truncate shell-user-email">
-          {user?.email ?? ""}
-        </p>
-      </div>
+      {user?.email && (
+        <div className="shell-account-heading">
+          <p className="truncate shell-user-email" title={user.email}>{user.email}</p>
+        </div>
+      )}
       <DropdownMenuItem onSelect={() => onPanel("settings")}>
         <Settings aria-hidden="true" />{translateUi("Settings")}</DropdownMenuItem>
       {billingAvailable ? <>
@@ -76,40 +65,15 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
         <DropdownMenuItem onSelect={() => onPanel("billing", { panelTab: "usage" })}>
           <ChartNoAxesCombined aria-hidden="true" />{translateUi("Usage")}</DropdownMenuItem>
       </> : null}
-      <DropdownMenuItem asChild>
-        <Link to="/approvals/settings" onClick={activateLink}>
-          <Bell aria-hidden="true" />
-          <span className="min-w-0 flex-1">{translateUi("Notification settings")}<span aria-hidden="true" className="block text-12 text-text-tertiary">{translateUi("Studio")}</span>
-          </span>
-          <span className="sr-only">{translateUi(" (opens in Studio)")}</span>
-        </Link>
-      </DropdownMenuItem>
-      {nyxagentEnabled ? (
-        <>
-          <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
-            <Settings2 aria-hidden="true" />{translateUi("NyxBot settings")}</DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => {
-              dismissDrawer();
-              replayIntro();
-              // The intro opens over the NyxBot home.
-              void navigate({ to: "/assistant" });
-            }}
-          >
-            <Sparkles aria-hidden="true" />{translateUi("Replay intro")}</DropdownMenuItem>
-        </>
-      ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem asChild>
         <Link to="/dashboard" onClick={activateLink}>
           <SlidersHorizontal aria-hidden="true" />{translateUi("Open Studio")}</Link>
       </DropdownMenuItem>
       <DropdownMenuSeparator />
-      <DropdownMenuItem
-        onSelect={() => void handleLogout()}
-        className="text-destructive focus:text-destructive"
-      >
-        <LogOut aria-hidden="true" />{translateUi("Log out")}</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => void handleLogout()} disabled={logout.isPending}>
+        <LogOut aria-hidden="true" />{translateUi("Log out")}
+      </DropdownMenuItem>
     </>
   );
 }
@@ -131,7 +95,7 @@ export function AssistantAccountMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild ref={triggerRef}>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent align={align} side={side} className="w-max min-w-0 max-w-[calc(100vw-1rem)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto p-2"
+      <DropdownMenuContent align={align} side={side} className="w-[max(184px,var(--radix-dropdown-menu-trigger-width))] min-w-0 max-w-[calc(100vw-1rem)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto p-2"
         onCloseAutoFocus={() => {
           const request = pending.current;
           pending.current = null;

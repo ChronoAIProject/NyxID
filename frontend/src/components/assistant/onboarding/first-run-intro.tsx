@@ -29,7 +29,9 @@ import { LiveReplay } from "./live-replay";
 
 /** The screens after the greeting; the progress bar counts these. */
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
-type Step = "welcome" | (typeof STEPS)[number];
+const FLOW = ["welcome", ...STEPS] as const;
+type Step = (typeof FLOW)[number];
+const LAST = FLOW.length - 1;
 /** Leaving pills fade out before the shared ones move. */
 const PILL_EXIT_MS = 140;
 
@@ -46,14 +48,12 @@ function reducedMotion() {
 export function FirstRunIntro({
   open,
   state,
-  entryPoint,
   onOpenChange,
   onStart,
   onTour,
 }: {
   readonly open: boolean;
   readonly state: AssistantOnboarding;
-  readonly entryPoint: "first_run" | "account_menu";
   readonly onOpenChange: (open: boolean) => void;
   /** Close the intro and send the step's prompt to NyxBot. */
   readonly onStart: (step: NextStep) => void;
@@ -63,9 +63,6 @@ export function FirstRunIntro({
   useUiTranslation();
   const save = useSaveOnboarding();
   const firstName = useAuthStore((auth) => auth.user?.display_name?.trim().split(/\s+/)[0]);
-  // Only a first-timer is greeted; a replay starts at the questions.
-  const flow: readonly Step[] = entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
-  const LAST = flow.length - 1;
   const [index, setIndex] = useState(0);
   const [topics, setTopics] = useState<readonly string[]>(() => state.profile?.topics ?? []);
   const [workStyle, setWorkStyle] = useState<string | null>(() => state.profile?.work_style ?? null);
@@ -79,7 +76,7 @@ export function FirstRunIntro({
   const openedAt = useRef(0);
   const body = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
-  const step: Step = flow[index] ?? "interests";
+  const step: Step = FLOW[index] ?? "interests";
 
   useEffect(() => {
     if (!open) return;
@@ -90,7 +87,7 @@ export function FirstRunIntro({
     setTopics(state.profile?.topics ?? []);
     setWorkStyle(state.profile?.work_style ?? null);
     setAudience(state.profile?.work_style ?? "solo");
-    void capture({ name: "ui.dialog_opened", props: { dialog_id: "nyxbot_intro", entry_point: entryPoint } });
+    void capture({ name: "ui.dialog_opened", props: { dialog_id: "nyxbot_intro", entry_point: "first_run" } });
     // Only a fresh open resets the intro; later state refreshes keep progress.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -142,13 +139,13 @@ export function FirstRunIntro({
     if (index >= LAST) return;
     void capture({
       name: "ui.dialog_step_completed",
-      props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
+      props: { dialog_id: "nyxbot_intro", step: index, total_steps: FLOW.length },
     });
     goTo(index + 1);
   }
 
   function back() {
-    if (index > 0 && flow[index - 1] !== "welcome") goTo(index - 1);
+    if (index > 0 && FLOW[index - 1] !== "welcome") goTo(index - 1);
   }
 
   function start(nextStep: NextStep) {
@@ -222,7 +219,7 @@ export function FirstRunIntro({
           {step === "welcome" ? null : (
             <Progress
               index={(STEPS as readonly string[]).indexOf(step)}
-              onSelect={(position) => goTo(flow.indexOf(STEPS[position] ?? "interests"))}
+              onSelect={(position) => goTo(FLOW.indexOf(STEPS[position] ?? "interests"))}
             />
           )}
           <div
@@ -315,7 +312,7 @@ export function FirstRunIntro({
               <Button variant="ghost" size="sm" onClick={skip}>{translateUi("Skip intro")}</Button>
             ) : null}
             <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
-              {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
+              {index > 0 && index < LAST && FLOW[index - 1] !== "welcome" ? (
                 <Button variant="outline" size="sm" onClick={back}>{translateUi("Back")}</Button>
               ) : null}
               {index < LAST ? (

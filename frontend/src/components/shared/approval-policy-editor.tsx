@@ -117,7 +117,7 @@ export function ApprovalPolicyEditor({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="grid grid-cols-[auto_minmax(0,190px)] items-center justify-start gap-2">
         <Label htmlFor={defaultId}>{translateUi("Default")}</Label>
         <Select
           value={draftDefaultEffect}
@@ -125,7 +125,7 @@ export function ApprovalPolicyEditor({
             setDraftDefaultEffect(value as ApprovalEffect)
           }
         >
-          <SelectTrigger id={defaultId} className="h-8 w-[190px]">
+          <SelectTrigger id={defaultId} className="mt-0!">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

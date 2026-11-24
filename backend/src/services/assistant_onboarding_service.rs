@@ -478,7 +478,7 @@ pub async fn get(db: &Database, owner: &str) -> AppResult<Option<AssistantOnboar
 
 /// Whether the first-run intro should open: a revised intro the owner has not
 /// seen, or never finished or skipped while the owner has no NyxBot thread yet (people who already use NyxBot are not
-/// interrupted; they can replay the intro from the account menu).
+/// interrupted).
 pub async fn should_show_intro(
     db: &Database,
     owner: &str,

@@ -86,14 +86,12 @@ function renderIntro(
   onStart = vi.fn(),
   onOpenChange = vi.fn(),
   onTour?: () => void,
-  entryPoint: "first_run" | "account_menu" = "account_menu",
 ) {
   render(
     <QueryClientProvider client={client}>
       <FirstRunIntro
         open
         state={state()}
-        entryPoint={entryPoint}
         onOpenChange={onOpenChange}
         onStart={onStart}
         onTour={onTour}
@@ -105,7 +103,7 @@ function renderIntro(
 
 it("a first-timer is greeted by name before the questions", async () => {
   const user = userEvent.setup();
-  renderIntro(vi.fn(), vi.fn(), undefined, "first_run");
+  renderIntro();
   expect(screen.getByRole("heading", { name: "Welcome, Owner" })).toBeTruthy();
   expect(screen.queryByLabelText(/Step 1 of/)).toBeNull();
   await user.click(screen.getByRole("button", { name: "Let's get started" }));
@@ -116,7 +114,7 @@ it("a first-timer is greeted by name before the questions", async () => {
 
 it("skipping from the greeting records a skipped intro", async () => {
   const user = userEvent.setup();
-  const { onOpenChange } = renderIntro(vi.fn(), vi.fn(), undefined, "first_run");
+  const { onOpenChange } = renderIntro();
   await user.click(screen.getByRole("button", { name: "Skip for now" }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
   await waitFor(() =>
@@ -133,6 +131,7 @@ it("skipping from the greeting records a skipped intro", async () => {
 it("skipping saves the picks as a skipped intro and closes", async () => {
   const user = userEvent.setup();
   const { onOpenChange } = renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
   await user.click(screen.getByRole("button", { name: "Skip intro" }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -150,6 +149,7 @@ it("skipping saves the picks as a skipped intro and closes", async () => {
 it("finishing saves once and starts a ranked next step", async () => {
   const user = userEvent.setup();
   const { onStart, onOpenChange } = renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("checkbox", { name: /Research & news/ }));
   await user.click(screen.getByRole("radio", { name: /My team/ }));
   await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -177,6 +177,7 @@ it("the last step offers the on-screen tour", async () => {
   const user = userEvent.setup();
   const onTour = vi.fn();
   const { onOpenChange } = renderIntro(vi.fn(), vi.fn(), onTour);
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   for (const name of ["Continue without picking", "Next", "Next", "Next"]) {
     await user.click(screen.getByRole("button", { name }));
   }
@@ -189,6 +190,7 @@ it("the last step offers the on-screen tour", async () => {
 it("topics follow who NyxBot is for and drop picks that no longer apply", async () => {
   const user = userEvent.setup();
   renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   expect(screen.queryByRole("checkbox", { name: /Sales & leads/ })).toBeNull();
   await user.click(screen.getByRole("checkbox", { name: /Research & news/ }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
@@ -206,6 +208,7 @@ it("topics follow who NyxBot is for and drop picks that no longer apply", async 
 it("step bars jump anywhere; suggestions show at once and later changes save again", async () => {
   const user = userEvent.setup();
   renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("button", { name: /Step 5 of 5: First steps/ }));
   // Suggestions show while the save runs.
   expect(
@@ -222,6 +225,7 @@ it("step bars jump anywhere; suggestions show at once and later changes save aga
 it("arrow keys move between intro screens", async () => {
   const user = userEvent.setup();
   renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
   await user.keyboard("{ArrowRight}");
   expect(screen.getByRole("heading", { name: "Meet NyxBot, your chief of staff" })).toBeTruthy();

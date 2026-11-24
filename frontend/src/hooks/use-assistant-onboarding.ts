@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { create } from "zustand";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import type { AssistantOnboarding, OnboardingAnswers } from "@/schemas/assistant-onboarding";
@@ -53,7 +52,7 @@ function useSuggestionsVisibility(hidden: boolean) {
   });
 }
 
-/** Hides the home's suggestions until restored or the intro is retaken. */
+/** Hides the home's suggestions until restored. */
 export function useHideSuggestions() {
   return useSuggestionsVisibility(true);
 }
@@ -62,17 +61,3 @@ export function useHideSuggestions() {
 export function useShowSuggestions() {
   return useSuggestionsVisibility(false);
 }
-
-/**
- * A request to open the intro again, from the account menu on any assistant
- * page. The chat page consumes it once it is showing.
- */
-export const useIntroReplay = create<{
-  readonly pending: boolean;
-  readonly replay: () => void;
-  readonly consume: () => void;
-}>((set) => ({
-  pending: false,
-  replay: () => set({ pending: true }),
-  consume: () => set({ pending: false }),
-}));

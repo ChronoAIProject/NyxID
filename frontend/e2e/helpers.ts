@@ -76,6 +76,15 @@ export async function openAccountMenu(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Account menu" }).click();
 }
 
+export async function openNyxBotSettings(page: Page): Promise<void> {
+  const drawer = page.getByRole("button", { name: "Open chats" });
+  if (await drawer.isVisible()) await drawer.click();
+  const options = page.getByRole("button", { name: "Options for NyxBot", exact: true });
+  await options.focus();
+  await options.press("Enter");
+  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
+}
+
 export async function sendMessage(page: Page, text: string): Promise<void> {
   const input = composerInput(page);
   await input.fill(text);
