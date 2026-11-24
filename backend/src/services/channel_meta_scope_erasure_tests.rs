@@ -324,7 +324,7 @@ async fn newer_checkpoint_keeps_independent_b_contents_after_source_expiry_and_r
             .await
             .unwrap();
         let result = transaction_service::run_db_only(db, &(db, &f.scope), |tx, &(db, scope)| {
-            Box::pin(erase_turn(db, tx, scope, 6))
+            Box::pin(async move { erase_turn(db, tx, scope, &Document::new(), 6).await })
         })
         .await;
         let after = checkpoints
@@ -1216,5 +1216,193 @@ async fn manual_worker_losing_its_parent_requires_exact_typed_completion_proof()
     captured.meta_binding.as_mut().unwrap().grant_id = uuid::Uuid::new_v4().to_string();
     assert!(manual_pass(&f.state, &captured).await.is_err());
     assert!(f.server.received_requests().await.unwrap().is_empty());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_turn_audits_every_message_before_descendants_and_preserves_contradictory_proof() {
+    for kind in [
+        "mixed",
+        "foreign",
+        "out-of-range",
+        "malformed",
+        "untagged",
+        "after-page",
+    ] {
+        let f = fixture().await;
+        let db = &f.state.db;
+        let a = scopes::reference(&f.bot).unwrap();
+        let parent = conversation(&f.bot.user_id, false, &a);
+        let conversation = parent.get_str("_id").unwrap();
+        db.collection::<Document>("assistant_conversations")
+            .insert_one(&parent)
+            .await
+            .unwrap();
+        let mut input = message(&f.bot.user_id, conversation, "a-turn", 1, "user", &a);
+        input.insert("_id", "00000000-0000-4000-8000-000000000000");
+        let mut reply = message(&f.bot.user_id, conversation, "a-turn", 2, "assistant", &a);
+        reply.insert("_id", "ffffffff-0000-4000-8000-000000000000");
+        let mut b = a.clone();
+        b.grant_id = uuid::Uuid::new_v4().to_string();
+        match kind {
+            "mixed" => {
+                reply.insert("meta_grants", bson::to_bson(&vec![a.clone(), b]).unwrap());
+            }
+            "foreign" => {
+                reply.insert("meta_grants", bson::to_bson(&vec![b]).unwrap());
+            }
+            "out-of-range" => {
+                b = a.clone();
+                b.generation = -1;
+                reply.insert("meta_grants", bson::to_bson(&vec![b]).unwrap());
+            }
+            "malformed" => {
+                reply.insert("meta_grants", "invalid proof");
+            }
+            _ => {
+                reply.remove("meta_grants");
+            }
+        }
+        db.collection::<Document>("assistant_messages")
+            .insert_many([input.clone(), reply.clone()])
+            .await
+            .unwrap();
+        if kind == "after-page" {
+            let filler: Vec<_> = (1..100)
+                .map(|i| {
+                    let mut row = message(
+                        &f.bot.user_id,
+                        conversation,
+                        "a-turn",
+                        i + 2,
+                        "assistant",
+                        &a,
+                    );
+                    row.insert("_id", format!("{i:08x}-0000-4000-8000-000000000000"));
+                    row
+                })
+                .collect();
+            db.collection::<Document>("assistant_messages")
+                .insert_many(filler)
+                .await
+                .unwrap();
+        }
+        let tool = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"conversation_id":conversation,
+        "turn_id":"a-turn","output":"Private original result"};
+        db.collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME)
+            .insert_one(&tool)
+            .await
+            .unwrap();
+        let mut progress = Document::new();
+        if kind == "after-page" {
+            let step = transaction_service::run_db_only(db, &(db, &f.scope), |tx, &(db, scope)| {
+                Box::pin(async move { erase_turn(db, tx, scope, &Document::new(), 6).await })
+            })
+            .await
+            .unwrap();
+            assert_eq!(step.progress.get_bool("turn_audited").ok(), None);
+            assert!(step.progress.get_str("after").is_ok());
+            progress = step.progress;
+        }
+        let result = transaction_service::run_db_only(
+            db,
+            &(db, &f.scope, &progress),
+            |tx, &(db, scope, progress)| Box::pin(erase_turn(db, tx, scope, progress, 6)),
+        )
+        .await;
+        assert!(result.is_err());
+        for row in [&input, &reply] {
+            assert_eq!(
+                db.collection::<Document>("assistant_messages")
+                    .find_one(doc! {"_id":row.get("_id").cloned()})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                *row
+            );
+        }
+        assert_eq!(
+            db.collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME)
+                .find_one(doc! {"_id":tool.get("_id").cloned()})
+                .await
+                .unwrap()
+                .unwrap(),
+            tool
+        );
+        assert_eq!(
+            db.collection::<Document>("assistant_conversations")
+                .find_one(doc! {"_id":conversation})
+                .await
+                .unwrap()
+                .unwrap(),
+            parent
+        );
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shared_turn_erasure_removes_only_notifications_whose_current_source_still_names_a() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    let a = scopes::reference(&f.bot).unwrap();
+    let parent = conversation(&f.bot.user_id, false, &a);
+    let conversation = parent.get_str("_id").unwrap();
+    db.collection::<Document>("assistant_conversations")
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    let input = message(&f.bot.user_id, conversation, "a-turn", 1, "user", &a);
+    db.collection::<Document>("assistant_messages")
+        .insert_one(input)
+        .await
+        .unwrap();
+    let notifications =
+        db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME);
+    let old = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"source":{
+    "conversation_id":conversation,"turn_id":"a-turn","message_id":"a-reply"}};
+    let mut coalesced = old.clone();
+    coalesced.insert("_id", uuid::Uuid::new_v4().to_string());
+    coalesced
+        .get_document_mut("source")
+        .unwrap()
+        .insert("turn_id", "b-turn");
+    coalesced
+        .get_document_mut("source")
+        .unwrap()
+        .insert("message_id", "b-reply");
+    notifications
+        .insert_many([old.clone(), coalesced.clone()])
+        .await
+        .unwrap();
+    let mut progress = Document::new();
+    for _ in 0..8 {
+        let step = transaction_service::run_db_only(
+            db,
+            &(db, &f.scope, &progress),
+            |tx, &(db, scope, progress)| Box::pin(erase_turn(db, tx, scope, progress, 6)),
+        )
+        .await
+        .unwrap();
+        progress = step.progress;
+        if progress.get_i32("phase") == Ok(7) {
+            break;
+        }
+    }
+    assert!(
+        notifications
+            .find_one(doc! {"_id":old.get("_id").cloned()})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        notifications
+            .find_one(doc! {"_id":coalesced.get("_id").cloned()})
+            .await
+            .unwrap()
+            .unwrap(),
+        coalesced
+    );
     db.drop().await.unwrap();
 }
