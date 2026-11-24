@@ -70,6 +70,7 @@ pub(crate) async fn adopt_private_partition(
     })).await
 }
 
+#[cfg(test)]
 pub(crate) async fn lane(
     db: &Database,
     origin: &ChannelOrigin,
