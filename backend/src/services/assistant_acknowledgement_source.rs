@@ -29,8 +29,13 @@ async fn input(
     text: bool,
     latest: bool,
 ) -> AppResult<Option<Input>> {
-    filter.extend(doc! {"conversation_id":&chat.conversation_id,"user_id":&chat.user_id,
-        "role":{"$in":["user","orchestrator","event"]},"steering":bson::Bson::Null,"execution_pending":{"$ne":true}});
+    if !filter.contains_key("role") {
+        filter.insert("role", doc! {"$in":["user","orchestrator","event","group"]});
+    }
+    filter.extend(
+        doc! {"conversation_id":&chat.conversation_id,"user_id":&chat.user_id,
+        "steering":bson::Bson::Null,"execution_pending":{"$ne":true}},
+    );
     let mut projection = doc! {"_id":1,"turn_id":1,"role":1,"meta_grants":1,"meta_contexts":1};
     if text {
         projection.insert("text", 1);
@@ -195,9 +200,6 @@ pub(crate) async fn select(
         if let Some(seq) = active.and_then(|turn| turn.initiating_message_seq) {
             filter.insert("seq", doc! {"$lte":seq});
         }
-        // `input` supplies the common role floor; keep the legacy role choice
-        // in an explicit conjunction for an independent ordinary event.
-        filter = doc! {"$and":[filter,{"role":{"$in":["user","orchestrator"]}}]};
         input(db, tx, chat, filter, text, true).await?
     };
     let initiating = selected.as_ref().or(first.as_ref());
