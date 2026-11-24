@@ -126,6 +126,57 @@ fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
     }
 }
 
+/// Persist before replacing the reusable content claim, including a legacy
+/// claim whose key is no longer usable. This source never migrates to its heir.
+async fn retain_origin(
+    db: &Database,
+    tx: &mut ClientSession,
+    owner: &str,
+    agent: &str,
+    claim: &AuthoredDraftClaim,
+) -> AppResult<()> {
+    let rows = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+    let Some(proposal) = rows
+        .find_one(doc! {"_id":&claim.proposal_id})
+        .session(&mut *tx)
+        .await?
+    else {
+        return Ok(());
+    };
+    if proposal.owner_id != owner
+        || proposal.agent_id != agent
+        || proposal.source != ProposalSource::Authored
+    {
+        return Err(conflict());
+    }
+    if let Some(saved)=proposal.authoring_origin {
+        if bson::to_bson(&saved).map_err(|_|conflict())? != bson::to_bson(claim).map_err(|_|conflict())? {return Err(conflict())}
+    } else if db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+        doc! {"_id":&claim.proposal_id,"owner_id":owner,"agent_id":agent,"source":"authored","authoring_origin":bson::Bson::Null},
+        doc! {"$set":{"authoring_origin":bson::to_bson(claim).map_err(|_|conflict())?}}).session(tx).await?.matched_count!=1 {return Err(conflict())}
+    Ok(())
+}
+
+pub(super) async fn saved_origin(
+    db: &Database,
+    tx: &mut ClientSession,
+    proposal: &AssistantAgentLearningProposal,
+) -> AppResult<Option<AuthoredDraftClaim>> {
+    if let Some(origin) = &proposal.authoring_origin {
+        if origin.proposal_id != proposal.id {
+            return Err(conflict());
+        }
+        return Ok(Some(origin.clone()));
+    }
+    let row=db.collection::<bson::Document>(CLAIMS).find_one(doc! {"claim.proposal_id":&proposal.id,"owner_id":&proposal.owner_id,"agent_id":&proposal.agent_id})
+        .session(tx).await?;
+    row.map(|row| {
+        bson::from_document(row.get_document("claim").map_err(|_| conflict())?.clone())
+            .map_err(|_| conflict())
+    })
+    .transpose()
+}
+
 /// Renew the saved review, even while another inbox is using its home. The
 /// original card, claim, proposal and source are checked in one transaction.
 pub async fn renew(
@@ -207,11 +258,9 @@ pub(crate) async fn fence_proposal_in_session(
     {
         return Ok(());
     }
-    let Some(row)=db.collection::<bson::Document>(CLAIMS).find_one(doc! {"claim.proposal_id":&proposal.id,"owner_id":&proposal.owner_id,"agent_id":&proposal.agent_id})
-        .session(&mut *tx).await? else {return Ok(())};
-    let claim: AuthoredDraftClaim =
-        bson::from_document(row.get_document("claim").map_err(|_| conflict())?.clone())
-            .map_err(|_| conflict())?;
+    let Some(claim) = saved_origin(db, tx, proposal).await? else {
+        return Ok(());
+    };
     if claim.meta_contexts.is_empty() {
         return Ok(());
     }
@@ -305,6 +354,7 @@ pub(super) async fn reserve(
             let proposals = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
             if let Ok(value) = current.get_document("claim") {
                 let claim: AuthoredDraftClaim = bson::from_document(value.clone()).map_err(|_| conflict())?;
+                retain_origin(db,session,&chat.user_id,&candidate.agent_id,&claim).await?;
                 let mut filter = unstarted();
                 filter.insert("_id", &claim.proposal_id);
                 filter.insert("owner_id", &chat.user_id);
@@ -364,9 +414,11 @@ pub(super) async fn reserve(
                 // Recovery re-raises the card with the drafting turn's routing, not a later turn's.
                 routing: Some(super::super::assistant_access_policy::routing_for(chat, &conversation)),
             };
-            proposals.insert_one(candidate).session(&mut *session).await?;
+            let mut candidate=candidate.clone();
+            candidate.authoring_origin=Some(claim.clone());
+            proposals.insert_one(&candidate).session(&mut *session).await?;
             save_claim(db, &claim_id, &claim, session).await?;
-            Ok(Reservation { claim_id: claim_id.clone(), claim, proposal: candidate.clone(), card: None })
+            Ok(Reservation { claim_id: claim_id.clone(), claim, proposal: candidate, card: None })
         }).await;
         mutations::transaction_result(result)
     }).await.map_err(mutations::map_transaction_error)
@@ -378,6 +430,20 @@ async fn save_claim(
     claim: &AuthoredDraftClaim,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    let row = db
+        .collection::<bson::Document>(CLAIMS)
+        .find_one(doc! {"_id":id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(conflict)?;
+    retain_origin(
+        db,
+        session,
+        row.get_str("owner_id").map_err(|_| conflict())?,
+        row.get_str("agent_id").map_err(|_| conflict())?,
+        claim,
+    )
+    .await?;
     db.collection::<bson::Document>(CLAIMS)
         .update_one(
             doc! {"_id":id},

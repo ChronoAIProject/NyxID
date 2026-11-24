@@ -198,13 +198,14 @@ async fn deleting_drafting_grant_preserves_verified_publication_but_retires_orig
     let skill = Uuid::new_v4().to_string();
     mount_publication(&f, &server, &proposal, &skill, "POST").await;
     assert_eq!(finish(&f, card, true).await.unwrap().status, "used");
-    let published = db
+    let mut published = db
         .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
         .find_one(doc! {"_id":&proposal.id})
         .await
         .unwrap()
         .unwrap();
     assert_eq!(published.get_str("status"), Ok("pinned"));
+    published.remove("authoring_origin");
     assert!(erase(&f, &bot).await);
     assert_eq!(
         db.collection::<bson::Document>(CLAIMS)
@@ -615,4 +616,117 @@ async fn original_draft_claim_inventory_resumes_after_one_hundred_rows() {
         0
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn signed_cleanup_finds_superseded_meta_draft_after_real_key_rotation_and_preserves_successor()
+ {
+    for disposition in ["pending", "legacy_pending", "verified"] {
+        let f = fixture("meta_draft_superseded_origin").await;
+        let server = setup_ornn(&f).await;
+        let (bot, chat) = meta_turn(&f).await;
+        let first = draft_in_chat(&f, &chat).await.unwrap();
+        let db = &f.state.db;
+        let proposals = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+        let id = first["proposal_id"].as_str().unwrap();
+        let original = proposals.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        let mut skill = None;
+        if disposition == "verified" {
+            let card = db
+                .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+                .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+                .await
+                .unwrap()
+                .unwrap();
+            let published = Uuid::new_v4().to_string();
+            mount_publication(&f, &server, &original, &published, "POST").await;
+            assert_eq!(finish(&f, card, true).await.unwrap().status, "used");
+            skill = Some(published);
+        } else if disposition == "legacy_pending" {
+            db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                .update_one(doc! {"_id":id}, doc! {"$unset":{"authoring_origin":""}})
+                .await
+                .unwrap();
+        }
+        settle(
+            &f,
+            &engine::get(db, &f.owner, &chat.conversation_id)
+                .await
+                .unwrap(),
+        )
+        .await;
+        crate::services::key_service::rotate_api_key(
+            db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &chat.api_key_id,
+        )
+        .await
+        .unwrap();
+        let caller = another_authoring_chat(&f).await;
+        let second = draft_in_chat(&f, &caller).await.unwrap();
+        let successor = second["proposal_id"].as_str().unwrap();
+        assert_ne!(successor, id);
+        assert_eq!(
+            db.collection::<bson::Document>(CLAIMS)
+                .count_documents(doc! {"claim.proposal_id":id})
+                .await
+                .unwrap(),
+            0
+        );
+        let saved = proposals.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        assert_eq!(
+            saved.authoring_origin.as_ref().unwrap().meta_contexts[0].meta_grant,
+            Some(meta::scopes::reference(&bot).unwrap())
+        );
+        let successor_before = db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .find_one(doc! {"_id":successor})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(erase(&f, &bot).await);
+        if let Some(skill) = skill {
+            let retained = proposals.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+            assert_eq!(retained.status, "pinned");
+            assert!(retained.authoring_origin.is_none());
+            assert_eq!(
+                retained.publication.as_ref().unwrap().skill_id.as_deref(),
+                Some(skill.as_str())
+            );
+        } else {
+            assert!(proposals.find_one(doc! {"_id":id}).await.unwrap().is_none());
+        }
+        assert_eq!(
+            db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":successor})
+                .await
+                .unwrap()
+                .unwrap(),
+            successor_before
+        );
+        let successor_card = db
+            .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .find_one(
+                doc! {"_id":second["acknowledgement_id"].as_str().unwrap(),"status":"pending"},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            acks::decide(
+                db,
+                &f.owner,
+                &caller.conversation_id,
+                &successor_card.id,
+                true
+            )
+            .await
+            .unwrap()
+            .status,
+            "allowed"
+        );
+        server.verify().await;
+        db.drop().await.unwrap();
+    }
 }

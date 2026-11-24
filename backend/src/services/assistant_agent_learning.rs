@@ -72,6 +72,9 @@ pub(crate) struct GeneratedFile {
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).create_index(IndexModel::builder()
+        .keys(doc! {"authoring_origin.meta_contexts.meta_grant.bot_id":1,"authoring_origin.meta_contexts.meta_grant.grant_id":1,"_id":1})
+        .build()).await?;
     let claims = db.collection::<bson::Document>(
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     );
@@ -1344,6 +1347,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         .await?
         .map_or(0, |agent| agent.skills_revision);
     let proposal = AssistantAgentLearningProposal {
+        authoring_origin: None,
         source: Default::default(),
         id: Uuid::new_v4().to_string(),
         agent_id: run.agent_id.clone(),

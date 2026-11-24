@@ -51,6 +51,10 @@ pub(crate) async fn required(db: &Database, bot: &str, grant: &str) -> AppResult
             crate::services::assistant_skill_authoring::erasure::filter(bot, grant),
         ),
         (
+            crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+            crate::services::assistant_skill_authoring::erasure::proposal_filter(bot, grant),
+        ),
+        (
             crate::models::async_service_operation::COLLECTION_NAME,
             async_filter(bot, grant),
         ),
@@ -1437,6 +1441,27 @@ async fn erase_turn(
     // Retain initiating inputs until their original draft operations drain.
     // A dispatched publication must reconcile before its claim can retire.
     let mut progress = progress.clone();
+    if progress.get_bool("draft_proposals_done") != Ok(true) {
+        let page = crate::services::assistant_skill_authoring::erasure::erase_proposals_page(
+            db,
+            tx,
+            scope,
+            progress.get_str("draft_proposal_after").ok(),
+        )
+        .await?;
+        let pending = progress.get_bool("draft_proposal_pending").unwrap_or(false) || page.pending;
+        if let Some(after) = page.after {
+            progress.insert("draft_proposal_after", after);
+            progress.insert("draft_proposal_pending", pending);
+            return Ok(Step::stay(progress));
+        }
+        progress.remove("draft_proposal_after");
+        progress.remove("draft_proposal_pending");
+        if pending {
+            return Ok(Step::stay(progress));
+        }
+        progress.insert("draft_proposals_done", true);
+    }
     if progress.get_bool("drafts_done") != Ok(true) {
         let page = crate::services::assistant_skill_authoring::erasure::erase_page(
             db,
@@ -1490,7 +1515,7 @@ async fn erase_turn(
     {
         progress.clone()
     } else {
-        doc! {"phase":phase,"drafts_done":true,"turn_audit_conversation":conversation,"turn_audit_turn":turn}
+        doc! {"phase":phase,"drafts_done":true,"draft_proposals_done":true,"turn_audit_conversation":conversation,"turn_audit_turn":turn}
     };
     if progress.get_bool("turn_audited") != Ok(true) {
         let rows = page(
@@ -1850,6 +1875,11 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
         }
     }
     for (collection, filter, phase) in [
+        (
+            crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+            crate::services::assistant_skill_authoring::erasure::proposal_filter(bot, grant),
+            6,
+        ),
         (
             crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
             crate::services::assistant_skill_authoring::erasure::filter(bot, grant),

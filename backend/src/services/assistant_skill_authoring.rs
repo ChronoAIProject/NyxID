@@ -391,6 +391,7 @@ pub async fn create(
     let scope_digest = hex::encode(Sha256::digest(&scope_bytes));
     let now = Utc::now();
     let candidate = AssistantAgentLearningProposal {
+        authoring_origin: None,
         source: ProposalSource::Authored,
         id: Uuid::new_v4().to_string(),
         agent_id: agent.id.clone(),
@@ -684,6 +685,7 @@ async fn submit_owner_draft(
         }
         let now = Utc::now();
         let row = AssistantAgentLearningProposal {
+            authoring_origin: None,
             source: ProposalSource::Authored,
             id: id.clone(),
             agent_id: agent.id.clone(),
