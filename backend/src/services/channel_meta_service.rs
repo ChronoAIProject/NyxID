@@ -1837,7 +1837,12 @@ pub(crate) async fn sweep_service(
                     && bot.meta_binding.as_ref().is_some_and(|captured|captured.grant_id==binding.grant_id && captured.generation==binding.generation))
             {
                 let grant_id = live.meta_binding.as_ref().map(|binding| binding.grant_id.as_str()).unwrap_or_default();
-                if let Err(error) = super::personal_erasure_service::erase_provider_inbox(state, &bot.id, grant_id).await {
+                let purge = if scope_erasure::required(service.db,&bot.id,grant_id).await? {
+                    scope_erasure::manual_pass(state,&live).await.map(|_|())
+                } else {
+                    super::personal_erasure_service::erase_provider_inbox(state,&bot.id,grant_id).await
+                };
+                if let Err(error) = purge {
                     tracing::warn!(bot_id=%bot.id,error_code=error.error_code(),"Manual Meta purge remains pending");
                 }
             }

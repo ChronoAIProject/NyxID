@@ -7988,7 +7988,7 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
             .await
             .unwrap()
             .unwrap();
-            assistant::finish_turn(
+            let settled = assistant::finish_turn(
                 &state.db,
                 row,
                 &credential.api_key_id,
@@ -8002,6 +8002,7 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
             )
             .await
             .unwrap();
+            assert!(settled.is_none());
         }
         settle(&state, &bot.user_id, &web, "Independent web reply").await;
         let mut start =
@@ -8063,7 +8064,10 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
         );
         let s = service(&state, &server);
         if manual {
-            s.delete_snapshot(&bot.user_id, &bot).await.unwrap();
+            assert_eq!(
+                s.delete_snapshot(&bot.user_id, &bot).await.unwrap(),
+                Some("removed")
+            );
             for _ in 0..32 {
                 if grants::completion_for(&state.db, &bot.id, &grant.grant_id)
                     .await

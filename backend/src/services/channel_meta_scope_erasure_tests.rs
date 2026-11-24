@@ -62,6 +62,9 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
         "child-foreign",
         "child-range",
         "child-malformed",
+        "voice-child",
+        "ttl-child",
+        "org-turn-child",
     ] {
         let f = fixture().await;
         let db = &f.state.db;
@@ -74,6 +77,9 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
             .unwrap();
         let mut first = message(&f.bot.user_id, id, "a-turn", 1, "user", &grant);
         match evidence {
+            "ttl-child" => {
+                first.insert("attachments", vec![doc! {"id":"expired-tool-image"}]);
+            }
             "untagged" => {
                 first.remove("meta_grants");
             }
@@ -94,6 +100,20 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
         if evidence == "orphan-child" {
             db.collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME).insert_one(doc! {
                 "_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"conversation_id":id,"turn_id":"unproven-old-turn"}).await.unwrap();
+        }
+        if evidence == "voice-child" {
+            db.collection::<Document>(crate::models::assistant_voice_session::COLLECTION_NAME).insert_one(doc! {
+                "_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"conversation_id":id,"turn_id":"a-turn","live_slot":true,
+                "meta_grant":bson::to_bson(&grant).unwrap()}).await.unwrap();
+        }
+        if evidence == "ttl-child" {
+            db.collection::<Document>(crate::models::assistant_upload_retention::TOMBSTONES).insert_one(doc! {
+                "_id":"expired-tool-image","user_id":&f.bot.user_id,"conversation_id":id,"expired_at":bson::DateTime::now()}).await.unwrap();
+        }
+        if evidence == "org-turn-child" {
+            db.collection::<Document>(crate::models::org_channel::MESSAGES).insert_one(doc! {
+                "_id":uuid::Uuid::new_v4().to_string(),"user_id":uuid::Uuid::new_v4().to_string(),"conversation_id":id,
+                "request_id":"a-turn","text":"Organization guest transcript"}).await.unwrap();
         }
         let child = if evidence.starts_with("child-") {
             let mut proof = grant.clone();
@@ -122,7 +142,7 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
             .unwrap();
         let mut progress = doc! {"phase":5};
         let mut refused = false;
-        for _ in 0..16 {
+        for _ in 0..128 {
             let result = transaction_service::run_db_only(
                 db,
                 &(db, &f.scope, &progress),
@@ -146,7 +166,10 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
                 break;
             }
         }
-        let completes = matches!(evidence, "same" | "child-same");
+        let completes = matches!(
+            evidence,
+            "same" | "child-same" | "ttl-child" | "org-turn-child"
+        );
         assert_eq!(refused, !completes);
         assert_eq!(
             db.collection::<Document>("assistant_conversations")
@@ -1013,4 +1036,185 @@ async fn exact_turn_feedback_and_artifact_deliveries_drain_before_source_and_kee
         );
         db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn large_guest_history_audits_and_destroys_in_restartable_pages_before_parent_retirement() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    ensure_indexes(db).await.unwrap();
+    let grant = scopes::reference(&f.bot).unwrap();
+    let mut guest = conversation(&f.bot.user_id, true, &grant);
+    guest.insert("message_count", 1001_i64);
+    let unrelated = conversation(&f.bot.user_id, false, &grant);
+    let unrelated_id = unrelated.get_str("_id").unwrap().to_owned();
+    let conversation = guest.get_str("_id").unwrap().to_owned();
+    db.collection::<Document>("assistant_conversations")
+        .insert_many([guest, unrelated])
+        .await
+        .unwrap();
+    let messages: Vec<_> = (0..1001)
+        .map(|number| {
+            message(
+                &f.bot.user_id,
+                &conversation,
+                &format!("a-turn-{number}"),
+                number + 1,
+                "user",
+                &grant,
+            )
+        })
+        .collect();
+    db.collection::<Document>("assistant_messages")
+        .insert_many(messages)
+        .await
+        .unwrap();
+    let tools:Vec<_>=(0..1001).map(|number|doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,
+        "conversation_id":&conversation,"turn_id":format!("a-turn-{number}"),"output":"private guest result"}).collect();
+    db.collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME)
+        .insert_many(tools)
+        .await
+        .unwrap();
+    db.collection::<Document>(BOTS)
+        .update_one(
+            doc! {"_id":&f.bot.id},
+            doc! {"$set":{"is_active":false,"meta_binding.subscription":"removed"}},
+        )
+        .await
+        .unwrap();
+    let cutoff = bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::seconds(1));
+    let mut last_count = 2002_u64;
+    let mut partial = false;
+    let mut done = false;
+    for _ in 0..192 {
+        // Every pass constructs a new worker and reloads the only durable
+        // cursor from the scope. No local audit/proof survives a restart.
+        done = pass(
+            &f.state,
+            &MetaService::from(&f.state),
+            &f.bot.id,
+            &grant.grant_id,
+            cutoff,
+        )
+        .await
+        .unwrap();
+        let messages = db
+            .collection::<Document>("assistant_messages")
+            .count_documents(doc! {"conversation_id":&conversation})
+            .await
+            .unwrap();
+        let tools = db
+            .collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&conversation})
+            .await
+            .unwrap();
+        let count = messages + tools;
+        assert!(
+            last_count - count <= 100,
+            "one destructive transaction exceeded its page"
+        );
+        if count > 0 {
+            assert!(
+                db.collection::<Document>("assistant_conversations")
+                    .find_one(doc! {"_id":&conversation})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                !grants::completion_for(db, &f.bot.id, &grant.grant_id)
+                    .await
+                    .unwrap()
+            );
+        }
+        if count < 2002 && count > 0 {
+            partial = true;
+            let stored = db
+                .collection::<Document>(GRANT_SCOPES)
+                .find_one(doc! {"_id":f.scope.get("_id").cloned()})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                stored
+                    .get_document("purge")
+                    .unwrap()
+                    .get_i32("guest_delete_stage")
+                    .is_ok()
+            );
+        }
+        last_count = count;
+        if done {
+            break;
+        }
+    }
+    assert!(done && partial);
+    assert_eq!(last_count, 0);
+    assert!(
+        db.collection::<Document>("assistant_conversations")
+            .find_one(doc! {"_id":&conversation})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.collection::<Document>("assistant_conversations")
+            .find_one(doc! {"_id":&unrelated_id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        grants::completion_for(db, &f.bot.id, &grant.grant_id)
+            .await
+            .unwrap()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manual_worker_losing_its_parent_requires_exact_typed_completion_proof() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    let mut captured = f.bot.clone();
+    captured.is_active = false;
+    db.collection::<Document>(BOTS)
+        .delete_one(doc! {"_id":&captured.id})
+        .await
+        .unwrap();
+    assert!(manual_pass(&f.state, &captured).await.is_err());
+    let scopes_rows = db.collection::<Document>(GRANT_SCOPES);
+    scopes_rows.update_one(doc! {"_id":f.scope.get("_id").cloned()},doc! {"$set":{"status":"completed",
+        "local_data_erased_at":"not a date","completed_grant_id":&captured.meta_binding.as_ref().unwrap().grant_id}}).await.unwrap();
+    let corrupt = scopes_rows
+        .find_one(doc! {"_id":f.scope.get("_id").cloned()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(manual_pass(&f.state, &captured).await.is_err());
+    assert_eq!(
+        scopes_rows
+            .find_one(doc! {"_id":f.scope.get("_id").cloned()})
+            .await
+            .unwrap()
+            .unwrap(),
+        corrupt
+    );
+    scopes_rows
+        .replace_one(doc! {"_id":f.scope.get("_id").cloned()}, &f.scope)
+        .await
+        .unwrap();
+    let grant = &captured.meta_binding.as_ref().unwrap().grant_id;
+    transaction_service::run_db_only(
+        db,
+        &(db, captured.id.as_str(), grant.as_str()),
+        |tx, &(db, bot, grant)| Box::pin(scopes::mark_complete(db, tx, bot, grant)),
+    )
+    .await
+    .unwrap();
+    assert!(manual_pass(&f.state, &captured).await.unwrap());
+    captured.meta_binding.as_mut().unwrap().grant_id = uuid::Uuid::new_v4().to_string();
+    assert!(manual_pass(&f.state, &captured).await.is_err());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    db.drop().await.unwrap();
 }
