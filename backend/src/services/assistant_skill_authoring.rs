@@ -753,25 +753,59 @@ async fn submit_owner_draft(
             return Err(failure.error);
         }
     };
+    // App Edit is independently authored, including when the home's latest
+    // input came from an inbox. Do not select that input as its source.
+    let app_origin = acks::RequestOrigin {
+        initiating_input_id: None,
+        meta_contexts: Vec::new(),
+        invocation_id: None,
+        creation_turn_id: None,
+        requested_turn_id: None,
+        voice_request_id: None,
+        trigger_run_id: None,
+        routing: Some(crate::models::assistant_acknowledgement::CardRouting::NotInvolved),
+    };
     if !chat.guest
         && acks::effective_access_mode(&state.db, chat).await?
             == crate::models::assistant_settings::AccessMode::Autopilot
     {
-        return publish_automatically(state, chat, &agent, &id, &binding, reader).await;
+        return publish_automatically_from_origin(
+            state,
+            chat,
+            &agent,
+            &id,
+            &binding,
+            reader,
+            Some(&app_origin),
+        )
+        .await;
     }
-    let card = acks::request(
+    acks::expire(&state.db, &chat.user_id, &chat.conversation_id).await?;
+    let (card, activity) = super::transaction_service::run_db_only(
         &state.db,
-        chat,
-        acks::Request {
-            kind: "action",
-            service: None,
-            tool: Some(review::TOOL),
-            arguments: Some(&binding),
-            summary: CARD_SUMMARY,
-            platform: false,
+        &(&state.db, chat, &binding, &app_origin),
+        |session, &(db, chat, binding, origin)| {
+            Box::pin(acks::request_in_session(
+                db,
+                chat,
+                acks::Request {
+                    kind: "action",
+                    service: None,
+                    tool: Some(review::TOOL),
+                    arguments: Some(binding),
+                    summary: CARD_SUMMARY,
+                    platform: false,
+                },
+                Some(origin),
+                chat.approval_options(),
+                session,
+            ))
         },
     )
     .await?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
     Ok(draft_result(state, &card, &id, &agent.id))
 }
 

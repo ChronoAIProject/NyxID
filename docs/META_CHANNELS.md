@@ -433,6 +433,11 @@ Full-access renewal and recovery preserve automatic publication while recording
 the receipt against the original review's home, input and grant. The receipt
 transaction revalidates that input and source; a later active turn cannot
 supply replacement evidence.
+App Edit starts with an explicit app origin, without an initiating input,
+requesting turn or grant, even if the latest settled home input was an inbox
+DM. Its initial review and renewed receipt remain independent of that inbox.
+MCP drafts and retained legacy claims keep their recorded requesting turn and
+grant; absent optional fields do not convert those sources into app origins.
 Before removing initiating history, grant cleanup scans original authored-draft
 claims and per-proposal origins in pages of 100. It removes exact unstarted proposals and their matching
 reserved publication targets and removes the grant’s queued repair notices, allowing a fresh draft afterward. First dispatch
