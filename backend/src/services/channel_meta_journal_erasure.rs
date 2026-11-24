@@ -65,13 +65,26 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
             .projection(doc! {"user_id": 1, source_field: 1})
             .await?;
         while let Some(source) = sources.try_next().await? {
-            let owner = source
-                .get_str("user_id")
-                .map_err(|_| attribution_required(&bot.id))?;
-            let id = source
-                .get_str(source_field)
-                .map_err(|_| attribution_required(&bot.id))?;
-            owners.insert(owner.to_owned());
+            if let Ok(owner) = source.get_str("user_id") {
+                owners.insert(owner.to_owned());
+            }
+            let (Ok(owner), Ok(id)) = (source.get_str("user_id"), source.get_str(source_field))
+            else {
+                // Old/corrupt but explicitly bot-scoped rows are removed by
+                // the ordinary derived cleanup. They cannot prove a journal's
+                // ownership: refuse if a legacy saved plan needs that join.
+                if let Ok(id) = source.get_str(source_field)
+                    && plans
+                        .find_one(doc! {"channel_bot_id": null, "source_id": id,
+                        "logical_key": {"$regex": "^saved-result:"}})
+                        .projection(doc! {"_id": 1})
+                        .await?
+                        .is_some()
+                {
+                    return Err(attribution_required(&bot.id));
+                }
+                continue;
+            };
             plans
                 .delete_many(doc! {"channel_bot_id": null, "user_id": owner, "source_id": id})
                 .await?;
@@ -228,7 +241,9 @@ mod tests {
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()}
     }
     fn saved(turn: &str, origin: &ChannelOrigin) -> Document {
-        doc! {"origin": bson::to_bson(origin).unwrap(), "source": {"turn_id": turn}}
+        doc! {"origin": bson::to_bson(origin).unwrap(),
+        "source": {"turn_id": turn, "event_id": null, "ids": [], "expected": true},
+        "additional": false}
     }
 
     #[tokio::test]
