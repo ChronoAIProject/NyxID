@@ -442,6 +442,11 @@ inventory until admitted or retired. Database read failures and unresolved
 scope proof keep the encrypted result for retry or verified repair; they do
 not become evidence of authority loss. Ordinary web-watch delivery keeps its
 existing lifecycle.
+The pending-delivery deadline does not cancel a result already admitted to its
+exact active event turn. The consumer may read and settle that result under its
+existing payload-retention and grant-erasure limits. Timeout retirement and
+admission serialize on the same conversation record; unrelated active turns do
+not establish admission for that watch.
 
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved

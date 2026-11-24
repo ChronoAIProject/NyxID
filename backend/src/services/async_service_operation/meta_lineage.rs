@@ -206,9 +206,16 @@ pub(super) async fn retire_in_session(
         return Err(super::super::channel_meta_service::grants::incomplete());
     }
     let now = Utc::now();
+    // The same conversation write that consumes the pending event commits
+    // admission. Retirement also writes that parent, so overlapping admission
+    // and timeout retry against one consistent snapshot of the exact event.
+    let admitted=live.state=="queued" && now>=live.deadline && db.collection::<bson::Document>(CONVERSATIONS)
+        .find_one(doc! {"_id":&live.conversation_id,"user_id":&live.user_id,"active_turn.stop_requested":{"$ne":true},
+            "active_turn.events":{"$elemMatch":{"kind":EVENT_KIND,"id":&live.id}}})
+        .projection(doc! {"_id":1}).session(&mut *tx).await?.is_some();
     let mut reason = if now >= live.expires_at.min(live.created_at + Duration::hours(4)) {
         Some("result_expired")
-    } else if now >= live.deadline {
+    } else if now >= live.deadline && !admitted {
         Some("timeout")
     } else {
         None
