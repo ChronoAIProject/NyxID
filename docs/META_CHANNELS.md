@@ -489,8 +489,10 @@ use the same live route proof before opening access. Explicitly closing access
 remains available on a failing route, subject to the existing owner/admin checks.
 After the first organization Grants activation, the service list and permission
 digests on a direct Meta binding are a ceiling. During a temporary fallback,
-administrators can remove services, edit spending limits or close guest access.
-Expanding that ceiling requires the reviewed Grants adoption flow. Upgrade all
+administrators can reduce service access, edit spending limits or close guest
+access. Removing a service preserves each retained service’s saved permissions.
+A stale permission digest can suspend the whole frozen delegation. Restoring
+that delegation or expanding its ceiling requires the Grants adoption flow. Upgrade all
 serving writers and drain earlier versions before enabling these new channels.
 Hosted assistant setup stores only its server-computed expected callback in the
 trusted wake reference. Wake admission verifies that callback and the live route

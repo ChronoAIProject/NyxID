@@ -687,6 +687,42 @@ async fn legacy_org_meta_guest_reductions_remain_available_on_callback_failure()
         ),
     )
     .await;
+    // Dropping the stale digest would reopen the remaining service on a
+    // frozen binding when Grants returns. Check against the live specialist.
+    let channels = state.db.collection::<bson::Document>(CHANNELS);
+    let saved = narrower.org_specialist.as_ref().unwrap();
+    let mut frozen_policy = saved.guests.clone();
+    frozen_policy.service_ids = service_ids.clone();
+    frozen_policy.service_authority.insert(
+        service_ids[1].clone(),
+        org::management::service_digest(&agent, &service_ids[1]),
+    );
+    frozen_policy.follows_agent_grants = false;
+    channels
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {
+                "org_specialist.guests": bson::to_bson(&frozen_policy).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        patch(json!({"service_ids":[&service_ids[1]],"expected_revision":revision().await})).await,
+        Err(AppError::Conflict(_))
+    ));
+    let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(after.org_specialist.unwrap().guests, frozen_policy);
+    // Restore the already-observed narrowing result for the activation race below.
+    channels
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {
+                "org_specialist.guests": bson::to_bson(&saved.guests).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
     // The live route is healthy and the last readiness read still saw the
     // incompatible replica. Its departure cannot widen the frozen service list.
     crate::services::durable_wake_tests::resume_after(

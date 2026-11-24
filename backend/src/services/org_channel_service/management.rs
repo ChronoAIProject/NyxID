@@ -408,11 +408,17 @@ async fn update_choice(
         if (*ready || *direct_meta) && super::guest_grants_ready(db).await? != *ready {
             return Err(if *ready { AppError::SecurityReadinessUnavailable } else { settings_changed() });
         }
-        let expands_frozen_services = *direct_meta && !*ready && *author_services &&
-            policy.service_ids.iter().any(|id| {
-                !b.guests.service_ids.contains(id) || policy.service_authority.get(id) != b.guests.service_authority.get(id)
-            });
-        if expands_frozen_services {
+        let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
+        let expands_services = *author_services && policy.service_ids.iter().any(|id| {
+            !b.guests.service_ids.contains(id) || policy.service_authority.get(id) != b.guests.service_authority.get(id)
+        });
+        // When Grants returns, a single stale digest still closes every
+        // delegated service on a frozen binding. Removing that digest may
+        // restore execution through the retained services.
+        let restores_frozen_delegation = !b.guests.follows_agent_grants && policy.enabled
+            && !super::guest_delegation_current(&live, &b.guests)
+            && super::guest_delegation_current(&live, policy);
+        if *direct_meta && !*ready && (expands_services || restores_frozen_delegation) {
             use crate::services::security_readiness_service as readiness;
             readiness::fence_org_guest_grants_activation(db, tx).await?;
             #[cfg(test)]
@@ -422,7 +428,6 @@ async fn update_choice(
             }
         }
 
-        let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
         let newly_eligible = *direct_meta && !*ready
             && !legacy_eligible(&b.guests,&live) && legacy_eligible(policy,&live);
         if *widening || newly_eligible {
@@ -473,9 +478,7 @@ fn legacy_eligible(
     policy.enabled
         && !policy.revision.is_empty()
         && policy.daily_credits.is_some_and(|cap| cap > Credits::ZERO)
-        && policy.service_authority.iter().all(|(id, digest)| {
-            agent.grants.service_ids.contains(id) && service_digest(agent, id) == *digest
-        })
+        && super::guest_delegation_current(agent, policy)
 }
 
 fn settings_changed() -> AppError {

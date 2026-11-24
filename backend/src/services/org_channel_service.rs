@@ -52,6 +52,13 @@ pub(crate) async fn guest_grants_ready(db: &Database) -> AppResult<bool> {
     }
 }
 
+/// Frozen bindings keep their original permission digests until Grants adoption.
+fn guest_delegation_current(agent: &AssistantAgent, policy: &GuestPolicy) -> bool {
+    policy.service_authority.iter().all(|(id, digest)| {
+        agent.grants.service_ids.contains(id) && management::service_digest(agent, id) == *digest
+    })
+}
+
 /// Binding selection only: operation/guest classification remains in the shared
 /// operation-scope evaluators. A legacy digest mismatch never widens a key.
 pub(crate) fn guest_service_selected(
@@ -601,10 +608,7 @@ fn check_audience<'a>(
             }
             if executing
                 && !(guest_grants_ready && policy.follows_agent_grants)
-                && policy.service_authority.iter().any(|(id, digest)| {
-                    !agent.grants.service_ids.contains(id)
-                        || management::service_digest(&agent, id) != *digest
-                })
+                && !guest_delegation_current(&agent, policy)
             {
                 return Err(denied());
             }
