@@ -341,6 +341,7 @@ pub mod assistant_account_tools;
 pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
 pub mod assistant_checking_notice;
+mod assistant_citation_markers;
 pub mod assistant_continuation;
 pub mod assistant_group_kind;
 pub mod assistant_group_service;
