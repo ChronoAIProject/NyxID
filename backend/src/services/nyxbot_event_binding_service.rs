@@ -31,6 +31,8 @@ use crate::{
     },
 };
 
+pub(crate) mod storage;
+
 const CHANNELS: &str = crate::models::nyxbot_channel::COLLECTION_NAME;
 const THREADS: &str = crate::models::nyxbot_channel::THREADS_COLLECTION_NAME;
 const MAX_PARTITION: usize = 256;
@@ -206,10 +208,10 @@ pub(crate) async fn create(
     .await?;
     let provider_key = Zeroizing::new(provider.full_key);
     let producer_secret = Zeroizing::new({
-        let mut bytes = [0u8; 32];
+        let mut bytes = Zeroizing::new([0u8; 32]);
         let mut rng = rand::rngs::OsRng;
-        rng.fill_bytes(&mut bytes);
-        STANDARD.encode(bytes)
+        rng.fill_bytes(bytes.as_mut());
+        STANDARD.encode(bytes.as_slice())
     });
     let id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -225,18 +227,9 @@ pub(crate) async fn create(
         partition_policy: "per_event".into(),
         provider_binding_id: None,
         provider_api_key_id: Some(provider.id.clone()),
-        provider_key_ciphertext: Some(
-            state
-                .encryption_keys
-                .encrypt(provider_key.as_bytes())
-                .await?,
-        ),
-        producer_secret_ciphertext: Some(
-            state
-                .encryption_keys
-                .encrypt(producer_secret.as_bytes())
-                .await?,
-        ),
+        provider_key_ciphertext: None,
+        producer_secret_ciphertext: None,
+        secret_context_versions: Default::default(),
         producer_key_id: producer_key_id.clone(),
         gateway_channel_id: None,
         custom_event_url: None,
@@ -248,6 +241,17 @@ pub(crate) async fn create(
         created_at: now,
         updated_at: now,
     };
+    if let Err(error) = storage::install(
+        &state.encryption_keys,
+        &mut row,
+        &provider_key,
+        &producer_secret,
+    )
+    .await
+    {
+        let _ = key_service::delete_api_key(&state.db, owner, &provider.id).await;
+        return Err(error);
+    }
     if let Err(error) = state
         .db
         .collection::<NyxbotEventBinding>(COLLECTION_NAME)
@@ -257,6 +261,9 @@ pub(crate) async fn create(
         let _ = key_service::delete_api_key(&state.db, owner, &provider.id).await;
         return Err(error.into());
     }
+    let preparing = doc! {"_id":&row.id, "user_id":owner, "status":"preparing",
+    "agent_id":&row.agent_id, "agent_owner_id":&row.agent_owner_id,
+    "provider_api_key_id":&provider.id, "producer_key_id":&producer_key_id};
     let result = async {
         let creator = gateway::creator_bearer(state, owner)?;
         let base = gateway::gateway_base(state).await?;
@@ -326,12 +333,15 @@ pub(crate) async fn create(
         {
             return Err(AppError::ValidationError("gateway_target_mismatch".into()));
         }
-        row.status = "ready".into();
-        row.updated_at = Utc::now();
+        // Preparation may have been rewrapped while the gateway call was in flight.
+        // Publish only the remote identity and the completed setup state.
         let saved = state
             .db
             .collection::<NyxbotEventBinding>(COLLECTION_NAME)
-            .replace_one(doc! {"_id": &row.id, "status": "preparing"}, &row)
+            .update_one(preparing.clone(), doc! {"$set":{
+                "gateway_channel_id":&row.gateway_channel_id, "provider_binding_id":&row.provider_binding_id,
+                "gateway_version":row.gateway_version, "custom_event_url":&row.custom_event_url,
+                "status":"ready", "updated_at":bson::DateTime::now()}})
             .await?;
         if saved.matched_count != 1 {
             return Err(AppError::Conflict("custom_binding_changed".into()));
@@ -365,19 +375,15 @@ pub(crate) async fn create(
             AppError::ValidationError(code) => code.clone(),
             _ => "gateway_setup_failed".into(),
         };
-        row.status = "failed".into();
-        row.last_error = Some(code.clone());
-        row.provider_key_ciphertext = None;
-        row.producer_secret_ciphertext = None;
-        row.updated_at = Utc::now();
-        let _ = state
-            .db
-            .collection::<NyxbotEventBinding>(COLLECTION_NAME)
-            .replace_one(doc! {"_id": &row.id, "status": "preparing"}, &row)
+        let _ = state.db.collection::<NyxbotEventBinding>(COLLECTION_NAME)
+            .update_one(preparing, doc! {"$set":{
+                "gateway_channel_id":&row.gateway_channel_id, "provider_binding_id":&row.provider_binding_id,
+                "gateway_version":row.gateway_version, "custom_event_url":&row.custom_event_url,
+                "status":"failed", "last_error":&code, "updated_at":bson::DateTime::now(),
+                "provider_key_ciphertext":bson::Bson::Null, "producer_secret_ciphertext":bson::Bson::Null},
+                "$unset":{"secret_context_versions.provider_key_ciphertext":"",
+                          "secret_context_versions.producer_secret_ciphertext":""}})
             .await;
-        // A failed preparation cannot be used by the provider. Retire the
-        // dedicated execution key immediately; the encrypted ciphertext is
-        // retained only as a redacted recovery marker and is never usable.
         if let Some(key_id) = row.provider_api_key_id.as_deref() {
             let _ = key_service::delete_api_key(&state.db, owner, key_id).await;
         }
@@ -487,7 +493,8 @@ pub(crate) async fn unbind_provider(state: &AppState, row: &NyxbotEventBinding) 
                     "revoked_at": bson::DateTime::now(),
                     "updated_at": bson::DateTime::now(),
                 },
-                "$unset": {"provider_key_ciphertext": "", "producer_secret_ciphertext": ""},
+                "$unset": {"provider_key_ciphertext": "", "producer_secret_ciphertext": "",
+                    "secret_context_versions.provider_key_ciphertext":"", "secret_context_versions.producer_secret_ciphertext":""},
             },
         )
         .await?;

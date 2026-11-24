@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "nyxbot_event_bindings";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEventBinding {
     #[serde(rename = "_id")]
     pub id: String,
@@ -38,6 +38,8 @@ pub struct NyxbotEventBinding {
     /// provider endpoint.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub producer_secret_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default = "default_producer_key_id")]
     pub producer_key_id: String,
     #[serde(default)]
@@ -76,5 +78,13 @@ fn default_status() -> String {
 impl NyxbotEventBinding {
     pub fn active(&self) -> bool {
         self.status == "ready" && self.revoked_at.is_none()
+    }
+}
+
+impl std::fmt::Debug for NyxbotEventBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NyxbotEventBinding")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
     }
 }

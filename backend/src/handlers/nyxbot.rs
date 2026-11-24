@@ -7949,6 +7949,7 @@ mod custom_event_contract_tests {
             provider_api_key_id: Some("key".into()),
             provider_key_ciphertext: None,
             producer_secret_ciphertext: None,
+            secret_context_versions: Default::default(),
             producer_key_id: "producer".into(),
             gateway_channel_id: Some("cmaeg1".into()),
             custom_event_url: None,

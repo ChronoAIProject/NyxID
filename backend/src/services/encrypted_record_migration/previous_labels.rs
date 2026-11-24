@@ -213,8 +213,14 @@ pub(super) const CHANNEL_BOT_DIGEST: &str =
 pub(super) const WHATSAPP_DIGEST: &str =
     "6c328214696d6e4cdbb50c0b9aa5ef852c20e6e480fd2203ed6002b48477a50b";
 
-pub(super) const NYXBOT_CHANNEL_KEY_DIGEST: &str =
+pub(super) const CHANNEL_KEY_DIGEST: &str =
     "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9";
 
 pub(super) const META_OAUTH_DIGEST: &str =
     "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed";
+
+pub(super) const EVENT_BINDING_DIGEST: &str =
+    "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
+
+pub(super) const META_CHANNEL_KEY_DIGEST: &str =
+    "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241";

@@ -54,6 +54,7 @@ enum Adapter {
     ChannelBot,
     NativeWhatsapp,
     NyxbotChannelKey,
+    EventBinding,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -332,7 +333,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_event_bindings",
-        adapter: Adapter::Pending,
+        adapter: Adapter::EventBinding,
         fields: &["provider_key_ciphertext", "producer_secret_ciphertext"],
     },
     Entry {
@@ -567,15 +568,18 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::META_OAUTH_DIGEST) => project_labels(
-            &row,
-            previous_labels::reconciled().chain(std::iter::once((
-                "channel_meta_oauth_sessions",
-                &["assets_encrypted"][..],
-            ))),
-        )?,
+        Some(previous_labels::META_OAUTH_DIGEST | previous_labels::META_CHANNEL_KEY_DIGEST) => {
+            project_labels(
+                &row,
+                previous_labels::reconciled().chain(std::iter::once((
+                    "channel_meta_oauth_sessions",
+                    &["assets_encrypted"][..],
+                ))),
+            )?
+        }
         Some(
-            previous_labels::NYXBOT_CHANNEL_KEY_DIGEST
+            previous_labels::EVENT_BINDING_DIGEST
+            | previous_labels::CHANNEL_KEY_DIGEST
             | previous_labels::WHATSAPP_DIGEST
             | previous_labels::CHANNEL_BOT_DIGEST
             | previous_labels::OAUTH_WEBHOOK_DIGEST
@@ -778,6 +782,9 @@ async fn verify(
         }
         Adapter::ChannelBot => super::channel_bot_record::verify(keys, row).await,
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::EventBinding => {
+            super::nyxbot_event_binding_service::storage::verify(db, keys, row).await
+        }
         Adapter::NativeWhatsapp => super::whatsapp_native::token_record::verify(keys, row).await,
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::verify(keys, row).await,
         Adapter::Broker => {
@@ -906,6 +913,9 @@ async fn migrate(
         }
         Adapter::ChannelBot => Box::pin(super::channel_bot_record::migrate(db, keys, row)).await,
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::EventBinding => {
+            super::nyxbot_event_binding_service::storage::migrate(db, keys, row).await
+        }
         Adapter::NativeWhatsapp => {
             super::whatsapp_native::token_record::migrate(db, keys, row).await
         }
@@ -1456,6 +1466,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 mod tests {
     mod channel_bots;
     mod channel_keys;
+    mod event_bindings;
     mod registry;
     mod swaps;
     mod webhooks;

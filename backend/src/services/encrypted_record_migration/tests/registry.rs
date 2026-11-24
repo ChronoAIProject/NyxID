@@ -28,10 +28,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"request_ciphertext": &bytes},
         ),
         (
-            nyxbot_event_binding::COLLECTION_NAME,
-            doc! {"provider_key_ciphertext": &bytes, "producer_secret_ciphertext": &bytes},
-        ),
-        (
             auth_device_code::V2_COLLECTION_NAME,
             doc! {"agent_key_grant": bson::to_document(&grant).unwrap()},
         ),
@@ -191,7 +187,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241"
+        "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96"
     );
     for digest in [
         Some(live.as_str()),
@@ -200,8 +196,10 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
-        Some(previous_labels::NYXBOT_CHANNEL_KEY_DIGEST),
+        Some(previous_labels::CHANNEL_KEY_DIGEST),
         Some(previous_labels::META_OAUTH_DIGEST),
+        Some(previous_labels::META_CHANNEL_KEY_DIGEST),
+        Some(previous_labels::EVENT_BINDING_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -233,6 +231,19 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 .contains(&"registry_or_primary_provider_changed"),
             digest != Some(live.as_str())
         );
+        let includes_meta = digest == Some(live.as_str())
+            || matches!(
+                digest,
+                Some(previous_labels::META_CHANNEL_KEY_DIGEST | previous_labels::META_OAUTH_DIGEST)
+            );
+        assert_eq!(
+            report
+                .field_outcomes
+                .iter()
+                .any(|field| field.collection == "channel_meta_oauth_sessions"
+                    && field.field == "assets_encrypted"),
+            includes_meta
+        );
         let expected = match digest {
             Some(previous_labels::DIGEST) => Some((
                 "nyxbot_watches",
@@ -243,7 +254,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::NYXBOT_CHANNEL_KEY_DIGEST
+                        previous_labels::CHANNEL_KEY_DIGEST
+                            | previous_labels::META_CHANNEL_KEY_DIGEST
+                            | previous_labels::EVENT_BINDING_DIGEST
                             | previous_labels::META_OAUTH_DIGEST
                             | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST
