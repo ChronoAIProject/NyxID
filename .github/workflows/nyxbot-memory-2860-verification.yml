@@ -37,4 +37,5 @@ jobs:
       - name: Start the disposable MongoDB replica set
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Run the native memory contract suite
-        run: cargo test --locked -p nyxid --lib memory_write_tests:: -- --test-threads=2
+        run: |
+          cargo test --locked -p nyxid --lib 'memory_write_tests::' -- --test-threads=2
