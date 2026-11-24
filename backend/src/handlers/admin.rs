@@ -2312,11 +2312,9 @@ pub async fn create_oauth_client(
         )
         .await?;
     }
-    let revocation_webhook_secret_encrypted =
-        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
-            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
-            None => None,
-        };
+    let revocation_webhook_secret =
+        normalize_optional_nonempty(body.revocation_webhook_secret.as_deref())
+            .map(|secret| (state.encryption_keys.as_ref(), secret));
 
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
@@ -2329,7 +2327,7 @@ pub async fn create_oauth_client(
         crate::models::oauth_client::ScopeProvenance::Explicit,
         body.broker_capability_enabled.unwrap_or(false),
         revocation_webhook_url,
-        revocation_webhook_secret_encrypted,
+        revocation_webhook_secret,
         &[],
     )
     .await?;
@@ -3968,6 +3966,7 @@ mod operator_route_tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dynamic_registration".to_string()),
             created_at: now,

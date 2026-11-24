@@ -405,6 +405,7 @@ mod tests {
                     connection_webhook_url: None,
                     connection_webhook_secret_encrypted: None,
                     connection_webhook_key_id: None,
+                    secret_context_versions: Default::default(),
                     connection_webhook_enabled: false,
                     created_by: None,
                     created_at: now,

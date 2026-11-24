@@ -67,6 +67,8 @@ pub struct OauthClient {
     pub connection_webhook_key_id: Option<String>,
     #[serde(default)]
     pub connection_webhook_enabled: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     pub created_by: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -166,6 +168,7 @@ mod tests {
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
             connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
             connection_webhook_key_id: Some("key_fixture".to_string()),
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
@@ -246,6 +249,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),
@@ -284,6 +288,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
@@ -316,6 +321,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
             connection_webhook_key_id: Some("key_fixture".to_string()),
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: None,
             created_at: Utc::now(),
