@@ -9,7 +9,7 @@ import { useShallow } from "zustand/react/shallow";
 import { createPortal } from "react-dom";
 import { AssistantThreadsContext } from "./assistant-threads-context";
 import { AssistantThreadList } from "./assistant-thread-list";
-import { conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
+import { channelSourceTitle, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useQuery } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -227,6 +227,7 @@ function ConversationRow({
         aria-label={unread ? translateUi("{{title}}, unread", { title: shownTitle }) : shownTitle}
         aria-current={active ? "page" : undefined}
         aria-describedby={showDraft ? draftPreviewId : undefined}
+        title={conversation.title}
         className={cn(
           "w-full overflow-hidden px-2 py-1 text-left transition-colors",
           showDetails && "py-2.5",
@@ -255,8 +256,8 @@ function ConversationRow({
         {showDetails && !showDraft ? (
           <span className="mt-1 flex items-center gap-1.5 text-12 text-text-tertiary">
             {conversation.active_turn ? translateUi("Working") : (
-              <time dateTime={conversation.last_message_at}>
-                {Number.isNaN(Date.parse(conversation.last_message_at)) ? "" : new Date(conversation.last_message_at)
+              <time dateTime={conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at}>
+                {Number.isNaN(Date.parse(conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at)) ? "" : new Date(conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at)
                   .toLocaleDateString(getFormattingLocale(), { month: "short", day: "numeric" })}
               </time>
             )}
@@ -316,8 +317,16 @@ function ConversationRow({
             const channelKey = conversation.channel
               ? conversation.channel.channel_agent_id ?? `platform:${conversation.channel.platform}`
               : undefined;
-            const trigger = rowList.current?.querySelector<HTMLElement>(`[data-conversation-options="${CSS.escape(conversation.id)}"]`)
-              ?? (channelKey ? rowList.current?.querySelector<HTMLElement>(`[data-channel-group="${CSS.escape(channelKey)}"]`) : null);
+            const options = rowList.current?.querySelector<HTMLElement>(`[data-conversation-options="${CSS.escape(conversation.id)}"]`);
+            const pins = useAssistantPinsStore.getState();
+            const sourceKey = channelKey ? JSON.stringify([channelKey, JSON.stringify([
+              pins.ownerUserId === ownerUserId && pins.ids.includes(conversation.id),
+              conversation.channel?.parent_chat_id ?? conversation.channel?.chat_id ?? conversation.id,
+            ])]) : undefined;
+            const trigger = options && !options.closest("[hidden]") ? options
+              : (sourceKey ? Array.from(rowList.current?.querySelectorAll<HTMLElement>("[data-channel-source]") ?? [])
+                .find((header) => header.dataset.channelSource === sourceKey) : null)
+                ?? (channelKey ? rowList.current?.querySelector<HTMLElement>(`[data-channel-group="${CSS.escape(channelKey)}"]`) : null);
             if (trigger?.isConnected) {
               event.preventDefault();
               trigger.focus();
@@ -642,7 +651,8 @@ function AgentRow({
               }
             }}
             aria-label={agentAccessibleName(agent)}
-            aria-expanded={threadsColumn ? undefined : expanded}
+            data-agent-id={agent.id}
+            aria-expanded={threadsColumn || model.onBackToWorkspace ? undefined : expanded}
             aria-controls={separateThreads ? threadsColumn?.id : undefined}
             aria-current={highlighted ? "page" : undefined}
             // Folding is in place; keep the mobile drawer open for it.
@@ -1038,6 +1048,17 @@ export function AssistantSidebar({
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
   const [renameTarget, setRenameTarget] = useState<Conversation | undefined>();
   const [threadPreviewVersion, setThreadPreviewVersion] = useState(0);
+  const sidebarRoot = useRef<HTMLDivElement>(null);
+  const mobileThreads = Boolean(agents?.mobileThreadList);
+  const mobileWorkspace = Boolean(agents?.onBackToWorkspace);
+  const previousMobileThreads = useRef(mobileThreads);
+  useLayoutEffect(() => {
+    const returning = previousMobileThreads.current && !mobileThreads;
+    previousMobileThreads.current = mobileThreads;
+    if (returning && mobileWorkspace && agents?.selectedAgentId) {
+      sidebarRoot.current?.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(agents.selectedAgentId)}"]`)?.focus({ preventScroll: true });
+    }
+  }, [mobileThreads, mobileWorkspace, agents?.selectedAgentId]);
   const [deletePendingIds, setDeletePendingIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -1115,7 +1136,7 @@ export function AssistantSidebar({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-sidebar">
+    <div ref={sidebarRoot} className="flex h-full min-h-0 flex-col bg-sidebar">
       {agents?.mobileThreadList ? <AssistantThreadList model={agents} activeThreadId={activeConversationId}
         renderThread={(thread) => renderRow(thread, true)} notice={pinError ? <p role="alert" className="px-2 py-1 type-secondary text-destructive">
           {pinError === "load" ? translateUi("Could not load pinned chats in this browser. Try reloading the page.")
@@ -1752,7 +1773,10 @@ function RailAgentChats({
                 <span className="min-w-0">
                   <span className="block truncate">{conversationDisplayTitle(chat) || translateUi("New conversation")}</span>
                   {chat.channel ? <span className="mt-0.5 block truncate type-secondary text-text-tertiary">
-                    {channelPlatformName(chat.channel.platform)} · {chat.channel.parent_title || chat.channel.bot_label}
+                    {chat.channel.parent_title?.trim()
+                      ? `${channelPlatformName(chat.channel.platform)} · ${chat.channel.parent_title}`
+                      : translateUi("{{platform}} · Bot: {{bot}}", { platform: channelPlatformName(chat.channel.platform),
+                        bot: chat.channel.bot_label?.trim() || channelSourceTitle(chat.channel) })}
                   </span> : null}
                 </span>
               </button>

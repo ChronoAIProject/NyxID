@@ -158,8 +158,8 @@ export function AssistantEngineSidebar({
           else goTo({ agent: agentId });
         },
         mobileThreadList: mobileDrawer && !browse?.workspace && Boolean(selectedAgent) &&
-          (Boolean(browse?.agent) || (!home && !openGroup)),
-        onBackToWorkspace: mobileDrawer ? () => setMobileBrowse({ owner: userId, workspace: true }) : undefined,
+          (Boolean(browse?.agent) || (onChatRoute && !home && !openGroup)),
+        onBackToWorkspace: mobileDrawer ? () => setMobileBrowse({ owner: userId, agent: selectedAgent?.id, workspace: true }) : undefined,
         onNewThread: (agentId) => goTo({ draft: true, agent: agentId }),
         onAgentDetails: setDetailsAgentId,
         onNewAgent: setCreatingAgent,

@@ -4,7 +4,7 @@ import { channelSourceGroups, channelSourceTitle, conversationDisplayTitle } fro
 import type { Conversation } from "@/types/assistant";
 
 const thread: Conversation = {
-  id: "conversation", title: "Thread · 2026-11-02 10:16 UTC",
+  id: "conversation", title: "Thread · 2026-11-02 10:16 UTC", title_source: "user",
   created_at: "2026-11-02T10:16:12Z", last_message_at: "2026-11-02T11:16:00Z",
   channel: { platform: "lark", channel_agent_id: "bot", bot_label: "NyxBot",
     chat_id: "child", thread_id: "child", parent_chat_id: "parent", parent_title: "Engineering", chat_kind: "group" },
@@ -20,7 +20,7 @@ describe("channel thread presentation", () => {
   });
 
   it("keeps user titles and does not replace a child title with its chat title", () => {
-    expect(conversationDisplayTitle({ ...thread, title_source: "user" })).toBe(thread.title);
+    expect(conversationDisplayTitle({ ...thread, title: "Thread · 2026-11-02 10:15 UTC" })).toBe("Thread · 2026-11-02 10:15 UTC");
     expect(conversationDisplayTitle({ ...thread, title: "Deployment", channel: { ...thread.channel!, chat_title: "Engineering" } })).toBe("Deployment");
     expect(conversationDisplayTitle({ ...thread, created_at: "invalid" })).toBe(thread.title);
   });

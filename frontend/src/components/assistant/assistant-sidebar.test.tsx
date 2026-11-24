@@ -686,6 +686,48 @@ describe("NyxBot agents in the sidebar", () => {
     expect(screen.getByRole("button", { name: "Engineering on Lark, 8 threads" })).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("keeps older unread, working and drafted source rows in the preview", () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-preview-${index}`, title: `Discussion ${index}`,
+      channel: { platform: "lark", channel_agent_id: "office", bot_label: "Office", parent_chat_id: "engineering",
+        parent_title: "Engineering", thread_id: `child-${index}` },
+      active_turn: index === 5 ? { turn_id: "running", started_at: at } : null }));
+    useAssistantDraftStore.getState().saveDraft(USER.id, `conv:${rows[6]!.id}`, "Finish this discussion");
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows,
+      unreadThreadIds: new Set([rows[5]!.id]) });
+    expect(screen.getByRole("button", { name: "Engineering on Lark, 8 threads, working, unread" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Discussion 5, unread" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Discussion 6" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Discussion 7" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show 1 more" })).toBeVisible();
+  });
+
+  it("keeps pin and unpin destinations visible and returns focus to the moved row", async () => {
+    const rows = [thread.id, "nyxa-inactive"].map((id, index) => ({ ...thread, id, title: `Discussion ${index}`,
+      channel: { platform: "lark", channel_agent_id: "office", bot_label: "Office", parent_chat_id: "engineering",
+        parent_title: "Engineering", thread_id: `child-${index}` } }));
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Options for Discussion 1" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Options for Discussion 1" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Discussion 1" })).toBeVisible();
+    const sourceHeaders = screen.getAllByRole("button", { name: "Engineering on Lark, 1 thread" });
+    expect(new Set(sourceHeaders.map((header) => header.getAttribute("data-channel-source"))).size).toBe(2);
+    await user.click(sourceHeaders[1]!);
+    await user.click(screen.getByRole("button", { name: "Options for Discussion 1" }));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Options for Discussion 1" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Discussion 1" })).toBeVisible();
+  });
+
+  it("shows every source header even when earlier sources have more than five threads", () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-parent-${index}`, title: `Discussion ${index}`,
+      channel: { platform: "lark", channel_agent_id: "office", bot_label: "Office", parent_chat_id: `parent-${index}`,
+        parent_title: `Team ${index}`, thread_id: `child-${index}` } }));
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows });
+    expect(screen.getByRole("button", { name: "Team 7 on Lark, 1 thread" })).toBeVisible();
+  });
+
   it("keeps multiple pinned topics across two parent chats ahead of ordinary siblings", async () => {
     const user = userEvent.setup();
     const rows = ["Engineering", "Support"].flatMap((parent) => Array.from({ length: 4 }, (_, index) => ({

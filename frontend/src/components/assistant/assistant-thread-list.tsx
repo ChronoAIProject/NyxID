@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, MessageSquare, Plus, Search, Settings2, X } from "lucide-react";
 import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
 import { AgentAvatar } from "./nyxbot-agent-avatar";
@@ -39,6 +39,11 @@ export function AssistantThreadList({
 }) {
   useUiTranslation();
   const [query, setQuery] = useState("");
+  const backButton = useRef<HTMLButtonElement>(null);
+  const mobile = Boolean(model.onBackToWorkspace);
+  useLayoutEffect(() => {
+    if (mobile) backButton.current?.focus({ preventScroll: true });
+  }, [mobile, model.selectedAgentId]);
   const pinnedIds = usePinnedConversationIds();
   const agent = model.agents.find((item) => item.id === model.selectedAgentId);
   if (!agent) return null;
@@ -68,7 +73,7 @@ export function AssistantThreadList({
       }
     }}>
       <header className="shrink-0 px-4 pb-3 pt-4">
-        {model.onBackToWorkspace ? <button type="button" data-keep-drawer-open="" onClick={model.onBackToWorkspace}
+        {model.onBackToWorkspace ? <button ref={backButton} type="button" data-keep-drawer-open="" onClick={model.onBackToWorkspace}
           className="mb-4 flex items-center gap-1.5 rounded-md py-1 type-secondary text-text-tertiary hover:text-foreground">
           <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />{translateUi("Back to workspace")}
         </button> : null}

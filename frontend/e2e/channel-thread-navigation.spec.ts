@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 import { openAssistant } from "./helpers";
 
 async function seedChannelThreads(page: Page) {
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   return page.evaluate(() => {
     const key = "nyxagent-http-fixture-v4";
@@ -17,7 +19,7 @@ async function seedChannelThreads(page: Page) {
     for (const [index, id] of ids.entries()) {
       const row = structuredClone(template);
       row.history.conversation = { ...row.history.conversation, id,
-        title: "Thread · 2026-11-02 10:16 UTC", title_source: "provisional",
+        title: "Thread · 2026-11-02 10:16 UTC", title_source: "user",
         created_at: `2026-11-02T10:16:${index ? "45" : "12"}Z`,
         last_message_at: `2026-11-02T10:16:${index ? "45" : "12"}Z`,
         channel: { platform: "lark", channel_agent_id: "lark-bot", bot_label: "NyxBot",
@@ -58,6 +60,18 @@ for (const width of [1440, 390]) for (const mode of ["light", "dark"] as const) 
     await expect(list.getByRole("status")).toHaveText("No matching threads");
     await list.getByRole("button", { name: "Clear search", exact: true }).click();
     await expect(search).toHaveValue("");
+    const options = () => list.getByRole("button", { name: "Options for Thread · 10:16:45 UTC", exact: true });
+    await options().click();
+    await page.getByRole("menuitem", { name: "Pin chat", exact: true }).click();
+    await expect(options()).toBeFocused();
+    await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toBeVisible();
+    const sourceHeaders = list.locator("[data-channel-source]");
+    await expect(sourceHeaders).toHaveCount(2);
+    await sourceHeaders.nth(1).click();
+    await options().click();
+    await page.getByRole("menuitem", { name: "Unpin chat", exact: true }).click();
+    await expect(options()).toBeFocused();
+    await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toBeVisible();
     await list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`c=${ids[1]}`));
     await expect(page.locator("[data-channel-thread-context]")).toContainText("Product team on Lark");
@@ -66,13 +80,25 @@ for (const width of [1440, 390]) for (const mode of ["light", "dark"] as const) 
       await page.getByRole("button", { name: "Open chats", exact: true }).click();
       await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toHaveAttribute("aria-current", "page");
       await list.getByRole("button", { name: "Back to workspace", exact: true }).click();
+      await expect(list.getByRole("button", { name: /^NyxBot —/ })).toBeFocused();
+      await expect(list.getByRole("button", { name: /^NyxBot —/ })).not.toHaveAttribute("aria-expanded");
       await list.getByRole("button", { name: /^researcher, specialist/ }).click();
+      await expect(list.getByRole("button", { name: "Back to workspace", exact: true })).toBeFocused();
       await expect(list.getByRole("heading", { name: "researcher", exact: true })).toBeVisible();
       await expect(page).toHaveURL(new RegExp(`c=${ids[1]}`));
       await list.getByRole("button", { name: "Back to workspace", exact: true }).click();
+      await expect(list.getByRole("button", { name: /^researcher, specialist/ })).toBeFocused();
       await list.getByRole("button", { name: /^NyxBot —/ }).click();
       await expect(list.getByRole("button", { name: "Thread · 10:16:45 UTC", exact: true })).toHaveAttribute("aria-current", "page");
+      await list.getByRole("button", { name: "Back to workspace", exact: true }).click();
+      await list.getByRole("link", { name: "Machines", exact: true }).click();
+      await page.getByRole("button", { name: "Open chats", exact: true }).click();
+      await expect(list.getByRole("link", { name: "Machines", exact: true })).toBeVisible();
+      await expect(list.getByRole("button", { name: "Back to workspace", exact: true })).toHaveCount(0);
     } else {
+      await page.getByRole("button", { name: "Rename chat", exact: true }).click();
+      await expect(page.getByRole("textbox", { name: "Chat title", exact: true })).toHaveValue("Thread · 2026-11-02 10:16 UTC");
+      await page.getByRole("button", { name: "Cancel rename", exact: true }).click();
       await list.getByRole("button", { name: "Options for Thread · 10:16:45 UTC", exact: true }).click();
       await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
       await list.getByRole("textbox", { name: "Title", exact: true }).fill("Deployment investigation");

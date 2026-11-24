@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 import { openAssistant } from "./helpers";
 
 async function openThreadPreview(page: Page) {
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await expect(page.getByRole("button", { name: /^NyxBot —/ })).toBeVisible();
   await page.evaluate(() => {

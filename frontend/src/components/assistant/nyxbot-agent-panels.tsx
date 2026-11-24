@@ -132,11 +132,13 @@ export function ThreadHeader({
   onOpenDetails,
   controls,
   title,
+  displayTitle,
   titleKey,
   onRenameTitle,
 }: {
   /** The thread's title, shown above the agent in the expanded header. */
   readonly title?: string;
+  readonly displayTitle?: string;
   /** Resets an open rename when another thread is shown. */
   readonly titleKey?: string;
   /** Makes the title editable in place. */
@@ -167,9 +169,9 @@ export function ThreadHeader({
       {title && !compact ? (
         <div className="flex min-w-0 items-center">
           {onRenameTitle ? (
-            <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
+            <ThreadTitle key={titleKey} title={title} displayTitle={displayTitle} onRename={onRenameTitle} heading />
           ) : (
-            <h1 title={title} className="truncate type-card-title text-foreground">{title}</h1>
+            <h1 title={title} className="truncate type-card-title text-foreground">{displayTitle ?? title}</h1>
           )}
         </div>
       ) : null}
@@ -220,7 +222,7 @@ export function ThreadHeader({
           </HeaderItem>
         ) : null}
       </HeaderBar>
-      {sourceChannel?.thread_id ? (
+      {sourceChannel?.thread_id && !compact ? (
         <div data-channel-thread-context="" className="flex items-start gap-2 rounded-lg border border-hairline px-3 py-2 type-secondary text-text-tertiary">
           <MessagesSquare aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{translateUi("{{agent}}’s conversation for a thread in {{chat}} on {{platform}}.", {

@@ -19,17 +19,28 @@ or platform exposes every matching row. Missing chat names use a platform/kind
 fallback, while opaque bot and parent IDs keep distinct sources separate.
 Pins retain their existing order within each bot, including separate pinned
 and ordinary partitions with the parent context repeated when necessary.
+Every source retains its header. Each previews five ordinary rows and always
+includes pinned, unread, working, drafted and selected rows; Show more expands
+only that source. Source status summarizes all of its rows. Pin/unpin opens the
+receiving source and restores focus to the visible row or its exact source header.
 
 On phones, Open chats opens a full-screen navigation view. A selected agent's
 thread list uses the same source groups as desktop; Back to workspace shows the
 agent roster. Browsing another agent loads its threads without navigating away
 from the conversation. Selecting a thread navigates and closes the drawer;
 opening it again restores the current conversation's agent and selection.
+Workspace pages open the roster rather than a fallback agent list. Switching
+between the roster and thread list moves focus to the new view's Back control
+or the originating agent, without focusing the search keyboard.
 
 Channel child rows use a thread icon and their conversation title. Existing
-generic minute-resolution titles include creation-time seconds in the display,
-formatted in the selected interface language and explicitly marked UTC. User
-titles, persisted titles, conversations and reply routing are unchanged. An open
+generic minute-resolution titles include creation-time seconds in a compact
+time label, formatted in the selected interface language and marked UTC. Only
+the exact default format whose minute matches conversation creation is recognized;
+channel defaults also have `title_source=user`. Other owner titles stay verbatim.
+Child-row date metadata shows creation date, and the full persisted title remains
+available on hover and in both rename editors. Persisted titles, conversations
+and reply routing are unchanged. An open
 child conversation identifies the platform and source chat in its header. These
 labels describe the conversation's origin, not its current follow status.
 

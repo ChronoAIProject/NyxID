@@ -1088,7 +1088,8 @@ function NyxAgentThreadPage() {
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
         sourceChannel={conversation?.channel}
         onOpenDetails={headerAgent ? () => setDetailsAgentId(headerAgent.id) : undefined}
-        title={desktop ? displayTitle : undefined}
+        title={desktop ? chat.session.title : undefined}
+        displayTitle={desktop ? displayTitle : undefined}
         titleKey={selectedId}
         onRenameTitle={
           selectedId && !destroyed
@@ -1131,7 +1132,8 @@ function NyxAgentThreadPage() {
       cmaOperations={chat.session.cmaOperations}
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
-      title={showHome ? translateUi("Home") : displayTitle}
+      title={showHome ? translateUi("Home") : chat.session.title}
+      displayTitle={showHome ? undefined : displayTitle}
       contentTitle={desktop}
       titleKey={selectedId}
       onRenameTitle={
