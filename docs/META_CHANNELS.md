@@ -405,6 +405,15 @@ quoted in its excerpt, and removes the matching service-execution binding.
 Card creation and binding publication fence their original source grants in
 the write transaction; a missing erased card cannot acquire a new binding.
 Independent cards and the ordinary audit log retain their existing lifetime.
+Cards retain the original admitted Meta source references for their existing
+lifetime. A denied-card continuation rereads that exact card and fences its
+sources before copying the summary into a separate queued turn; independent
+notices stay separate. Queued Meta questions bind their card to their own event
+input. Delayed action requests cannot adopt a later turn's source. Automatic
+action receipts, including clean HTTP stream EOF, reread the captured turn's
+source and fence receipt insertion in the same transaction, so erased turns
+cannot acquire a late receipt. Ordinary web receipts may still settle after
+their original turn has finished.
 Async service watches retain a bounded set of their original Meta source
 references on the watch itself, without display names, chat labels or provider
 credentials. Reservation, result enqueue, admission and connected consumption

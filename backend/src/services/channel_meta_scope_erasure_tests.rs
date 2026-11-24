@@ -4,6 +4,9 @@ use crate::{
     services::transaction_service,
 };
 
+#[path = "channel_meta_card_source_tests.rs"]
+mod card_sources;
+
 struct Fixture {
     state: crate::AppState,
     bot: ChannelBot,

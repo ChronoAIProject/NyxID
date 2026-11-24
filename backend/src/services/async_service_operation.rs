@@ -927,7 +927,12 @@ fn delivery_watch_filter(
 }
 
 fn channel_question(event: &AgentEvent) -> bool {
-    !event.source_event_ids.is_empty() || (event.kind == "message" && !event.reply_to.is_empty())
+    !event.source_event_ids.is_empty()
+        || (event.kind == "message" && !event.reply_to.is_empty())
+        || event
+            .channel_contexts
+            .iter()
+            .any(|context| context.meta_grant.is_some())
 }
 
 /// CMA approvals wake a fresh turn independently of the task's result watch.
