@@ -317,6 +317,196 @@ async fn idle_app_edit_full_access_renewal_keeps_absent_creation_turn_and_surviv
     db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn app_edit_after_settled_meta_dm_keeps_initial_card_and_renewed_receipt_independent() {
+    for erase_before_renew in [false, true] {
+        let f = fixture("app_edit_after_settled_meta_dm").await;
+        let server = setup_ornn(&f).await;
+        let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
+        let skill = Uuid::new_v4().to_string();
+        mount_publication(&f, &server, &base, &skill, "POST").await;
+        finish(&f, base_card, true).await.unwrap();
+        let db = &f.state.db;
+        let (a, a_chat) = meta_turn(&f).await;
+        settle(
+            &f,
+            &engine::get(db, &f.owner, &a_chat.conversation_id)
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            engine::get(db, &f.owner, &a_chat.conversation_id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/skills/{skill}/versions")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":{"items":[{"version":"1.0"}]}})),
+            )
+            .mount(&server)
+            .await;
+        let (_, axum::Json(edit)) = crate::handlers::agent_skills::improve(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((f.chat.agent_id.clone(), skill.clone())),
+        )
+        .await
+        .unwrap();
+        let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+        let original = cards
+            .find_one(doc! {"_id":&edit.acknowledgement_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.conversation_id, a_chat.conversation_id);
+        assert!(original.creation_turn_id.is_none());
+        assert!(original.requested_turn_id.is_none());
+        assert!(original.meta_contexts.is_empty());
+        assert_eq!(original.status, "pending");
+        if erase_before_renew {
+            assert!(erase(&f, &a).await);
+            assert!(
+                cards
+                    .find_one(doc! {"_id":&original.id,"status":"pending"})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        // Renew the same independent app review through the public handler.
+        db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&original.id},
+                doc! {"$set":{"status":"expired","expires_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        let proposal = stored(&f, &edit.proposal_id).await;
+        crate::services::assistant_settings_service::update(
+            db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        mount_publication(&f, &server, &proposal, &skill, "PUT").await;
+        let axum::Json(result) = crate::handlers::assistant_agent_learning::approve(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((proposal.agent_id.clone(), proposal.id.clone())),
+            axum::Json(
+                serde_json::from_value(json!({"revision":proposal.revision,
+                "agent_skills_revision":proposal.agent_skills_revision,"renewal_of":&original.id}))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "pinned");
+        let receipt = cards
+            .find_one(doc! {"user_id":&f.owner,"tool_name":review::TOOL,"decided_by":"access_mode"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(receipt.creation_turn_id.is_none());
+        assert!(receipt.requested_turn_id.is_none());
+        assert!(receipt.meta_contexts.is_empty());
+        assert_eq!(receipt.conversation_id, original.conversation_id);
+        if !erase_before_renew {
+            assert!(erase(&f, &a).await);
+        }
+        for id in [&original.id, &receipt.id] {
+            assert!(cards.find_one(doc! {"_id":id}).await.unwrap().is_some());
+        }
+        assert_eq!(stored(&f, &proposal.id).await.status, "pinned");
+        server.verify().await;
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn retained_legacy_mcp_claim_keeps_its_inbox_source_when_recovered_from_another_chat() {
+    let f = fixture("legacy_mcp_claim_keeps_meta_origin").await;
+    let (b, b_chat) = meta_turn(&f).await;
+    let first = draft_in_chat(&f, &b_chat).await.unwrap();
+    let db = &f.state.db;
+    let proposal = first["proposal_id"].as_str().unwrap();
+    let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    let original = cards
+        .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.creation_turn_id, b_chat.turn_id);
+    assert_eq!(original.requested_turn_id, b_chat.turn_id);
+    assert_eq!(original.meta_contexts.len(), 1);
+    // Earlier claims retained the requesting turn/grant but lacked the input
+    // pointer, optional creation turn and per-proposal copy. None means an
+    // absent legacy field here; it does not make this an app-origin review.
+    db.collection::<bson::Document>(CLAIMS)
+        .update_one(
+            doc! {"claim.proposal_id":proposal},
+            doc! {"$unset":{"claim.initiating_input_id":"","claim.creation_turn_id":""}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":proposal},
+            doc! {"$unset":{"authoring_origin":""}},
+        )
+        .await
+        .unwrap();
+    cards.delete_one(doc! {"_id":&original.id}).await.unwrap();
+    let (a, a_chat) = meta_turn(&f).await;
+    let caller = another_authoring_chat(&f).await;
+    let recovered = draft_in_chat(&f, &caller).await.unwrap();
+    assert_eq!(recovered["proposal_id"], proposal);
+    let recovered = cards
+        .find_one(doc! {"_id":recovered["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(recovered.creation_turn_id.is_none());
+    assert_eq!(recovered.requested_turn_id, b_chat.turn_id);
+    assert_eq!(
+        bson::to_bson(&recovered.meta_contexts).unwrap(),
+        bson::to_bson(&original.meta_contexts).unwrap()
+    );
+    settle(
+        &f,
+        &engine::get(db, &f.owner, &a_chat.conversation_id)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(erase(&f, &a).await);
+    assert!(
+        cards
+            .find_one(doc! {"_id":&recovered.id,"status":"pending"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(erase(&f, &b).await);
+    assert!(
+        cards
+            .find_one(doc! {"_id":&recovered.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
 async fn settle(f: &Fixture, row: &crate::models::assistant_conversation::AssistantConversation) {
     engine::finish_turn(
         &f.state.db,
