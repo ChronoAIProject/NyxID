@@ -148,12 +148,15 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             started_at: row.started_at,
             ended_at: row.ended_at,
             failure: row.failure,
-            memory_recovery: row.memory_recovery.map(|part| MemoryRecoveryResponse {
-                failed_activity_id: part.failed_activity_id,
-                part: part.part,
-                total: part.total,
-                committed: part.committed,
-            }),
+            memory_recovery: row
+                .memory_recovery
+                .filter(|part| !part.unlinked)
+                .map(|part| MemoryRecoveryResponse {
+                    failed_activity_id: part.failed_activity_id,
+                    part: part.part,
+                    total: part.total,
+                    committed: part.committed,
+                }),
         }
     }
 }

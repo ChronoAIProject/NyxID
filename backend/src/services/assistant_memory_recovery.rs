@@ -139,6 +139,7 @@ pub(crate) fn part(args: &Value) -> Option<MemoryRecovery> {
     let requested = args.get("recovery")?;
     let mut part: MemoryRecovery = serde_json::from_value(requested.clone()).ok()?;
     if requested.get("committed").is_some()
+        || requested.get("unlinked").is_some()
         || Uuid::parse_str(&part.failed_activity_id).is_err()
         || part.part == 0
         || part.part > part.total
@@ -148,6 +149,7 @@ pub(crate) fn part(args: &Value) -> Option<MemoryRecovery> {
         return None;
     }
     part.committed = false;
+    part.unlinked = false;
     Some(part)
 }
 
@@ -206,38 +208,37 @@ where
         return unavailable();
     };
     let collection = state.db.collection::<Document>(COLLECTION_NAME);
+    let claim = |filter, part: &MemoryRecovery| {
+        collection
+            .update_one(
+                filter,
+                doc! {"$set": {"active_turn.activities.$[activity].memory_recovery":
+                bson::to_bson(part).expect("memory recovery metadata")}},
+            )
+            .array_filters(vec![
+                doc! {"activity.id": &activity_id, "activity.status": "running"},
+            ])
+    };
     let filter = doc! {"$and": [scope.clone(), origin(&part, &target), no_duplicate(&part)]};
-    let claimed = collection
-        .update_one(
-            filter,
-            doc! {"$set": {"active_turn.activities.$[activity].memory_recovery":
-            bson::to_bson(&part).expect("memory recovery metadata")}},
-        )
-        .array_filters(vec![
-            doc! {"activity.id": &activity_id, "activity.status": "running"},
-        ])
-        .await;
+    let claimed = claim(filter, &part).await;
     match claimed {
         Ok(result) if result.modified_count == 1 => {}
         Ok(_) if approved => {
             // The exact one-use card was consumed. Honor the authorized save
             // independently if the original row is no longer available.
-            let continued = collection
-                .find_one(doc! {"$and": [
-                    scope,
+            part.unlinked = true;
+            let continued = claim(
+                doc! {"$and": [
+                    scope.clone(),
                     {"active_turn.activities.id": {"$ne": &part.failed_activity_id}},
                     no_duplicate(&part),
-                ]})
-                .projection(doc! {"_id": 1})
-                .await;
-            if !continued.is_ok_and(|row| row.is_some()) {
+                ]},
+                &part,
+            )
+            .await;
+            if !continued.is_ok_and(|row| row.modified_count == 1) {
                 return unavailable();
             }
-            let (mut value, error) = execute().await;
-            if !error {
-                value["recovery_status"] = json!("unlinked_after_approval");
-            }
-            return (value, error);
         }
         _ => return unavailable(),
     }
@@ -251,6 +252,12 @@ where
         .array_filters(vec![doc! {"activity.id": &activity_id, "activity.status": "running"}])
         .await;
     }
-    value["recovery"] = json!(part);
+    if part.unlinked {
+        if part.committed {
+            value["recovery_status"] = json!("unlinked_after_approval");
+        }
+    } else {
+        value["recovery"] = json!(part);
+    }
     (value, is_error)
 }

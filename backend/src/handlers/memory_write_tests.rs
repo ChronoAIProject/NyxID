@@ -413,6 +413,15 @@ async fn remember_recovery_claims_only_after_confirmation() {
         let card = result(&call(&f.state, &auth, args.clone()).await);
         assert_eq!(card["error"], "acknowledgement_required", "{card}");
         let id = card["acknowledgement_id"].as_str().unwrap();
+        let mut second = args.clone();
+        second["text"] = json!("The same business fact worded differently");
+        let second_card = result(&call(&f.state, &auth, second.clone()).await);
+        assert_eq!(
+            second_card["error"], "acknowledgement_required",
+            "{second_card}"
+        );
+        let second_id = second_card["acknowledgement_id"].as_str().unwrap();
+        assert_ne!(id, second_id);
         let pending = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
         assert!(
             pending
@@ -424,6 +433,9 @@ async fn remember_recovery_claims_only_after_confirmation() {
         );
 
         acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+            .await
+            .unwrap();
+        acks::decide(&f.state.db, &f.owner, &f.row.id, second_id, true)
             .await
             .unwrap();
         if continuation {
@@ -454,6 +466,9 @@ async fn remember_recovery_claims_only_after_confirmation() {
         }
         let replay = call(&f.state, &auth, args).await;
         assert_eq!(replay["result"]["isError"], true, "{replay}");
+        second["acknowledgement_id"] = json!(second_id);
+        let duplicate = result(&call(&f.state, &auth, second).await);
+        assert_eq!(duplicate["error"], "memory_recovery_unavailable");
         let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
             .await
             .unwrap();

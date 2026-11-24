@@ -298,6 +298,9 @@ pub struct MemoryRecovery {
     /// Native write evidence. A turn can settle while an activity is still running.
     #[serde(default)]
     pub committed: bool,
+    /// Retain the claim for deduplication when history can only show an independent save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlinked: bool,
 }
 
 /// Additive strings keep old replicas readable. State is refreshed from the

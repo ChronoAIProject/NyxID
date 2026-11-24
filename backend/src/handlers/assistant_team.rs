@@ -1620,6 +1620,14 @@ async fn execute_authorized_tool_impl(
                     // Reaching here consumed the exact action confirmation.
                     approved_memory = args["acknowledgement_id"].is_string();
                 }
+            } else if recovery.is_some()
+                && let Some(id) = args["acknowledgement_id"].as_str()
+            {
+                // An allowed card can resume after the access mode changes.
+                // Honor the same exact receipt for the independent-save path.
+                approved_memory = Box::pin(acks::consume_action(
+                    &state.db, chat, id, tool_name, args,
+                )).await?;
             }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
