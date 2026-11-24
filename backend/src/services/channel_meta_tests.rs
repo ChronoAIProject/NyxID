@@ -6944,17 +6944,33 @@ async fn admit_page_message(
         .unwrap();
     let event = json!({"sender":{"id":"333"},"recipient":{"id":"222"},"timestamp":Utc::now().timestamp_millis(),
         "message":{"mid":mid,"text":"A local customer question"}});
-    let inbound = meta::parse_event(Inbox::Messenger, &bot.id, "222", &event).unwrap();
+    let body = serde_json::to_vec(
+        &json!({"object":"page","entry":[{"id":&bot.platform_bot_id,"messaging":[event]}]}),
+    )
+    .unwrap();
+    let headers = meta::tests::signed(&body);
+    let secrets = PlatformVerifySecrets::from([
+        ("app_id", "111"),
+        ("webhook_signing_secret", "fixture-signing-secret"),
+    ]);
+    let prepared = adapter
+        .prepare_webhook(bot, Some(&secrets), &headers, &body)
+        .await
+        .unwrap();
+    let messages = adapter.parse_inbound(&prepared.body).await.unwrap();
+    let [inbound] = messages.as_slice() else {
+        panic!("expected one inbound Page message");
+    };
     let mut message = super::super::channel_relay_service::inbound_metadata(
         &bot.id,
         "scoped-route",
         &bot.user_id,
         "messenger",
-        &inbound,
+        inbound,
         key,
         &uuid::Uuid::new_v4().to_string(),
     );
-    message.meta_authority = Some(meta::authority(bot, &inbound, 1800).unwrap());
+    message.meta_authority = Some(meta::authority(bot, inbound, 1800).unwrap());
     assert!(
         super::super::channel_admission_service::store(&state.db, message.clone())
             .await

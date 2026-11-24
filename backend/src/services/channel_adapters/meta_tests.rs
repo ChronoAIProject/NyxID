@@ -18,7 +18,7 @@ fn event(asset: &str, sender: &str, mid: &str) -> Value {
 fn payload(inbox: Inbox, entries: Vec<Value>) -> Vec<u8> {
     serde_json::to_vec(&json!({"object":inbox.object(),"entry":entries})).unwrap()
 }
-fn signed(body: &[u8]) -> HeaderMap {
+pub(crate) fn signed(body: &[u8]) -> HeaderMap {
     let mut mac = Hmac::<Sha256>::new_from_slice(b"fixture-signing-secret").unwrap();
     mac.update(body);
     let mut headers = HeaderMap::new();
