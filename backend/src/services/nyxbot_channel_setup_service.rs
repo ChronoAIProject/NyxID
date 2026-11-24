@@ -10,7 +10,6 @@ use crate::{
     },
     services::{assistant_nyxagent as engine, channel_bot_service},
 };
-use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde_json::{Value, json};
 use uuid::Uuid;
