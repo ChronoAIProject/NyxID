@@ -2283,6 +2283,7 @@ async fn approve_core(
                     .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id})
                     .session(&mut *session).await?.ok_or_else(conflict)?;
                 let mut next = fresh.publication.clone().ok_or_else(conflict)?;
+                super::assistant_skill_authoring::fence_proposal_in_session(&db,session,&fresh).await?;
                 if fresh.scope_digest.is_some() && next.reduced_scope_acceptance.as_ref().is_some_and(|consent| consent.revision != fresh.revision || consent.approval_digest != digest) { return Err(conflict()); }
 
                 if publication::binding(&fresh, &next, agent_for_claim.skills_revision) != binding { return Err(conflict()); }
@@ -2541,6 +2542,9 @@ async fn mark_started(
             // same owner barrier. A request held in package validation cannot
             // start an external publication after erasure was accepted.
             super::erasure_admission::fence_in_session(&db, &row.owner_id, session).await?;
+            let original=db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(filter.clone()).session(&mut *session).await?.ok_or_else(conflict)?;
+            super::assistant_skill_authoring::fence_proposal_in_session(&db,session,&original).await?;
             fence_invocation_publication(&db, session, &row, &publication).await?;
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                 .update_one(filter.clone(), vec![doc! {"$set":{"publication.started":true,"publication.dispatched_at":{"$ifNull":["$publication.dispatched_at",bson::DateTime::now()]},"publication.last_stage":"publish"}}])

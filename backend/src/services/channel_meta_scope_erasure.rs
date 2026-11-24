@@ -47,6 +47,10 @@ pub(crate) async fn required(db: &Database, bot: &str, grant: &str) -> AppResult
         ),
         ("assistant_conversations", queued_filter(bot, grant)),
         (
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+            crate::services::assistant_skill_authoring::erasure::filter(bot, grant),
+        ),
+        (
             crate::models::async_service_operation::COLLECTION_NAME,
             async_filter(bot, grant),
         ),
@@ -529,7 +533,7 @@ async fn validate_reference(
     reference_in_range(proof, &scope)
 }
 
-fn reference_in_range(proof: &GrantRef, scope: &Document) -> AppResult<()> {
+pub(crate) fn reference_in_range(proof: &GrantRef, scope: &Document) -> AppResult<()> {
     let from = scope
         .get_i64("from_generation")
         .map_err(|_| grants::incomplete())?;
@@ -1430,6 +1434,30 @@ async fn erase_turn(
     progress: &Document,
     phase: i32,
 ) -> AppResult<Step> {
+    // Retain initiating inputs until their original draft operations drain.
+    // A dispatched publication must reconcile before its claim can retire.
+    let mut progress = progress.clone();
+    if progress.get_bool("drafts_done") != Ok(true) {
+        let page = crate::services::assistant_skill_authoring::erasure::erase_page(
+            db,
+            tx,
+            scope,
+            progress.get_str("draft_after").ok(),
+        )
+        .await?;
+        let pending = progress.get_bool("draft_pending").unwrap_or(false) || page.pending;
+        if let Some(after) = page.after {
+            progress.insert("draft_after", after);
+            progress.insert("draft_pending", pending);
+            return Ok(Step::stay(progress));
+        }
+        progress.remove("draft_after");
+        progress.remove("draft_pending");
+        if pending {
+            return Ok(Step::stay(progress));
+        }
+        progress.insert("drafts_done", true);
+    }
     let bot = scope.get_str("bot_id").map_err(|_| grants::incomplete())?;
     let grant = scope
         .get_str("grant_id")
@@ -1462,7 +1490,7 @@ async fn erase_turn(
     {
         progress.clone()
     } else {
-        doc! {"phase":phase,"turn_audit_conversation":conversation,"turn_audit_turn":turn}
+        doc! {"phase":phase,"drafts_done":true,"turn_audit_conversation":conversation,"turn_audit_turn":turn}
     };
     if progress.get_bool("turn_audited") != Ok(true) {
         let rows = page(
@@ -1823,6 +1851,11 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
     }
     for (collection, filter, phase) in [
         (
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+            crate::services::assistant_skill_authoring::erasure::filter(bot, grant),
+            6,
+        ),
+        (
             "assistant_messages",
             doc! {"meta_grants":{"$elemMatch":{"bot_id":bot,"grant_id":grant}}},
             6,
@@ -2051,6 +2084,16 @@ async fn step(
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::IndexModel;
+    db.collection::<Document>(
+        crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! {"claim.meta_contexts.meta_grant.bot_id":1,
+            "claim.meta_contexts.meta_grant.grant_id":1,"_id":1})
+            .build(),
+    )
+    .await?;
     db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
