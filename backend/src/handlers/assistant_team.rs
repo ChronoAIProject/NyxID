@@ -208,7 +208,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 /// Start an event turn draining a thread's queue when it is idle. Loop
 /// guards: a NyxBot thread stops after `MAX_EVENT_STREAK` consecutive event
 /// turns without a user message or bound desktop decision, and an owner runs at most
-/// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
+/// `EVENT_TURNS_PER_HOUR` autonomous event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
     let Some(_claim) = state.shutdown.background() else {
@@ -225,10 +225,12 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
+        let gallery = crate::services::assistant_skill_templates::queued_opening(&row);
         let automation =
             crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
                 .await?;
         if !automation
+            && !gallery
             && crate::services::coordination_service::RateWindowStore::is_exhausted(
                 &state.db,
                 "assistant_event_turns",
@@ -251,9 +253,6 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
             return Ok(());
         }
-        let gallery = row.gallery_skill.as_ref().is_some_and(|launch| {
-            launch.state == crate::models::assistant_conversation::GallerySkillState::Queued
-        });
         if gallery {
             engine::require_enabled(&state.db, owner).await?;
         }
@@ -290,9 +289,6 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         #[cfg(test)]
         tests::wait_for_wake_barrier(&state.db).await;
         let mut start = event_turn(id);
-        // The explicit gallery action follows the owner's live permissions
-        // cohort, including after a restart on another replica.
-        start.execution_enrollment = gallery;
         start.org_access = org_access;
         let mut group_seen = None;
         if row.group_request_id.is_some()

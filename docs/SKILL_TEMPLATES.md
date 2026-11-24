@@ -227,7 +227,9 @@ The browser sends a structured launch to
 `POST /api/v1/assistant/nyxagent/skill-templates/{slug}/start`. NyxID
 verifies the Ornn GUID, version, SHA-256, and dependency closure. It
 attaches the exact enabled pin, creates a private thread, and queues one
-opening event in the same transaction. An account-bound setup ID lets
+`gallery_skill_started` event in the same transaction. This explicit
+start uses regular turn capacity and billing. It has its own opening turn
+outside the hourly quota for autonomous background events. An account-bound setup ID lets
 the browser recover the same thread after a refresh or lost response.
 
 The chat shows the overview and starting template above the transcript.

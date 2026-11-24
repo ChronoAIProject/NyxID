@@ -2651,12 +2651,8 @@ pub(crate) async fn begin_owner_turn_in_session(
 
     use super::assistant_skill_templates as gallery;
     use crate::models::assistant_conversation::GallerySkillState;
-    if start.origin != TurnOrigin::Event
-        && row
-            .gallery_skill
-            .as_ref()
-            .is_some_and(|launch| launch.state == GallerySkillState::Queued)
-    {
+    let gallery_opening = gallery::queued_opening(&row);
+    if start.origin != TurnOrigin::Event && gallery_opening {
         return Err(AppError::AssistantTurnActive);
     }
     if live_turn(&row, now).is_some() {
@@ -2789,7 +2785,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if let Some(work) = automation_work.as_ref()
+    let events = if gallery_opening {
+        // The explicit start opens exactly one workflow. Ordinary events
+        // stay queued for their own metered autonomous turn.
+        let (opening, remaining) = std::mem::take(&mut row.pending_events)
+            .into_iter()
+            .partition(|event| event.kind == gallery::EVENT);
+        row.pending_events = remaining;
+        opening
+    } else if let Some(work) = automation_work.as_ref()
         && start.trigger.is_some()
     {
         let (selected, rest) = std::mem::take(&mut row.pending_events)
@@ -3691,8 +3695,19 @@ pub(crate) async fn begin_owner_turn_in_session(
         .as_ref()
         .is_none_or(|t| t.automation_work.is_none())
     {
+        // The server-launched gallery turn follows the user's live
+        // permissions cohort, including when woken on a different replica.
+        let gallery_start = gallery::opening_turn(&row).map(|_| {
+            let mut start = start.clone();
+            start.execution_enrollment = true;
+            start
+        });
         Box::pin(super::execution_permission_dispatch::tasks::admit(
-            db, session, &mut row, start, ids,
+            db,
+            session,
+            &mut row,
+            gallery_start.as_ref().unwrap_or(start),
+            ids,
         ))
         .await?;
     }
@@ -4193,6 +4208,8 @@ pub(crate) async fn claim_turn(
                     .await?;
                     if start.origin == TurnOrigin::Event
                         && let OwnerTurnAdmission::Started(claim) = &admission
+                        && super::assistant_skill_templates::opening_turn(&claim.conversation)
+                            .is_none()
                         && claim
                             .conversation
                             .active_turn

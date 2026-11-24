@@ -157,6 +157,13 @@ pub(crate) fn matches_agent(launch: &GallerySkillLaunch, agent: &AssistantAgent)
             .any(|pin| matches_pin(pin, &launch.reference))
 }
 
+pub(crate) fn queued_opening(row: &AssistantConversation) -> bool {
+    row.gallery_skill
+        .as_ref()
+        .is_some_and(|launch| launch.state == GallerySkillState::Queued)
+        && row.pending_events.iter().any(|event| event.kind == EVENT)
+}
+
 pub(crate) fn opening_turn(row: &AssistantConversation) -> Option<&GallerySkillLaunch> {
     let turn = row.active_turn.as_ref()?;
     turn.events
