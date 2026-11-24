@@ -397,6 +397,11 @@ destructive message page checks the complete proof again. Contradictory proof
 leaves both the messages and their descendants pending for repair. Owner feed
 cleanup matches the notification's current conversation and turn, preserving a
 coalesced row that already points to an independent successor reply.
+Approval-card cleanup follows both its creation turn and the initiating turn
+quoted in its excerpt, and removes the matching service-execution binding.
+Card creation and binding publication fence their original source grants in
+the write transaction; a missing erased card cannot acquire a new binding.
+Independent cards and the ordinary audit log retain their existing lifetime.
 
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved

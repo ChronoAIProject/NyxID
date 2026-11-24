@@ -2747,6 +2747,32 @@ async fn request_candidate_inner(
         row.voice_request_id = origin.voice_request_id.clone();
         row.trigger_run_id = origin.trigger_run_id.clone();
     }
+    // Both the active request and an initiating-message excerpt can carry
+    // provider content. Serialize card publication with each original scope.
+    if conversation.context_reset_reason.as_deref() == Some("provider_erasure")
+        && chat.turn_id.is_some()
+    {
+        super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
+    }
+    for turn in [
+        row.creation_turn_id.as_deref(),
+        row.requested_turn_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for proof in super::channel_meta_service::scopes::assistant_turn_references(
+            db,
+            session,
+            &chat.user_id,
+            &chat.conversation_id,
+            turn,
+        )
+        .await?
+        {
+            super::channel_meta_service::scopes::fence_reference(db, session, &proof, true).await?;
+        }
+    }
     if row.decider == "orchestrator" {
         row.request_excerpt = started_by.map(|message| {
             format!(

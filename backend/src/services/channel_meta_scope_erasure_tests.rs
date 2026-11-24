@@ -1406,3 +1406,107 @@ async fn shared_turn_erasure_removes_only_notifications_whose_current_source_sti
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn shared_turn_erases_real_cards_and_bindings_and_refuses_late_publication() {
+    use crate::services::{
+        assistant_acknowledgement_service as acks, assistant_service_execution as execution,
+    };
+    let f = fixture().await;
+    let db = &f.state.db;
+    crate::services::assistant_nyxagent::ensure_indexes(db)
+        .await
+        .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.bot.user_id,
+        "Private Meta question",
+    )
+    .await;
+    let turn = &row.active_turn.as_ref().unwrap().turn_id;
+    let proof = scopes::reference(&f.bot).unwrap();
+    db.collection::<Document>("assistant_messages")
+        .update_many(
+            doc! {"conversation_id":&row.id,"turn_id":turn},
+            doc! {"$set":{"meta_grants":[bson::to_bson(&proof).unwrap()]}},
+        )
+        .await
+        .unwrap();
+    let chat =
+        crate::services::assistant_authority_tests::chat_for_row(&f.state, &f.bot.user_id, &row)
+            .await;
+    let args = serde_json::json!({"private":"operation"});
+    let request = || acks::Request {
+        kind: "action",
+        service: None,
+        tool: Some("private_operation"),
+        arguments: Some(&args),
+        summary: "Private Meta approval summary",
+        platform: false,
+    };
+    let card = acks::request(db, &chat, request()).await.unwrap();
+    assert_eq!(card.creation_turn_id.as_deref(), Some(turn.as_str()));
+    let binding = doc! {"kind":"card_binding","user_id":&f.bot.user_id,"conversation_id":&row.id,
+    "api_key_id":&chat.api_key_id,"turn_id":turn,"operation":{"private":"binding"}};
+    execution::publish_card_binding(db, &chat, &card.id, binding.clone())
+        .await
+        .unwrap();
+    let independent = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"conversation_id":&row.id,
+    "creation_turn_id":"independent-web-turn","requested_turn_id":"independent-web-turn","summary":"Web card"};
+    db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .insert_one(&independent)
+        .await
+        .unwrap();
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"erasure_requested":true}},
+        )
+        .await
+        .unwrap();
+    assert!(acks::request(db, &chat, request()).await.is_err());
+    let mut progress = Document::new();
+    for _ in 0..12 {
+        let step = transaction_service::run_db_only(
+            db,
+            &(db, &f.scope, &progress),
+            |tx, &(db, scope, progress)| Box::pin(erase_turn(db, tx, scope, progress, 6)),
+        )
+        .await
+        .unwrap();
+        progress = step.progress;
+        if progress.get_i32("phase") == Ok(7) {
+            break;
+        }
+    }
+    assert_eq!(progress.get_i32("phase"), Ok(7));
+    assert!(
+        db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":&card.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.collection::<Document>(execution::COLLECTION)
+            .find_one(doc! {"_id":&card.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":independent.get("_id").cloned()})
+            .await
+            .unwrap()
+            .unwrap(),
+        independent
+    );
+    assert!(
+        execution::publish_card_binding(db, &chat, &card.id, binding)
+            .await
+            .is_err()
+    );
+    assert!(acks::request(db, &chat, request()).await.is_err());
+    db.drop().await.unwrap();
+}

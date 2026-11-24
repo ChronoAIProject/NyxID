@@ -1425,6 +1425,24 @@ async fn erase_turn(
         }
         return Ok(Step::stay(progress));
     }
+    let cards = crate::models::assistant_acknowledgement::COLLECTION_NAME;
+    let card_filter = doc! {"user_id":owner,"conversation_id":conversation,
+    "$or":[{"creation_turn_id":turn},{"requested_turn_id":turn}]};
+    let rows = page(db, tx, cards, card_filter.clone(), &Document::new()).await?;
+    if !rows.is_empty() {
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|row| row.get("_id").cloned().ok_or_else(grants::incomplete))
+            .collect::<AppResult<_>>()?;
+        db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+            .delete_many(doc! {"_id":{"$in":&ids},"kind":"card_binding","user_id":owner,"conversation_id":conversation})
+            .session(&mut *tx).await?;
+        db.collection::<Document>(cards)
+            .delete_many(doc! {"$and":[card_filter,{"_id":{"$in":ids}}]})
+            .session(&mut *tx)
+            .await?;
+        return Ok(Step::stay(progress));
+    }
     // A coalesced notification may already point to B's newer reply. Delete
     // only while its current source still names this exact erased turn.
     let notifications = crate::models::assistant_notification::COLLECTION_NAME;
@@ -1473,6 +1491,10 @@ async fn erase_turn(
         (
             crate::models::assistant_message_feedback::COLLECTION_NAME,
             doc! {"turn_id":turn},
+        ),
+        (
+            crate::services::assistant_service_execution::COLLECTION,
+            doc! {"kind":"card_binding","turn_id":turn},
         ),
         (
             crate::models::generated_artifact::DELIVERIES,
@@ -1908,6 +1930,22 @@ async fn step(
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::IndexModel;
+    for field in ["creation_turn_id", "requested_turn_id"] {
+        db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"user_id":1,"conversation_id":1,field:1,"_id":1})
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"kind":1,"turn_id":1,"_id":1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>("assistant_messages")
         .create_index(
             IndexModel::builder()
