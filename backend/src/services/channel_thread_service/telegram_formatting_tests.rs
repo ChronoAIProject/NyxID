@@ -4,7 +4,9 @@ use crate::{
     models::channel_thread::{ChannelThreadFacts, TelegramTopic, ThreadKind},
     services::{
         channel_adapters::{telegram::TelegramAdapter, telegram_new::TelegramNewAdapter},
-        channel_platform::{BotCredentials, OutboundReply, PlatformAdapter},
+        channel_platform::{
+            BotCredentials, MaterializedAttachment, MediaKind, OutboundReply, PlatformAdapter,
+        },
         channel_reply_plan,
         channel_thread_service::ThreadReplyTarget,
         telegram_formatting,
@@ -238,7 +240,61 @@ async fn bound_telegram_refuses_unresolved_target_before_sending() {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, AppError::Conflict(code) if code == "thread_target_unavailable"));
+        assert!(matches!(
+            error,
+            AppError::ChannelConversationNotReachable(_)
+        ));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
+}
+
+#[test]
+fn bound_telegram_attachment_only_does_not_post_the_formatting_marker() {
+    let commonmark = json!({"text_format":"commonmark","message_thread_id":999});
+    let forged = json!({
+        "text_format":"telegram_entities","entities":[{"type":"bold","offset":0,"length":1}],
+        "parse_mode":"HTML","reply_markup":{"remove_keyboard":true},
+    });
+    let mut reply = OutboundReply {
+        text: None,
+        metadata: Some(commonmark.clone()),
+        reply_to_platform_message_id: None,
+        attachments: vec![MaterializedAttachment {
+            kind: MediaKind::Image,
+            bytes: Default::default(),
+            filename: None,
+            mime_type: None,
+            caption: None,
+        }],
+    };
+    for platform in ["telegram", "telegram-new"] {
+        for text in [None, Some(String::new())] {
+            reply.text = text;
+            reply.metadata = Some(commonmark.clone());
+            let parts = components(&reply, platform, false).unwrap();
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0].attachments.len(), 1);
+            assert!(parts[0].text.is_none() && parts[0].metadata.is_none());
+
+            reply.metadata = Some(forged.clone());
+            let parts = components(&reply, platform, false).unwrap();
+            let mut legacy_metadata = forged.clone();
+            legacy_metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("text_format");
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0].metadata.as_ref(), Some(&legacy_metadata));
+            assert_eq!(parts[1].attachments.len(), 1);
+        }
+    }
+    reply.attachments.clear();
+    reply.metadata = Some(commonmark);
+    assert!(components(&reply, "telegram", false).is_err());
+
+    let card = json!({"card":{"elements":[]}});
+    reply.metadata = Some(card.clone());
+    let parts = components(&reply, "lark", false).unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].metadata.as_ref(), Some(&card));
 }

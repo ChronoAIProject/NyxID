@@ -335,28 +335,33 @@ fn components(
         }
         Ok(())
     };
+    let telegram = matches!(platform, "telegram" | "telegram-new");
     let mut metadata = reply.metadata.clone();
     // Only NyxID-owned callers can pass parts rendered before thread delivery.
     // Public callers can ask this planner to render their CommonMark here.
     if !allow_pre_rendered
-        && matches!(platform, "telegram" | "telegram-new")
+        && telegram
         && let Some(object) = metadata.as_mut().and_then(serde_json::Value::as_object_mut)
         && object.get("text_format").and_then(serde_json::Value::as_str) == Some("telegram_entities")
     {
         object.remove("text_format");
     }
-    push_text(reply.text.as_deref().unwrap_or_default(), metadata)?;
+    push_text(reply.text.as_deref().unwrap_or_default(), metadata.clone())?;
     for attachment in &reply.attachments {
         if let Some(caption) = &attachment.caption {
             push_text(caption, None)?;
         }
     }
-    if parts.is_empty() && reply.metadata.is_some() {
+    // A formatting opt-in alone cannot produce a Telegram text send.
+    if parts.is_empty()
+        && metadata.is_some()
+        && !(telegram && crate::services::channel_reply_plan::commonmark(metadata.as_ref()))
+    {
         parts.push(OutboundReply {
             text: None,
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
-            metadata: reply.metadata.clone(),
+            metadata,
         });
     }
     for attachment in &reply.attachments {
