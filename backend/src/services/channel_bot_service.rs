@@ -808,7 +808,11 @@ async fn insert_registered_bot_inner(
             } else if telegram_request_revision.is_some() {
                 super::channel_connect_link_service::associate_telegram(&db, &mut *session, &bot).await?;
             }
-            bots.insert_one(&bot).session(&mut *session).await?;
+            let mut inserted = bot.clone();
+            if let Some(value) = super::channel_signing_migration::capture_attachment(&db,session,&bot).await? {
+                inserted.credential_continuity = Some(value);
+            }
+            bots.insert_one(&inserted).session(&mut *session).await?;
             if let Some(setup) = approved_setup {
                 let installation = db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
                     .find_one(doc! {"setup_id": &setup.id, "channel_bot_id": &bot.id}).session(&mut *session).await?
@@ -964,12 +968,13 @@ async fn reconnect_bot_inner(
                     "poll_backoff_until": backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
                     "last_polled_at": last_polled_at, "status": "active", "error": null, "updated_at": bson::DateTime::now(),
                 } },
-            ).session(session).await?;
+            ).session(&mut *session).await?;
             if result.matched_count == 0 {
                 return Err(AppError::Conflict(
                     "Channel bot changed during reconnect; retry".to_string(),
                 ));
             }
+            super::channel_signing_migration::prepare_observed(&db,session,&bot.id).await?;
             Ok(())
         }.await;
         super::api_key_mutation_service::transaction_result(operation)
