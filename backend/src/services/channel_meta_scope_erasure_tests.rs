@@ -1510,3 +1510,231 @@ async fn shared_turn_erases_real_cards_and_bindings_and_refuses_late_publication
     assert!(acks::request(db, &chat, request()).await.is_err());
     db.drop().await.unwrap();
 }
+
+fn async_catalog() -> crate::services::mcp_service::McpToolService {
+    use crate::services::mcp_service::{McpToolEndpoint, McpToolService, McpToolSource};
+    let contract=bson::from_document(doc! {"status_operation":"status","result_operation":"result",
+        "id_field":"/id","id_parameter":"id","status_field":"/status","success_states":["done"],"failure_states":["failed"]}).unwrap();
+    let submit = McpToolEndpoint {
+        endpoint_id: "submit".into(),
+        name: "submit".into(),
+        method: "POST".into(),
+        path: "/jobs".into(),
+        async_operation: Some(contract),
+        ..Default::default()
+    };
+    let endpoints = vec![
+        submit,
+        McpToolEndpoint {
+            name: "status".into(),
+            endpoint_id: "status".into(),
+            method: "GET".into(),
+            path: "/jobs/{id}".into(),
+            parameters: Some(serde_json::json!([{"name":"id","in":"path","required":true}])),
+            ..Default::default()
+        },
+        McpToolEndpoint {
+            name: "result".into(),
+            endpoint_id: "result".into(),
+            method: "GET".into(),
+            path: "/jobs/{id}/result".into(),
+            parameters: Some(serde_json::json!([{"name":"id","in":"path","required":true}])),
+            ..Default::default()
+        },
+    ];
+    McpToolService {
+        workspace_destinations_pending: false,
+        service_id: "test-service".into(),
+        service_name: "Test service".into(),
+        service_slug: "test-service".into(),
+        description: None,
+        service_category: "other".into(),
+        endpoints,
+        durable_endpoint_metadata: Default::default(),
+        source: McpToolSource::Internal,
+        executable: true,
+        is_generic_proxy: false,
+        invalid_openapi_contract: false,
+        recommended_skills: Vec::new(),
+        recommended_skill_refs: None,
+        skills_revision: None,
+        proxy_operation_policy: None,
+    }
+}
+
+async fn finish_source_turn(state: &crate::AppState, row: &AssistantConversation, text: &str) {
+    use crate::services::assistant_nyxagent as engine;
+    let next = engine::finish_turn(
+        &state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: text.into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(next.is_none());
+}
+
+#[tokio::test]
+async fn async_result_inherits_original_grant_through_reserve_queue_input_reply_and_erasure() {
+    use crate::models::assistant_conversation::{ChannelTurnContext, TurnOrigin};
+    use crate::services::{assistant_nyxagent as engine, async_service_operation as watches};
+    let f = fixture().await;
+    let db = &f.state.db;
+    engine::ensure_indexes(db).await.unwrap();
+    let catalog = async_catalog();
+    let proof = scopes::reference(&f.bot).unwrap();
+    let context:ChannelTurnContext=bson::from_document(doc! {"meta_grant":bson::to_bson(&proof).unwrap(),
+        "source_event_id":uuid::Uuid::new_v4().to_string(),"channel_id":uuid::Uuid::new_v4().to_string(),"channel_bot_id":&f.bot.id,
+        "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true,
+        "display_name":"Private display label","conversation_label":"Private chat label"}).unwrap();
+    let mut home = None;
+    let mut meta_turns = Vec::new();
+    let mut web_turns = Vec::new();
+    let mut meta_ready = None;
+    for meta in [false, true] {
+        let request:engine::TurnRequest=serde_json::from_value(serde_json::json!({"conversation_id":home,"text":if meta {"Private Meta task"} else {"Independent web task"}})).unwrap();
+        let mut start = engine::TurnStart::from(&request);
+        if meta {
+            start.origin = TurnOrigin::Channel;
+            start.channel_context = Some(context.clone());
+        }
+        let original = engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys)
+            .await
+            .unwrap();
+        home = Some(original.id.clone());
+        let chat = crate::services::assistant_authority_tests::chat_for_row(
+            &f.state,
+            &f.bot.user_id,
+            &original,
+        )
+        .await;
+        let watch = watches::reserve(db, &chat, &catalog, &catalog.endpoints[0])
+            .await
+            .unwrap();
+        assert_eq!(watch.meta_contexts.len(), usize::from(meta));
+        if meta {
+            assert_eq!(watch.meta_contexts[0].meta_grant.as_ref(), Some(&proof));
+            assert!(watch.meta_contexts[0].display_name.is_none());
+            assert!(watch.meta_contexts[0].conversation_label.is_none());
+        }
+        let result = if meta {
+            "Private asynchronous result"
+        } else {
+            "Independent web result"
+        };
+        watches::ready(
+            db,
+            &watch,
+            Some(&f.state.encryption_keys),
+            "completed",
+            Some(result),
+        )
+        .await
+        .unwrap();
+        let ready = db
+            .collection::<crate::models::async_service_operation::AsyncServiceOperation>(
+                crate::models::async_service_operation::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(watches::enqueue(db, &ready).await.unwrap());
+        finish_source_turn(&f.state, &original, "Submitted operation").await;
+        let request: engine::TurnRequest = serde_json::from_value(
+            serde_json::json!({"conversation_id":&original.id,"text":"Read completed operation"}),
+        )
+        .unwrap();
+        let mut start = engine::TurnStart::from(&request);
+        start.origin = TurnOrigin::Event;
+        let delivered = engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys)
+            .await
+            .unwrap();
+        assert!(
+            watches::input_context(&f.state, &delivered)
+                .await
+                .unwrap()
+                .contains(result)
+        );
+        let turn = &delivered.active_turn.as_ref().unwrap().turn_id;
+        let input = db
+            .collection::<Document>("assistant_messages")
+            .find_one(doc! {"conversation_id":&original.id,"turn_id":turn,"role":"event"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(input.contains_key("meta_grants"), meta);
+        finish_source_turn(&f.state, &delivered, result).await;
+        if meta {
+            meta_turns.extend([
+                original.active_turn.as_ref().unwrap().turn_id.clone(),
+                turn.clone(),
+            ]);
+            meta_ready = Some(ready);
+        } else {
+            web_turns.extend([
+                original.active_turn.as_ref().unwrap().turn_id.clone(),
+                turn.clone(),
+            ]);
+        }
+    }
+    let home = home.unwrap();
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"erasure_requested":true}},
+        )
+        .await
+        .unwrap();
+    assert!(watches::enqueue(db, &meta_ready.unwrap()).await.is_err());
+    let mut progress = Document::new();
+    for _ in 0..32 {
+        let step = transaction_service::run_db_only(
+            db,
+            &(db, &f.scope, &progress),
+            |tx, &(db, scope, progress)| Box::pin(erase_turn(db, tx, scope, progress, 6)),
+        )
+        .await
+        .unwrap();
+        progress = step.progress;
+        if progress.get_i32("phase") == Ok(7) {
+            break;
+        }
+    }
+    assert_eq!(progress.get_i32("phase"), Ok(7));
+    let messages = db.collection::<Document>("assistant_messages");
+    for turn in meta_turns {
+        assert_eq!(
+            messages
+                .count_documents(doc! {"conversation_id":&home,"turn_id":turn})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    for turn in web_turns {
+        assert_eq!(
+            messages
+                .count_documents(doc! {"conversation_id":&home,"turn_id":turn})
+                .await
+                .unwrap(),
+            2
+        );
+    }
+    if let Some(checkpoint) = db
+        .collection::<Document>(crate::models::assistant_checkpoint::COLLECTION_NAME)
+        .find_one(doc! {"_id":&home})
+        .await
+        .unwrap()
+    {
+        assert!(!format!("{checkpoint:?}").contains("Private asynchronous result"));
+    }
+    db.drop().await.unwrap();
+}
