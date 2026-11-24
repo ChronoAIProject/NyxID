@@ -1109,7 +1109,7 @@ impl PlatformAdapter for MetaAdapter {
                     storage: "",
                     secret: false,
                     required: true,
-                    patchable: false,
+                    patchable: true,
                     clearable: false,
                     webhook_secret: false,
                     platform_fallback: None,

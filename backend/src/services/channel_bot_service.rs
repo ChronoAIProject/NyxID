@@ -1423,6 +1423,16 @@ async fn update_bot_inner(
     let descriptor = adapter.registration();
     let fields = params.fields();
     descriptor.validate(&fields, true)?;
+    let is_meta = super::channel_adapters::meta::is_meta(&bot.platform);
+    if is_meta
+        && let Some(confirmation) = params.verification_token
+        && (confirmation != "exclusive" || params.bot_token.is_none())
+    {
+        return Err(AppError::ValidationError(
+            "Submit the exclusive routing confirmation together with the replacement inbox token"
+                .into(),
+        ));
+    }
     if !fields.0.is_empty() {
         unset_doc.insert("last_verification", "");
     }
@@ -1440,7 +1450,6 @@ async fn update_bot_inner(
     )
     .await?;
 
-    let is_meta = super::channel_adapters::meta::is_meta(&bot.platform);
     let rebuilt_bot_token =
         maybe_rebuild_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?;
     let meta_token_replacement = is_meta && rebuilt_bot_token.is_some();

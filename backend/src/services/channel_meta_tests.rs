@@ -4029,7 +4029,12 @@ async fn transferred_manual_inbox_requires_verified_token_and_explicit_routing_c
                 .unwrap()
                 .exclusive_routing_verified
         );
-        for confirm in [false, true] {
+        for (token, confirmation) in [
+            (None, Some("exclusive")),
+            (Some("replacement-token"), Some("wrong")),
+            (Some("replacement-token"), None),
+            (Some("replacement-token"), Some("exclusive")),
+        ] {
             let updated = bots::update_bot_as_actor(
                 &state.db,
                 &state.encryption_keys,
@@ -4042,16 +4047,16 @@ async fn transferred_manual_inbox_requires_verified_token_and_explicit_routing_c
                 },
                 bots::UpdateBotParams {
                     x_events: None,
-                    bot_token: Some("replacement-token"),
+                    bot_token: token,
                     label: None,
-                    verification_token: confirm.then_some("exclusive"),
+                    verification_token: confirmation,
                     encrypt_key: bots::SecretPatch::Unchanged,
                     app_id: None,
                     app_secret: None,
                 },
             )
             .await;
-            if !confirm {
+            if token.is_none() || confirmation != Some("exclusive") {
                 assert!(matches!(updated, Err(AppError::ValidationError(_))));
                 let retained = bots::get_bot(&state.db, &bot.id).await.unwrap();
                 assert_eq!(
