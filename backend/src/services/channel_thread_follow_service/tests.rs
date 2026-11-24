@@ -287,7 +287,7 @@ async fn admitted_binding_survives_stop_but_not_relink_or_sender_revocation() {
         )
         .await
         .unwrap();
-    relink(&db, "owner", "owner", "link", "replacement")
+    relink(&db, "owner", "owner", "link", "replacement", None)
         .await
         .unwrap();
     assert!(
