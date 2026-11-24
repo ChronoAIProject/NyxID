@@ -17,20 +17,32 @@ import type {
 } from "./managed-flow-types";
 import type { CreateChannelBotResponse } from "@/types/channels";
 
-export function ManagedMetaConnect({
+type MetaConnectProps = Omit<ManagedFlowProps, "bootstrap"> & {
+  bootstrap?: ManagedFlowProps["bootstrap"];
+};
+
+export function ManagedMetaConnect(props: MetaConnectProps) {
+  const link = useChannelConnectLinkContext();
+  const actor = useAuthStore((s) => s.user?.id);
+  const { platform, orgId, botId } = props;
+  const storageKey = `meta-inbox:${actor}:${platform}:${orgId ?? "personal"}:${botId ?? "new"}:${link?.id ?? "direct"}`;
+  return <MetaConnectForm key={storageKey} {...props} link={link} storageKey={storageKey} />;
+}
+
+function MetaConnectForm({
   platform,
   bootstrap,
   label,
   orgId,
   botId,
   onConnected,
-}: Omit<ManagedFlowProps, "bootstrap"> & {
-  bootstrap?: ManagedFlowProps["bootstrap"];
+  link,
+  storageKey,
+}: MetaConnectProps & {
+  link: ReturnType<typeof useChannelConnectLinkContext>;
+  storageKey: string;
 }) {
   const { t } = useUiTranslation();
-  const link = useChannelConnectLinkContext();
-  const actor = useAuthStore((s) => s.user?.id);
-  const storageKey = `meta-inbox:${actor}:${platform}:${orgId ?? "personal"}:${botId ?? "new"}:${link?.id ?? "direct"}`;
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
       return link?.connectionId ?? sessionStorage.getItem(storageKey);
@@ -43,13 +55,15 @@ export function ManagedMetaConnect({
   const [error, setError] = useState<string | null>(null);
   const [popupClosed, setPopupClosed] = useState(false);
   const popup = useRef<Window | null>(null);
+  const mounted = useRef(false);
   const connection = useMetaConnection(platform, sessionId);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
       popup.current?.close();
-    },
-    [],
-  );
+    };
+  }, []);
   useEffect(() => {
     try {
       if (sessionId) sessionStorage.setItem(storageKey, sessionId);
@@ -89,6 +103,7 @@ export function ManagedMetaConnect({
         reconnect_bot_id: botId,
         setup_token: link?.token,
       });
+      if (!mounted.current) return;
       setSessionId(result.session_id);
       setPopupClosed(false);
       setSelected("");
@@ -110,7 +125,9 @@ export function ManagedMetaConnect({
         asset_id: assetId,
         exclusive_routing_verified: confirmed,
       });
+      if (!mounted.current) return;
       await link?.refresh();
+      if (!mounted.current) return;
       if (result.status === "suspended") {
         await connection.progress.refetch();
         return;
@@ -123,6 +140,7 @@ export function ManagedMetaConnect({
         webhook_secret_label: null,
       } as CreateChannelBotResponse);
     } catch (failure) {
+      if (!mounted.current) return;
       setError(
         failure instanceof Error
           ? failure.message

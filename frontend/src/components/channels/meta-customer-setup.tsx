@@ -10,6 +10,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   type MetaCustomerSetupResult,
   useMetaCustomerSetup,
@@ -20,13 +21,17 @@ const schema = z.object({
   enable_guests: z.boolean(),
 });
 
-export function MetaCustomerSetup({
-  botId,
-  orgId,
-}: {
+interface SetupProps {
   readonly botId: string;
   readonly orgId: string | null;
-}) {
+}
+
+export function MetaCustomerSetup(props: SetupProps) {
+  const actor = useAuthStore((s) => s.user?.id);
+  return <CustomerSetupForm key={`${actor ?? ""}:${props.botId}:${props.orgId ?? ""}`} {...props} />;
+}
+
+function CustomerSetupForm({ botId, orgId }: SetupProps) {
   const { t } = useUiTranslation();
   const agents = useNyxBotAgents();
   const save = useMetaCustomerSetup(botId);
@@ -51,7 +56,6 @@ export function MetaCustomerSetup({
         code: result.owner_link_code,
         expiresAt: result.owner_link_expires_at,
       });
-    return result;
   }
   const form = useAppForm({
     resolver: zodResolver(schema),
@@ -83,12 +87,7 @@ export function MetaCustomerSetup({
   async function check() {
     if (!agentId) return;
     try {
-      const result = await apply(checkedAgent === agentId ? "check" : "assign");
-      if (result.owner_link_code)
-        setOwnerLink({
-          code: result.owner_link_code,
-          expiresAt: result.owner_link_expires_at,
-        });
+      await apply(checkedAgent === agentId ? "check" : "assign");
       setCheckedAgent(agentId);
     } catch {
       setCheckedAgent(null);
@@ -116,11 +115,14 @@ export function MetaCustomerSetup({
           id={`meta-specialist-${botId}`}
           className="w-full rounded-md border border-input bg-background p-2 type-body"
           value={agentId}
+          disabled={save.isPending}
           onChange={(event) => {
             form.setValue("agent_id", event.target.value);
             form.setValue("enable_guests", false);
             setCheckedAgent(null);
+            setCommitted(null);
             setOwnerLink(null);
+            save.reset();
           }}
         >
           <option value="">{t("Choose a specialist")}</option>
@@ -160,17 +162,7 @@ export function MetaCustomerSetup({
           <Button
             type="button"
             disabled={save.isPending}
-            onClick={() =>
-              void apply("owner_link")
-                .then((result) => {
-                  if (result.owner_link_code)
-                    setOwnerLink({
-                      code: result.owner_link_code,
-                      expiresAt: result.owner_link_expires_at,
-                    });
-                })
-                .catch(() => undefined)
-            }
+            onClick={() => void apply("owner_link").catch(() => undefined)}
           >
             {t("Create a fresh owner verification code")}
           </Button>

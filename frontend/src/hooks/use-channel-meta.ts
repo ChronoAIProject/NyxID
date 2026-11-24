@@ -72,6 +72,7 @@ export interface MetaCustomerSetupResult {
 export function useMetaCustomerSetup(botId: string) {
   return useMutation({
     retry: false,
+    gcTime: 0,
     mutationFn: (input: {
       agent_id: string;
       action:

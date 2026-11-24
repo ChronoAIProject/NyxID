@@ -79,11 +79,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 function view(orgId: string | null = null) {
-  render(
+  const form = (botId: string) => (
     <QueryClientProvider client={client}>
-      <MetaCustomerSetup botId="bot" orgId={orgId} />
-    </QueryClientProvider>,
+      <MetaCustomerSetup botId={botId} orgId={orgId} />
+    </QueryClientProvider>
   );
+  const { rerender } = render(form("bot"));
+  return (botId: string) => rerender(form(botId));
 }
 async function assign(id: string) {
   await userEvent.selectOptions(
@@ -172,4 +174,29 @@ it("restricts org scope and exposes member verification", async () => {
     await screen.findByText(/Customer conversations are enabled/),
   ).toBeVisible();
   expect(actions).toEqual(["assign", "enable_guests"]);
+});
+
+it("clears the previous specialist's readiness and management controls when the selection changes", async () => {
+  ready = true;
+  enabled = true;
+  view("org");
+  await assign("org");
+  expect(await screen.findByText(/Customer conversations are enabled/)).toBeVisible();
+  await userEvent.selectOptions(screen.getByLabelText("Support specialist"), "");
+  expect(screen.queryByText(/Customer conversations are enabled/)).toBeNull();
+  expect(screen.queryByText(/Member verification for channel/)).toBeNull();
+  expect(screen.getByRole("checkbox")).toBeDisabled();
+});
+
+it("requires a new assignment and consent when navigating to another inbox", async () => {
+  ready = true;
+  const navigate = view();
+  await assign("personal");
+  await userEvent.click(screen.getByRole("checkbox"));
+  expect(screen.getByText("nyxlink_once")).toBeVisible();
+  navigate("another-bot");
+  expect(screen.queryByText("nyxlink_once")).toBeNull();
+  expect(screen.getByLabelText("Support specialist")).toHaveValue("");
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(screen.getByRole("button", { name: "Enable customer conversations" })).toBeDisabled();
 });
