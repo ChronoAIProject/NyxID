@@ -411,3 +411,152 @@ async fn contradictory_mixed_grant_claim_keeps_both_original_operations_for_repa
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn original_draft_erasure_releases_only_exact_reserved_target_and_retains_contradictions() {
+    use crate::models::assistant_agent_learning::PUBLICATION_TARGETS_COLLECTION_NAME as TARGETS;
+    for disposition in ["exact", "sibling", "contradictory"] {
+        let f = fixture("meta_draft_exact_target_cleanup").await;
+        let (bot, chat) = meta_turn(&f).await;
+        let first = draft_in_chat(&f, &chat).await.unwrap();
+        let db = &f.state.db;
+        let id = first["proposal_id"].as_str().unwrap();
+        // Defensive inventory fixture for a reserved, not yet dispatched,
+        // update. No provider request is sent by this cleanup operation.
+        db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id},
+            doc! {"$set":{"publication.target_kind":"update","publication.target_skill_id":"source-skill"}}).await.unwrap();
+        let proposal = db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        let p = proposal.publication.as_ref().unwrap();
+        let target = format!("source-skill:{}", p.version);
+        let mut holder = doc! {"_id":&target,"owner_id":&proposal.owner_id,"agent_id":&proposal.agent_id,
+        "proposal_id":id,"operation_id":&p.operation_id,"package_sha256":&p.sha256,"state":"reserved"};
+        if disposition == "sibling" {
+            holder.insert("proposal_id", Uuid::new_v4().to_string());
+            holder.insert("operation_id", Uuid::new_v4().to_string());
+        } else if disposition == "contradictory" {
+            holder.insert("package_sha256", "contradictory-digest");
+        }
+        db.collection::<bson::Document>(TARGETS)
+            .insert_one(&holder)
+            .await
+            .unwrap();
+        let scope = db
+            .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+            .find_one(
+                doc! {"bot_id":&bot.id,"grant_id":meta::scopes::reference(&bot).unwrap().grant_id},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let result = crate::services::transaction_service::run_db_only(
+            db,
+            &(db, &scope),
+            |tx, &(db, scope)| Box::pin(erasure::erase_page(db, tx, scope, None)),
+        )
+        .await;
+        if disposition == "contradictory" {
+            assert!(matches!(result, Err(AppError::Conflict(_))));
+        } else {
+            let page = result.unwrap();
+            assert!(!page.pending);
+            assert!(page.after.is_none());
+        }
+        for (collection, filter) in [
+            (CLAIMS, doc! {"claim.proposal_id":id}),
+            (PROPOSALS_COLLECTION_NAME, doc! {"_id":id}),
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(filter)
+                    .await
+                    .unwrap(),
+                u64::from(disposition == "contradictory")
+            );
+        }
+        let retained = db
+            .collection::<bson::Document>(TARGETS)
+            .find_one(doc! {"_id":&target})
+            .await
+            .unwrap();
+        if disposition == "exact" {
+            assert!(retained.is_none());
+        } else {
+            assert_eq!(retained.unwrap(), holder);
+        }
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn original_draft_claim_inventory_resumes_after_one_hundred_rows() {
+    let f = fixture("meta_draft_claim_page_bound").await;
+    let (bot, chat) = meta_turn(&f).await;
+    let first = draft_in_chat(&f, &chat).await.unwrap();
+    let db = &f.state.db;
+    let original = db
+        .collection::<bson::Document>(CLAIMS)
+        .find_one(doc! {"claim.proposal_id":first["proposal_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    // Retained orphan claims remain attributable even if their proposals have
+    // already disappeared. Seed the page boundary without 101 provider calls.
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        let mut row = original.clone();
+        row.insert("_id", Uuid::new_v4().to_string());
+        row.get_document_mut("claim")
+            .unwrap()
+            .insert("proposal_id", Uuid::new_v4().to_string());
+        rows.push(row);
+    }
+    db.collection::<bson::Document>(CLAIMS)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let scope = db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .find_one(
+            doc! {"bot_id":&bot.id,"grant_id":meta::scopes::reference(&bot).unwrap().grant_id},
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let first =
+        crate::services::transaction_service::run_db_only(db, &(db, &scope), |tx, &(db, scope)| {
+            Box::pin(erasure::erase_page(db, tx, scope, None))
+        })
+        .await
+        .unwrap();
+    assert!(!first.pending);
+    assert!(first.after.is_some());
+    assert_eq!(
+        db.collection::<bson::Document>(CLAIMS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    let next = crate::services::transaction_service::run_db_only(
+        db,
+        &(db, &scope, first.after.as_deref()),
+        |tx, &(db, scope, after)| Box::pin(erasure::erase_page(db, tx, scope, after)),
+    )
+    .await
+    .unwrap();
+    assert!(!next.pending);
+    assert!(next.after.is_none());
+    assert_eq!(
+        db.collection::<bson::Document>(CLAIMS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
+}
