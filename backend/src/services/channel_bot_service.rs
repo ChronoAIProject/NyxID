@@ -2550,7 +2550,14 @@ pub(crate) async fn delete_bot_observed_with_state(
             .as_ref()
             .map(|binding| binding.grant_id.as_str())
             .unwrap_or_default();
-        super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant_id).await?;
+        if super::channel_meta_service::scopes::has_history(&state.db, bot_id).await? {
+            // Delivery and the subscription are already stopped. Local pages
+            // continue through the durable manual obligation and sweeper;
+            // ordinary progress is a successful Delete, not a conflict.
+            super::channel_meta_service::scope_erasure::manual_pass(state, &current).await?;
+        } else {
+            super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant_id).await?;
+        }
     }
     Ok(result)
 }
