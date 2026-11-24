@@ -843,6 +843,31 @@ async fn publish_automatically_from_origin(
         .map(|p| p.name.as_str())
         .unwrap_or("authored skill")
         .to_owned();
+    // A Full-access retry can arrive in a different chat while reusing an
+    // existing draft. The publication caller and the content's source home
+    // are independently captured; receipts follow the original content.
+    let saved = proposal.authoring_origin.as_ref();
+    let saved_origin = saved.map(claims::origin);
+    let receipt_origin = origin.or(saved_origin.as_ref());
+    let mut receipt_chat = chat.clone();
+    if let Some(saved) = saved {
+        if saved.proposal_id != proposal.id {
+            return Err(AppError::Conflict("Skill draft changed".into()));
+        }
+        receipt_chat.conversation_id = saved.conversation_id.clone();
+        receipt_chat.api_key_id = saved.api_key_id.clone();
+    }
+    if let Some(origin) = receipt_origin {
+        receipt_chat.turn_id = origin.creation_turn_id.clone();
+        receipt_chat.invocation_id = origin.invocation_id.clone();
+        receipt_chat.automation_work = None;
+        receipt_chat.execution_task = None;
+        receipt_chat.report_to = origin
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.report_to())
+            .map(str::to_owned);
+    }
     let mut result = Box::pin(review::approve_automatically(
         state,
         chat,
@@ -879,7 +904,7 @@ async fn publish_automatically_from_origin(
     }
     acks::record_auto_allowed_with_origin(
         &state.db,
-        chat,
+        &receipt_chat,
         review::TOOL,
         binding,
         &acks::AutoAllowed {
@@ -889,7 +914,7 @@ async fn publish_automatically_from_origin(
         },
         &summary,
         Some(&url),
-        origin,
+        receipt_origin,
     )
     .await;
     result["proposal_id"] = id.into();
