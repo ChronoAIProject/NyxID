@@ -3048,6 +3048,12 @@ async fn meta_login_credentials_remain_available_until_each_apps_data_is_drained
     accept_provider_request(&s, "messenger", &revoke, false)
         .await
         .unwrap();
+    // Accepted callbacks still need this app until the worker finishes discovery.
+    assert!(matches!(
+        credentials::delete(&state.db, &messenger).await,
+        Err(AppError::Conflict(_))
+    ));
+    provider::reconcile_with_service(&state, &s).await.unwrap();
     credentials::delete(&state.db, &messenger).await.unwrap();
 }
 
@@ -6806,6 +6812,17 @@ async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_wit
     let now = bson::DateTime::now();
     let wanted = provider::grant_identity("messenger", "111", "900").unwrap();
     let mut bots = Vec::new();
+    let session = |subject: &str| {
+        let id = uuid::Uuid::new_v4().to_string();
+        doc! {
+            "_id": &id,
+            "state_hash": fingerprint(&id),
+            "platform": "messenger",
+            "app_id": "111",
+            "grant_subject_id": subject,
+            "created_at": now,
+        }
+    };
     let mut sessions = Vec::new();
     let mut retired = Vec::new();
     for i in 0..500 {
@@ -6814,7 +6831,7 @@ async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_wit
         sibling.platform_bot_id = format!("6000{i}");
         sibling.meta_binding.as_mut().unwrap().grant_subject_id = format!("8000{i}");
         bots.push(sibling);
-        sessions.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"platform":"messenger","app_id":"111","grant_subject_id":format!("8000{i}"),"created_at":now});
+        sessions.push(session(&format!("8000{i}")));
         retired.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"retired_grant":{"identity":format!("other-{i}"),"authorized_at":now,"grant_id":uuid::Uuid::new_v4().to_string()}});
     }
     state
@@ -6823,7 +6840,7 @@ async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_wit
         .insert_many(bots)
         .await
         .unwrap();
-    sessions.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"platform":"messenger","app_id":"111","grant_subject_id":"900","created_at":now});
+    sessions.push(session("900"));
     retired.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"retired_grant":{"identity":&wanted,"authorized_at":now,"grant_id":uuid::Uuid::new_v4().to_string()}});
     state
         .db
