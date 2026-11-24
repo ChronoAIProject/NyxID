@@ -1,6 +1,7 @@
 import { TextBlock } from "./blocks/text-block";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { NyxAgentRequestLinks } from "./nyxagent-request-links";
@@ -1064,6 +1065,9 @@ function NyxAgentThreadPage() {
     return conversationCardLanguage(chat.session.messages, appLanguage);
   }, [appLanguage, cardPreference.choice, chat.session.messages]);
   useCardCatalog(cardLanguage);
+  const displayTitle = conversation?.channel?.thread_id
+    ? conversationDisplayTitle({ ...conversation, title: chat.session.title })
+    : chat.session.title;
   const threadPanels = !showHome ? (
     <ThreadPanels>
       <ThreadHeader
@@ -1074,8 +1078,10 @@ function NyxAgentThreadPage() {
         agentId={headerAgent?.id}
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
+        sourceChannel={conversation?.channel}
         onOpenDetails={headerAgent ? () => setDetailsAgentId(headerAgent.id) : undefined}
         title={desktop ? chat.session.title : undefined}
+        displayTitle={desktop ? displayTitle : undefined}
         titleKey={selectedId}
         onRenameTitle={
           selectedId && !destroyed
@@ -1119,6 +1125,7 @@ function NyxAgentThreadPage() {
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? translateUi("Home") : chat.session.title}
+      displayTitle={showHome ? undefined : displayTitle}
       contentTitle={desktop}
       titleKey={selectedId}
       onRenameTitle={

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openAssistant } from "./helpers";
+import { openAssistant, waitForAssistantNavigation } from "./helpers";
 
 async function seedThreads(page: Page) {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
@@ -47,9 +47,9 @@ for (const width of [1440, 390]) {
           useAssistantDraftStore.getState().saveDraft(app.authStore.getState().user.id, `conv:${id}`, "Draft to finish later");
         }, ids[10]!);
         if (width === 390) {
+          await waitForAssistantNavigation(page);
           await page.getByRole("button", { name: language === "en" ? "Open chats" : language === "zh-CN" ? "打开聊天" : "開啟聊天" }).click();
         }
-        const nav = page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "Regular chat 1", exact: true }) });
         if (width >= 1024) {
           const column = page.getByRole("complementary", { name: language === "en" ? "Threads" : language === "zh-CN" ? "对话" : "對話", exact: true });
           const list = column.getByRole("navigation");
@@ -71,39 +71,19 @@ for (const width of [1440, 390]) {
           await expect(column).not.toBeVisible();
           return;
         }
-        await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveText([
-          "Regular chat 1", "Regular chat 2", "Regular chat 3", "Regular chat 4", "Regular chat 5",
-          "Regular chat 8", "Regular chat 10", /^Regular chat 11/,
-        ]);
-        const more = language === "en" ? "Show 4 more" : language === "zh-CN" ? "再显示 4 个" : "再顯示 4 個";
-        const fewer = language === "en" ? "Show fewer" : language === "zh-CN" ? "收起" : "收合";
-        const controlsId = await nav.getByRole("button", { name: more, exact: true }).getAttribute("aria-controls");
-        const toggle = nav.locator(`button[aria-controls="${controlsId}"]`);
-        await expect(toggle).toHaveAttribute("aria-expanded", "false");
-        await nav.getByRole("button", { name: "Regular chat 11", exact: true }).focus();
-        for (let tab = 0; tab < 4 && !(await toggle.evaluate((element) => element === document.activeElement)); tab++) {
-          await page.keyboard.press("Tab");
-        }
-        await expect(toggle).toBeFocused();
-        await expect(toggle).toBeInViewport({ ratio: 1 });
-        await page.screenshot({ path: testInfo.outputPath(`sidebar-${width}-${mode}-${language}-collapsed.png`) });
-        await page.keyboard.press("Enter");
-        await expect(toggle).toHaveAccessibleName(fewer);
-        await expect(toggle).toHaveAttribute("aria-expanded", "true");
-        await expect(toggle).toBeFocused();
-        await expect(toggle).toBeInViewport({ ratio: 1 });
+        const drawer = page.locator('aside[data-tour="sidebar"]:visible');
+        const nav = drawer.getByRole("navigation");
         await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(12);
-        await page.screenshot({ path: testInfo.outputPath(`sidebar-${width}-${mode}-${language}-expanded.png`) });
-        await page.keyboard.press("Space");
-        await expect(toggle).toHaveAccessibleName(more);
-        await expect(toggle).toHaveAttribute("aria-expanded", "false");
-        await expect(toggle).toBeFocused();
-        await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(8);
-        await expect(nav).toBeVisible();
-        // Disclosure state is intentionally local to the mounted sidebar.
-        await page.reload({ waitUntil: "domcontentloaded" });
-        if (width === 390) await page.getByRole("button", { name: language === "en" ? "Open chats" : language === "zh-CN" ? "打开聊天" : "開啟聊天" }).click();
-        await expect(page.getByRole("button", { name: more, exact: true })).toHaveAttribute("aria-expanded", "false");
+        await expect(nav.getByRole("button", { name: "Regular chat 10", exact: true })).toHaveAttribute("aria-current", "page");
+        await expect(nav.getByRole("button", { name: "Regular chat 11", exact: true })).toHaveAccessibleDescription(
+          language === "en" ? "Draft: Draft to finish later" : "草稿： Draft to finish later",
+        );
+        const search = drawer.getByRole("searchbox");
+        await search.fill("Regular chat 12");
+        await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(1);
+        await search.fill("");
+        await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(12);
+        await page.screenshot({ path: testInfo.outputPath(`mobile-threads-${mode}-${language}.png`) });
       });
     }
   }
