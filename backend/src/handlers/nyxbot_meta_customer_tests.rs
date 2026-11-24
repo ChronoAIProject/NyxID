@@ -369,6 +369,12 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
             .0
             .is_success()
         );
+        let billing = crate::billing_integration_tests::billing_service(
+            &state.db,
+            Arc::new(crate::billing_integration_tests::FakeLago::default()),
+            1000,
+        );
+        billing.ensure_wallet(&org_id).await.unwrap();
         let mut fresh = bot_doc(platform, "Fresh organization inbox");
         fresh.insert("user_id", &org_id);
         let fresh_id = fresh.get_str("_id").unwrap().to_owned();
@@ -382,12 +388,30 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         assert_eq!(status, StatusCode::OK, "{assigned}");
         assert_eq!(assigned["guests_enabled"], false);
         assert!(assigned["owner_link_code"].is_null());
-        let billing = crate::billing_integration_tests::billing_service(
+        let fresh_channel = assigned["channel_id"].as_str().unwrap();
+        // An already funded organization cannot accept customers through Assign.
+        // The versioned ordinary defaults worker must preserve this explicit choice.
+        crate::services::org_channel_service::defaults::apply(
             &state.db,
-            Arc::new(crate::billing_integration_tests::FakeLago::default()),
-            1000,
+            fresh_channel,
+            crate::services::org_channel_service::defaults::HistoricalRule::NoAuditedSave,
+        )
+        .await
+        .unwrap();
+        let closed = load_channel(&state, OWNER, fresh_channel).await.unwrap();
+        assert_eq!(closed.private_chats.as_deref(), Some("owner"));
+        assert!(!closed.org_specialist.as_ref().unwrap().guests.enabled);
+        assert!(
+            crate::services::org_channel_service::sender(
+                &state.db,
+                &closed,
+                "unverified-customer",
+                false,
+                &agent.id,
+            )
+            .await
+            .is_err()
         );
-        billing.ensure_wallet(&org_id).await.unwrap();
         for bot_id in [&row.channel_bot_id, &fresh_id] {
             let (status, enabled) =
                 action(&router, &token, bot_id, &agent.id, "enable_guests").await;
@@ -614,5 +638,194 @@ async fn meta_assign_repairs_incomplete_routes_and_keys_then_preserves_healthy_r
                 hash
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn meta_assignment_key_storage_error_preserves_existing_route_and_owner_link() {
+    let (state, _calls, _server) = setup("meta_repair_key_storage_error").await;
+    let agent = specialist(&state).await;
+    let bot = bot_doc("instagram", "Healthy inbox");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>("channel_bots")
+        .insert_one(bot)
+        .await
+        .unwrap();
+    let (router, token) = app(&state).await;
+    let (status, assigned) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+    assert_eq!(status, StatusCode::OK, "{assigned}");
+    let prior = load_channel(&state, OWNER, assigned["channel_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let keys = state.db.collection::<bson::Document>("api_keys");
+    let key = keys
+        .find_one(doc! {"_id": &prior.route_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    keys.update_one(
+        doc! {"_id": &prior.route_api_key_id},
+        doc! {"$set": {"created_at": "invalid-storage-date"}},
+    )
+    .await
+    .unwrap();
+    for name in ["check", "assign"] {
+        let (status, result) = action(&router, &token, &bot_id, &agent.id, name).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{result}");
+        let current = load_channel(&state, OWNER, &prior.id).await.unwrap();
+        assert_eq!(current.status, "active");
+        assert_eq!(current.route_id, prior.route_id);
+        assert_eq!(current.link_code_hash, prior.link_code_hash);
+        assert!(
+            keys.find_one(doc! {"_id": &prior.route_api_key_id, "is_active": true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+                .find_one(doc! {"_id": &prior.route_id, "is_active": true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    keys.replace_one(doc! {"_id": &prior.route_api_key_id}, key)
+        .await
+        .unwrap();
+    let (status, retried) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["channel_id"], prior.id);
+    assert!(retried["owner_link_code"].is_null());
+    assert_eq!(
+        load_channel(&state, OWNER, &prior.id)
+            .await
+            .unwrap()
+            .link_code_hash,
+        prior.link_code_hash
+    );
+}
+
+#[tokio::test]
+async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retirement() {
+    for demotion in [false, true] {
+        let (state, _calls, _server) = setup("meta_repair_retirement_race").await;
+        let (prior, _, agent, org) = org_channel_tests::org_channel(&state, false).await;
+        state
+            .db
+            .collection::<bson::Document>("channel_bots")
+            .update_one(
+                doc! {"_id": &prior.channel_bot_id},
+                doc! {"$set": {"platform": "instagram"}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id": &prior.id},
+                doc! {"$set": {"platform": "instagram", "status": "pending"}},
+            )
+            .await
+            .unwrap();
+        let second = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&second, UserType::Person))
+            .await
+            .unwrap();
+        let membership = crate::test_utils::test_membership(
+            &org,
+            &second,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        );
+        state
+            .db
+            .collection("org_memberships")
+            .insert_one(&membership)
+            .await
+            .unwrap();
+        let (router, _) = app(&state).await;
+        let token = token_for(&state, &second);
+        crate::services::durable_wake_tests::resume_after(
+            "channel_repair_before_retirement",
+            async {
+                let (status, result) =
+                    action(&router, &token, &prior.channel_bot_id, &agent.id, "assign").await;
+                assert_eq!(
+                    status,
+                    if demotion {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::CONFLICT
+                    },
+                    "{result}"
+                );
+            },
+            async {
+                if demotion {
+                    crate::services::org_service::update_membership(
+                        &state.db,
+                        &membership.id,
+                        Some(crate::models::org_membership::OrgRole::Member),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    crate::services::nyxbot_channel_continuity_service::activate(
+                        &state.db,
+                        OWNER,
+                        &prior.id,
+                        prior.route_id.as_deref().unwrap(),
+                        None,
+                        false,
+                        "activated-owner-code",
+                    )
+                    .await
+                    .unwrap();
+                }
+            },
+        )
+        .await;
+        let current = load_channel(&state, OWNER, &prior.id).await.unwrap();
+        assert_eq!(current.status, if demotion { "pending" } else { "active" });
+        assert_eq!(current.route_api_key_id, prior.route_api_key_id);
+        assert_eq!(current.route_id, prior.route_id);
+        assert!(
+            state
+                .db
+                .collection::<bson::Document>("api_keys")
+                .find_one(doc! {"_id": &prior.route_api_key_id, "is_active": true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+                .find_one(doc! {"_id": &prior.route_id, "is_active": true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .count_documents(doc! {"channel_bot_id": &prior.channel_bot_id})
+                .await
+                .unwrap(),
+            1
+        );
     }
 }

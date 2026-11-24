@@ -287,8 +287,9 @@ setup links and associated guest conversations after cleanup. Existing required
 financial/audit records are retained. Saved-result text plans are included:
 new saved-result plans on every platform carry the bot ID, and Meta plans are
 created under the inbox erasure fence;
-legacy plans are removed by exact owner/source-message pairs before their
-inbound records are deleted. Erasing one inbox preserves sibling inbox plans.
+legacy plans are attributed in bounded batches by exact owner/source-message
+pairs before their inbound records are deleted. The receipt lookup has an
+owner/inbound-message index; new parented plans do not require a source scan. Erasing one inbox preserves sibling inbox plans.
 A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire
@@ -296,12 +297,18 @@ second; a delayed callback cannot revoke a grant authorized in a later second.
 
 Legacy saved-result plans can outlive the 30-day TTL on `channel_messages` and
 `channel_reply_deliveries`. On dev, a Meta inbox reaches this path through a
-personal owner's saved private-chat result. Its logical key is
+saved private-chat result. Ordinary NyxBot also permits an organization-owned
+bot linked by an administrator to that person's personal specialist. In that
+case the text plan belongs to the organization, while the saved assistant
+message and NyxBot channel belong to the linking person. Its logical key is
 `saved-result:<turn ID>:<destination SHA-256>`; the saved assistant message keeps
 `handoff_delivery.targets` after delivery. Erasure first uses exact owner/source
 joins, then reproduces that destination hash from the saved target and resolves
-its original NyxBot channel's bot parent. It also considers retained ownership
-transfer history. It preserves positively identified sibling and other-platform
+its original NyxBot channel's bot parent. Bot-owner history (including retained
+ownership transfers) selects eligible receipts; channel/conversation-owner
+history locates the saved message and does not expand receipt ownership.
+Native gateway saved replies retain their existing linking-person journal owner
+and record their independently verified bot parent as well. It preserves positively identified sibling and other-platform
 receipts and never purges an owner's unrelated journals. Organization guest
 handoffs and initiated Meta posts do not authorize this saved-result path.
 
@@ -313,7 +320,10 @@ exact original owner/source metadata or saved `handoff_delivery.targets` and
 channel-parent metadata from independently verified retained records or a
 backup. Verify the owner, turn, destination hash and original bot association;
 do not guess an association, delete all same-owner receipts or use a routing
-checkbox as proof. Restore metadata only, keeping credentials and message text
+checkbox as proof. An ownerless scoped source is not sufficient by itself;
+independent owner-bearing reply receipts or the verified saved handoff can
+resolve it without deleting that source. Contradictory parent evidence keeps
+the obligation pending. Restore metadata only, keeping credentials and message text
 out of diagnostics. The existing pending-cleanup worker retries; a manual
 installation can also repeat its ordinary Delete action. If exact attribution
 cannot be recovered, retain the unresolved obligation and escalate it for
@@ -322,6 +332,14 @@ operator handling rather than reporting completed erasure.
 After derived cleanup finishes, the erasure fence records a non-identifying
 completion timestamp before the retired bot is removed. This makes a crash
 retry after bot deletion idempotent without retaining provider identifiers.
+
+Assigning a specialist to a fresh Meta organization inbox keeps guest exposure
+disabled and private DMs owner-only, including when the org wallet is funded.
+The administrator must explicitly enable customer conversations after readiness
+checks. Repair preserves the last committed guest exposure choice; it refuses
+if the checked connection changes or the acting administrator loses authority
+before retirement. A failed storage read is retryable setup failure and never
+proof that an existing route or key should be rebuilt.
 
 Turning off enrollment blocks new setup and preserves management/disconnect.
 For an incident, suspend delivery independently:

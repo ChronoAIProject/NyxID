@@ -23,8 +23,11 @@ fn attribution_required(bot: &str) -> AppError {
     AppError::Conflict("Legacy saved reply attribution is missing. Erasure remains pending; restore its verified source or saved handoff metadata as described in docs/META_CHANNELS.md".into())
 }
 
-pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<()> {
-    let plans = db.collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
+const BATCH: i64 = 100;
+
+/// Plan ownership follows the bot, not the person who linked an organization
+/// bot to a personal specialist. Conversation ownership is resolved separately.
+async fn bot_owners(db: &Database, bot: &ChannelBot) -> AppResult<BTreeSet<String>> {
     let mut owners = BTreeSet::from([bot.user_id.clone()]);
     let mut transfers = db
         .collection::<Document>(crate::models::ownership_transfer::COLLECTION_NAME)
@@ -38,117 +41,172 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
             }
         }
     }
-    let mut channels = db
-        .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-        .find(doc! {"channel_bot_id": &bot.id})
-        .projection(doc! {"user_id": 1, "bot_owner_id": 1})
-        .await?;
-    while let Some(channel) = channels.try_next().await? {
-        for field in ["user_id", "bot_owner_id"] {
-            if let Ok(owner) = channel.get_str(field) {
-                owners.insert(owner.to_owned());
-            }
-        }
-    }
-    // These references are authoritative while present, but both collections
-    // have a 30-day TTL. Delete their exact joins before erasing either parent.
-    for (collection, source_field) in [
-        (crate::models::channel_message::COLLECTION_NAME, "_id"),
-        (
-            crate::models::channel_reply_delivery::COLLECTION_NAME,
-            "inbound_message_id",
-        ),
-    ] {
-        let mut sources = db
-            .collection::<Document>(collection)
-            .find(doc! {"channel_bot_id": &bot.id})
-            .projection(doc! {"user_id": 1, source_field: 1})
-            .await?;
-        while let Some(source) = sources.try_next().await? {
-            if let Ok(owner) = source.get_str("user_id") {
-                owners.insert(owner.to_owned());
-            }
-            let (Ok(owner), Ok(id)) = (source.get_str("user_id"), source.get_str(source_field))
-            else {
-                // Old/corrupt but explicitly bot-scoped rows are removed by
-                // the ordinary derived cleanup. They cannot prove a journal's
-                // ownership: refuse if a legacy saved plan needs that join.
-                if let Ok(id) = source.get_str(source_field)
-                    && plans
-                        .find_one(doc! {"channel_bot_id": null, "source_id": id,
-                        "logical_key": {"$regex": "^saved-result:"}})
-                        .projection(doc! {"_id": 1})
-                        .await?
-                        .is_some()
-                {
-                    return Err(attribution_required(&bot.id));
-                }
-                continue;
-            };
-            plans
-                .delete_many(doc! {"channel_bot_id": null, "user_id": owner, "source_id": id})
-                .await?;
-        }
-    }
-    for owner in owners {
-        // Meta initiated posts and native gateway sends are forbidden. On dev,
-        // its only legacy persistent text plans use SAVED_RELAY_KEY. Plans
-        // predating this bot cannot belong to it; absent dates prove no cutoff.
-        let mut legacy = db.collection::<ChannelTextDelivery>(crate::models::channel_text_delivery::COLLECTION_NAME)
-            .find(doc! {"channel_bot_id": null, "user_id": &owner,
-                "logical_key": {"$regex": "^saved-result:"},
-                "$or": [{"created_at": {"$gte": bson::DateTime::from_chrono(bot.created_at)}}, {"created_at": null}]})
-            .await?;
-        while let Some(plan) = legacy.try_next().await? {
-            match target(db, &plan, &bot.platform).await? {
-                Some(Target::Bot(id)) if id == bot.id => {
-                    plans
-                        .delete_one(doc! {"_id": &plan.id, "user_id": &plan.user_id,
-                        "source_id": &plan.source_id, "logical_key": &plan.logical_key,
-                        "channel_bot_id": null})
-                        .await?;
-                }
-                Some(_) => {} // Positive sibling/other-platform proof; retain it.
-                None => return Err(attribution_required(&bot.id)),
-            }
-        }
-    }
-    Ok(())
+    Ok(owners)
 }
 
-async fn target(
+async fn conversation_owners(db: &Database, owners: &BTreeSet<String>) -> AppResult<Vec<String>> {
+    let owners: Vec<_> = owners.iter().cloned().collect();
+    let mut people: BTreeSet<String> = owners.iter().cloned().collect();
+    let mut channels = db
+        .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find(doc! {"$or": [
+            {"bot_owner_id": {"$in": &owners}},
+            {"bot_owner_id": null, "user_id": {"$in": &owners}}
+        ]})
+        .projection(doc! {"user_id": 1})
+        .await?;
+    while let Some(channel) = channels.try_next().await? {
+        if let Ok(person) = channel.get_str("user_id") {
+            people.insert(person.to_owned());
+        }
+    }
+    Ok(people.into_iter().collect())
+}
+
+#[derive(Default)]
+struct Evidence {
+    proven: Option<Target>,
+    // An ownerless row identifies a parent but cannot prove a plan's owner.
+    // Independent owner-bearing evidence can recover it, never contradict it.
+    parent: Option<String>,
+    conflicting: bool,
+}
+impl Evidence {
+    fn prove(&mut self, target: Target) {
+        if self.proven.as_ref().is_some_and(|prior| prior != &target) {
+            self.conflicting = true;
+        }
+        self.proven = Some(target);
+    }
+    fn observe(&mut self, row: &Document, owner: &str, source_field: &str) {
+        let Ok(parent) = row.get_str("channel_bot_id") else {
+            return;
+        };
+        match row.get_str("user_id") {
+            Ok(found) if found == owner => self.prove(Target::Bot(parent.into())),
+            Err(_) => {
+                if self.parent.as_deref().is_some_and(|prior| prior != parent) {
+                    self.conflicting = true;
+                }
+                self.parent = Some(parent.into());
+            }
+            _ => {}
+        }
+        debug_assert!(row.get_str(source_field).is_ok());
+    }
+    fn target(self) -> Option<Target> {
+        if self.conflicting
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| self.proven.as_ref() != Some(&Target::Bot(parent.clone())))
+        {
+            None
+        } else {
+            self.proven
+        }
+    }
+}
+
+pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<()> {
+    let plans =
+        db.collection::<ChannelTextDelivery>(crate::models::channel_text_delivery::COLLECTION_NAME);
+    let owners = bot_owners(db, bot).await?;
+    let people = conversation_owners(db, &owners).await?;
+    let owners: Vec<_> = owners.into_iter().collect();
+    let mut after = None;
+    loop {
+        // New parented plans need no source scan. Only legacy saved results
+        // that could have been created during this bot's lifetime need proof.
+        let mut filter = doc! {"channel_bot_id": null, "user_id": {"$in": &owners},
+        "logical_key": {"$regex": "^saved-result:"},
+        "$or": [{"created_at": {"$gte": bson::DateTime::from_chrono(bot.created_at)}}, {"created_at": null}]};
+        if let Some(id) = &after {
+            filter.insert("_id", doc! {"$gt": id});
+        }
+        let batch: Vec<_> = plans
+            .find(filter)
+            .sort(doc! {"_id": 1})
+            .limit(BATCH)
+            .await?
+            .try_collect()
+            .await?;
+        let Some(last) = batch.last() else {
+            return Ok(());
+        };
+        after = Some(last.id.clone());
+        let sources: Vec<_> = batch.iter().map(|plan| plan.source_id.clone()).collect();
+        let messages: Vec<Document> = db
+            .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": &sources}})
+            .projection(doc! {"user_id": 1, "channel_bot_id": 1})
+            .await?
+            .try_collect()
+            .await?;
+        // Group multipart receipts on the server. Both branches have a
+        // supporting index, including the historical ownerless scoped case.
+        let receipts: Vec<Document> = db
+            .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+            .aggregate([
+                doc! {"$match": {"inbound_message_id": {"$in": &sources}, "$or": [
+                    {"user_id": {"$in": &owners}},
+                    {"user_id": null, "channel_bot_id": &bot.id}
+                ]}},
+                doc! {"$group": {"_id": {"source": "$inbound_message_id", "owner": "$user_id", "bot": "$channel_bot_id"}}},
+                doc! {"$project": {"_id": 0, "inbound_message_id": "$_id.source", "user_id": "$_id.owner", "channel_bot_id": "$_id.bot"}},
+            ])
+            .max_time(std::time::Duration::from_secs(5))
+            .await?.try_collect().await?;
+        let mut remove = Vec::new();
+        let mut unresolved = false;
+        for plan in &batch {
+            let mut evidence = Evidence::default();
+            for message in messages
+                .iter()
+                .filter(|row| row.get_str("_id") == Ok(plan.source_id.as_str()))
+            {
+                evidence.observe(message, &plan.user_id, "_id");
+            }
+            for receipt in receipts
+                .iter()
+                .filter(|row| row.get_str("inbound_message_id") == Ok(plan.source_id.as_str()))
+            {
+                evidence.observe(receipt, &plan.user_id, "inbound_message_id");
+            }
+            if evidence.proven.is_none()
+                && !evidence.conflicting
+                && let Some(target) =
+                    saved_target(db, plan, &people, &owners, &bot.platform).await?
+            {
+                evidence.prove(target);
+            }
+            match evidence.target() {
+                Some(Target::Bot(id)) if id == bot.id => remove.push(doc! {
+                    "_id": &plan.id, "user_id": &plan.user_id,
+                    "source_id": &plan.source_id, "logical_key": &plan.logical_key,
+                }),
+                Some(_) => {} // Positive sibling/other-platform proof; retain it.
+                None => unresolved = true,
+            }
+        }
+        if !remove.is_empty() {
+            plans
+                .delete_many(doc! {"channel_bot_id": null, "$or": remove})
+                .await?;
+        }
+        if unresolved {
+            return Err(attribution_required(&bot.id));
+        }
+    }
+}
+
+async fn saved_target(
     db: &Database,
     plan: &ChannelTextDelivery,
+    people: &[String],
+    owners: &[String],
     platform: &str,
 ) -> AppResult<Option<Target>> {
-    if let Some(source) = db
-        .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
-        .find_one(doc! {"_id": &plan.source_id, "user_id": &plan.user_id})
-        .projection(doc! {"channel_bot_id": 1})
-        .await?
-        && let Ok(bot) = source.get_str("channel_bot_id")
-    {
-        return Ok(Some(Target::Bot(bot.to_owned())));
-    }
-    let receipts: Vec<Document> = db
-        .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
-        .aggregate([
-            doc! {"$match": {"inbound_message_id": &plan.source_id, "user_id": &plan.user_id}},
-            doc! {"$group": {"_id": "$channel_bot_id"}},
-            doc! {"$limit": 2},
-        ])
-        .max_time(std::time::Duration::from_secs(5))
-        .await?
-        .try_collect()
-        .await?;
-    if receipts.len() == 1
-        && let Ok(bot) = receipts[0].get_str("_id")
-    {
-        return Ok(Some(Target::Bot(bot.to_owned())));
-    }
-    if !receipts.is_empty() {
-        return Ok(None);
-    }
     let Some((turn, destination)) = plan
         .logical_key
         .strip_prefix("saved-result:")
@@ -167,21 +225,21 @@ async fn target(
     }
     let mut replies = db
         .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
-        .find(doc! {"user_id": &plan.user_id, "turn_id": turn, "role": "assistant"})
-        .projection(doc! {"handoff_delivery.targets": 1})
+        .find(doc! {"user_id": {"$in": people}, "turn_id": turn, "role": "assistant"})
+        .projection(doc! {"user_id": 1, "handoff_delivery.targets": 1})
         .await?;
-    let mut proven = None;
+    let mut evidence = Evidence::default();
     while let Some(reply) = replies.try_next().await? {
+        let Ok(person) = reply.get_str("user_id") else {
+            continue;
+        };
         let Ok(targets) = reply
             .get_document("handoff_delivery")
             .and_then(|v| v.get_array("targets"))
         else {
             continue;
         };
-        for saved in targets {
-            let Some(saved) = saved.as_document() else {
-                continue;
-            };
+        for saved in targets.iter().filter_map(|target| target.as_document()) {
             if saved
                 .get_document("source")
                 .and_then(|v| v.get_str("turn_id"))
@@ -200,29 +258,38 @@ async fn target(
             if super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key {
                 continue;
             }
-            let found = if origin.platform != platform {
-                Target::OtherPlatform
-            } else {
-                let Some(channel) = db
-                    .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-                    .find_one(doc! {"_id": &origin.nyxbot_channel_id})
-                    .projection(doc! {"channel_bot_id": 1})
-                    .await?
-                else {
+            let channel = db
+                .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+                .find_one(doc! {"_id": &origin.nyxbot_channel_id})
+                .projection(
+                    doc! {"channel_bot_id": 1, "user_id": 1, "bot_owner_id": 1, "platform": 1},
+                )
+                .await?;
+            let found = if let Some(channel) = channel {
+                let owner = channel
+                    .get_str("bot_owner_id")
+                    .or_else(|_| channel.get_str("user_id"));
+                if channel.get_str("user_id") != Ok(person)
+                    || !owner.is_ok_and(|owner| owners.iter().any(|id| id == owner))
+                    || channel.get_str("platform") != Ok(origin.platform.as_str())
+                {
                     return Ok(None);
-                };
+                }
                 let Ok(bot) = channel.get_str("channel_bot_id") else {
                     return Ok(None);
                 };
                 Target::Bot(bot.to_owned())
-            };
-            if proven.as_ref().is_some_and(|prior| prior != &found) {
+            } else if origin.platform != platform && person == plan.user_id {
+                // A retained non-Meta destination proves this cannot be a Meta
+                // plan even when its old channel was already removed.
+                Target::OtherPlatform
+            } else {
                 return Ok(None);
-            }
-            proven = Some(found);
+            };
+            evidence.prove(found);
         }
     }
-    Ok(proven)
+    Ok(evidence.target())
 }
 
 #[cfg(test)]
@@ -335,7 +402,19 @@ mod tests {
         )
         .await
         .unwrap();
-        // Both TTL collections are already empty; attribution uses the exact
+        let unknown = channel_text_delivery::load(&state.db, &unknown_key)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .db
+            .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &unknown.source_id, "channel_bot_id": &bot.id})
+            .await
+            .unwrap();
+        // The ownerless source is a constraint, not proof. Independent handoff
+        // recovery below must work without editing or deleting this row.
+        // Both TTL collections have no owner-bearing source; attribution uses the exact
         // saved-result destination, not a guessed owner-wide receipt purge.
         let grant = bot.meta_binding.as_ref().unwrap().grant_id.as_str();
         let result =
@@ -410,5 +489,266 @@ mod tests {
         super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
             .await
             .unwrap();
+    }
+    fn plan(owner: &str, source: &str, parent: Option<&str>) -> Document {
+        let mut row = doc! {"_id": uuid::Uuid::new_v4().to_string(),
+        "logical_key": format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "a".repeat(64)),
+        "user_id": owner, "source_id": source, "fingerprint": "retained",
+        "parts": [{"state": "sent", "platform_message_id": "provider-id"}],
+        "created_at": bson::DateTime::now()};
+        if let Some(parent) = parent {
+            row.insert("channel_bot_id", parent);
+        }
+        row
+    }
+
+    #[tokio::test]
+    async fn org_bot_legacy_plans_resolve_personal_specialist_handoffs_without_claiming_the_admins_receipts()
+     {
+        let (state, _, _server, mut bot) = fixture("instagram").await;
+        let admin = bot.user_id.clone();
+        let org = uuid::Uuid::new_v4().to_string();
+        bot.user_id = org.clone();
+        bot.created_at -= chrono::Duration::days(60);
+        let own_channel = uuid::Uuid::new_v4().to_string();
+        let sibling_channel = uuid::Uuid::new_v4().to_string();
+        let sibling = uuid::Uuid::new_v4().to_string();
+        let mut own_parent = parent(&admin, &bot.id, &own_channel, "instagram");
+        own_parent.insert("bot_owner_id", &org);
+        let mut sibling_parent = parent(&admin, &sibling, &sibling_channel, "instagram");
+        sibling_parent.insert("bot_owner_id", &org);
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .insert_many([own_parent, sibling_parent])
+            .await
+            .unwrap();
+        let turn = uuid::Uuid::new_v4().to_string();
+        let origin = |channel: &str| ChannelOrigin {
+            org_execution: None,
+            native_event_id: None,
+            thread: None,
+            nyxbot_channel_id: channel.into(),
+            partition: "private-owner".into(),
+            platform: "instagram".into(),
+        };
+        let own = origin(&own_channel);
+        let other = origin(&sibling_channel);
+        state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &admin,
+            "turn_id": &turn, "role": "assistant", "handoff_delivery": {"targets": [saved(&turn, &own), saved(&turn, &other)]}})
+            .await.unwrap();
+        let own_key = channel_supplemental_delivery::saved_key(&turn, &own);
+        let sibling_key = channel_supplemental_delivery::saved_key(&turn, &other);
+        for key in [&own_key, &sibling_key] {
+            channel_text_delivery::begin(
+                &state.db,
+                key,
+                &org,
+                &uuid::Uuid::new_v4().to_string(),
+                "old",
+                1,
+            )
+            .await
+            .unwrap();
+        }
+        let personal = plan(
+            &admin,
+            "unrelated-personal-source-without-any-history",
+            None,
+        );
+        state
+            .db
+            .collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .insert_one(&personal)
+            .await
+            .unwrap();
+        erase_legacy(&state.db, &bot).await.unwrap();
+        assert!(
+            channel_text_delivery::load(&state.db, &own_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for key in [
+            sibling_key.as_str(),
+            personal.get_str("logical_key").unwrap(),
+        ] {
+            assert!(
+                channel_text_delivery::load(&state.db, key)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ownerless_metadata_accepts_independent_owner_receipts_but_rejects_contradictory_parents()
+     {
+        for contradiction in [false, true] {
+            let (state, _, _server, bot) = fixture("instagram").await;
+            let source = uuid::Uuid::new_v4().to_string();
+            let row = plan(&bot.user_id, &source, None);
+            let key = row.get_str("logical_key").unwrap();
+            state
+                .db
+                .collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .insert_one(&row)
+                .await
+                .unwrap();
+            state
+                .db
+                .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+                .insert_one(doc! {"_id": &source, "channel_bot_id": &bot.id})
+                .await
+                .unwrap();
+            let receipt = uuid::Uuid::new_v4().to_string();
+            let parent = if contradiction {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                bot.id.clone()
+            };
+            let receipts = state
+                .db
+                .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME);
+            receipts
+                .insert_one(doc! {"_id": &receipt, "user_id": &bot.user_id,
+                "inbound_message_id": &source, "channel_bot_id": parent})
+                .await
+                .unwrap();
+            let result = erase_legacy(&state.db, &bot).await;
+            if contradiction {
+                assert!(matches!(result, Err(AppError::Conflict(_))));
+                assert!(
+                    channel_text_delivery::load(&state.db, key)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                receipts
+                    .update_one(
+                        doc! {"_id": &receipt},
+                        doc! {"$set": {"channel_bot_id": &bot.id}},
+                    )
+                    .await
+                    .unwrap();
+                erase_legacy(&state.db, &bot).await.unwrap();
+            } else {
+                result.unwrap();
+            }
+            assert!(
+                channel_text_delivery::load(&state.db, key)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_erasure_uses_bounded_source_batches_and_parented_plans_need_no_source_scan() {
+        let (state, _, _server, bot) = fixture("instagram").await;
+        super::super::channel_reply_delivery::ensure_indexes(&state.db)
+            .await
+            .unwrap();
+        let indexes: Vec<_> = state
+            .db
+            .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(
+            indexes
+                .iter()
+                .any(|index| index.keys == doc! {"user_id": 1, "inbound_message_id": 1})
+        );
+        let plans = state
+            .db
+            .collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
+        let messages = state
+            .db
+            .collection::<Document>(crate::models::channel_message::COLLECTION_NAME);
+        let mut parented = Vec::new();
+        let mut sources = Vec::new();
+        for _ in 0..205 {
+            let source = uuid::Uuid::new_v4().to_string();
+            parented.push(plan(&bot.user_id, &source, Some(&bot.id)));
+            sources.push(doc! {"_id": source, "user_id": &bot.user_id, "channel_bot_id": &bot.id});
+        }
+        plans.insert_many(parented).await.unwrap();
+        messages.insert_many(sources).await.unwrap();
+        let (db, commands) = super::super::durable_wake_tests::monitored(&state.db).await;
+        erase_legacy(&db, &bot).await.unwrap();
+        let observed = super::super::durable_wake_tests::take(&commands);
+        assert_eq!(
+            observed
+                .get("delete:channel_text_deliveries")
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            observed.get("find:channel_messages").copied().unwrap_or(0),
+            0
+        );
+        let mut legacy = Vec::new();
+        let mut receipts = Vec::new();
+        for _ in 0..205 {
+            let source = uuid::Uuid::new_v4().to_string();
+            legacy.push(plan(&bot.user_id, &source, None));
+            receipts.push(
+                doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
+                "inbound_message_id": source, "channel_bot_id": &bot.id},
+            );
+        }
+        let sibling = uuid::Uuid::new_v4().to_string();
+        let source = uuid::Uuid::new_v4().to_string();
+        let retained = plan(&bot.user_id, &source, None);
+        receipts.push(
+            doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
+            "inbound_message_id": source, "channel_bot_id": sibling},
+        );
+        legacy.push(retained.clone());
+        plans.insert_many(legacy).await.unwrap();
+        state
+            .db
+            .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+            .insert_many(receipts)
+            .await
+            .unwrap();
+        erase_legacy(&db, &bot).await.unwrap();
+        let observed = super::super::durable_wake_tests::take(&commands);
+        assert_eq!(
+            observed
+                .get("delete:channel_text_deliveries")
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+        assert_eq!(
+            observed
+                .get("aggregate:channel_reply_deliveries")
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+        assert_eq!(
+            plans
+                .count_documents(doc! {"channel_bot_id": null})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            plans
+                .find_one(doc! {"_id": retained.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

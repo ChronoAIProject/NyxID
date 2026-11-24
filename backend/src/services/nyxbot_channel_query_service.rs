@@ -2,7 +2,7 @@ use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 
 use crate::{
-    errors::AppResult,
+    errors::{AppError, AppResult},
     models::nyxbot_channel::{COLLECTION_NAME, NyxbotChannel},
 };
 
@@ -52,13 +52,9 @@ pub(crate) async fn reusable(
     row: &NyxbotChannel,
 ) -> AppResult<bool> {
     let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
-    let keys_alive = super::key_service::get_api_key(db, owner, &row.route_api_key_id)
-        .await
-        .is_ok_and(|key| key.is_active)
+    let keys_alive = key_alive(db, owner, &row.route_api_key_id).await?
         && match row.agent_api_key_id.as_deref() {
-            Some(key) => super::key_service::get_api_key(db, actor, key)
-                .await
-                .is_ok_and(|key| key.is_active),
+            Some(key) => key_alive(db, actor, key).await?,
             None => true,
         };
     let route_alive = match row.route_id.as_deref() {
@@ -75,6 +71,14 @@ pub(crate) async fn reusable(
         && route_alive
         && row.delivery_status.as_deref() != Some("failing")
         && owner == bot_owner)
+}
+
+async fn key_alive(db: &Database, owner: &str, key: &str) -> AppResult<bool> {
+    match super::key_service::get_api_key(db, owner, key).await {
+        Ok(key) => Ok(key.is_active),
+        Err(AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

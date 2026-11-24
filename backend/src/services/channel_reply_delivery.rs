@@ -498,6 +498,9 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
                 .keys(doc! {"channel_bot_id": 1, "inbound_message_id": 1})
                 .build(),
             IndexModel::builder()
+                .keys(doc! {"user_id": 1, "inbound_message_id": 1})
+                .build(),
+            IndexModel::builder()
                 .keys(doc! {"parts.outbound_message_id": 1})
                 .build(),
         ])

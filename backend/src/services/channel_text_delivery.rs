@@ -53,10 +53,24 @@ pub(crate) async fn begin_bound(
     fingerprint: &str,
     count: usize,
 ) -> AppResult<ChannelTextDelivery> {
+    begin_parented(db, key, &bot.user_id, source, fingerprint, count, bot).await
+}
+
+/// Native transports historically journal under the linking person's owner.
+/// Preserve that identity while recording the independently verified bot parent.
+pub(crate) async fn begin_parented(
+    db: &Database,
+    key: &str,
+    owner: &str,
+    source: &str,
+    fingerprint: &str,
+    count: usize,
+    bot: &crate::models::channel_bot::ChannelBot,
+) -> AppResult<ChannelTextDelivery> {
     begin_versioned(
         db,
         key,
-        &bot.user_id,
+        owner,
         source,
         fingerprint,
         count,
@@ -495,6 +509,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(adopted.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        let transport_person = uuid::Uuid::new_v4().to_string();
+        let native = begin_parented(
+            &db,
+            "native-saved-result",
+            &transport_person,
+            "native-event",
+            "native-hash",
+            1,
+            &bot,
+        )
+        .await
+        .unwrap();
+        assert_eq!(native.user_id, transport_person);
+        assert_eq!(native.channel_bot_id.as_deref(), Some(bot.id.as_str()));
         let observed = super::super::durable_wake_tests::take(&commands);
         assert!(
             !observed

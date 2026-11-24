@@ -410,10 +410,28 @@ pub(crate) async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppRe
     let ids =
         releases::retire_connection(state, &row, ReleaseReason::Disconnect, "disconnected", None)
             .await?;
+    finish_disconnect(state, owner, &row, &ids).await
+}
+
+pub(crate) async fn disconnect_for_repair(
+    state: &AppState,
+    actor: &str,
+    expected: &NyxbotChannel,
+) -> AppResult<Value> {
+    let ids = releases::retire_for_repair(state, actor, expected).await?;
+    finish_disconnect(state, actor, expected, &ids).await
+}
+
+async fn finish_disconnect(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+    ids: &[String],
+) -> AppResult<Value> {
     let gateway_released = if ids.is_empty() {
         row.transport != "gateway"
     } else {
-        releases::try_inline(state, &ids).await
+        releases::try_inline(state, ids).await
     };
     audit(
         state,

@@ -321,56 +321,7 @@ impl MetaService<'_> {
         if new_installation {
             require_platform_delivery(db, tx, platform).await?;
         }
-        super::org_membership_authority::fence_live_member(db, actor, tx).await?;
-        if actor == owner {
-            if db
-                .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-                .find_one(doc! {
-                    "_id": owner,
-                    "is_active": true,
-                    "platform_personal_deleting": {"$ne": true},
-                })
-                .session(&mut *tx)
-                .await?
-                .is_none()
-            {
-                return Err(AppError::Forbidden("Inbox owner is unavailable".into()));
-            }
-        } else {
-            super::org_membership_authority::fence_org(db, owner, tx).await?;
-            if db
-                .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-                .find_one(doc! {
-                    "_id": owner,
-                    "user_type": "org",
-                    "is_active": true,
-                    "platform_personal_deleting": {"$ne": true},
-                })
-                .session(&mut *tx)
-                .await?
-                .is_none()
-            {
-                return Err(AppError::Forbidden(
-                    "Inbox organization is unavailable".into(),
-                ));
-            }
-            if db
-                .collection::<bson::Document>("org_memberships")
-                .find_one(doc! {
-                    "org_user_id": owner,
-                    "member_user_id": actor,
-                    "role": "admin",
-                    "revoked_at": null,
-                })
-                .session(&mut *tx)
-                .await?
-                .is_none()
-            {
-                return Err(AppError::Forbidden(
-                    "Organization administrator access changed during inbox setup".into(),
-                ));
-            }
-        }
+        super::channel_bot_service::fence_owner_management(db, tx, actor, owner).await?;
         if new_installation {
             super::channel_adapters::meta_managed::require_enrollment(db, actor, platform).await?;
         }

@@ -795,6 +795,34 @@ pub(crate) async fn retire_connection(
     status: &str,
     error: Option<&str>,
 ) -> AppResult<Vec<String>> {
+    retire_connection_checked(state, row, reason, status, error, None).await
+}
+
+pub(crate) async fn retire_for_repair(
+    state: &AppState,
+    actor: &str,
+    expected: &NyxbotChannel,
+) -> AppResult<Vec<String>> {
+    retire_connection_checked(
+        state,
+        expected,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+        Some(actor),
+    )
+    .await
+}
+
+async fn retire_connection_checked(
+    state: &AppState,
+    row: &NyxbotChannel,
+    reason: ReleaseReason,
+    status: &str,
+    error: Option<&str>,
+    repair_actor: Option<&str>,
+) -> AppResult<Vec<String>> {
+    let repair_actor = repair_actor.map(str::to_owned);
     let scoped_state = state.clone();
     let db = state.db.clone();
     let scoped_row = row.clone();
@@ -806,6 +834,17 @@ pub(crate) async fn retire_connection(
         let row = &scoped_row;
         let work:AppResult<_>=Box::pin(async {
             let current=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&row.id,"user_id":&row.user_id}).session(&mut *session).await?.ok_or_else(conflict)?;
+            if let Some(actor) = &repair_actor {
+                super::channel_bot_service::fence_owner_management(
+                    &db, session, actor, bot_owner(&current),
+                ).await?;
+                // The write below contends with activation/relinking. Revalidate
+                // the exact repair snapshot on every transaction retry before
+                // retiring any route, key, follow or gateway release.
+                if !repair_snapshot_matches(row, &current) {
+                    return Err(AppError::Conflict("Channel assignment changed during repair".into()));
+                }
+            }
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok((Vec::new(), false));}
             let ids=retire_in_session(state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
@@ -834,6 +873,24 @@ pub(crate) async fn retire_connection(
         super::org_thread_notice::after_retirement(state.db.clone(), row.id.clone());
     }
     Ok(ids)
+}
+
+fn repair_snapshot_matches(expected: &NyxbotChannel, current: &NyxbotChannel) -> bool {
+    expected.channel_bot_id == current.channel_bot_id
+        && expected.bot_owner_id == current.bot_owner_id
+        && expected.execution_policy_revision == current.execution_policy_revision
+        && expected.notification_epoch == current.notification_epoch
+        && expected.status == current.status
+        && expected.agent_id == current.agent_id
+        && expected.route_id == current.route_id
+        && expected.route_api_key_id == current.route_api_key_id
+        && expected.agent_api_key_id == current.agent_api_key_id
+        && expected.pending_route_api_key_id == current.pending_route_api_key_id
+        && expected.pending_agent_api_key_id == current.pending_agent_api_key_id
+        && expected.gateway_setup_release_id == current.gateway_setup_release_id
+        && expected.gateway_version == current.gateway_version
+        && expected.binding_id == current.binding_id
+        && expected.updated_at == current.updated_at
 }
 
 fn live_filter(release: &Release) -> Document {
