@@ -329,12 +329,10 @@ async fn deleting_drafting_grant_retires_original_claim_and_unstarted_proposal_a
     db.drop().await.unwrap();
 }
 
-#[tokio::test]
-async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web_notice() {
-    let f = fixture("meta_draft_repair_notice").await;
-    let server = setup_ornn(&f).await;
-    let (bot, chat) = meta_turn(&f).await;
-    let first = draft_in_chat(&f, &chat).await.unwrap();
+async fn queue_draft_repair_notice(f: &Fixture) -> (ChannelBot, String) {
+    let server = setup_ornn(f).await;
+    let (bot, chat) = meta_turn(f).await;
+    let first = draft_in_chat(f, &chat).await.unwrap();
     let db = &f.state.db;
     let card = db
         .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
@@ -351,7 +349,7 @@ async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web
         .with_priority(1)
         .mount(&server)
         .await;
-    assert!(matches!(finish(&f, card, true).await,
+    assert!(matches!(finish(f, card, true).await,
         Err(AppError::Conflict(code)) if code == "ornn_validation_failed"));
     let home = engine::get(db, &f.owner, &f.row.id).await.unwrap();
     let notice = home
@@ -361,6 +359,14 @@ async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web
         .unwrap();
     assert_eq!(notice.channel_contexts.len(), 1);
     assert_eq!(notice.channel_contexts[0].meta_grant.as_ref(), Some(&grant));
+    (bot, notice.id.clone())
+}
+
+#[tokio::test]
+async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web_notice() {
+    let f = fixture("meta_draft_repair_notice").await;
+    let db = &f.state.db;
+    let (bot, notice) = queue_draft_repair_notice(&f).await;
     let unrelated = crate::services::assistant_team_service::event(
         "notice",
         "Independent web notice".into(),
@@ -372,16 +378,84 @@ async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web
         .unwrap();
     assert!(erase(&f, &bot).await);
     let home = engine::get(db, &f.owner, &f.row.id).await.unwrap();
-    assert!(
-        home.pending_events
-            .iter()
-            .all(|event| event.id != notice.id)
-    );
+    assert!(home.pending_events.iter().all(|event| event.id != notice));
     assert!(
         home.pending_events
             .iter()
             .any(|event| event.id == unrelated.id)
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_skill_repair_notice_preserves_uncertain_evidence_and_allows_healthy_inbox_to_advance()
+ {
+    let f = fixture("meta_draft_repair_prune").await;
+    let db = &f.state.db;
+    let (a, notice) = queue_draft_repair_notice(&f).await;
+    meta_turn(&f).await;
+    let home = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    let mut healthy =
+        crate::services::assistant_team_service::event("message", "B question".into(), None);
+    healthy.channel_message = Some("B question".into());
+    healthy.channel_contexts = vec![
+        home.active_turn
+            .as_ref()
+            .unwrap()
+            .channel_context
+            .clone()
+            .unwrap(),
+    ];
+    engine::push_events(db, &f.owner, &f.row.id, vec![healthy.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    settle(&f, &home).await;
+    meta::set_bot_delivery(db, &a, &f.owner, false)
+        .await
+        .unwrap();
+    let held = db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&a.id})
+        .await
+        .unwrap()
+        .unwrap();
+    meta::set_bot_delivery(db, &held, &f.owner, true)
+        .await
+        .unwrap();
+    let scopes = db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES);
+    let filter = doc! {"bot_id":&a.id,"grant_id":&meta::scopes::reference(&a).unwrap().grant_id};
+    let scope = scopes.find_one(filter.clone()).await.unwrap().unwrap();
+    scopes
+        .update_one(filter.clone(), doc! {"$set":{"from_generation":"unknown"}})
+        .await
+        .unwrap();
+    let prune =
+        || crate::services::channel_thread_follow_service::prune_queue(db, &f.owner, &f.row.id);
+    assert!(prune().await.is_err());
+    let home = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    assert!(home.pending_events.iter().any(|event| event.id == notice));
+    assert!(
+        home.pending_events
+            .iter()
+            .any(|event| event.id == healthy.id)
+    );
+    scopes
+        .update_one(
+            filter,
+            doc! {"$set":{"from_generation":scope.get_i64("from_generation").unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(prune().await.unwrap(), 1);
+    let request: engine::TurnRequest =
+        serde_json::from_value(json!({"conversation_id":&f.row.id,"text":"Next event"})).unwrap();
+    let mut start = engine::TurnStart::from(&request);
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+    let admitted = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(admitted.active_turn.unwrap().events[0].id, healthy.id);
     db.drop().await.unwrap();
 }
 

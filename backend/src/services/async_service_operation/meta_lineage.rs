@@ -62,6 +62,23 @@ pub(crate) async fn fence(
     Ok(())
 }
 
+pub(crate) async fn contexts_current(
+    db: &Database,
+    tx: &mut ClientSession,
+    contexts: &[ChannelTurnContext],
+) -> AppResult<bool> {
+    if contexts.len() > 100 {
+        return Err(super::super::channel_meta_service::grants::incomplete());
+    }
+    let mut valid = true;
+    for context in contexts {
+        if !current(db, tx, context).await? {
+            valid = false;
+        }
+    }
+    Ok(valid)
+}
+
 /// A successful exact read can establish permanent loss. Storage errors and
 /// malformed or missing scope evidence propagate for retry/repair instead.
 pub(crate) async fn current(

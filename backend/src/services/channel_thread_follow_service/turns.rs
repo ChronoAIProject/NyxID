@@ -293,6 +293,20 @@ pub async fn filter_events(
 ) -> AppResult<Vec<AgentEvent>> {
     let mut allowed = Vec::new();
     for mut event in events {
+        if event.kind == "skill_publication"
+            && event
+                .channel_contexts
+                .iter()
+                .any(|context| context.meta_grant.is_some())
+            && !super::super::async_service_operation::meta_lineage::contexts_current(
+                db,
+                session,
+                &event.channel_contexts,
+            )
+            .await?
+        {
+            continue;
+        }
         if event.kind == "action_denied"
             && event
                 .channel_contexts

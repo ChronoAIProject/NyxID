@@ -1276,10 +1276,10 @@ async fn push_failure_event(
     };
     // A definitive validation failure can settle after consent ends. Its
     // optional repair notice still requires the original delivery authority.
-    for context in &contexts {
-        if !super::async_service_operation::meta_lineage::current(db, session, context).await? {
-            return Ok(());
-        }
+    if !super::async_service_operation::meta_lineage::contexts_current(db, session, &contexts)
+        .await?
+    {
+        return Ok(());
     }
     super::async_service_operation::meta_lineage::fence(db, session, &contexts, true).await?;
     let event_id = Uuid::new_v5(
