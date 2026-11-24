@@ -760,7 +760,7 @@ async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retire
         );
         state
             .db
-            .collection("org_memberships")
+            .collection::<crate::models::org_membership::OrgMembership>("org_memberships")
             .insert_one(&membership)
             .await
             .unwrap();
