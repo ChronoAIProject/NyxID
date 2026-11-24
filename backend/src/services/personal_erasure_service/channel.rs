@@ -235,6 +235,7 @@ async fn complete_provider_inbox(
     if changed.matched_count != 1 {
         return Err(super::super::channel_meta_service::grants::incomplete());
     }
+    super::super::channel_meta_service::scopes::mark_complete(db, tx, bot, grant).await?;
     let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
     let deleted = bots
         .delete_one(doc! {"_id":bot,"is_active":false,

@@ -60,3 +60,46 @@ pub struct AssetCredential {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub expires_at: Option<DateTime<Utc>>,
 }
+
+pub const GRANT_SCOPES: &str = "channel_meta_grant_scopes";
+
+/// Provenance on an original record; no provider address or credential is copied.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrantRef {
+    pub bot_id: String,
+    pub grant_id: String,
+    pub generation: i64,
+}
+impl std::fmt::Debug for GrantRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetaGrantRef").finish_non_exhaustive()
+    }
+}
+
+/// One installation grant's immutable identity and generation interval.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct GrantScope {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub bot_id: String,
+    pub grant_id: String,
+    pub identity: Option<String>,
+    pub platform: String,
+    pub app_id: String,
+    pub from_generation: i64,
+    pub to_generation: Option<i64>,
+    pub legacy_history: bool,
+    pub binding_fingerprint: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub authorized_at: Option<DateTime<Utc>>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub bot_created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub sealed_at: Option<DateTime<Utc>>,
+    pub status: String,
+    pub outstanding: bool,
+    #[serde(default)]
+    pub erasure_requested: bool,
+}

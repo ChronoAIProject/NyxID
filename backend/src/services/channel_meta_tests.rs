@@ -4834,3 +4834,368 @@ async fn sweep_attributes_rejection_to_the_credential_that_made_the_provider_req
         server.verify().await;
     }
 }
+
+async fn page_grant(server: &MockServer, subject: &str, page_token: &str) {
+    Mock::given(method("POST"))
+        .and(path("/v25.0/oauth/access_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token":"login-token","expires_in":5184000})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v25.0/me"))
+        .and(header("authorization", "Bearer login-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":subject})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v25.0/me/permissions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[
+            {"permission":"pages_show_list","status":"granted"},
+            {"permission":"pages_manage_metadata","status":"granted"},
+            {"permission":"pages_messaging","status":"granted"}]})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v25.0/me/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"222","name":"Shared Page","tasks":["MESSAGING"],"access_token":page_token}]})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v25.0/debug_token"))
+        .and(header("authorization", "Bearer 111|login-secret"))
+        .and(query_param("input_token", page_token))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{
+            "app_id":"111","is_valid":true,"type":"PAGE","profile_id":"222",
+            "scopes":["pages_messaging","pages_manage_metadata"]}})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v25.0/me"))
+        .and(header("authorization", format!("Bearer {page_token}")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id":"222","name":"Shared Page"})),
+        )
+        .mount(server)
+        .await;
+    subscriptions(server, "222").await;
+}
+
+#[tokio::test]
+async fn messenger_transfer_and_reconsent_preserve_public_id_and_capture_both_grant_scopes() {
+    use crate::{
+        models::channel_meta::{GRANT_SCOPES, GrantScope},
+        services::ownership_transfer_service as transfer,
+    };
+    for held in [false, true] {
+        let (state, _, server, fixture_bot) = fixture("messenger").await;
+        configure_transfer(&state, &fixture_bot).await;
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .delete_one(doc! {"_id":&fixture_bot.id})
+            .await
+            .unwrap();
+        page_grant(&server, "900", "page-token-a").await;
+        let s = service(&state, &server);
+        let start = s
+            .start(
+                &fixture_bot.user_id,
+                &fixture_bot.user_id,
+                "messenger",
+                "Shared Page",
+                None,
+            )
+            .await
+            .unwrap();
+        s.exchange(
+            &fixture_bot.user_id,
+            "messenger",
+            &state_value(&start),
+            Some("consent-a"),
+        )
+        .await
+        .unwrap();
+        let a = s
+            .finish(&fixture_bot.user_id, &start.session_id, "222", true)
+            .await
+            .unwrap();
+        let a_binding = a.meta_binding.as_ref().unwrap();
+        let a_plan = super::super::channel_text_delivery::begin_bound(
+            &state.db,
+            "scope-plan-a",
+            &a,
+            "source-a",
+            "hash-a",
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            a_plan.meta_grant.as_ref().unwrap().grant_id,
+            a_binding.grant_id
+        );
+        let recipient = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &recipient,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        flags::set_platform_override(
+            &state.db,
+            "channels:messenger",
+            &FlagTarget::User(recipient.clone()),
+            true,
+            &a.user_id,
+        )
+        .await
+        .unwrap();
+        let preview = transfer::preview(
+            &state.db,
+            &a.user_id,
+            transfer::ResourceKind::ChannelBot,
+            &a.id,
+            &recipient,
+            5,
+        )
+        .await
+        .unwrap();
+        transfer::transfer_with_keys(
+            &state.db,
+            Some(&state.encryption_keys),
+            transfer::TransferCommand {
+                actor: &a.user_id,
+                api_key_id: None,
+                first_party_human: true,
+                kind: transfer::ResourceKind::ChannelBot,
+                resource_id: &a.id,
+                destination: &recipient,
+                request_id: &uuid::Uuid::new_v4().to_string(),
+                expected_version: &preview.version,
+                capacity: 5,
+            },
+        )
+        .await
+        .unwrap();
+        if held {
+            state.db.collection::<ChannelBot>(BOTS).update_one(doc! {"_id":&a.id},doc! {"$set":{
+                "meta_binding.operator_suspended":true,"meta_binding.subscription":"suspended","status":"suspended"}}).await.unwrap();
+        }
+        let before = super::super::channel_bot_service::get_bot(&state.db, &a.id)
+            .await
+            .unwrap();
+        server.reset().await;
+        page_grant(&server, "901", "page-token-b").await;
+        let start = s
+            .start(
+                &recipient,
+                &recipient,
+                "messenger",
+                "Shared Page",
+                Some(&a.id),
+            )
+            .await
+            .unwrap();
+        s.exchange(
+            &recipient,
+            "messenger",
+            &state_value(&start),
+            Some("consent-b"),
+        )
+        .await
+        .unwrap();
+        let b = s
+            .finish(&recipient, &start.session_id, "222", true)
+            .await
+            .unwrap();
+        assert_eq!(b.id, a.id);
+        assert_eq!(b.user_id, recipient);
+        let b_binding = b.meta_binding.as_ref().unwrap();
+        assert_eq!(b_binding.grant_subject_id, "901");
+        assert_eq!(b_binding.operator_suspended, held);
+        assert_eq!(
+            b_binding.subscription,
+            if held { "suspended" } else { "active" }
+        );
+        assert!(b_binding.generation > before.meta_binding.as_ref().unwrap().generation);
+        assert_ne!(b_binding.grant_id, a_binding.grant_id);
+        let scopes = state.db.collection::<GrantScope>(GRANT_SCOPES);
+        assert_eq!(
+            scopes.count_documents(doc! {"bot_id":&a.id}).await.unwrap(),
+            2
+        );
+        let old = scopes
+            .find_one(doc! {"bot_id":&a.id,"grant_id":&a_binding.grant_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.status, "sealed");
+        assert_eq!(old.from_generation, a_binding.generation);
+        assert_eq!(
+            old.to_generation,
+            Some(before.meta_binding.as_ref().unwrap().generation)
+        );
+        assert!(!old.legacy_history);
+        let current = scopes
+            .find_one(doc! {"bot_id":&b.id,"grant_id":&b_binding.grant_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.status, "current");
+        assert_eq!(current.from_generation, b_binding.generation);
+        assert!(current.to_generation.is_none());
+        assert!(
+            super::super::channel_text_delivery::begin_bound(
+                &state.db,
+                "stale-a-plan",
+                &a,
+                "source-a",
+                "hash-a",
+                1
+            )
+            .await
+            .is_err()
+        );
+        let b_plan = super::super::channel_text_delivery::begin_bound(
+            &state.db,
+            "scope-plan-b",
+            &b,
+            "source-b",
+            "hash-b",
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            b_plan.meta_grant.as_ref().unwrap().grant_id,
+            b_binding.grant_id
+        );
+        let response = accept_provider_request(
+            &s,
+            "messenger",
+            &provider_request(json!(900), Utc::now().timestamp()),
+            true,
+        )
+        .await
+        .unwrap();
+        let job = state
+            .db
+            .collection::<bson::Document>(provider::REQUESTS)
+            .find_one(doc! {"_id":response["confirmation_code"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let targets = job.get_array("targets").unwrap();
+        assert_eq!(targets.len(), 1);
+        let target = targets[0].as_document().unwrap();
+        assert_eq!(target.get_str("grant_id"), Ok(a_binding.grant_id.as_str()));
+        assert_eq!(target.get_str("scope_id"), Ok(old.id.as_str()));
+        let unchanged = super::super::channel_bot_service::get_bot(&state.db, &b.id)
+            .await
+            .unwrap();
+        assert!(unchanged.is_active);
+        assert_eq!(
+            unchanged.meta_binding.as_ref().unwrap().generation,
+            b_binding.generation
+        );
+        assert!(!unchanged.meta_binding.as_ref().unwrap().erasure_requested);
+        let raw = state
+            .db
+            .collection::<bson::Document>(GRANT_SCOPES)
+            .find_one(doc! {"_id":&old.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.get_bool("erasure_requested"), Ok(true));
+        for secret in [
+            "900",
+            "901",
+            "page-token-a",
+            "page-token-b",
+            recipient.as_str(),
+        ] {
+            assert!(
+                !serde_json::to_string(&raw)
+                    .unwrap()
+                    .contains(&format!("\"{secret}\""))
+            );
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn chronology_repair_outside_signed_cutoff_skips_all_worker_effects() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let s = service(&state, &server);
+    let request = accept_provider_request(
+        &s,
+        "instagram",
+        &provider_request(json!(900), Utc::now().timestamp()),
+        true,
+    )
+    .await
+    .unwrap();
+    let code = request["confirmation_code"].as_str().unwrap();
+    let job = state
+        .db
+        .collection::<bson::Document>(provider::REQUESTS)
+        .find_one(doc! {"_id":code})
+        .await
+        .unwrap()
+        .unwrap();
+    let cutoff = *job.get_datetime("signed_cutoff").unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(doc! {"_id":"retained-source","channel_bot_id":&bot.id,"user_id":&bot.user_id})
+        .await
+        .unwrap();
+    super::super::durable_wake_tests::resume_after(
+        "meta_provider_before_transition",
+        async {
+            provider::reconcile_with_service(&state, &s).await.unwrap();
+        },
+        async {
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .update_one(
+                    doc! {"_id":&bot.id},
+                    doc! {"$set":{"meta_binding.authorized_at":cutoff}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"_id":"retained-source"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "completed"
+    );
+}

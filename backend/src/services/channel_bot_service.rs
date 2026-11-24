@@ -916,6 +916,9 @@ async fn insert_registered_bot_inner(
                 super::channel_meta_service::fence_grant_in_session(&db,session,&bot.platform,&binding.app_id,&binding.grant_subject_id,meta.created_at).await?;
             }
             bots.insert_one(&bot).session(&mut *session).await?;
+            if super::channel_adapters::meta::is_meta(&bot.platform) {
+                super::channel_meta_service::scopes::ensure_current(&db,session,&bot,true).await?;
+            }
             if let Some(meta) = &meta_session {
                 let done = db.collection::<bson::Document>(crate::models::channel_meta::SESSIONS).update_one(
                     doc! {"_id":&meta.id,"actor_id":&meta.actor_id,"owner_id":&bot.user_id,"status":"installing","selected_asset_id":&bot.platform_bot_id,"bot_id":&bot.id,"expires_at":{"$gt":bson::DateTime::now()}},

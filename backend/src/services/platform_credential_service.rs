@@ -528,6 +528,10 @@ async fn require_drained_meta_app(
 ) -> AppResult<()> {
     let obligations = [
         (
+            crate::models::channel_meta::GRANT_SCOPES,
+            doc! {"platform":platform,"app_id":app,"outstanding":true},
+        ),
+        (
             crate::models::channel_bot::COLLECTION_NAME,
             doc! {
                 "platform": platform, "credential_source": "platform", "meta_binding.app_id": app,

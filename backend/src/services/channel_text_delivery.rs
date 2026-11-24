@@ -103,6 +103,17 @@ async fn begin_versioned(
         return Err(AppError::ValidationError("Invalid multipart plan".into()));
     }
     let record = ChannelTextDelivery {
+        meta_grant: bound_bot
+            .filter(|bot| super::channel_adapters::meta::is_meta(&bot.platform))
+            .and_then(|bot| {
+                bot.meta_binding
+                    .as_ref()
+                    .map(|binding| crate::models::channel_meta::GrantRef {
+                        bot_id: bot.id.clone(),
+                        grant_id: binding.grant_id.clone(),
+                        generation: binding.generation,
+                    })
+            }),
         id: uuid::Uuid::new_v4().to_string(),
         logical_key: key.into(),
         user_id: owner.into(),
@@ -140,13 +151,14 @@ async fn begin_versioned(
                     .await?;
                     if db
                         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-                        .find_one(doc! {"_id": &bot.id, "user_id": &bot.user_id})
+                        .find_one(doc! {"_id": &bot.id, "user_id": &bot.user_id,"meta_binding.generation":bot.meta_binding.as_ref().map(|binding|binding.generation)})
                         .session(&mut *tx)
                         .await?
                         .is_none()
                     {
                         return Err(AppError::Conflict("Inbox ownership changed".into()));
                     }
+                    super::channel_meta_service::scopes::fence_current(db,tx,bot).await?;
                     db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
                         .update_one(
                             doc! {"logical_key": &record.logical_key},

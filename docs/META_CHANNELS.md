@@ -322,6 +322,20 @@ including crash/retry after bot removal. Former-owner and sibling records remain
 outside ordinary personal deletion, and successor grants remain outside the
 captured provider obligation.
 
+Reconnect preserves the public bot ID and records each installation in
+`channel_meta_grant_scopes`. The reconnect transaction seals the prior generation
+range, opens the successor range and fences both keyed login subjects. These
+constant-size scope rows retain bot/grant UUIDs, keyed subject and binding
+fingerprints, platform and App ID, generation bounds, timestamps and cleanup
+progress. They contain no raw subject, credential, participant address, copied
+owner list or message/receipt content. Original inbound metadata, multipart
+plans and reply receipts retain their admitted grant reference. A prior scope
+remains discoverable independently of the current binding and account lifetime;
+its outstanding app obligation is released only by exact provider completion.
+Completed scope proof remains for signed replay, without a terminal TTL. This
+additional bookkeeping is excluded from personal export and is registered as
+erasure bookkeeping in the personal-data inventory.
+
 Signed requests retain their authenticated authorization cutoff. A missing or
 malformed authorization date keeps that exact target pending without revoking
 its token, unsubscribing it or purging its data. Verified chronology repair is
