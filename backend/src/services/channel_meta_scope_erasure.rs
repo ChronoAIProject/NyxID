@@ -22,6 +22,53 @@ const EVENTS: &str = crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME;
 const THREADS: &str = crate::models::nyxbot_channel::THREADS_COLLECTION_NAME;
 const CHANNELS: &str = crate::models::nyxbot_channel::COLLECTION_NAME;
 
+/// Retained assistant provenance requires exact turn cleanup even when there
+/// has only ever been one consent. An inbox with no scoped assistant history
+/// retains the existing whole-inbox path.
+pub(crate) async fn required(db: &Database, bot: &str, grant: &str) -> AppResult<bool> {
+    if scopes::has_history(db, bot).await?
+        || db
+            .collection::<Document>(GRANT_SCOPES)
+            .find_one(doc! {"bot_id":bot,"grant_id":grant,"purge":{"$exists":true}})
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some()
+    {
+        return Ok(true);
+    }
+    for (collection, filter) in [
+        (
+            "assistant_messages",
+            doc! {"meta_grants":{"$elemMatch":{"bot_id":bot,"grant_id":grant}}},
+        ),
+        (
+            "assistant_conversations",
+            doc! {"meta_grant.bot_id":bot,"meta_grant.grant_id":grant},
+        ),
+        ("assistant_conversations", queued_filter(bot, grant)),
+    ] {
+        if db
+            .collection::<Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn queued_filter(bot: &str, grant: &str) -> Document {
+    let context = doc! {"meta_grant.bot_id":bot,"meta_grant.grant_id":grant};
+    doc! {"$or":[
+        {"pending_events":{"$elemMatch":{"channel_contexts":{"$elemMatch":&context}}}},
+        {"active_turn.channel_context.meta_grant.bot_id":bot,"active_turn.channel_context.meta_grant.grant_id":grant},
+        {"active_turn.events":{"$elemMatch":{"channel_contexts":{"$elemMatch":&context}}}},
+    ]}
+}
+
 enum Authority {
     Signed(bson::DateTime),
     Manual(Document),
@@ -925,12 +972,14 @@ async fn erase_queued(
     let grant = scope
         .get_str("grant_id")
         .map_err(|_| grants::incomplete())?;
-    let context = doc! {"meta_grant.bot_id":bot,"meta_grant.grant_id":grant};
-    let rows=page(db,tx,"assistant_conversations",doc! {"$or":[
-        {"pending_events":{"$elemMatch":{"channel_contexts":{"$elemMatch":&context}}}},
-        {"active_turn.channel_context.meta_grant.bot_id":bot,"active_turn.channel_context.meta_grant.grant_id":grant},
-        {"active_turn.events":{"$elemMatch":{"channel_contexts":{"$elemMatch":&context}}}},
-    ]},&Document::new()).await?;
+    let rows = page(
+        db,
+        tx,
+        "assistant_conversations",
+        queued_filter(bot, grant),
+        &Document::new(),
+    )
+    .await?;
     if rows.is_empty() {
         return Ok(Step::next(phase));
     }
@@ -1217,6 +1266,16 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
     let grant = scope
         .get_str("grant_id")
         .map_err(|_| grants::incomplete())?;
+    if db
+        .collection::<Document>("assistant_conversations")
+        .find_one(queued_filter(bot, grant))
+        .projection(doc! {"_id":1})
+        .session(&mut *tx)
+        .await?
+        .is_some()
+    {
+        return Ok(Step::stay(doc! {"phase":4}));
+    }
     // The scope write in the caller serializes this positive inventory with
     // every admitted writer. Revisit the responsible phase for an exact
     // straggler instead of certifying completion or wedging at phase 19.

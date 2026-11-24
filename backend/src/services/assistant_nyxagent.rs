@@ -3792,8 +3792,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         .filter_map(|source| source.meta_grant.as_ref())
         .cloned()
         .collect();
-    if let Some(grant) = admitted_meta_grants.first() {
+    for grant in &admitted_meta_grants {
         super::channel_meta_service::scopes::fence_reference(db, session, grant, true).await?;
+    }
+    if let Some(grant) = admitted_meta_grants.first() {
         if start.guest {
             if admitted_meta_grants
                 .iter()
@@ -4082,16 +4084,12 @@ pub(crate) async fn begin_owner_turn_in_session(
         report_to: None,
     };
     if voice_request.is_none() || hidden_voice {
-        if let Some(grant) = start
-            .channel_context
-            .as_ref()
-            .and_then(|context| context.meta_grant.as_ref())
-        {
+        if !admitted_meta_grants.is_empty() {
             let mut document = bson::to_document(&message)
                 .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?;
             document.insert(
                 "meta_grants",
-                bson::to_bson(&[grant])
+                bson::to_bson(&admitted_meta_grants)
                     .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
             );
             db.collection::<bson::Document>(MESSAGES)

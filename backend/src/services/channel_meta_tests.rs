@@ -7922,3 +7922,201 @@ async fn managed_http_delete_stop_can_overlap_signed_scoped_cleanup_without_manu
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removing_unrelated_web_turns()
+ {
+    use crate::models::assistant_conversation::{AgentEvent, ChannelTurnContext, TurnOrigin};
+    use crate::services::{
+        assistant_agent_credential_service as credentials, assistant_nyxagent as assistant,
+    };
+    for manual in [false, true] {
+        let (state, adapter, server, mut bot, key) = scoped_reply_fixture().await;
+        if manual {
+            bot.credential_source = "user".into();
+            bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .replace_one(doc! {"_id":&bot.id}, &bot)
+                .await
+                .unwrap();
+            Mock::given(method("DELETE"))
+                .and(path("/v25.0/222/subscribed_apps"))
+                .and(header("authorization", "Bearer fixture-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+                .mount(&server)
+                .await;
+        }
+        assistant::ensure_indexes(&state.db).await.unwrap();
+        let source = admit_page_message(
+            &state,
+            &adapter,
+            &bot,
+            &key,
+            "mid.owner-single-consent",
+            "fixture-token",
+        )
+        .await;
+        let grant = scopes::reference(&bot).unwrap();
+        let context: ChannelTurnContext = bson::from_document(doc! {"meta_grant":bson::to_bson(&grant).unwrap(),
+            "source_event_id":&source.id,"channel_id":"owner-inbox","channel_bot_id":&bot.id,
+            "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true}).unwrap();
+        let request = |conversation: Option<&str>, text: &str| -> assistant::TurnRequest {
+            serde_json::from_value(json!({"conversation_id":conversation,"text":text})).unwrap()
+        };
+        let web = assistant::begin_turn(
+            &state.db,
+            &bot.user_id,
+            &request(None, "Unrelated web question"),
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        async fn settle(
+            state: &crate::AppState,
+            owner: &str,
+            row: &crate::models::assistant_conversation::AssistantConversation,
+            text: &str,
+        ) {
+            let credential = credentials::load_for_conversation(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assistant::finish_turn(
+                &state.db,
+                row,
+                &credential.api_key_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &assistant::TurnResult {
+                    text: text.into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        settle(&state, &bot.user_id, &web, "Independent web reply").await;
+        let mut start =
+            assistant::TurnStart::from(&request(Some(&web.id), "Owner's verified inbox question"));
+        start.origin = TurnOrigin::Channel;
+        start.channel_context = Some(context.clone());
+        let direct = assistant::begin_turn(&state.db, &bot.user_id, start, &state.encryption_keys)
+            .await
+            .unwrap();
+        // The owner is busy. Queue the actual source-bearing event while that
+        // DM runs, then let ordinary event admission render its initiating text.
+        let event:AgentEvent=bson::from_document(doc! {"id":uuid::Uuid::new_v4().to_string(),"kind":"message",
+            "text":"Queued private inbox question","channel_message":"Queued private inbox question",
+            "channel_contexts":[bson::to_bson(&context).unwrap()],"created_at":bson::DateTime::now()}).unwrap();
+        assistant::push_events(&state.db, &bot.user_id, &web.id, vec![event])
+            .await
+            .unwrap()
+            .unwrap();
+        settle(&state, &bot.user_id, &direct, "Direct inbox reply").await;
+        let mut start =
+            assistant::TurnStart::from(&request(Some(&web.id), "Process queued events"));
+        start.origin = TurnOrigin::Event;
+        let queued = assistant::begin_turn(&state.db, &bot.user_id, start, &state.encryption_keys)
+            .await
+            .unwrap();
+        let queued_turn = &queued.active_turn.as_ref().unwrap().turn_id;
+        let messages = state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+        let input = messages
+            .find_one(doc! {"conversation_id":&web.id,"turn_id":queued_turn,"role":"event"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            input
+                .get_str("text")
+                .unwrap()
+                .contains("Queued private inbox question")
+        );
+        assert_eq!(
+            input.get_array("meta_grants").unwrap(),
+            &vec![bson::to_bson(&grant).unwrap()]
+        );
+        settle(&state, &bot.user_id, &queued, "Queued inbox reply").await;
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+                .count_documents(doc! {"bot_id":&bot.id})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            scope_erasure::required(&state.db, &bot.id, &grant.grant_id)
+                .await
+                .unwrap()
+        );
+        let s = service(&state, &server);
+        if manual {
+            s.delete_snapshot(&bot.user_id, &bot).await.unwrap();
+            for _ in 0..32 {
+                if grants::completion_for(&state.db, &bot.id, &grant.grant_id)
+                    .await
+                    .unwrap()
+                {
+                    break;
+                }
+                state
+                    .db
+                    .collection::<bson::Document>(BOTS)
+                    .update_one(
+                        doc! {"_id":&bot.id},
+                        vec![doc! {"$set":{"meta_binding.next_reconcile_at":"$$NOW"}}],
+                    )
+                    .await
+                    .unwrap();
+                sweep_service(&state, &s).await.unwrap();
+            }
+        } else {
+            let accepted = accept_provider_request(
+                &s,
+                "messenger",
+                &provider_request(json!(900), Utc::now().timestamp()),
+                true,
+            )
+            .await
+            .unwrap();
+            drain_provider_request(&state, &s, accepted["confirmation_code"].as_str().unwrap())
+                .await;
+        }
+        assert!(
+            grants::completion_for(&state.db, &bot.id, &grant.grant_id)
+                .await
+                .unwrap()
+        );
+        for turn in [&direct.active_turn.as_ref().unwrap().turn_id, queued_turn] {
+            assert_eq!(
+                messages
+                    .count_documents(doc! {"conversation_id":&web.id,"turn_id":turn})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(messages.count_documents(doc! {"conversation_id":&web.id,"turn_id":&web.active_turn.as_ref().unwrap().turn_id}).await.unwrap(),2);
+        assert!(
+            state
+                .db
+                .collection::<bson::Document>("assistant_conversations")
+                .find_one(doc! {"_id":&web.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}

@@ -379,6 +379,12 @@ grant preserves the successor's credentials, assignment, policy and independent
 verification. A thread pointer is cleared only while it still names the erased
 source and grant.
 
+Assistant history carrying grant proof uses this scoped worker even for a
+single consent. Owner DMs and queued message inputs
+retain the contexts that supplied their text; cleanup removes their exact
+turns while preserving unrelated web turns in the same home. Completion also
+checks nested queued and active contexts, revisiting queue cleanup if needed.
+
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved
 for repair. Untagged or mixed legacy history stays pending.
