@@ -204,3 +204,6 @@ pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
         })
         .chain(ADDED.iter().copied())
 }
+
+pub(super) const CHANNEL_BOT_DIGEST: &str =
+    "fdb9b9bb2bba7447d7cef07e588e6c1d1ce9461af13bd17be7664d0a47dc1f12";
