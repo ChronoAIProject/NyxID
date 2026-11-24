@@ -193,44 +193,7 @@ pub async fn renew(
     let mut session = db.client().start_session().await?;
     let (card, activity) = session.start_transaction().and_run2(async move |session| {
         let result: AppResult<_> = Box::pin(async {
-            let original = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
-                .find_one(doc! {"_id":&original_id,"user_id":&chat.user_id,
-                    "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,"tool_name":review::TOOL})
-                .session(&mut *session).await?.ok_or_else(conflict)?;
-            review::require_renewal_of(&original, &binding)?;
-            let reference = original.authored_skill.as_ref().ok_or_else(conflict)?;
-            let proposal = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
-                .find_one(doc! {"_id":&reference.proposal_id,"owner_id":&chat.user_id,"agent_id":&reference.agent_id,
-                    "source":"authored","revision":reference.revision})
-                .session(&mut *session).await?.ok_or_else(conflict)?;
-            let skills_revision = binding["skills_revision"].as_i64().ok_or_else(conflict)?;
-            if super::super::assistant_learning_publication::binding(&proposal,proposal.publication.as_ref().ok_or_else(conflict)?,skills_revision) != binding {
-                return Err(conflict());
-            }
-            if !review::renewal_eligible(&proposal,&original,skills_revision,Utc::now()) {return Err(conflict());}
-            if db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(
-                doc! {"_id":&proposal.agent_id,"user_id":&proposal.owner_id,"destroyed_at":bson::Bson::Null,"skills_revision":skills_revision},
-                doc! {"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
-            if db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
-                doc! {"_id":&proposal.id,"owner_id":&proposal.owner_id,"source":"authored","revision":proposal.revision},
-                doc! {"$inc":{"authoring_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
-            let origin = if let Some(claim) = saved_origin(&db,session,&proposal).await? {
-                if claim.conversation_id != original.conversation_id || claim.api_key_id != original.api_key_id
-                    || claim.creation_turn_id != original.creation_turn_id || claim.requested_turn_id != original.requested_turn_id
-                    || bson::to_bson(&claim.meta_contexts).map_err(|_|conflict())? != bson::to_bson(&original.meta_contexts).map_err(|_|conflict())? {
-                    return Err(conflict());
-                }
-                origin(&claim)
-            } else {
-                // Retained legacy cards still require their actual original
-                // input; absence of a claim does not borrow today's turn.
-                acks::RequestOrigin {
-                    initiating_input_id:None,meta_contexts:original.meta_contexts.clone(),
-                    invocation_id:original.invocation_id.clone(),creation_turn_id:original.creation_turn_id.clone(),
-                    requested_turn_id:original.requested_turn_id.clone(),voice_request_id:original.voice_request_id.clone(),
-                    trigger_run_id:original.trigger_run_id.clone(),routing:original.routing.clone(),
-                }
-            };
+            let origin=renewal_origin_in_session(&db,&chat,&original_id,&binding,session).await?;
             acks::request_in_session(&db,&chat,acks::Request {
                 kind:"action",service:None,tool:Some(review::TOOL),arguments:Some(&binding),
                 summary:"Publish this reviewed private Ornn skill and attach its exact pinned version to the agent.",platform:false,
@@ -513,4 +476,90 @@ pub(super) async fn finalize(
         activity.publish_after_commit();
     }
     Ok(card)
+}
+
+async fn renewal_origin_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    original_id: &str,
+    binding: &Value,
+    session: &mut ClientSession,
+) -> AppResult<acks::RequestOrigin> {
+    let original = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&original_id,"user_id":&chat.user_id,
+                    "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,"tool_name":review::TOOL})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+    review::require_renewal_of(&original, binding)?;
+    let reference = original.authored_skill.as_ref().ok_or_else(conflict)?;
+    let proposal = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&reference.proposal_id,"owner_id":&chat.user_id,"agent_id":&reference.agent_id,
+                    "source":"authored","revision":reference.revision})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+    let skills_revision = binding["skills_revision"].as_i64().ok_or_else(conflict)?;
+    if super::super::assistant_learning_publication::binding(
+        &proposal,
+        proposal.publication.as_ref().ok_or_else(conflict)?,
+        skills_revision,
+    ) != *binding
+    {
+        return Err(conflict());
+    }
+    if !review::renewal_eligible(&proposal, &original, skills_revision, Utc::now()) {
+        return Err(conflict());
+    }
+    if db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(
+                doc! {"_id":&proposal.agent_id,"user_id":&proposal.owner_id,"destroyed_at":bson::Bson::Null,"skills_revision":skills_revision},
+                doc! {"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+    if db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+                doc! {"_id":&proposal.id,"owner_id":&proposal.owner_id,"source":"authored","revision":proposal.revision},
+                doc! {"$inc":{"authoring_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+    let origin = if let Some(claim) = saved_origin(db, session, &proposal).await? {
+        if claim.conversation_id != original.conversation_id
+            || claim.api_key_id != original.api_key_id
+            || claim.creation_turn_id != original.creation_turn_id
+            || claim.requested_turn_id != original.requested_turn_id
+            || bson::to_bson(&claim.meta_contexts).map_err(|_| conflict())?
+                != bson::to_bson(&original.meta_contexts).map_err(|_| conflict())?
+        {
+            return Err(conflict());
+        }
+        origin(&claim)
+    } else {
+        // Retained legacy cards still require their actual original
+        // input; absence of a claim does not borrow today's turn.
+        acks::RequestOrigin {
+            initiating_input_id: None,
+            meta_contexts: original.meta_contexts.clone(),
+            invocation_id: original.invocation_id.clone(),
+            creation_turn_id: original.creation_turn_id.clone(),
+            requested_turn_id: original.requested_turn_id.clone(),
+            voice_request_id: original.voice_request_id.clone(),
+            trigger_run_id: original.trigger_run_id.clone(),
+            routing: original.routing.clone(),
+        }
+    };
+    Ok(origin)
+}
+
+pub(super) async fn prepare_automatic_renewal(
+    db: &Database,
+    chat: &ChatAuthority,
+    original_id: &str,
+    binding: &Value,
+) -> AppResult<acks::RequestOrigin> {
+    super::super::transaction_service::run_db_only(
+        db,
+        &(db, chat, original_id, binding),
+        |tx, &(db, chat, original_id, binding)| {
+            Box::pin(async move {
+                let origin = renewal_origin_in_session(db, chat, original_id, binding, tx).await?;
+                let (conversation, _, _) = acks::fence(db, chat, tx).await?;
+                let source =
+                    acks::source::select(db, tx, chat, &conversation, Some(&origin), false).await?;
+                acks::source::fence_selection(db, tx, &source).await?;
+                Ok(origin)
+            })
+        },
+    )
+    .await
 }

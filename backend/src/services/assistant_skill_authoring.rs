@@ -785,6 +785,52 @@ pub async fn publish_automatically(
     binding: &Value,
     reader: &impl super::agent_skill_service::OrnnReader,
 ) -> AppResult<Value> {
+    publish_automatically_from_origin(state, chat, agent, id, binding, reader, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn renew_automatically(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    original_id: &str,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
+    let origin = claims::prepare_automatic_renewal(&state.db, chat, original_id, binding).await?;
+    let mut source_chat = chat.clone();
+    source_chat.turn_id = origin.creation_turn_id.clone();
+    source_chat.invocation_id = origin.invocation_id.clone();
+    source_chat.automation_work = None;
+    source_chat.execution_task = None;
+    source_chat.report_to = origin
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.report_to())
+        .map(str::to_owned);
+    publish_automatically_from_origin(
+        state,
+        &source_chat,
+        agent,
+        id,
+        binding,
+        reader,
+        Some(&origin),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_automatically_from_origin(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+    origin: Option<&acks::RequestOrigin>,
+) -> AppResult<Value> {
     let proposal = state
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
@@ -831,7 +877,7 @@ pub async fn publish_automatically(
             ));
         }
     }
-    acks::record_auto_allowed_with_link(
+    acks::record_auto_allowed_with_origin(
         &state.db,
         chat,
         review::TOOL,
@@ -843,6 +889,7 @@ pub async fn publish_automatically(
         },
         &summary,
         Some(&url),
+        origin,
     )
     .await;
     result["proposal_id"] = id.into();

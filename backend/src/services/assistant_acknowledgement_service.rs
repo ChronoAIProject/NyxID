@@ -741,18 +741,61 @@ pub async fn record_auto_allowed_for_activity(
     link: Option<&str>,
     activity_id: Option<String>,
 ) {
+    record_auto_allowed_from_origin(db, chat, tool, args, auto, summary, link, activity_id, None)
+        .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_auto_allowed_with_origin(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+    origin: Option<&RequestOrigin>,
+) {
+    record_auto_allowed_from_origin(
+        db,
+        chat,
+        tool,
+        args,
+        auto,
+        summary,
+        link,
+        super::machine_activity_service::activity_id(),
+        origin,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_auto_allowed_from_origin(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+    activity_id: Option<String>,
+    origin: Option<&RequestOrigin>,
+) {
     if chat.guest {
         return;
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
-        meta_contexts: Vec::new(),
+        meta_contexts: origin
+            .map(|source| source.meta_contexts.clone())
+            .unwrap_or_default(),
         activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id,
-        invocation_id: None,
+        invocation_id: origin.and_then(|source| source.invocation_id.clone()),
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
         user_id: chat.user_id.clone(),
@@ -784,17 +827,24 @@ pub async fn record_auto_allowed_for_activity(
         operation_selection: None,
         operation_contract_digest: None,
         skill_selection: None,
-        requested_turn_id: chat.turn_id.clone(),
-        creation_turn_id: chat.turn_id.clone(),
-        voice_request_id: None,
+        requested_turn_id: origin
+            .map(|source| source.requested_turn_id.clone())
+            .unwrap_or_else(|| chat.turn_id.clone()),
+        creation_turn_id: origin
+            .map(|source| source.creation_turn_id.clone())
+            .unwrap_or_else(|| chat.turn_id.clone()),
+        voice_request_id: origin.and_then(|source| source.voice_request_id.clone()),
         continuation_receipt_id: None,
-        trigger_run_id: None,
+        trigger_run_id: origin.and_then(|source| source.trigger_run_id.clone()),
         request_excerpt: None,
         reason: None,
         machine_context: None,
-        routing: None,
+        routing: origin.and_then(|source| source.routing.clone()),
     };
-    if source::insert_receipt(db, chat, &row).await.is_err() {
+    if source::insert_receipt_with_origin(db, chat, &row, origin)
+        .await
+        .is_err()
+    {
         tracing::warn!(conversation_id = %chat.conversation_id, tool, code = "receipt_insert_failed", "Automatic action receipt write failed");
         return;
     }

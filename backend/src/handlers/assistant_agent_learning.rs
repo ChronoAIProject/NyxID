@@ -322,7 +322,18 @@ pub async fn approve(
             scopes: None,
             chat: None,
         };
-        return Ok(Json(
+        return Ok(Json(if let Some((original, _)) = &renewal {
+            crate::services::assistant_skill_authoring::renew_automatically(
+                &state,
+                &chat,
+                &agent,
+                &original.id,
+                &proposal_id,
+                &args,
+                &owner_reader,
+            )
+            .await?
+        } else {
             crate::services::assistant_skill_authoring::publish_automatically(
                 &state,
                 &chat,
@@ -331,8 +342,8 @@ pub async fn approve(
                 &args,
                 &owner_reader,
             )
-            .await?,
-        ));
+            .await?
+        }));
     }
     if let Some(id) = body.acknowledgement_id.as_deref() {
         review::confirm_learned_card(

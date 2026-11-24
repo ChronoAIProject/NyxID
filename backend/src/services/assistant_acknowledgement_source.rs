@@ -340,6 +340,56 @@ pub(super) async fn insert_receipt(
     .await
 }
 
+pub(super) async fn insert_receipt_with_origin(
+    db: &Database,
+    chat: &ChatAuthority,
+    row: &AssistantAcknowledgement,
+    origin: Option<&RequestOrigin>,
+) -> AppResult<()> {
+    let Some(origin) = origin else {
+        return insert_receipt(db, chat, row).await;
+    };
+    super::super::transaction_service::run_db_only(
+        db,
+        &(db, chat, row, origin),
+        |tx, &(db, chat, row, origin)| {
+            Box::pin(async move {
+                super::super::erasure_admission::fence_in_session(db, &chat.user_id, tx).await?;
+                let conversation = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one_and_update(
+                        doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id},
+                        doc! {"$inc":{"receipt_fence":1_i64}},
+                    )
+                    .session(&mut *tx)
+                    .await?
+                    .ok_or(AppError::AssistantTurnRequired)?;
+                let source = select(db, tx, chat, &conversation, Some(origin), false).await?;
+                for context in &source.contexts {
+                    let proof = context
+                        .meta_grant
+                        .as_ref()
+                        .ok_or_else(super::super::channel_meta_service::grants::incomplete)?;
+                    super::super::channel_meta_service::scopes::fence_reference(
+                        db, tx, proof, false,
+                    )
+                    .await?;
+                }
+                let mut row = row.clone();
+                row.meta_contexts = source.contexts;
+                row.creation_turn_id = source.creation_turn_id;
+                row.requested_turn_id = source.requested_turn_id;
+                db.collection::<AssistantAcknowledgement>(ACKS)
+                    .insert_one(&row)
+                    .session(tx)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
 /// A decision callback may resume after deletion. Reread and fence the exact
 /// stored card before copying its summary into a new event.
 pub(crate) async fn publish_owner_denial(
