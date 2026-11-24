@@ -581,6 +581,7 @@ pub(crate) async fn migrate_snapshot(
         if changed.matched_count != 1 {
             return Ok(false);
         }
+        super::channel_signing_migration::guard(&db, &mut tx, collection, source).await?;
         if owner != PLATFORM_OWNER {
             super::erasure_admission::credential_change_in_session(&db, owner, &mut tx).await?;
         }

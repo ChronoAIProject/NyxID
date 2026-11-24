@@ -162,14 +162,8 @@ impl<'a> RegistrationValues<'a> {
     }
 }
 
-/// Read the field named by the registration descriptor or the consuming protocol.
-/// The owner, record ID, version and ciphertext all come from the same bot.
-pub(super) async fn open_secret(
-    keys: &EncryptionKeys,
-    bot: &ChannelBot,
-    field: &str,
-) -> AppResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
-    let ciphertext = match field {
+pub(super) fn stored_secret<'a>(bot: &'a ChannelBot, field: &str) -> AppResult<Option<&'a [u8]>> {
+    Ok(match field {
         "bot_token_encrypted" => Some(bot.bot_token_encrypted.as_slice()),
         "registration_pin_encrypted" => bot.registration_pin_encrypted.as_deref(),
         "webhook_secret_encrypted" => bot.webhook_secret_encrypted.as_deref(),
@@ -181,7 +175,17 @@ pub(super) async fn open_secret(
                 "Unknown channel bot credential field".into(),
             ));
         }
-    };
+    })
+}
+
+/// Read the field named by the registration descriptor or the consuming protocol.
+/// The owner, record ID, version and ciphertext all come from the same bot.
+pub(super) async fn open_secret(
+    keys: &EncryptionKeys,
+    bot: &ChannelBot,
+    field: &str,
+) -> AppResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    let ciphertext = stored_secret(bot, field)?;
     let version = bot.secret_context_versions.get(field).copied();
     match ciphertext {
         Some(bytes) => crate::crypto::record_field::decrypt(
@@ -248,6 +252,7 @@ pub(crate) fn transfer_source_predicate(source: &bson::Document) -> bson::Docume
         source,
         &[
             "user_id",
+            "credential_continuity",
             "secret_context_versions",
             "bot_token_encrypted",
             "registration_pin_encrypted",

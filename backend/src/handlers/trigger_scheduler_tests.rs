@@ -462,6 +462,7 @@ async fn schedule_missed_grace_overlap_and_budgets() {
     let first = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     let skipped = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    assert_eq!(skipped.blocking_run_id.as_deref(), Some(first.id.as_str()));
     let job = schedules::claim(&state.db, &skipped.id, Utc::now())
         .await
         .unwrap()
@@ -479,6 +480,16 @@ async fn schedule_missed_grace_overlap_and_budgets() {
             .as_deref(),
         Some("overlap_skip")
     );
+    let history = schedules::history(&state.db, &trigger, None, None)
+        .await
+        .unwrap();
+    let response = crate::handlers::triggers::run_response(
+        history
+            .into_iter()
+            .find(|run| run.id == skipped.id)
+            .unwrap(),
+    );
+    assert_eq!(response.blocking_run_id.as_deref(), Some(first.id.as_str()));
     state
         .db
         .collection::<Document>(schedules::BUDGETS)
@@ -516,6 +527,76 @@ async fn schedule_missed_grace_overlap_and_budgets() {
             .status,
         TriggerStatus::Active
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn schedule_records_the_owned_overlap_found_at_dispatch() {
+    let (state, calls, server) = setup("schedule_dispatch_overlap").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, Some(ThreadPolicy::New)).await;
+    let now = Utc::now();
+    let runs = state.db.collection::<TriggerRun>(RUNS);
+
+    // Even an older row with this trigger ID cannot identify another owner.
+    let mut foreign = schedules::new_run(&trigger, now - Duration::minutes(2), now);
+    foreign.user_id = Uuid::new_v4().to_string();
+    foreign.outcome = RunOutcome::Started;
+    runs.insert_one(&foreign).await.unwrap();
+    let pending = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    assert!(pending.reason.is_none());
+    assert!(pending.blocking_run_id.is_none());
+
+    // Simulate a different worker starting or recovering an older occurrence
+    // between insertion and assistant turn admission.
+    let mut live = schedules::new_run(&trigger, now - Duration::minutes(1), now);
+    live.outcome = RunOutcome::Waiting;
+    runs.insert_one(&live).await.unwrap();
+    let job = schedules::claim(&state.db, &pending.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A new blocker can also appear after the worker's preliminary check.
+    // Verify what the admission transaction returns in that case.
+    let claim = schedules::TurnClaim {
+        enroll_v2: false,
+        run_id: pending.id.clone(),
+        fence: job.get_str("fence").unwrap().to_owned(),
+        trigger_updated_at: trigger.updated_at,
+        continuation: false,
+    };
+    let db = state.db.clone();
+    let mut session = db.client().start_session().await.unwrap();
+    let conflict = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            crate::services::api_key_mutation_service::transaction_result(
+                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", session).await,
+            )
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        AppError::TriggerOverlapSkip { blocking_run_id } if blocking_run_id == live.id
+    ));
+
+    run_job_once(&state, &job).await.unwrap();
+
+    let history = schedules::history(&state.db, &trigger, None, None)
+        .await
+        .unwrap();
+    assert!(!history.iter().any(|run| run.id == foreign.id));
+    let blocked = history.iter().find(|run| run.id == pending.id).unwrap();
+    assert_eq!(blocked.outcome, RunOutcome::Skipped);
+    assert_eq!(blocked.reason.as_deref(), Some("overlap"));
+    assert_eq!(blocked.blocking_run_id.as_deref(), Some(live.id.as_str()));
+    assert!(blocked.started_at.is_none());
+    let live = history.into_iter().find(|run| run.id == live.id).unwrap();
+    assert_eq!(live.outcome, RunOutcome::Waiting);
+    assert!(calls.lock().await.is_empty());
     server.abort();
 }
 
@@ -1661,6 +1742,130 @@ async fn result_transport_responses(
         .build()
         .unwrap();
     (client, requests, server)
+}
+
+#[tokio::test]
+async fn scheduled_notification_dispatch_honors_overlap_policy() {
+    use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
+
+    let db = connect_transaction_test_database("schedule_notification_overlap").await;
+    schedules::indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
+    let mut state = test_app_state(db);
+    let (client, requests, server) = result_transport().await;
+    state.http_client = client;
+    state.config.telegram_bot_token = Some("fixture-bot".into());
+    let mut channel =
+        crate::services::notification_service::get_or_create_channel(&state.db, OWNER)
+            .await
+            .unwrap();
+    channel.telegram_enabled = true;
+    channel.telegram_chat_id = Some(42);
+    state
+        .db
+        .collection::<NotificationChannel>(CHANNELS)
+        .replace_one(doc! { "_id": &channel.id }, &channel)
+        .await
+        .unwrap();
+    let runs = state.db.collection::<TriggerRun>(RUNS);
+
+    for overlap in [OverlapPolicy::Skip, OverlapPolicy::Queue] {
+        let now = Utc::now();
+        let trigger = trigger_service::create(
+            &state.db,
+            &state.encryption_keys,
+            trigger_service::CreateInput {
+                source: TriggerSource::Schedule,
+                setup_watch_id: None,
+                user_id: OWNER.into(),
+                label: "Scheduled notification".into(),
+                user_service_id: None,
+                overlap,
+                schedule: Some(ScheduleSpec {
+                    timing: ScheduleKind::Every {
+                        amount: 5,
+                        unit: IntervalUnit::Minutes,
+                        anchor: now,
+                    },
+                    start: None,
+                    end: None,
+                    max_runs: None,
+                    grace_seconds: Some(60),
+                }),
+                verification: TriggerVerification::Schedule,
+                delivery: TriggerDelivery::Notification,
+            },
+        )
+        .await
+        .unwrap()
+        .trigger;
+        let pending = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+        assert_eq!(pending.outcome, RunOutcome::Pending);
+        assert!(pending.reason.is_none());
+
+        // An older occurrence becomes active after insertion.
+        let mut blocker = schedules::new_run(&trigger, now - Duration::minutes(1), now);
+        blocker.outcome = RunOutcome::Started;
+        runs.insert_one(&blocker).await.unwrap();
+        let job = schedules::claim(&state.db, &pending.id, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        Box::pin(run_job_once(&state, &job)).await.unwrap();
+
+        let saved = runs
+            .find_one(doc! { "_id": &pending.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.reason.as_deref(), Some("overlap"));
+        assert!(saved.started_at.is_none());
+        assert!(requests.lock().await.is_empty());
+
+        schedules::finish(
+            &state.db,
+            &blocker.id,
+            RunOutcome::Completed,
+            None,
+            &state.config.frontend_url,
+        )
+        .await
+        .unwrap();
+        let retry = schedules::claim(&state.db, &pending.id, Utc::now() + Duration::seconds(2))
+            .await
+            .unwrap();
+
+        match overlap {
+            OverlapPolicy::Skip => {
+                assert_eq!(saved.outcome, RunOutcome::Skipped);
+                assert_eq!(saved.blocking_run_id.as_deref(), Some(blocker.id.as_str()));
+                assert!(saved.finished_at.is_some());
+                assert!(retry.is_none());
+                assert!(requests.lock().await.is_empty());
+            }
+            OverlapPolicy::Queue => {
+                assert_eq!(saved.outcome, RunOutcome::Pending);
+                assert!(saved.blocking_run_id.is_none());
+                Box::pin(run_job_once(&state, &retry.expect("queued retry")))
+                    .await
+                    .unwrap();
+                let delivered = runs
+                    .find_one(doc! { "_id": &pending.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(delivered.outcome, RunOutcome::Completed);
+                let requests = requests.lock().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].0.ends_with("/sendMessage"));
+                assert_eq!(requests[0].1["chat_id"], 42);
+            }
+        }
+    }
+    server.abort();
 }
 
 #[tokio::test]

@@ -19,11 +19,77 @@ pub struct PlatformCredentialSnapshot {
     projected: PlatformCredential,
     oauth_source: Option<crate::models::provider_config::ProviderConfig>,
     auxiliary: Option<PlatformCredential>,
+    observed_absent_auxiliary: bool,
 }
 impl std::ops::Deref for PlatformCredentialSnapshot {
     type Target = PlatformCredential;
     fn deref(&self) -> &Self::Target {
         &self.projected
+    }
+}
+
+impl PlatformCredentialSnapshot {
+    pub(super) fn producer_ids(&self) -> (&str, Option<&str>) {
+        (&self.id, self.auxiliary.as_ref().map(|row| row.id.as_str()))
+    }
+
+    /// A composite mutation also writes its provider. The provider fence orders
+    /// concurrent inserts, and this read catches inserts committed before it.
+    pub(super) async fn auxiliary_presence_matches(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        if !self.observed_absent_auxiliary {
+            return Ok(true);
+        }
+        Ok(db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"provider": &self.projected.provider})
+            .projection(doc! {"_id": 1})
+            .session(session)
+            .await?
+            .is_none())
+    }
+
+    pub(super) async fn fence_projection(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        let field = |value: &Option<Vec<u8>>| {
+            value.as_ref().map(|bytes| bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: bytes.clone(),
+            })
+        };
+        let platform = if let Some(provider) = &self.oauth_source {
+            let guard = doc! {"_id":&provider.id,"slug":&provider.slug,"client_id_encrypted":field(&provider.client_id_encrypted),"client_secret_encrypted":field(&provider.client_secret_encrypted),"updated_at":bson::DateTime::from_chrono(provider.updated_at)};
+            if db
+                .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+                .update_one(guard, doc! {"$inc":{"channel_observation_version":1_i64}})
+                .session(&mut *session)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Ok(false);
+            }
+            self.auxiliary.as_ref()
+        } else {
+            Some(&self.projected)
+        };
+        let Some(platform) = platform else {
+            return self.auxiliary_presence_matches(db, session).await;
+        };
+        let guard = doc! {"_id":&platform.id,"provider":&platform.provider,"secrets":bson::to_bson(&platform.secrets).map_err(|_|AppError::Internal("Unable to encode platform credentials".into()))?};
+        Ok(db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(guard, doc! {"$inc":{"channel_observation_version":1_i64}})
+            .session(session)
+            .await?
+            .matched_count
+            == 1)
     }
 }
 
@@ -141,6 +207,8 @@ pub async fn load(
         return Ok(projected.map(|projected| PlatformCredentialSnapshot {
             projected,
             oauth_source,
+            observed_absent_auxiliary: has_auxiliary_fields(descriptor)
+                && auxiliary_source.is_none(),
             auxiliary: auxiliary_source,
         }));
     }
@@ -152,6 +220,7 @@ pub async fn load(
             projected: row,
             oauth_source: None,
             auxiliary: None,
+            observed_absent_auxiliary: false,
         }))
 }
 
@@ -423,18 +492,31 @@ pub(crate) async fn migrate_storage_snapshot(
             .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?,
     );
     verify_current_storage_snapshot(keys, &candidate).await?;
-    Ok(db
-        .collection::<bson::Document>(COLLECTION_NAME)
-        .update_one(
-            super::record_storage::exact_document_predicate(source),
-            doc! {"$set":{
-                "secrets":candidate.get("secrets").cloned(),
-                "secret_context_versions":candidate.get("secret_context_versions").cloned()
-            }},
-        )
-        .await?
-        .matched_count
-        == 1)
+    let db = super::transaction_service::durable_database(db);
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
+    let result = async {
+        let changed = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                super::record_storage::exact_document_predicate(source),
+                doc! {"$set":{
+                    "secrets":candidate.get("secrets").cloned(),
+                    "secret_context_versions":candidate.get("secret_context_versions").cloned()
+                }},
+            )
+            .session(&mut session)
+            .await?
+            .matched_count
+            == 1;
+        if changed {
+            super::channel_signing_migration::guard(&db, &mut session, COLLECTION_NAME, source)
+                .await?;
+        }
+        Ok(changed)
+    }
+    .await;
+    super::org_membership_authority::finish(session, result).await
 }
 
 /// Keep the login secret available for signed deauthorization and deletion.
@@ -925,10 +1007,13 @@ async fn write_composite_provider(
     db: &mongodb::Database,
     provider_slug: &str,
     provider_name: &'static str,
-    update: bson::Document,
+    mut update: bson::Document,
     auxiliary_update: Option<bson::Document>,
     expected_ids: Option<(&str, &str)>,
 ) -> AppResult<bool> {
+    // An auxiliary-only change must still write the provider even if its
+    // millisecond timestamp already equals this update's timestamp.
+    update.insert("$inc", doc! {"channel_observation_version": 1_i64});
     let db = super::transaction_service::durable_database(db);
     let context = (
         &db,

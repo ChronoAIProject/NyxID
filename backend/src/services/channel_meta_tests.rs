@@ -2222,16 +2222,23 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
         doc! {"_id": &bot.id},
         doc! {"$set": {"meta_binding.expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::days(9))}},
     ).await.unwrap();
-    super::super::channel_registration::bind_fixture_fields(
+    let mut rewrap_keys = crate::test_utils::test_encryption_keys();
+    rewrap_keys.set_contextual_record_writes(true);
+    let due = super::super::channel_credential_continuity::rewrap_fixture(
         &state.db,
-        &state.encryption_keys,
-        &bot.id,
+        &rewrap_keys,
+        &bot,
         &["bot_token_encrypted"],
     )
     .await;
-    let due = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
+    let before =
+        super::super::channel_credential_continuity::field_pin(&bot, "bot_token_encrypted")
+            .unwrap();
+    assert_eq!(
+        super::super::channel_credential_continuity::field_pin(&due, "bot_token_encrypted")
+            .unwrap(),
+        before
+    );
     Mock::given(method("GET"))
         .and(path("/refresh_access_token"))
         .and(query_param("grant_type", "ig_refresh_token"))
@@ -2251,6 +2258,11 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
     let fresh = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
+    assert_ne!(
+        super::super::channel_credential_continuity::field_pin(&fresh, "bot_token_encrypted")
+            .unwrap(),
+        before
+    );
     assert!(
         !fresh
             .secret_context_versions

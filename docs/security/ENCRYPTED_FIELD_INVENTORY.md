@@ -85,6 +85,13 @@ compares the exact observed client document before replacing stored material.
 
 ### Production storage for Pending fields
 
+- A bot-local storage rewrite retains its verification, native-entry, Discord resume
+  and Aurinko subscription fingerprints for the same credential generation. The
+  producer authenticates each retained value and its dependencies. A real replacement
+  invalidates the affected pins. Lifecycle previews compare physical snapshots.
+  Migrations of shared signing credentials used by a channel bot record a blocked
+  finding until the shared producer can prepare its dependants.
+  [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
 - Channel bot registration and delivery readers select each local credential by bot ID,
   owner and stored field version. The writers still emit the historical format in both
   writer modes, so serving these rows requires legacy reads. The registry entry stays

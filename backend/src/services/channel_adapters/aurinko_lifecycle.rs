@@ -3,6 +3,76 @@ use crate::models::channel_email::{
     BATCHES, EmailBatch, EmailReceipt, EmailSend, EmailSubscription, RECEIPTS, SENDS, SUBSCRIPTIONS,
 };
 
+async fn publish_subscription(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    fingerprint: &str,
+    binding: bson::Document,
+    update: bson::Document,
+) -> AppResult<bool> {
+    use crate::services::channel_credential_continuity::{APP, field_pin, physical_filter};
+    crate::services::transaction_service::run_db_only(
+        db,
+        &(db, bot, fingerprint, binding, update),
+        |session, (db, bot, fingerprint, binding, update)| {
+            Box::pin(async move {
+                let bots = db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME);
+                let Some(current) = bots
+                    .find_one(
+                        doc! {"_id":&bot.id,"user_id":&bot.user_id,"platform":"aurinko",
+                        "platform_bot_id":&bot.platform_bot_id,"is_active":true},
+                    )
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok(false);
+                };
+                if current.ownership_version != bot.ownership_version
+                    || field_pin(&current, APP)? != *fingerprint
+                {
+                    return Ok(false);
+                }
+                let mut filter = physical_filter(&current)?;
+                filter.insert("_id", &bot.id);
+                filter.insert(
+                    "app_secret_encrypted",
+                    current
+                        .app_secret_encrypted
+                        .as_ref()
+                        .map(|bytes| bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: bytes.clone(),
+                        }),
+                );
+                if bots
+                    .update_one(filter, doc! {"$inc":{"channel_observation_version":1_i64}})
+                    .session(&mut *session)
+                    .await?
+                    .matched_count
+                    != 1
+                {
+                    return Ok(false);
+                }
+                Ok(db
+                    .collection::<EmailSubscription>(SUBSCRIPTIONS)
+                    .update_one(binding.clone(), update.clone())
+                    .session(session)
+                    .await?
+                    .matched_count
+                    == 1)
+            })
+        },
+    )
+    .await
+}
+fn signing_pin(bot: &ChannelBot) -> AppResult<String> {
+    bot.app_secret_encrypted.as_ref().ok_or_else(invalid)?;
+    crate::services::channel_credential_continuity::field_pin(
+        bot,
+        crate::services::channel_credential_continuity::APP,
+    )
+}
+
 impl AurinkoAdapter {
     async fn subscriptions(&self, token: &str, url: &str) -> AppResult<Vec<Value>> {
         let mut found = Vec::new();
@@ -87,9 +157,7 @@ impl AurinkoAdapter {
         // Recover a successful subscribe whose response (or subsequent DB write)
         // was lost. Never subscribe a second time without checking the exact URL.
         let rows = self.subscriptions(token, url).await?;
-        let fingerprint = hex::encode(Sha256::digest(
-            bot.app_secret_encrypted.as_deref().ok_or_else(invalid)?,
-        ));
+        let fingerprint = signing_pin(bot)?;
         let active = rows.iter().find(|row| {
             binding.verified_secret_fingerprint.as_deref() == Some(&fingerprint)
                 && row["active"] == true
@@ -114,14 +182,12 @@ impl AurinkoAdapter {
             }
             identity(&row["id"]).ok_or_else(upstream)?
         };
-        let persisted = collection
-            .update_one(
+        let persisted=publish_subscription(db,bot,&fingerprint,
                 doc! { "_id": &bot.id, "user_id": &bot.user_id,
-                "account_id": &bot.platform_bot_id, "verified_secret_fingerprint": &fingerprint },
+                "account_id": &bot.platform_bot_id, "notification_url":url,"subscription_id":&binding.subscription_id,"verified_secret_fingerprint": &fingerprint },
                 doc! { "$set": { "subscription_id": &id } },
-            )
-            .await?;
-        if persisted.matched_count != 1 {
+        ).await?;
+        if !persisted {
             return Err(AppError::ChannelPlatformError(
                 "Aurinko did not verify the current signing secret; retry Verify".into(),
             ));
@@ -189,17 +255,27 @@ impl AurinkoAdapter {
             }
             // No account payload exists in Aurinko's signed text/plain challenge.
             // The per-bot URL and persisted verified account bind setup here.
-            let fingerprint = hex::encode(Sha256::digest(
-                bot.app_secret_encrypted.as_deref().ok_or_else(invalid)?,
-            ));
-            context
+            let fingerprint = signing_pin(&bot)?;
+            let binding = context
                 .db
                 .collection::<EmailSubscription>(SUBSCRIPTIONS)
-                .update_one(
-                    doc! { "_id": &bot.id, "user_id": &bot.user_id },
-                    doc! { "$set": { "verified_secret_fingerprint": fingerprint } },
+                .find_one(
+                    doc! {"_id":&bot.id,"user_id":&bot.user_id,"account_id":&bot.platform_bot_id},
                 )
-                .await?;
+                .await?
+                .ok_or_else(invalid)?;
+            if !publish_subscription(
+                context.db,
+                &bot,
+                &fingerprint,
+                doc! {"_id":&bot.id,"user_id":&bot.user_id,
+                "account_id":&bot.platform_bot_id,"notification_url":&binding.notification_url},
+                doc! {"$set":{"verified_secret_fingerprint":&fingerprint}},
+            )
+            .await?
+            {
+                return Err(invalid());
+            }
             return Ok(Some(challenge.clone()));
         }
         if bot.status != "active" || !bot.webhook_registered {

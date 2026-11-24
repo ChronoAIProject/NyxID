@@ -1125,6 +1125,16 @@ mod tests {
             panic!("installed")
         };
         assert_eq!(first.command_id, "300");
+        let bot = crate::services::channel_bot_service::get_bot(&fixture.db, &fixture.bot_id)
+            .await
+            .unwrap();
+        crate::services::channel_credential_continuity::rewrap_fixture(
+            &fixture.db,
+            &state.encryption_keys,
+            &bot,
+            &["bot_token_encrypted"],
+        )
+        .await;
         let retry = install_captured_at(
             &fixture.db,
             &state.encryption_keys,

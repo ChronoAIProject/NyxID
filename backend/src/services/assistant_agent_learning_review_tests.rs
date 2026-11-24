@@ -1371,7 +1371,13 @@ async fn wiremock_publish_failure_is_ambiguous_and_reconcile_accepts_one_match()
         ..Default::default()
     };
     assert!(matches!(
-        publication::publish_classified(&reader, None, bytes.clone()).await,
+        publication::publish_classified(
+            &reader,
+            None,
+            bytes.clone(),
+            crate::services::agent_skill_service::PublicationDispatch::for_test()
+        )
+        .await,
         publication::PublishOutcome::Uncertain { .. }
     ));
     server.reset().await;
@@ -1488,7 +1494,13 @@ async fn version_exists_reconciles_exact_zip_and_refuses_mismatch_without_anothe
         .mount(&server)
         .await;
     assert!(matches!(
-        publication::publish_classified(&reader, Some(&base), bytes.clone()).await,
+        publication::publish_classified(
+            &reader,
+            Some(&base),
+            bytes.clone(),
+            crate::services::agent_skill_service::PublicationDispatch::for_test()
+        )
+        .await,
         publication::PublishOutcome::VersionConflict { status: 409 }
     ));
     Mock::given(method("GET"))

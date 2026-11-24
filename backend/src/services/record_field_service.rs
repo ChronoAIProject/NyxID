@@ -91,6 +91,12 @@ pub(crate) async fn migrate_snapshot(
         "secret_context_versions",
         bson::to_bson(&versions).map_err(|_| invalid())?,
     );
+    if collection == crate::models::channel_bot::COLLECTION_NAME {
+        if source.get_str("user_id").ok() != Some(owner) {
+            return Err(invalid());
+        }
+        return super::channel_credential_continuity::publish_rewrap(db, keys, source, set).await;
+    }
     let filter = super::record_storage::exact_document_predicate(source);
     let db = super::transaction_service::durable_database(db);
     Ok(db

@@ -317,6 +317,7 @@ async fn schedule_notification_retries_saved_report_after_explicit_refusal_only(
     let blocked = reload(&state, &blocked.id).await;
     assert_eq!(blocked.outcome, RunOutcome::Skipped);
     assert_eq!(blocked.reason.as_deref(), Some("overlap_skip"));
+    assert_eq!(blocked.blocking_run_id.as_deref(), Some(run.id.as_str()));
     retry_due(&state, &run).await;
     // The newer skipped occurrence owns the last-run projection. Inspect the
     // original run directly after its synchronous recovery has settled.
