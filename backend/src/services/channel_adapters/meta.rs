@@ -625,6 +625,10 @@ pub(crate) fn authority(
         .ok_or_else(|| unreachable("binding_unverified"))?
         .generation;
     Ok(crate::models::channel_message::MetaMessageAuthority {
+        grant_id: bot
+            .meta_binding
+            .as_ref()
+            .map(|binding| binding.grant_id.clone()),
         generation,
         asset_id: asset.into(),
         sender_id: sender.into(),

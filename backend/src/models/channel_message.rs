@@ -14,6 +14,8 @@ pub struct TextCompleteness {
 /// No customer text or bearer credential is retained.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MetaMessageAuthority {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
     pub generation: i64,
     pub asset_id: String,
     pub sender_id: String,

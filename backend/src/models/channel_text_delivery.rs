@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "channel_text_deliveries";
 /// Metadata-only evidence for one immutable multipart plan. No message bodies.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelTextDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_grant: Option<super::channel_meta::GrantRef>,
     #[serde(rename = "_id")]
     pub id: String,
     pub logical_key: String,

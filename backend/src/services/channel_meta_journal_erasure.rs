@@ -345,7 +345,6 @@ fn native_target(
     let origin: crate::models::assistant_conversation::ChannelOrigin =
         bson::from_document(origin.clone()).map_err(|_| ())?;
     if event.get_str("channel_id") != Ok(origin.nyxbot_channel_id.as_str())
-        || event.get_str("partition") != Ok(origin.partition.as_str())
         || origin
             .native_event_id
             .as_deref()
@@ -910,15 +909,21 @@ mod tests {
             .insert_one(native_parent)
             .await
             .unwrap();
-        let event = uuid::Uuid::new_v4().to_string();
-        let conversation = uuid::Uuid::new_v4().to_string();
+        let event_partition = format!("conv_{}", uuid::Uuid::new_v4().simple());
+        let response = super::super::nyxbot_dispatch_identity::native_response(
+            &channel,
+            "discord-binding",
+            "native-source",
+        );
+        let event = super::super::nyxbot_dispatch_identity::native_event(&response);
+        let conversation = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
         let turn = uuid::Uuid::new_v4().to_string();
         let origin = ChannelOrigin {
             org_execution: None,
             native_event_id: Some(event.clone()),
             thread: None,
             nyxbot_channel_id: channel.clone(),
-            partition: "private-native".into(),
+            partition: format!("chat_{}", uuid::Uuid::new_v4().simple()),
             platform: "discord".into(),
         };
         let key = channel_supplemental_delivery::saved_key(&turn, &origin);
@@ -940,7 +945,7 @@ mod tests {
             "_id":uuid::Uuid::new_v4().to_string(),"user_id":&bot.user_id,"conversation_id":&conversation,
             "turn_id":&turn,"role":"assistant","handoff_delivery":{"targets":[saved(&turn,&origin)]}}).await.unwrap();
         state.db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME).insert_one(doc! {
-            "_id":&event,"user_id":&bot.user_id,"channel_id":&channel,"partition":&origin.partition,"event_id":"native-source",
+            "_id":&event,"user_id":&bot.user_id,"channel_id":&channel,"partition":&event_partition,"event_id":"native-source",
             "status":"completed","conversation_id":&conversation,"turn_id":&turn,"created_at":now,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::days(30)),
             "delivery":{"version":1,"state":"sent","origin":bson::to_bson(&origin).unwrap(),"sender_id":"native-sender",
                 "guest":false,"addressed":true,"transport":"gateway","stream_deadline":now,"checked_at":now}}).await.unwrap();

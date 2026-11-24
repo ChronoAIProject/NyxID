@@ -1312,6 +1312,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "channel_meta_erasure_fences retains the retired bot/grant UUIDs, keyed grant fingerprint, platform and application ID, creation/authorization/cleanup times and an opaque personal-erasure job reference. Existing transfer records and that job supply exact owner scope after account retirement; no raw provider subject, asset, credential, participant ID or customer content is copied. This bookkeeping preserves independent signed deletion obligations and prevents late outbound persistence; only verified provider cleanup writes provider completion.",
     },
     Entry {
+        collection: "channel_meta_grant_scopes",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_grant_scopes retains one bot/grant UUID pair, keyed subject identity, platform/application ID, binding fingerprint, generation range and authorization/cleanup progress per installation grant. It contains no raw provider subject, credentials, participant IDs, copied owner list or source records. A sealed grant remains independently discoverable for signed deletion after reconnect or account retirement; exact completion releases its app-drain obligation and retains only replay proof.",
+    },
+    Entry {
         collection: "channel_meta_grant_authority",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),

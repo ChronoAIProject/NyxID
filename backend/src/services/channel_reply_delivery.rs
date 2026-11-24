@@ -33,8 +33,8 @@ impl Delivery {
         if super::channel_adapters::meta::is_meta(&bot.platform) {
             super::transaction_service::run_db_only(
                 db,
-                &(db, &record, bot.platform.as_str()),
-                |tx, &(db, record, platform)| {
+                &(db, &record, bot, original, bot.platform.as_str()),
+                |tx, &(db, record, bot, original, platform)| {
                     Box::pin(async move {
                         super::channel_relay_service::fence_meta_observation(
                             db,
@@ -44,6 +44,15 @@ impl Delivery {
                             true,
                         )
                         .await?;
+                        let binding=bot.meta_binding.as_ref().ok_or_else(unconfirmed)?;
+                        let source=original.meta_authority.as_ref().ok_or_else(unconfirmed)?;
+                        if source.generation != binding.generation || source.grant_id.as_ref().is_some_and(|grant|grant != &binding.grant_id) {
+                            return Err(unconfirmed());
+                        }
+                        let mut filter=doc! {"_id":&bot.id,"user_id":&bot.user_id,"is_active":true,"meta_binding.generation":binding.generation};
+                        filter.extend(super::channel_meta_service::grants::grant_filter(&binding.grant_id));
+                        if db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).find_one(filter).session(&mut *tx).await?.is_none() {return Err(unconfirmed());}
+                        super::channel_meta_service::scopes::fence_current(db,tx,bot).await?;
                         db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
                             .insert_one(record)
                             .session(&mut *tx)
@@ -108,6 +117,14 @@ impl Delivery {
             ));
         }
         Ok(ChannelReplyDelivery {
+            meta_grant: super::channel_adapters::meta::is_meta(&bot.platform)
+                .then(|| bot.meta_binding.as_ref())
+                .flatten()
+                .map(|binding| crate::models::channel_meta::GrantRef {
+                    bot_id: bot.id.clone(),
+                    grant_id: binding.grant_id.clone(),
+                    generation: binding.generation,
+                }),
             id,
             user_id: bot.user_id.clone(),
             channel_bot_id: bot.id.clone(),

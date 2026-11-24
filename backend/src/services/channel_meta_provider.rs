@@ -39,7 +39,7 @@ pub(crate) fn verify_signed_request(
     Ok((subject, at))
 }
 
-fn grant_identity(platform: &str, app: &str, subject: &str) -> AppResult<String> {
+pub(super) fn grant_identity(platform: &str, app: &str, subject: &str) -> AppResult<String> {
     // Retain only a keyed revocation fence after erasure. Public provider IDs
     // must not be recoverable by enumerating an unkeyed identifier digest.
     super::super::audit_service::keyed_fingerprint(
@@ -101,6 +101,9 @@ async fn retire_account_inbox_in_session(
         return Err(conflict());
     };
     let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
+    let scope = super::scopes::ensure_current(db, tx, &bot, false).await?;
+    db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id,"status":"current"},
+        doc! {"$set":{"status":"retired","to_generation":binding.generation,"sealed_at":bson::DateTime::now()}}).session(&mut *tx).await?;
     db.collection::<bson::Document>("channel_meta_erasure_fences")
         .update_one(
             doc! {"_id":id},
@@ -351,7 +354,7 @@ pub async fn accept_provider_request(
                         Ok(at) if at >= &cutoff => continue,
                         Ok(_) => {
                             let bot: ChannelBot = bson::from_document(raw.clone()).map_err(|_|invalid())?;
-                            apply_callback_state(db,tx,&bot,*erase,&cutoff).await?;
+                            if !apply_callback_state(db,tx,&bot,*erase,&cutoff).await? {continue;}
                         }
                         Err(_) => {} // Exact identity, unresolved chronology: no destructive effect.
                     }
@@ -370,6 +373,23 @@ pub async fn accept_provider_request(
                         if !targets.iter().any(|target|target.get_str("bot_id")==Ok(id) && target.get_str("grant_id")==Ok(grant)) {
                             targets.push(doc! {"bot_id":id,"grant_id":grant});
                         }
+                    }
+                }
+                let mut scopes = db.collection::<crate::models::channel_meta::GrantScope>(crate::models::channel_meta::GRANT_SCOPES)
+                    .find(doc! {"identity":&identity,"outstanding":true}).session(&mut *tx).await?;
+                let captured:Vec<crate::models::channel_meta::GrantScope> = scopes.stream(&mut *tx).try_collect().await?;
+                for scope in captured {
+                    if scope.authorized_at.is_some_and(|at|bson::DateTime::from_chrono(at)>=cutoff) {continue;}
+                    let existing=targets.iter_mut().find(|target|target.get_str("bot_id")==Ok(scope.bot_id.as_str()) && target.get_str("grant_id")==Ok(scope.grant_id.as_str()));
+                    // Current installations use the bot's live, cutoff-checked
+                    // authorization. Sealed/retired scopes have independent proof.
+                    if scope.status=="current" && existing.is_none() {continue;}
+                    if let Some(target)=existing {target.insert("scope_id",&scope.id);} else {
+                        targets.push(doc! {"bot_id":&scope.bot_id,"grant_id":&scope.grant_id,"scope_id":&scope.id});
+                    }
+                    if *erase {
+                        db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id},
+                            doc! {"$set":{"erasure_requested":true},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
                     }
                 }
                 db.collection::<bson::Document>(REQUESTS).insert_one(doc! {
@@ -463,6 +483,7 @@ async fn reconcile_job(
             bot_id,
             grant_id,
             job.get_datetime("signed_cutoff").ok(),
+            target.get_str("scope_id").ok(),
         )
         .await
         {
@@ -509,7 +530,26 @@ async fn reconcile_target(
     bot_id: &str,
     grant_id: &str,
     cutoff: Option<&bson::DateTime>,
+    scope_id: Option<&str>,
 ) -> AppResult<()> {
+    if let Some(id) = scope_id {
+        let scope = state
+            .db
+            .collection::<crate::models::channel_meta::GrantScope>(
+                crate::models::channel_meta::GRANT_SCOPES,
+            )
+            .find_one(doc! {"_id":id,"bot_id":bot_id,"grant_id":grant_id})
+            .await?
+            .ok_or_else(super::grants::incomplete)?;
+        if scope.status == "completed" {
+            return Ok(());
+        }
+        if super::scopes::has_history(&state.db, bot_id).await? {
+            // The scoped eraser owns multi-grant records. Never fall through
+            // to a whole-inbox purge or acknowledge unprocessed prior data.
+            return Err(super::grants::incomplete());
+        }
+    }
     let cutoff = if let Some(cutoff) = cutoff {
         cutoff
     } else {
@@ -547,7 +587,7 @@ async fn reconcile_target(
                 bson::from_document(raw.clone()).map_err(|_| super::grants::incomplete())?;
             #[cfg(test)]
             super::super::durable_wake_tests::after("meta_provider_before_transition").await;
-            super::super::transaction_service::run_db_only(
+            let applied = super::super::transaction_service::run_db_only(
                 &state.db,
                 &(&state.db, &bot, erase, cutoff),
                 |tx, &(db, bot, erase, cutoff)| {
@@ -555,6 +595,9 @@ async fn reconcile_target(
                 },
             )
             .await?;
+            if !applied {
+                return Ok(());
+            }
         }
     } else if erase {
         let proof = state
@@ -654,7 +697,7 @@ async fn apply_callback_state(
     bot: &ChannelBot,
     erase: bool,
     cutoff: &bson::DateTime,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     // The live row and monotonic erasure bit belong to this transaction, not
     // the worker's earlier snapshot. A delayed deauth cannot undo deletion.
     let mut filter =
@@ -673,8 +716,9 @@ async fn apply_callback_state(
         .authorized_at
         .ok_or_else(super::grants::incomplete)?;
     if bson::DateTime::from_chrono(authorized) >= *cutoff {
-        return Ok(());
+        return Ok(false);
     }
+    super::scopes::ensure_current(db, tx, &bot, false).await?;
     let advance = bot.is_active && !binding.provider_revoked;
     let keep = !erase && !binding.erasure_requested && bot.is_active;
     let subscription = if keep && binding.operator_suspended {
@@ -711,5 +755,5 @@ async fn apply_callback_state(
     {
         return Err(conflict());
     }
-    Ok(())
+    Ok(true)
 }

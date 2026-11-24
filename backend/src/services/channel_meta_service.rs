@@ -1073,6 +1073,7 @@ impl MetaService<'_> {
                     binding.operator_suspended = true;
                     binding.subscription = "suspended".into();
                 }
+                scopes::cutover(db,tx,&old,&binding).await?;
                 // A reconnect is a new provider grant. Retire participant
                 // control observations from the old generation while the
                 // parent installation lock is held; the next inbound event
@@ -1815,6 +1816,7 @@ pub(crate) async fn sweep_service(
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
+    scopes::ensure_indexes(db).await?;
     db.collection::<OAuthSession>(SESSIONS)
         .create_indexes([
             IndexModel::builder()
@@ -1926,3 +1928,6 @@ pub use provider::{accept_provider_request, request_status};
 
 #[path = "channel_meta_grants.rs"]
 pub(crate) mod grants;
+
+#[path = "channel_meta_scopes.rs"]
+pub(crate) mod scopes;
