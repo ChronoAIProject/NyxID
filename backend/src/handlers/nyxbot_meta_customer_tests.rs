@@ -289,6 +289,74 @@ async fn meta_personal_customer_setup_prepares_then_enables_without_rotating_on_
 }
 
 #[tokio::test]
+async fn identical_owner_questions_from_two_meta_inboxes_queue_separately_in_one_busy_home() {
+    let (state, calls, server) = setup("meta_two_inboxes_busy_home").await;
+    let agent = specialist(&state).await;
+    let (router, token) = app(&state).await;
+    let mut inboxes = Vec::new();
+    for platform in ["messenger", "instagram"] {
+        let bot =
+            crate::services::channel_adapters::meta::tests::registered_bot(&state, OWNER, platform)
+                .await;
+        let (status, assigned) = action(&router, &token, &bot.id, &agent.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{assigned}");
+        let channel = assigned["channel_id"].as_str().unwrap();
+        let sender = format!("{platform}:{}:222:333", bot.id);
+        signed_customer_message(
+            &state,
+            channel,
+            &sender,
+            assigned["owner_link_code"].as_str().unwrap(),
+        )
+        .await;
+        assert!(
+            load_channel(&state, OWNER, channel)
+                .await
+                .unwrap()
+                .owner_sender_ids
+                .contains(&sender)
+        );
+        inboxes.push((
+            channel.to_owned(),
+            sender,
+            crate::services::channel_meta_service::scopes::reference(&bot).unwrap(),
+        ));
+    }
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let request: engine::TurnRequest = serde_json::from_value(json!({
+        "conversation_id": &home.id, "text": "Unrelated owner work"
+    }))
+    .unwrap();
+    let active = engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
+        .await
+        .unwrap();
+    for (channel, sender, _) in &inboxes {
+        signed_customer_message(&state, channel, sender, "Has the shipment arrived?").await;
+    }
+    let busy = engine::get(&state.db, OWNER, &home.id).await.unwrap();
+    assert_eq!(
+        busy.active_turn.as_ref().unwrap().turn_id,
+        active.active_turn.as_ref().unwrap().turn_id
+    );
+    assert_eq!(busy.pending_events.len(), 2);
+    for (event, (channel, _, grant)) in busy.pending_events.iter().zip(&inboxes) {
+        assert_eq!(event.source_event_ids.len(), 1);
+        assert_eq!(event.channel_contexts.len(), 1);
+        assert_eq!(event.channel_contexts[0].meta_grant.as_ref(), Some(grant));
+        assert_eq!(event.reply_to[0].nyxbot_channel_id, *channel);
+    }
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_is_atomic() {
     for platform in ["messenger", "instagram"] {
         let (state, _, server) = setup("meta_customer_org").await;
