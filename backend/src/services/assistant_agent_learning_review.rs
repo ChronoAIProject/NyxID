@@ -3141,10 +3141,13 @@ pub(crate) fn renewal_eligible(
         return false;
     };
     row.source == ProposalSource::Authored
-        && undispatched_status(row)
-        && non_effective(p, now)
+        && UNDISPATCHED_STATUSES.contains(&row.status.as_str())
+        && p.lease_expires_at.is_none_or(|expiry|expiry<=now)
+        // A new confirmation can reconcile an existing publication at the
+        // current skills revision; it never permits another dispatch.
+        && (undispatched_status(row) || (dispatched(p) && !attach_refused(row)))
         && !review_required_failure(row)
-        && !legacy_package(p, None)
+        && (!legacy_package(p, None) || dispatched(p))
         && card.status != "denied"
         && card.user_id == row.owner_id
         && card.tool_name.as_deref() == Some(TOOL)
