@@ -144,8 +144,10 @@ provider when a handover requires that separation.
 For Messenger and Instagram, transfer retires delivery authority and records
 `reconnect_required`. For a managed inbox, the destination selects Reconnect
 and completes fresh Facebook or Instagram consent. For a manual installation,
-the destination can instead supply a validated replacement token through the
-existing credential update. Verify refuses the transferred grant until one of
+the destination can instead supply a validated replacement token and explicitly
+confirm exclusive routing (`verification_token=exclusive`) together in the
+existing credential update. This keeps the public bot ID, establishes a fresh
+event cutoff, and preserves any operator hold. Verify refuses the transferred grant until one of
 these reauthorization paths succeeds. An unheld managed reconnect verifies the
 inbox immediately; a held inbox stays suspended and requires explicit Resume.
 Customer access stays closed during handover; review its assignment and exposure.

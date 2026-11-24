@@ -554,10 +554,7 @@ async fn require_drained_meta_app(
             "channel_meta_grant_authority",
             doc! {
                 "platform": platform, "app_id": app,
-                "$or": [
-                    {"revoked_at": null},
-                    {"$expr": {"$gt": ["$last_authorized_at", "$revoked_at"]}},
-                ],
+                "outstanding":{"$in":[true,bson::Bson::Null]},
             },
         ),
     ];
@@ -566,6 +563,7 @@ async fn require_drained_meta_app(
             .collection::<bson::Document>(collection)
             .find_one(filter)
             .projection(doc! {"_id":1})
+            .max_time(std::time::Duration::from_secs(5))
             .session(&mut *tx)
             .await?
             .is_some()
@@ -582,11 +580,12 @@ async fn require_drained_meta_app(
         .collection::<bson::Document>("channel_meta_erasure_fences")
         .find_one(doc! {"retired_grant.platform":platform,
         "retired_grant.app_id":{"$in":[app,bson::Bson::Null]}})
-        .projection(doc! {"_id":1})
         .max_time(std::time::Duration::from_secs(5))
         .session(&mut *tx)
         .await?;
-    if retired.is_some() {
+    if let Some(retired) = retired
+        && !super::channel_meta_service::grants::clear_completed_retired(db, tx, &retired).await?
+    {
         return Err(AppError::Conflict("Complete the retired Meta grant's signed deletion before changing its application ID or login secret".into()));
     }
     Ok(())

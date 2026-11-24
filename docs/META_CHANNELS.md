@@ -308,7 +308,7 @@ signed provider deletion is the authority for a wider captured-grant purge.
 
 Account retirement and signed request capture serialize through the keyed grant
 fence before the bot disappears. `channel_meta_erasure_fences` then retains only
-the bot/grant UUIDs, keyed grant identity, platform, original creation/authorization
+the bot/grant UUIDs, keyed grant identity, platform and application ID, original creation/authorization
 times and an opaque reference to the existing personal-erasure job. That job has
 no terminal TTL and retains the opaque account UUID; existing ownership-transfer
 records retain prior opaque owners. These existing records resolve the exact
@@ -321,6 +321,21 @@ requests and a first late signed deletion use the same captured grant and cutoff
 including crash/retry after bot removal. Former-owner and sibling records remain
 outside ordinary personal deletion, and successor grants remain outside the
 captured provider obligation.
+
+Signed requests retain their authenticated authorization cutoff. A missing or
+malformed authorization date keeps that exact target pending without revoking
+its token, unsubscribing it or purging its data. Verified chronology repair is
+checked against both sides of the original cutoff before any provider effect.
+A later grant stays outside the request. Missing or malformed exact completion
+proof cannot remove a retained obligation or acknowledge success.
+
+Manual Delete captures its actor, owner, credential source, grant and stopped
+generation on the original bot in the stop transaction. HTTP cleanup, assistant
+Delete retries and account retirement honor that same obligation. A reconnect
+cannot inherit it. Earlier removed manual installations require a verified
+Delete audit for the unchanged installation, or a fresh owner-authorized Delete;
+account retirement alone does not authorize a wider purge. The captured fields
+and optional audit reference disappear with the bot after confirmed cleanup.
 
 A manual installation with an empty login subject creates no managed grant
 authority or retired managed subject. Its explicit owner-driven Delete/purge
@@ -376,9 +391,11 @@ installation can also repeat its ordinary Delete action. If exact attribution
 cannot be recovered, retain the unresolved obligation and escalate it for
 operator handling rather than reporting completed erasure.
 
-After derived cleanup finishes, the erasure fence records a non-identifying
-completion timestamp before the retired bot is removed. This makes a crash
-retry after bot deletion idempotent without retaining provider identifiers.
+After derived cleanup finishes, one transaction records a typed, exact-grant
+completion timestamp and removes the retired bot. Missing or malformed proof
+retains the obligation for verified repair; a matching stale retired obligation
+is cleared atomically during replay or credential drain. This makes crash retry
+idempotent without retaining participant or credential data.
 
 Assigning a specialist to a fresh Meta organization inbox keeps guest exposure
 disabled and private DMs owner-only, including when the org wallet is funded.

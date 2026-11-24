@@ -1472,6 +1472,12 @@ async fn update_bot_inner(
             || binding.subscription == "reconnect_required";
 
         if meta_token_replacement {
+            if bot.credential_source != "platform" && !binding.exclusive_routing_verified {
+                if params.verification_token != Some("exclusive") {
+                    return Err(AppError::ValidationError("Confirm exclusive inbox routing with verification_token=exclusive together with the verified replacement token".into()));
+                }
+                set_doc.insert("meta_binding.exclusive_routing_verified", true);
+            }
             set_doc.insert("meta_binding.grant_reconnect_required", false);
             set_doc.insert("meta_binding.provider_revoked", false);
             set_doc.insert(
@@ -2419,21 +2425,56 @@ pub async fn delete_bot_with_state(
     bot_id: &str,
     user_id: &str,
 ) -> AppResult<Option<&'static str>> {
+    delete_bot_with_state_as_actor(state, adapter, bot_id, user_id, user_id).await
+}
+
+pub async fn delete_bot_with_state_as_actor(
+    state: &crate::AppState,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    user_id: &str,
+    actor: &str,
+) -> AppResult<Option<&'static str>> {
     let bot = get_bot_for_user(&state.db, bot_id, user_id).await?;
     let manual_meta = super::channel_adapters::meta::is_meta(&bot.platform)
         && bot.credential_source != "platform";
-    let result = delete_bot(
-        &state.db,
-        &state.config,
-        &state.http_client,
-        &state.encryption_keys,
-        adapter,
-        bot_id,
-        user_id,
-    )
-    .await?;
+    let result = if super::channel_adapters::meta::is_meta(&bot.platform) {
+        delete_meta_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            &bot,
+            actor,
+        )
+        .await?
+    } else {
+        delete_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            adapter,
+            bot_id,
+            user_id,
+        )
+        .await?
+    };
     if manual_meta && result == Some("removed") {
         let current = get_bot_for_user(&state.db, bot_id, user_id).await?;
+        if current.credential_source != bot.credential_source
+            || current
+                .meta_binding
+                .as_ref()
+                .map(|binding| &binding.grant_id)
+                != bot.meta_binding.as_ref().map(|binding| &binding.grant_id)
+            || !super::channel_meta_service::grants::manual_purge_authorized(&state.db, &current)
+                .await?
+        {
+            return Err(AppError::Conflict(
+                "Manual inbox deletion authority changed".into(),
+            ));
+        }
         let grant_id = current
             .meta_binding
             .as_ref()
@@ -2442,6 +2483,43 @@ pub async fn delete_bot_with_state(
         super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant_id).await?;
     }
     Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn delete_meta_bot(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    encryption_keys: &EncryptionKeys,
+    bot: &ChannelBot,
+    actor: &str,
+) -> AppResult<Option<&'static str>> {
+    let stopped = super::channel_meta_service::grants::stop_for_delete(db, actor, bot).await?;
+    let service = super::channel_meta_service::MetaService {
+        db,
+        config,
+        http: http_client,
+        keys: encryption_keys,
+        endpoints: Default::default(),
+    };
+    let result = service.disconnect(&stopped).await;
+    let current = get_bot_for_user(db, &bot.id, &bot.user_id).await?;
+    if current.is_active {
+        return Err(result.err().unwrap_or_else(|| {
+            AppError::Conflict("Inbox could not be stopped; refresh before deleting".into())
+        }));
+    }
+    let removed = current
+        .meta_binding
+        .as_ref()
+        .is_some_and(|binding| binding.subscription == "removed");
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_many(
+            doc! {"channel_bot_id":&bot.id},
+            doc! {"$set":{"is_active":false,"updated_at":bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(Some(if removed { "removed" } else { "failed" }))
 }
 
 async fn delete_bot_dispatch(
@@ -2455,41 +2533,7 @@ async fn delete_bot_dispatch(
 ) -> AppResult<Option<&'static str>> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
     if super::channel_adapters::meta::is_meta(&bot.platform) {
-        if bot.credential_source != "platform" {
-            // Only an explicit Delete authorizes the manual retry worker's
-            // inbox-wide purge. Account retirement has narrower authority.
-            db.collection::<bson::Document>(COLLECTION_NAME)
-                .update_one(
-                    doc! {"_id":bot_id,"user_id":user_id},
-                    doc! {"$set":{"meta_manual_purge_requested":true}},
-                )
-                .await?;
-        }
-        let service = super::channel_meta_service::MetaService {
-            db,
-            config,
-            http: http_client,
-            keys: encryption_keys,
-            endpoints: Default::default(),
-        };
-        let result = service.disconnect(&bot).await;
-        let current = get_bot_for_user(db, bot_id, user_id).await?;
-        if current.is_active {
-            return Err(result.err().unwrap_or_else(|| {
-                AppError::Conflict("Inbox could not be stopped; refresh before deleting".into())
-            }));
-        }
-        let removed = current
-            .meta_binding
-            .as_ref()
-            .is_some_and(|binding| binding.subscription == "removed");
-        db.collection::<bson::Document>(CONVERSATIONS)
-            .update_many(
-                doc! {"channel_bot_id":bot_id},
-                doc! {"$set":{"is_active":false,"updated_at":bson::DateTime::now()}},
-            )
-            .await?;
-        return Ok(Some(if removed { "removed" } else { "failed" }));
+        return delete_meta_bot(db, config, http_client, encryption_keys, &bot, user_id).await;
     }
     if bot.platform == "telegram" {
         return super::telegram_new_service::with_operation(
@@ -2867,6 +2911,18 @@ pub(crate) async fn erase_personal_bot(
         }
         .disconnect(&bot)
         .await?;
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_account_after_disconnect").await;
+        let stopped = get_bot_for_user(db, bot_id, owner).await?;
+        if super::channel_meta_service::grants::manual_purge_authorized(db, &stopped).await? {
+            let grant = &stopped
+                .meta_binding
+                .as_ref()
+                .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                .grant_id;
+            super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant).await?;
+            return Ok(());
+        }
         // Personal erasure retires only the departing owner's authority. A
         // signed provider request independently authorizes any wider purge.
         super::channel_meta_journal_erasure::attribute_legacy(db, &bot).await?;
