@@ -58,6 +58,7 @@ import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { parseSkillGallerySearch } from "@/lib/assistant/skill-templates";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
@@ -75,6 +76,8 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
+  TestingPage,
+  SkillTemplateWelcomePage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -232,6 +235,20 @@ const nyxbotOnboardingRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) =>
     nyxbotSearchSchema.parse(search),
   component: NyxbotOnboardingPage,
+});
+
+const testingRoute = createRoute({
+  path: "/testing",
+  getParentRoute: () => rootRoute,
+  validateSearch: parseSkillGallerySearch,
+  component: TestingPage,
+});
+
+const skillTemplateWelcomeRoute = createRoute({
+  path: "/testing/welcome",
+  getParentRoute: () => rootRoute,
+  validateSearch: parseSkillGallerySearch,
+  component: SkillTemplateWelcomePage,
 });
 
 const registerRoute = createRoute({
@@ -1306,6 +1323,8 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  testingRoute,
+  skillTemplateWelcomeRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,

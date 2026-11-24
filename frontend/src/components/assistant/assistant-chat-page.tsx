@@ -94,6 +94,7 @@ import { isLegacyConversationId } from "@/lib/assistant/conversation-ids";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { clearOpenTemplateDraft } from "@/lib/assistant/skill-template-handoff";
 import {
   useAssistantOnboarding,
   useHideSuggestions,
@@ -603,7 +604,7 @@ export function DirectAssistantChatPage() {
  * The NyxAgent engine: a group chat (`?g=`), a thread (`?c=`, `?draft`,
  * `?agent=`), or the NyxBot home when none of those are set.
  */
-export function NyxAgentAssistantChatPage() {
+export function NyxAgentAssistantChatPage({ templateDraft }: { readonly templateDraft?: TemplateDraft } = {}) {
   useUiTranslation();
   const search = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
@@ -611,10 +612,17 @@ export function NyxAgentAssistantChatPage() {
   if (search.g) {
     return <NyxAgentGroupPage key={search.g} groupId={search.g} mock={Boolean(search.mock)} />;
   }
-  return <NyxAgentThreadPage />;
+  return <NyxAgentThreadPage templateDraft={templateDraft} />;
 }
 
-function NyxAgentThreadPage() {
+export interface TemplateDraft {
+  readonly agent: NyxAgentConversationAgent;
+  readonly key: string;
+  readonly setupId?: string;
+  readonly title: string;
+}
+
+function NyxAgentThreadPage({ templateDraft }: { readonly templateDraft?: TemplateDraft }) {
   const { i18n } = useUiTranslation();
   const voiceFlagEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
@@ -701,7 +709,7 @@ function NyxAgentThreadPage() {
   const [requestError, setRequestError] = useState<{ scope: string; message: string }>();
   const pendingSend = useRef<{ scope: string } | undefined>(undefined);
   // No thread, draft or agent in the URL: the NyxBot home.
-  const home = !search.c && !search.draft && !search.agent;
+  const home = !search.c && !search.draft && !search.agent && !templateDraft;
   // Router state is global: while the sidebar navigates to another page this
   // component is still mounted and sees that page's (thread-less) URL.
   const onChatRoute = useRouterState({
@@ -772,13 +780,14 @@ function NyxAgentThreadPage() {
   }, [selectedId, user?.id, onChatRoute]);
   const adopt = useCallback((id: string) => {
     if (selection.current !== selectedId) return;
+    if (templateDraft?.setupId && user?.id) clearOpenTemplateDraft(templateDraft.setupId, user.id);
     if (pendingSend.current) pendingSend.current.scope = `${user?.id}:${id}`;
     void navigate({
       to: "/assistant",
       search: (previous) => ({ ...parseAccountPanelSearch(previous), c: id, ...(search.mock ? { mock: 1 as const } : {}) }),
       replace: true,
     });
-  }, [navigate, search.mock, selectedId, user?.id]);
+  }, [navigate, search.mock, selectedId, templateDraft?.setupId, user?.id]);
   const agents = useNyxBotAgents();
   const groups = useNyxBotGroups();
   // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
@@ -802,13 +811,14 @@ function NyxAgentThreadPage() {
         destroyed: selectedAgent.status === "destroyed",
       }
     : undefined;
-  const headerAgent = selectedId ? threadAgent : draftAgent;
+  const newThreadAgent = templateDraft?.agent ?? draftAgent;
+  const headerAgent = selectedId ? threadAgent : newThreadAgent;
   const chat = useNyxAgentAssistantChat({
     selectedConversationId: selectedId,
     reviewCardId: search.card,
     onConversationAdopted: adopt,
     threadsAgentId: selectedAgent?.id,
-    draftAgent,
+    draftAgent: newThreadAgent,
   });
   // Keep rejected retries with the other request failures above the chat.
   const retryFailedMessage = useCallback(async (messageId: string) => {
@@ -1406,7 +1416,7 @@ function NyxAgentThreadPage() {
               emptyDescription={
                 headerAgent?.kind === "specialist"
                   ? translateUi("Talk to {{value1}} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.", { value1: agentName })
-                  : "See your connected services, connect a new one, " +
+                  : templateDraft?.title ?? "See your connected services, connect a new one, " +
                     "set up a channel bot, or check approvals."
               }
             />
@@ -1473,7 +1483,7 @@ function NyxAgentThreadPage() {
             agentModel={selectedAgent?.model}
             voiceActive={voiceMounted && currentVoice?.active}
             voiceActivity={voiceMounted ? currentVoice?.activity : undefined}
-            key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
+            key={`${user?.id}:${selectedId ?? templateDraft?.key ?? headerAgent?.id ?? "draft"}`}
             onVoice={
               voiceEnabled && !destroyed && !channelPlatform
                 ? async (id, preparation) => {
@@ -1502,9 +1512,9 @@ function NyxAgentThreadPage() {
             draftKey={
               selectedId
                 ? `conv:${selectedId}`
-                : headerAgent?.kind === "specialist"
+                : templateDraft?.key ?? (headerAgent?.kind === "specialist"
                   ? `screen:nyxagent:agent:${headerAgent.id}`
-                  : "screen:nyxagent:assistant"
+                  : "screen:nyxagent:assistant")
             }
             focusRequest={focusRequest}
             agentOverride={agentOverride}
