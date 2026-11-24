@@ -215,6 +215,7 @@ async fn erase_attributed(
             .max_time(std::time::Duration::from_secs(5))
             .await?.try_collect().await?;
         let mut remove = Vec::new();
+        let mut attribute = std::collections::BTreeMap::<String, Vec<Document>>::new();
         let mut unresolved = false;
         for plan in &batch {
             let mut evidence = Evidence::default();
@@ -256,9 +257,25 @@ async fn erase_attributed(
                     "_id": &plan.id, "user_id": &plan.user_id,
                     "source_id": &plan.source_id, "logical_key": &plan.logical_key,
                 }),
+                Some(Target::Bot(id)) if !erase => {
+                    // Preserve positive sibling proof before its finite-lived
+                    // source disappears, on the original journal itself.
+                    attribute.entry(id).or_default().push(doc! {
+                        "_id": &plan.id, "user_id": &plan.user_id,
+                        "source_id": &plan.source_id, "logical_key": &plan.logical_key,
+                    });
+                }
                 Some(_) => {} // Positive sibling/other-platform proof; retain it.
                 None => unresolved = true,
             }
+        }
+        for (parent, exact) in attribute {
+            plans
+                .update_many(
+                    doc! {"channel_bot_id":null,"$or":exact},
+                    doc! {"$set":{"channel_bot_id":parent}},
+                )
+                .await?;
         }
         if !remove.is_empty() {
             let exact = doc! {"channel_bot_id": null, "$or": remove};
@@ -328,10 +345,33 @@ async fn saved_target(
             let Ok(origin) = saved.get_document("origin") else {
                 continue;
             };
+            // Destination identity does not depend on provenance fields such
+            // as platform. Establish an exact match before validating them.
+            #[derive(serde::Deserialize)]
+            struct Destination {
+                nyxbot_channel_id: String,
+                partition: String,
+                thread: Option<Box<crate::models::channel_thread_follow::ThreadTurnBinding>>,
+            }
+            let Ok(identity) = bson::from_document::<Destination>(origin.clone()) else {
+                continue;
+            };
+            let identity = crate::models::assistant_conversation::ChannelOrigin {
+                nyxbot_channel_id: identity.nyxbot_channel_id,
+                partition: identity.partition,
+                thread: identity.thread,
+                platform: String::new(),
+                native_event_id: None,
+                org_execution: None,
+            };
+            if super::channel_supplemental_delivery::saved_key(turn, &identity) != plan.logical_key
+            {
+                continue;
+            }
             let Ok(origin) = bson::from_document::<
                 crate::models::assistant_conversation::ChannelOrigin,
             >(origin.clone()) else {
-                continue;
+                return Ok(SavedTarget::Incomplete);
             };
             if super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key {
                 continue;
@@ -1000,7 +1040,11 @@ mod tests {
 
     #[tokio::test]
     async fn exact_predating_destination_with_missing_or_mismatched_nested_turn_stays_pending() {
-        for nested in [None, Some("different-turn")] {
+        for (nested, missing_platform) in [
+            (None, false),
+            (Some("different-turn"), false),
+            (Some("exact"), true),
+        ] {
             let (state, _, _server, mut bot) = fixture("instagram").await;
             stop_for_erasure(&state, &mut bot).await;
             let channel = uuid::Uuid::new_v4().to_string();
@@ -1039,7 +1083,13 @@ mod tests {
                 target
                     .get_document_mut("source")
                     .unwrap()
-                    .insert("turn_id", nested);
+                    .insert("turn_id", if nested == "exact" { &turn } else { nested });
+            }
+            if missing_platform {
+                target
+                    .get_document_mut("origin")
+                    .unwrap()
+                    .remove("platform");
             }
             let message = uuid::Uuid::new_v4().to_string();
             state
@@ -1079,7 +1129,8 @@ mod tests {
                 .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
                 .update_one(
                     doc! {"_id":&message},
-                    doc! {"$set":{"handoff_delivery.targets.0.source.turn_id":&turn}},
+                    doc! {"$set":{"handoff_delivery.targets.0.source.turn_id":&turn,
+                    "handoff_delivery.targets.0.origin.platform":"instagram"}},
                 )
                 .await
                 .unwrap();

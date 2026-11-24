@@ -2455,6 +2455,16 @@ async fn delete_bot_dispatch(
 ) -> AppResult<Option<&'static str>> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
     if super::channel_adapters::meta::is_meta(&bot.platform) {
+        if bot.credential_source != "platform" {
+            // Only an explicit Delete authorizes the manual retry worker's
+            // inbox-wide purge. Account retirement has narrower authority.
+            db.collection::<bson::Document>(COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":bot_id,"user_id":user_id},
+                    doc! {"$set":{"meta_manual_purge_requested":true}},
+                )
+                .await?;
+        }
         let service = super::channel_meta_service::MetaService {
             db,
             config,
@@ -2842,6 +2852,12 @@ pub(crate) async fn erase_personal_bot(
             return Err(AppError::Forbidden("Personal erasure is not active".into()));
         }
         let bot = get_bot_for_user(db, bot_id, owner).await?;
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":bot_id,"user_id":owner},
+                doc! {"$set":{"meta_account_retiring":true}},
+            )
+            .await?;
         super::channel_meta_service::MetaService {
             db,
             config,

@@ -1611,7 +1611,8 @@ pub(crate) async fn claim_due(db: &mongodb::Database) -> AppResult<Option<(Chann
         "platform":{"$in":["messenger","instagram"]},
         "$or":[
             {"meta_binding.subscription":{"$in":["active","pending","removal_pending","suspended"]}},
-            {"is_active":false,"credential_source":{"$ne":"platform"},"meta_binding.subscription":"removed"},
+            {"is_active":false,"credential_source":{"$ne":"platform"},"meta_binding.subscription":"removed",
+                "meta_manual_purge_requested":true,"meta_account_retiring":{"$ne":true}},
         ],
         "$and":[
             {"$or":[{"meta_binding.next_reconcile_at":null},{"meta_binding.next_reconcile_at":{"$lte":now}}]},
@@ -1636,6 +1637,9 @@ pub(crate) async fn sweep_service(
         let result=if !bot.is_active {
             let result = service.disconnect(&bot).await;
             if result.is_ok() && bot.credential_source != "platform"
+                && service.db.collection::<bson::Document>(BOTS).find_one(doc! {
+                    "_id":&bot.id,"meta_manual_purge_requested":true,"meta_account_retiring":{"$ne":true}
+                }).await?.is_some()
                 && let Ok(live) = super::channel_bot_service::get_bot(service.db, &bot.id).await
                 && live.meta_binding.as_ref().is_some_and(|binding| binding.subscription == "removed")
             {
@@ -1742,6 +1746,13 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"retired_grant.identity":1,"retired_grant.authorized_at":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>("channel_meta_erasure_fences")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"retired_grant.platform":1,"retired_grant.app_id":1})
                 .build(),
         )
         .await?;

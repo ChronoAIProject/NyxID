@@ -142,10 +142,13 @@ the account's ownership at the external platform. Rotate credentials at the
 provider when a handover requires that separation.
 
 For Messenger and Instagram, transfer retires delivery authority and records
-`reconnect_required`. The destination must select Reconnect and complete fresh
-Facebook or Instagram consent for that inbox. Verify refuses the transferred
-grant until reauthorization succeeds. Customer access remains closed during
-handover; review the assignment and exposure before explicitly resuming it.
+`reconnect_required`. For a managed inbox, the destination selects Reconnect
+and completes fresh Facebook or Instagram consent. For a manual installation,
+the destination can instead supply a validated replacement token through the
+existing credential update. Verify refuses the transferred grant until one of
+these reauthorization paths succeeds. An unheld managed reconnect verifies the
+inbox immediately; a held inbox stays suspended and requires explicit Resume.
+Customer access stays closed during handover; review its assignment and exposure.
 Retired routes and historical records retain their original owners. A recipient's
 personal-account erasure preserves that former-owner history; independently
 verified provider deletion retains its captured grant scope.

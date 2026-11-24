@@ -27,9 +27,11 @@ pub(crate) async fn erase_provider_inbox(
             .await?;
         if let Some(proof) = &proof {
             if proof.get_datetime("local_data_erased_at").is_ok()
-                && proof
-                    .get_str("completed_grant_id")
-                    .map_or(true, |id| id == grant_id)
+                && match proof.get("completed_grant_id") {
+                    None => true, // Compatibility with an absent legacy field.
+                    Some(bson::Bson::String(id)) => id == grant_id,
+                    Some(_) => false,
+                }
             {
                 return Ok(());
             }
@@ -39,6 +41,9 @@ pub(crate) async fn erase_provider_inbox(
                         AppError::Conflict("Retired inbox attribution is incomplete".into())
                     })?;
                 if context.grant_id == grant_id {
+                    if context.authorized_at.is_none() {
+                        return Err(AppError::Conflict("Retired grant chronology is incomplete; restore verified attribution before completing cleanup".into()));
+                    }
                     retired_context = Some(context);
                 }
             }
@@ -185,32 +190,43 @@ pub(crate) async fn erase_provider_inbox(
         .await?;
     super::super::org_channel_service::defaults::erase(&state.db, doc! {"channel_bot_id": bot_id})
         .await?;
-    let bots = state
-        .db
-        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
-    // No late writer can cross the installed erasure fence. Persist the proof
-    // before deleting the last owner/asset-bearing row so crash retries can
-    // distinguish completed cleanup from missing, unattributable history.
-    state
-        .db
-        .collection::<Document>("channel_meta_erasure_fences")
+    let args = (state.db.clone(), bot_id.to_owned(), grant_id.to_owned());
+    super::super::transaction_service::run_db_only(&state.db, &args, |tx, (db, bot, grant)| {
+        Box::pin(complete_provider_inbox(db, bot, grant, tx))
+    })
+    .await
+}
+
+// Completion proof and parent retirement have one commit boundary. Account
+// cleanup cannot recreate an outstanding grant between these two writes.
+async fn complete_provider_inbox(
+    db: &Database,
+    bot: &str,
+    grant: &str,
+    tx: &mut ClientSession,
+) -> AppResult<()> {
+    db.collection::<Document>("channel_meta_erasure_fences")
         .update_one(
-            doc! {"_id": bot_id},
-            doc! {"$set": {"local_data_erased_at": bson::DateTime::now(),"completed_grant_id":grant_id},
-                "$unset":{"retired_grant":""}},
+            doc! {"_id":bot},
+            doc! {
+            "$set":{"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":grant},
+            "$unset":{"retired_grant":""}},
         )
+        .session(&mut *tx)
         .await?;
+    let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
     let deleted = bots
-        .delete_one(doc! {
-            "_id": bot_id,
-            "is_active": false,
-            "meta_binding.grant_id": grant_id,
-            "meta_binding.subscription": "removed",
-        })
+        .delete_one(doc! {"_id":bot,"is_active":false,
+        "meta_binding.grant_id":grant,"meta_binding.subscription":"removed"})
+        .session(&mut *tx)
         .await?;
-    // Missing is a successful crash retry. An extant row must match the exact
-    // stopped grant; never acknowledge deletion after a concurrent replacement.
-    if deleted.deleted_count != 1 && bots.find_one(doc! {"_id": bot_id}).await?.is_some() {
+    if deleted.deleted_count != 1
+        && bots
+            .find_one(doc! {"_id":bot})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+    {
         return Err(AppError::Conflict(
             "The inbox changed during erasure; cleanup remains pending".into(),
         ));
