@@ -103,7 +103,10 @@ async fn delayed_meta_action_cannot_borrow_later_web_turn_but_ordinary_action_ke
         } else {
             assert_eq!(
                 result.unwrap().creation_turn_id,
-                web.active_turn.as_ref().map(|turn| turn.turn_id.clone())
+                original
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.turn_id.clone())
             );
         }
         db.drop().await.unwrap();
@@ -220,6 +223,17 @@ async fn denied_meta_card_continuation_keeps_proof_and_cannot_publish_after_eras
             .contains("Private denied action summary")
     );
     assert!(input.get_array("meta_grants").is_ok());
+    let denial_chat = crate::services::assistant_authority_tests::chat_for_row(
+        &f.state,
+        &f.bot.user_id,
+        &continued,
+    )
+    .await;
+    let repeated = acks::request(db, &denial_chat, request("Private denied action summary"))
+        .await
+        .unwrap();
+    assert_eq!(repeated.id, card.id);
+    assert_eq!(repeated.status, "denied");
     finish_source_turn(&f.state, &continued, "Explained private denied action").await;
     erase(&f).await;
     assert!(
@@ -246,6 +260,263 @@ async fn denied_meta_card_continuation_keeps_proof_and_cannot_publish_after_eras
             .await
             .unwrap(),
         0
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn erased_captured_input_cannot_be_recreated_after_public_reset_but_retained_web_input_can_delay()
+ {
+    for meta in [true, false] {
+        for later in [true, false] {
+            let f = fixture().await;
+            let db = &f.state.db;
+            engine::ensure_indexes(db).await.unwrap();
+            crate::services::feature_flag_service::set_platform_override(
+                db,
+                crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+                &crate::services::feature_flag_service::FlagTarget::User(f.bot.user_id.clone()),
+                true,
+                &f.bot.user_id,
+            )
+            .await
+            .unwrap();
+            let original = begin(&f, None, meta.then(|| context(&f.bot)), false).await;
+            let captured = crate::services::assistant_authority_tests::chat_for_row(
+                &f.state,
+                &f.bot.user_id,
+                &original,
+            )
+            .await;
+            finish_source_turn(&f.state, &original, "Original answer").await;
+            if meta {
+                erase(&f).await;
+            }
+            crate::handlers::assistant_nyxagent::reset_context(
+                axum::extract::State(f.state.clone()),
+                crate::test_utils::test_auth_user(&f.bot.user_id),
+                axum::extract::Path(original.id.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                engine::get(db, &f.bot.user_id, &original.id)
+                    .await
+                    .unwrap()
+                    .context_reset_reason
+                    .as_deref(),
+                Some("user_reset")
+            );
+            if later {
+                begin(&f, Some(&original.id), None, false).await;
+            }
+            let result = acks::request(
+                db,
+                &captured,
+                request("Captured private summary after reset"),
+            )
+            .await;
+            assert_eq!(result.is_ok(), !meta);
+            if meta {
+                assert_eq!(
+                    db.collection::<Document>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {"summary":"Captured private summary after reset"})
+                    .await
+                    .unwrap(),
+                    0
+                );
+            }
+            db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_event_retains_its_prior_meta_request_source_and_fences_each_grant_once() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    engine::ensure_indexes(db).await.unwrap();
+    let original = begin(&f, None, Some(context(&f.bot)), false).await;
+    let chat = crate::services::assistant_authority_tests::chat_for_row(
+        &f.state,
+        &f.bot.user_id,
+        &original,
+    )
+    .await;
+    let before = db
+        .collection::<Document>(BOTS)
+        .find_one(doc! {"_id":&f.bot.id})
+        .await
+        .unwrap()
+        .unwrap()
+        .get_i64("meta_observation_revision")
+        .unwrap_or(0);
+    acks::request(db, &chat, request("Ordinary direct Meta action"))
+        .await
+        .unwrap();
+    let after = db
+        .collection::<Document>(BOTS)
+        .find_one(doc! {"_id":&f.bot.id})
+        .await
+        .unwrap()
+        .unwrap()
+        .get_i64("meta_observation_revision")
+        .unwrap_or(0);
+    assert_eq!(
+        after - before,
+        1,
+        "one fresh source fence per distinct grant"
+    );
+    finish_source_turn(&f.state, &original, "Original answer").await;
+    let event = crate::services::assistant_team_service::event(
+        "channel_owner_verified",
+        "Owner verified".into(),
+        None,
+    );
+    engine::push_events(db, &f.bot.user_id, &original.id, vec![event])
+        .await
+        .unwrap()
+        .unwrap();
+    let ordinary = begin(&f, Some(&original.id), None, true).await;
+    let chat = crate::services::assistant_authority_tests::chat_for_row(
+        &f.state,
+        &f.bot.user_id,
+        &ordinary,
+    )
+    .await;
+    // Different operation arguments keep this independent from the pending
+    // direct card above while exercising the ordinary event's request source.
+    let args = serde_json::json!({"notice":true});
+    let mut asked = request("Action after owner verification");
+    asked.arguments = Some(&args);
+    let card = acks::request(db, &chat, asked).await.unwrap();
+    assert_eq!(
+        card.requested_turn_id,
+        original
+            .active_turn
+            .as_ref()
+            .map(|turn| turn.turn_id.clone())
+    );
+    assert_eq!(card.meta_contexts.len(), 1);
+    acks::decide(db, &f.bot.user_id, &ordinary.id, &card.id, false)
+        .await
+        .unwrap();
+    finish_source_turn(&f.state, &ordinary, "Awaiting owner decision").await;
+    assert!(
+        acks::source::publish_owner_denial(db, &f.bot.user_id, &card.id, &ordinary.id)
+            .await
+            .unwrap()
+    );
+    let continued = begin(&f, Some(&ordinary.id), None, true).await;
+    assert_eq!(
+        continued.active_turn.as_ref().unwrap().events[0].kind,
+        "action_denied"
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_denial_pruning_preserves_unresolved_proof_then_admits_healthy_b() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    engine::ensure_indexes(db).await.unwrap();
+    let mut b = crate::services::channel_adapters::meta::tests::registered_bot(
+        &f.state,
+        &f.bot.user_id,
+        "instagram",
+    )
+    .await;
+    b.platform_bot_id = "444".into();
+    db.collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&b.id}, &b)
+        .await
+        .unwrap();
+    transaction_service::run_db_only(db, &(db, &b), |tx, &(db, b)| {
+        Box::pin(scopes::ensure_current(db, tx, b, true))
+    })
+    .await
+    .unwrap();
+    let original = begin(&f, None, Some(context(&f.bot)), false).await;
+    let chat = crate::services::assistant_authority_tests::chat_for_row(
+        &f.state,
+        &f.bot.user_id,
+        &original,
+    )
+    .await;
+    let card = acks::request(db, &chat, request("Denied A operation"))
+        .await
+        .unwrap();
+    acks::decide(db, &f.bot.user_id, &original.id, &card.id, false)
+        .await
+        .unwrap();
+    finish_source_turn(&f.state, &original, "A answer").await;
+    let web = begin(&f, Some(&original.id), None, false).await;
+    assert!(
+        acks::source::publish_owner_denial(db, &f.bot.user_id, &card.id, &original.id)
+            .await
+            .unwrap()
+    );
+    crate::services::channel_meta_service::set_bot_delivery(db, &f.bot, &f.bot.user_id, false)
+        .await
+        .unwrap();
+    let held = db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id":&f.bot.id})
+        .await
+        .unwrap()
+        .unwrap();
+    crate::services::channel_meta_service::set_bot_delivery(db, &held, &f.bot.user_id, true)
+        .await
+        .unwrap();
+    let mut event = crate::services::assistant_team_service::event(
+        "message",
+        "Healthy B question".into(),
+        None,
+    );
+    event.channel_message = Some("Healthy B question".into());
+    event.channel_contexts = vec![context(&b)];
+    engine::push_events(db, &f.bot.user_id, &original.id, vec![event.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"from_generation":"unresolved"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        crate::services::channel_thread_follow_service::prune_queue(
+            db,
+            &f.bot.user_id,
+            &original.id
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        engine::get(db, &f.bot.user_id, &original.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        2
+    );
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"from_generation":f.scope.get("from_generation").cloned()}},
+        )
+        .await
+        .unwrap();
+    finish_source_turn(&f.state, &web, "Web answer").await;
+    let admitted = begin(&f, Some(&original.id), None, true).await;
+    assert_eq!(
+        admitted.active_turn.as_ref().unwrap().events[0].id,
+        event.id
     );
     db.drop().await.unwrap();
 }

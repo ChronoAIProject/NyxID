@@ -4152,6 +4152,13 @@ pub(crate) async fn begin_owner_turn_in_session(
                 bson::to_bson(&admitted_meta_grants)
                     .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
             );
+            document.insert(
+                "meta_contexts",
+                bson::to_bson(&super::async_service_operation::meta_lineage::contexts(
+                    &row,
+                )?)
+                .map_err(|_| AppError::AssistantTurnRequired)?,
+            );
             db.collection::<bson::Document>(MESSAGES)
                 .insert_one(document)
                 .session(&mut *session)

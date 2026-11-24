@@ -2396,6 +2396,8 @@ pub async fn request_tracked(
 /// must not bind the original confirmation to a later voice or trigger turn.
 #[derive(Clone)]
 pub struct RequestOrigin {
+    pub initiating_input_id: Option<String>,
+    pub meta_contexts: Vec<crate::models::assistant_conversation::ChannelTurnContext>,
     pub invocation_id: Option<String>,
     pub requested_turn_id: Option<String>,
     pub creation_turn_id: Option<String>,
@@ -2646,27 +2648,8 @@ async fn request_candidate_inner(
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
     let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
-    // A captured Meta request cannot borrow a successor turn's input, even
-    // when both turns use the same home and credential. Ordinary idle action
-    // callers retain their existing behavior.
-    let captured_turn = chat.turn_id.as_deref().filter(|_| origin.is_none());
-    if let Some(turn) = captured_turn {
-        let captured = super::channel_meta_service::scopes::assistant_turn_references(
-            db,
-            session,
-            &chat.user_id,
-            &chat.conversation_id,
-            turn,
-        )
-        .await?;
-        if !captured.is_empty() {
-            super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
-            for proof in captured {
-                super::channel_meta_service::scopes::fence_reference(db, session, &proof, true)
-                    .await?;
-            }
-        }
-    }
+    let selected = source::select(db, session, chat, &conversation, origin, orchestrated).await?;
+    source::fence_selection(db, session, &selected).await?;
     if access
         .as_ref()
         .and_then(|a| a.channel())
@@ -2713,38 +2696,7 @@ async fn request_candidate_inner(
     approval.require_request_support()?;
     let mut row = candidate.clone();
     row.routing = routing;
-    row.meta_contexts =
-        super::async_service_operation::meta_lineage::capture(db, session, &conversation).await?;
-    // Ordinary denials stay bound to the initiating user/orchestrator
-    // message across event turns. Only trigger runs use the active turn.
-    let mut initiating_filter = doc! {
-        "conversation_id": &conversation.id, "user_id": &chat.user_id,
-        "role": {"$in": ["user", "orchestrator"]},
-        "steering": bson::Bson::Null,
-        "execution_pending": {"$ne": true},
-    };
-    if let Some(seq) = conversation
-        .active_turn
-        .as_ref()
-        .and_then(|t| t.initiating_message_seq)
-    {
-        initiating_filter.insert("seq", doc! {"$lte": seq});
-    }
-    if !row.meta_contexts.is_empty() {
-        super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
-        let turn = conversation
-            .active_turn
-            .as_ref()
-            .ok_or(AppError::AssistantTurnRequired)?;
-        initiating_filter.insert("turn_id", &turn.turn_id);
-        initiating_filter.insert("role", doc! {"$in":["user","orchestrator","event"]});
-    }
-    let started_by = db
-        .collection::<AssistantMessage>(MESSAGES)
-        .find_one(initiating_filter)
-        .sort(doc! {"seq": -1})
-        .session(&mut *session)
-        .await?;
+    row.meta_contexts = selected.contexts;
     row.invocation_id = origin
         .map(|o| o.invocation_id.clone())
         .unwrap_or_else(|| chat.invocation_id.clone());
@@ -2763,67 +2715,26 @@ async fn request_candidate_inner(
             return Err(AppError::AssistantTurnRequired);
         }
     }
-    row.creation_turn_id = conversation
-        .active_turn
-        .as_ref()
-        .map(|turn| turn.turn_id.clone());
-    row.requested_turn_id = conversation
-        .active_turn
-        .as_ref()
-        .filter(|turn| turn.trigger_run_id.is_some() || turn.automation_work.is_some())
-        .map(|turn| turn.turn_id.clone())
-        .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
-    row.voice_request_id = conversation
-        .active_turn
-        .as_ref()
-        .and_then(|t| t.voice_request_id.clone());
-    row.trigger_run_id = conversation
-        .active_turn
-        .as_ref()
-        .and_then(|turn| turn.trigger_run_id.clone());
-    if let Some(origin) = origin {
-        row.requested_turn_id = origin.requested_turn_id.clone();
-        row.creation_turn_id = origin.creation_turn_id.clone();
-        row.voice_request_id = origin.voice_request_id.clone();
-        row.trigger_run_id = origin.trigger_run_id.clone();
-    }
-    // Both the active request and an initiating-message excerpt can carry
-    // provider content. Serialize card publication with each original scope.
-    if conversation.context_reset_reason.as_deref() == Some("provider_erasure")
-        && chat.turn_id.is_some()
-    {
-        super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
-    }
-    for turn in [
-        row.creation_turn_id.as_deref(),
-        row.requested_turn_id
-            .as_deref()
-            .filter(|turn| Some(*turn) != row.creation_turn_id.as_deref()),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|turn| Some(*turn) != captured_turn)
-    {
-        for proof in super::channel_meta_service::scopes::assistant_turn_references(
-            db,
-            session,
-            &chat.user_id,
-            &chat.conversation_id,
-            turn,
-        )
-        .await?
-        {
-            super::channel_meta_service::scopes::fence_reference(db, session, &proof, true).await?;
-        }
-    }
-    if row.decider == "orchestrator" {
-        row.request_excerpt = started_by.map(|message| {
-            format!(
-                "{} said: {}",
-                message.role,
-                super::assistant_nyxagent::excerpt(&message.text, 600)
-            )
+    row.creation_turn_id = selected.creation_turn_id;
+    row.requested_turn_id = selected.requested_turn_id;
+    row.voice_request_id = origin
+        .map(|origin| origin.voice_request_id.clone())
+        .unwrap_or_else(|| {
+            conversation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.voice_request_id.clone())
         });
+    row.trigger_run_id = origin
+        .map(|origin| origin.trigger_run_id.clone())
+        .unwrap_or_else(|| {
+            conversation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.trigger_run_id.clone())
+        });
+    if row.decider == "orchestrator" {
+        row.request_excerpt = selected.excerpt;
     }
     // A pending or denied duplicate is reused only when the same decider
     // would see it with the same NyxBot routing: work assigned from two

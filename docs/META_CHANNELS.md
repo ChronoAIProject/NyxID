@@ -414,6 +414,16 @@ action receipts, including clean HTTP stream EOF, reread the captured turn's
 source and fence receipt insertion in the same transaction, so erased turns
 cannot acquire a late receipt. Ordinary web receipts may still settle after
 their original turn has finished.
+Card publication requires the captured turn's retained initiating input,
+independently of context-reset markers. Original Meta inputs keep their minimal
+source contexts beside their grant proof; cards and authored-skill draft claims
+bind the initiating input and those contexts together. Recovery reuses that
+recorded source. A normal card reads the input once and fences each distinct
+grant once. Retained ordinary web inputs still permit delayed actions.
+Denial continuations retain the original requesting question, so explaining a
+denial does not create a new approval. Queue pruning removes only the exact
+continuation after positively established source loss and preserves it for
+retry on database errors or unresolved proof.
 Async service watches retain a bounded set of their original Meta source
 references on the watch itself, without display names, chat labels or provider
 credentials. Reservation, result enqueue, admission and connected consumption
