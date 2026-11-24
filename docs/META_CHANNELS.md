@@ -291,7 +291,12 @@ legacy plans are attributed in bounded batches by exact owner/source-message
 pairs before their inbound records are deleted. Retained exact joins also erase historical
 noncanonical logical keys; only expired-source recovery assumes the canonical
 saved-result key. The receipt lookup has an owner/inbound-message index; new
-parented plans require neither source nor channel-history scans. Erasing one inbox preserves sibling inbox plans.
+parented plans require neither source nor channel-history scans. A non-sparse
+owner/parent/ID index supports 100-plan pages, and attribution reads project
+only the owner, source, key, ID and timestamp. Retained exact joins deliberately
+have no timestamp cutoff: a required timestamp does not establish chronology
+for historical or recovered metadata. This also erases precisely attributable
+legacy rows whose stored timestamps precede the current bot record. Erasing one inbox preserves sibling inbox plans.
 A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire
@@ -326,8 +331,11 @@ backup. Verify the owner, turn, destination hash and original bot association;
 do not guess an association, delete all same-owner receipts or use a routing
 checkbox as proof. An ownerless scoped source is not sufficient by itself;
 independent owner-bearing reply receipts or the verified saved handoff can
-resolve it without deleting that source. Contradictory parent evidence keeps
-the obligation pending. Restore metadata only, keeping credentials and message text
+resolve it without deleting that source. Contradictory parent evidence, including ownerless receipts naming a sibling,
+keeps the obligation pending in either owner/source arrangement. A saved
+handoff with a retained channel preserves that channel's concrete bot identity;
+verified different-platform native handoffs can still preserve unrelated org
+receipts owned by their linking person. Restore metadata only, keeping credentials and message text
 out of diagnostics. The existing pending-cleanup worker retries; a manual
 installation can also repeat its ordinary Delete action. If exact attribution
 cannot be recovered, retain the unresolved obligation and escalate it for
@@ -342,7 +350,11 @@ disabled and private DMs owner-only, including when the org wallet is funded.
 The administrator must explicitly enable customer conversations after readiness
 checks. Repair preserves the last committed guest exposure choice; it refuses
 if the checked connection changes or the acting administrator loses authority
-before retirement, including delivery-health recovery. Marked credentials are
+before retirement, including delivery-health or route recovery. Direct Meta
+customer setup checks its dedicated callback key and default together under the
+bot routing fence. It refuses competing defaults instead of replacing them;
+ordinary route replacement and explicit per-conversation overrides retain their
+existing behavior. Marked credentials are
 authenticated under their old owner and rebound to the destination in the same
 fenced ownership transfer, following the existing staged/strict record writer
 mode; fresh Meta consent is still required for delivery. A failed storage read is retryable setup failure and never

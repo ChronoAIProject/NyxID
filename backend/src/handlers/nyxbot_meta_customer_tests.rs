@@ -743,7 +743,9 @@ async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retire
             .collection::<bson::Document>(CHANNELS)
             .update_one(
                 doc! {"_id": &prior.id},
-                doc! {"$set": {"platform": "instagram", "status": "pending"}},
+                doc! {"$set": {"platform": "instagram", "status": "pending", "transport": "direct",
+                "agent_api_key_id": null, "gateway_channel_id": null, "gateway_record_id": null,
+                "gateway_version": null, "binding_id": null, "agent_key_ciphertext": null}},
             )
             .await
             .unwrap();
@@ -905,3 +907,6 @@ async fn meta_assignment_repair_does_not_retire_a_route_recovered_by_the_health_
     assert_eq!(retried["channel_id"], id);
     assert!(retried["owner_link_code"].is_null());
 }
+
+#[path = "nyxbot_meta_routing_tests.rs"]
+mod routing;

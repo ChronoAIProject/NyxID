@@ -798,10 +798,16 @@ pub(crate) async fn retire_connection(
     retire_connection_checked(state, row, reason, status, error, None).await
 }
 
+struct RepairGuard {
+    actor: String,
+    meta_callback: Option<String>,
+}
+
 pub(crate) async fn retire_for_repair(
     state: &AppState,
     actor: &str,
     expected: &NyxbotChannel,
+    meta_callback: Option<&str>,
 ) -> AppResult<Vec<String>> {
     retire_connection_checked(
         state,
@@ -809,7 +815,10 @@ pub(crate) async fn retire_for_repair(
         ReleaseReason::Disconnect,
         "disconnected",
         None,
-        Some(actor),
+        Some(RepairGuard {
+            actor: actor.into(),
+            meta_callback: meta_callback.map(str::to_owned),
+        }),
     )
     .await
 }
@@ -820,9 +829,8 @@ async fn retire_connection_checked(
     reason: ReleaseReason,
     status: &str,
     error: Option<&str>,
-    repair_actor: Option<&str>,
+    repair: Option<RepairGuard>,
 ) -> AppResult<Vec<String>> {
-    let repair_actor = repair_actor.map(str::to_owned);
     let scoped_state = state.clone();
     let db = state.db.clone();
     let scoped_row = row.clone();
@@ -834,9 +842,9 @@ async fn retire_connection_checked(
         let row = &scoped_row;
         let work:AppResult<_>=Box::pin(async {
             let current=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&row.id,"user_id":&row.user_id}).session(&mut *session).await?.ok_or_else(conflict)?;
-            if let Some(actor) = &repair_actor {
+            if let Some(repair) = &repair {
                 super::channel_bot_service::fence_owner_management(
-                    &db, session, actor, bot_owner(&current),
+                    &db, session, &repair.actor, bot_owner(&current),
                 ).await?;
                 super::platform_bot_authority::fence_personal_routes(
                     &db, &current.channel_bot_id, bot_owner(&current), session,
@@ -846,6 +854,16 @@ async fn retire_connection_checked(
                 // retiring any route, key, follow or gateway release.
                 if !repair_snapshot_matches(row, &current) {
                     return Err(AppError::Conflict("Channel assignment changed during repair".into()));
+                }
+                if let Some(callback) = &repair.meta_callback {
+                    super::nyxbot_channel_query_service::require_no_competing_meta_default(
+                        &db, session, &current,
+                    ).await?;
+                    if super::nyxbot_channel_query_service::meta_default_matches(
+                        &db, &current, callback, Some(&mut *session),
+                    ).await? {
+                        return Err(AppError::Conflict("This inbox route recovered during repair. Check its current assignment".into()));
+                    }
                 }
             }
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok((Vec::new(), false));}

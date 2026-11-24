@@ -73,6 +73,133 @@ pub(crate) async fn reusable(
         && owner == bot_owner)
 }
 
+pub(crate) fn direct_callback(base_url: &str, channel_id: &str) -> String {
+    format!(
+        "{}/api/v1/nyxbot/relay/{channel_id}",
+        base_url.trim_end_matches('/')
+    )
+}
+
+/// Customer setup promises one dedicated default callback. Ordinary connection
+/// reuse and explicit per-chat overrides retain their established policies.
+pub(crate) async fn reusable_meta(
+    db: &Database,
+    actor: &str,
+    owner: &str,
+    row: &NyxbotChannel,
+    base_url: &str,
+) -> AppResult<bool> {
+    if row.transport != "direct" || !super::channel_adapters::meta::is_meta(&row.platform) {
+        return reusable(db, actor, owner, row).await;
+    }
+    if row.bot_owner_id.as_deref().unwrap_or(&row.user_id) != owner {
+        return Ok(false);
+    }
+    meta_default_matches(db, row, &direct_callback(base_url, &row.id), None).await
+}
+
+pub(crate) async fn meta_default_matches(
+    db: &Database,
+    row: &NyxbotChannel,
+    callback: &str,
+    mut tx: Option<&mut mongodb::ClientSession>,
+) -> AppResult<bool> {
+    if row.status != "active" || row.delivery_status.as_deref() == Some("failing") {
+        return Ok(false);
+    }
+    let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
+    let key = db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(
+            doc! {"_id": &row.route_api_key_id, "user_id": owner, "is_active": true,
+            "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}},
+        );
+    let key = if let Some(tx) = tx.as_deref_mut() {
+        key.session(tx).await?
+    } else {
+        key.await?
+    };
+    let Some(key) = key else { return Ok(false) };
+    if super::channel_routing_service::ensure_route_agent(&key, owner).is_err()
+        || key.callback_url.as_deref() != Some(callback)
+    {
+        return Ok(false);
+    }
+    if let Some(id) = &row.agent_api_key_id {
+        let agent = db
+            .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": id, "user_id": &row.user_id, "is_active": true,
+            "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}});
+        let agent = if let Some(tx) = tx.as_deref_mut() {
+            agent.session(tx).await?
+        } else {
+            agent.await?
+        };
+        if agent.is_none_or(|key| {
+            key.expires_at
+                .is_some_and(|expiry| expiry <= chrono::Utc::now())
+        }) {
+            return Ok(false);
+        }
+    }
+    let Some(route) = row.route_id.as_deref() else {
+        return Ok(false);
+    };
+    let found = db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .find_one(
+            doc! {"_id": route, "user_id": owner, "channel_bot_id": &row.channel_bot_id,
+            "platform": &row.platform, "is_active": true, "default_agent": true,
+            "agent_api_key_id": &row.route_api_key_id},
+        )
+        .projection(doc! {"_id": 1});
+    Ok(if let Some(tx) = tx {
+        found.session(tx).await?
+    } else {
+        found.await?
+    }
+    .is_some())
+}
+
+/// Caller holds the bot write fence, shared with ordinary route mutations.
+/// A rebound default is an owner-selected competitor even if it reused the
+/// original route ID. Non-default per-conversation routes are independent.
+pub(crate) async fn require_no_competing_meta_default(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    row: &NyxbotChannel,
+) -> AppResult<()> {
+    let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
+    let mut filter = doc! {"channel_bot_id": &row.channel_bot_id, "user_id": owner,
+    "is_active": true, "default_agent": true};
+    if let Some(route) = &row.route_id {
+        filter.insert(
+            "$or",
+            bson::bson!([
+                {"_id": {"$ne": route}},
+                {"agent_api_key_id": {"$ne": &row.route_api_key_id}}
+            ]),
+        );
+    } else {
+        // A crash after direct-route insertion may leave route_id unset. The
+        // connection's dedicated key still identifies its incomplete route.
+        filter.insert("agent_api_key_id", doc! {"$ne": &row.route_api_key_id});
+    }
+    let other = db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .find_one(filter)
+        .projection(doc! {"_id": 1})
+        .session(tx)
+        .await?;
+    if other.is_some() {
+        return Err(AppError::Conflict(
+            "This bot has another default route. Review its routing before assigning a specialist"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn key_alive(db: &Database, owner: &str, key: &str) -> AppResult<bool> {
     match super::key_service::get_api_key(db, owner, key).await {
         Ok(key) => Ok(key.is_active),

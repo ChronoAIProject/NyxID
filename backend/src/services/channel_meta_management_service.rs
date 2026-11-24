@@ -77,11 +77,12 @@ pub async fn customer_setup(
     let mut issued_link = None;
     let row = match existing {
         Some(mut row) => {
-            let reusable = super::nyxbot_channel_query_service::reusable(
+            let reusable = super::nyxbot_channel_query_service::reusable_meta(
                 &state.db,
                 &row.user_id,
                 &owner,
                 &row,
+                &state.config.base_url,
             )
             .await?;
             if !reusable {

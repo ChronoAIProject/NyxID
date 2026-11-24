@@ -2661,7 +2661,7 @@ async fn marked_channel_transfer_rebinds_credentials_in_staged_and_strict_modes_
         for platform in ["messenger", "instagram"] {
             let f = fixture("marked_meta_transfer").await;
             let mut keys = test_utils::test_encryption_keys();
-            keys.set_contextual_record_writes(contextual);
+            keys.set_contextual_record_writes(true);
             keys.set_allow_legacy_record_reads(!contextual);
             let bot = insert_bot(&f).await;
             let fields = [
@@ -2700,6 +2700,7 @@ async fn marked_channel_transfer_rebinds_credentials_in_staged_and_strict_modes_
                 .update_one(doc! {"_id": &bot.id}, doc! {"$set": set})
                 .await
                 .unwrap();
+            keys.set_contextual_record_writes(contextual);
             let reviewed = preview(
                 &f.db,
                 &f.admin,

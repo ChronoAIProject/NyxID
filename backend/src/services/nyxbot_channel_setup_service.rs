@@ -417,8 +417,9 @@ pub(crate) async fn disconnect_for_repair(
     state: &AppState,
     actor: &str,
     expected: &NyxbotChannel,
+    meta_callback: Option<&str>,
 ) -> AppResult<Value> {
-    let ids = releases::retire_for_repair(state, actor, expected).await?;
+    let ids = releases::retire_for_repair(state, actor, expected, meta_callback).await?;
     finish_disconnect(state, actor, expected, &ids).await
 }
 

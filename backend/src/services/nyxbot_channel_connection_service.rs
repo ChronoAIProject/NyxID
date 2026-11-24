@@ -78,6 +78,9 @@ pub(crate) struct ConnectionRequest<'a> {
 /// The service owns connection policy, transactions and lifecycle for every path.
 #[async_trait::async_trait]
 pub(crate) trait ConnectionTransport: Send + Sync {
+    fn requires_unclaimed_default(&self) -> bool {
+        false
+    }
     async fn connect_gateway(
         &self,
         state: &AppState,
@@ -106,6 +109,9 @@ pub(crate) trait ConnectionTransport: Send + Sync {
 pub(crate) struct RelayConnection;
 #[async_trait::async_trait]
 impl ConnectionTransport for RelayConnection {
+    fn requires_unclaimed_default(&self) -> bool {
+        true
+    }
     async fn connect_gateway(
         &self,
         _: &AppState,
@@ -313,6 +319,8 @@ pub(crate) async fn connect(
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
     let bot: ChannelBot = accessible_bot(state, owner, bot_id).await?;
+    let guarded_default = effects.requires_unclaimed_default()
+        && super::channel_adapters::meta::is_meta(&bot.platform);
     let org_binding =
         crate::services::org_channel_service::link_target(&state.db, owner, &bot, agent).await?;
     crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
@@ -347,14 +355,25 @@ pub(crate) async fn connect(
                 "This bot already has a selected agent".into(),
             ));
         }
-        if crate::services::nyxbot_channel_query_service::reusable(
-            &state.db,
-            owner,
-            &bot_owner_id,
-            &existing,
-        )
-        .await?
-        {
+        let reusable = if guarded_default {
+            super::nyxbot_channel_query_service::reusable_meta(
+                &state.db,
+                owner,
+                &bot_owner_id,
+                &existing,
+                &state.config.base_url,
+            )
+            .await?
+        } else {
+            super::nyxbot_channel_query_service::reusable(
+                &state.db,
+                owner,
+                &bot_owner_id,
+                &existing,
+            )
+            .await?
+        };
+        if reusable {
             if repair_channel.is_some() {
                 return Err(AppError::Conflict(
                     "Channel repair already completed; check the current assignment".into(),
@@ -385,7 +404,19 @@ pub(crate) async fn connect(
         rebuilt_from = Some(existing.clone());
         #[cfg(test)]
         super::durable_wake_tests::after("channel_repair_before_retirement").await;
-        super::nyxbot_channel_setup_service::disconnect_for_repair(state, owner, &existing).await?;
+        let callback = (guarded_default && existing.transport == "direct").then(|| {
+            super::nyxbot_channel_query_service::direct_callback(
+                &state.config.base_url,
+                &existing.id,
+            )
+        });
+        super::nyxbot_channel_setup_service::disconnect_for_repair(
+            state,
+            owner,
+            &existing,
+            callback.as_deref(),
+        )
+        .await?;
     }
     // Never silently replace another agent's default route.
     let routes =
@@ -411,10 +442,8 @@ pub(crate) async fn connect(
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     let label = excerpt(&bot.label, 60);
-    let direct_callback = format!(
-        "{}/api/v1/nyxbot/relay/{id}",
-        state.config.base_url.trim_end_matches('/')
-    );
+    let direct_callback =
+        super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &id);
     let gateway_url = if wants_gateway {
         match gateway_base(state).await {
             Ok(url) => Some(url),
@@ -638,6 +667,23 @@ pub(crate) async fn connect(
                 &route_key.full_key,
             )
             .await
+    } else if guarded_default {
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_default_before_insert").await;
+        channel_routing_service::create_meta_default(
+            &state.db,
+            bot_owner(&row),
+            &bot.id,
+            &bot.platform,
+            &row.route_api_key_id,
+            &direct_callback,
+        )
+        .await
+        .map(|route| route.id)
+        .map_err(|error| match error {
+            AppError::Conflict(_) => "default_route_conflict",
+            _ => "route_create_failed",
+        })
     } else {
         connect_direct(state, &row, &bot).await
     };
@@ -780,6 +826,9 @@ pub(crate) async fn connect(
                 ),
             )
             .await;
+            if code == "default_route_conflict" {
+                return Err(AppError::Conflict("The default route changed during specialist setup. Review this bot's routing and try again".into()));
+            }
             Err(AppError::ValidationError(match code {
                 "gateway_provider_not_registered" => {
                     "The Agent Event Gateway has not registered NyxBot as a provider yet \

@@ -18,6 +18,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"user_id": 1, "source_id": 1})
                 .build(),
+            // Non-sparse: historical plans omit the bot parent. Support the
+            // exact owner/null-parent page without scanning modern plans.
+            IndexModel::builder()
+                .keys(doc! {"user_id": 1, "channel_bot_id": 1, "_id": 1})
+                .build(),
             IndexModel::builder()
                 .keys(doc! {"channel_bot_id": 1})
                 .options(IndexOptions::builder().sparse(true).build())
@@ -34,6 +39,7 @@ pub async fn load(db: &Database, key: &str) -> AppResult<Option<ChannelTextDeliv
         .await?)
 }
 
+#[cfg(test)]
 #[cfg(test)]
 pub async fn begin(
     db: &Database,
