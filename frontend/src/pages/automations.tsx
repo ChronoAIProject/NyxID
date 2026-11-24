@@ -18,10 +18,6 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  useAutomationSetup,
-  type AutomationSetup,
-} from "@/hooks/use-automations";
 import { AutomationPreferences } from "@/components/assistant/automation-preferences";
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -34,11 +30,14 @@ import {
   useUpdateTrigger,
 } from "@/hooks/use-triggers";
 import {
+  isAutomationHistoryAccessError,
   useAutomationChats,
   useAutomationRuns,
+  useAutomationSetup,
   useCancelAutomationRun,
   useRunAutomation,
   useSchedulePreview,
+  type AutomationSetup,
 } from "@/hooks/use-automations";
 import {
   useNyxBotAgents,
@@ -298,7 +297,7 @@ function AutomationsContent() {
         />
       )}
       {history && (
-        <AutomationHistory row={history} onClose={() => setHistory(null)} />
+        <AutomationHistory key={history.id} row={history} onClose={() => setHistory(null)} />
       )}
       <OneTimeSecretDialog
         open={secrets.length > 0}
@@ -937,7 +936,20 @@ function AutomationHistory({
   const history = useAutomationRuns(row.id);
   const cancelRun = useCancelAutomationRun();
   const [cancelling, setCancelling] = useState<string | null>(null);
-  const runs = history.data?.pages.flatMap((page) => page.runs) ?? [];
+  const [olderRunsFailed, setOlderRunsFailed] = useState(false);
+  const error = history.error;
+  const accessDenied = isAutomationHistoryAccessError(error);
+  const pages = accessDenied ? [] : history.data?.pages ?? [];
+  const runs = pages.flatMap((page) => page.runs);
+  const hasHistory = pages.length > 0;
+  const hasOlderRuns = hasHistory && history.hasNextPage;
+  // Polling refreshes the loaded pages and can clear the query's next-page error.
+  const retryOlderRuns = hasOlderRuns && (olderRunsFailed || history.isFetchNextPageError);
+  if (!hasHistory) {
+    if (cancelling !== null) setCancelling(null);
+    if (olderRunsFailed) setOlderRunsFailed(false);
+  }
+  const historyById = new Map(runs.map((run) => [run.id, run]));
   return (
     <Dialog
       open
@@ -965,20 +977,32 @@ function AutomationHistory({
             </DialogFooter>
           </DialogContent>
         </Dialog>
-        {cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
-        {history.error ? (
-          <ErrorBanner message={history.error.message} />
-        ) : history.isPending ? (
+        {accessDenied ? (
+          <ErrorBanner message={error.message} />
+        ) : error && !hasHistory ? (
+          <ErrorBanner message={error.message} onRetry={() => void history.refetch()} />
+        ) : history.isRefetchError && history.fetchStatus === "idle" ? (
+          <ErrorBanner
+            message={translateUi("Could not refresh run history.")}
+            onRetry={() => void history.refetch({ cancelRefetch: false })}
+          />
+        ) : null}
+        {hasHistory && cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
+        {!hasHistory && !error && (
           <Skeleton className="h-24 w-full" aria-label={translateUi("Loading runs")} />
-        ) : !runs.length ? (
+        )}
+        {hasHistory && runs.length === 0 && (
           <GroupedList>
             <GroupedRow title={translateUi("No runs yet.")} />
           </GroupedList>
-        ) : (
+        )}
+        {runs.length > 0 && (
           <div className="space-y-6">
             {runs.map((run) => (
               <GroupedList
                 key={run.id}
+                id={`automation-run-${run.id}`}
+                tabIndex={-1}
                 title={run.outcome.replaceAll("_", " ")}
                 footer={
                   <>
@@ -1003,6 +1027,14 @@ function AutomationHistory({
                         {formatAutomationTime(run.missed.from, zone)}{translateUi(" and")}{" "}
                         {formatAutomationTime(run.missed.through, zone)}.
                       </p>
+                    ) : run.outcome === "skipped" && (run.reason === "overlap_skip" || run.reason === "overlap") ? (
+                      <OverlapSkipDetails
+                        runId={run.blocking_run_id}
+                        scheduledAt={historyById.get(run.blocking_run_id ?? "")?.scheduled_at}
+                        hasOlderRuns={hasOlderRuns}
+                        retryOlderRuns={retryOlderRuns}
+                        zone={zone}
+                      />
                     ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "permit" ? (
                       <p>{translateUi("A temporary server problem interrupted this run. Check completed actions before starting another run.")}</p>
                     ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "shutdown" ? (
@@ -1063,19 +1095,72 @@ function AutomationHistory({
             ))}
           </div>
         )}
-        {history.hasNextPage && (
-          <GroupedList>
+        {hasOlderRuns && (
+          <GroupedList footer={retryOlderRuns && (
+            <p role="alert" className="text-destructive">{translateUi("Could not load older runs.")}</p>
+          )}>
             <GroupedRow asChild interactive>
               <button
                 type="button"
-                disabled={history.isFetchingNextPage}
-                onClick={() => void history.fetchNextPage()}
-              >{translateUi("Load older runs")}</button>
+                disabled={history.isFetching}
+                onClick={async () => {
+                  const result = await history.fetchNextPage({ cancelRefetch: false });
+                  if (result.isFetchNextPageError) {
+                    setOlderRunsFailed(true);
+                  } else if (result.data && result.data.pages.length > pages.length) {
+                    setOlderRunsFailed(false);
+                  }
+                }}
+              >{history.isFetchingNextPage
+                ? translateUi("Loading older runs…")
+                : retryOlderRuns
+                  ? translateUi("Retry loading older runs")
+                  : translateUi("Load older runs")}</button>
             </GroupedRow>
           </GroupedList>
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function OverlapSkipDetails({ runId, scheduledAt, hasOlderRuns, retryOlderRuns, zone }: {
+  readonly runId: string | null | undefined;
+  readonly scheduledAt: string | undefined;
+  readonly hasOlderRuns: boolean;
+  readonly retryOlderRuns: boolean;
+  readonly zone: string;
+}) {
+  if (!runId) {
+    return <p>{translateUi("Skipped because another run was in progress. The blocking run was not recorded.")}</p>;
+  }
+  if (!scheduledAt && retryOlderRuns) {
+    return <p>{translateUi("Skipped because of run {{value1}}. Retry loading older runs to look for it.", { value1: runId })}</p>;
+  }
+  if (!scheduledAt) {
+    return (
+      <p>{hasOlderRuns
+        ? translateUi("Skipped because of run {{value1}}. Load older runs to look for it.", { value1: runId })
+        : translateUi("Skipped because of run {{value1}}. That run is unavailable in history.", { value1: runId })}
+      </p>
+    );
+  }
+  return (
+    <p>
+      <button
+        type="button"
+        className="text-primary-text underline"
+        onClick={() => {
+          const section = document.getElementById(`automation-run-${runId}`);
+          section?.scrollIntoView({ block: "nearest" });
+          section?.focus({ preventScroll: true });
+        }}
+      >
+        {translateUi("Skipped because of the run scheduled for {{value1}}", {
+          value1: formatAutomationTime(scheduledAt, zone, true),
+        })}
+      </button>
+    </p>
   );
 }
 

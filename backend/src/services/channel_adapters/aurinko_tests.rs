@@ -968,6 +968,42 @@ async fn aurinko_failed_setup_delete_with_revoked_token_deactivates_locally() {
 #[tokio::test]
 async fn aurinko_repair_replaces_signal_subscription_and_recovers_unknown_creation() {
     let f = Fixture::new().await;
+    let writes = f
+        .mock
+        .lock()
+        .await
+        .requests
+        .iter()
+        .filter(|(method, url)| method == "POST" && url.starts_with("/v1/subscriptions"))
+        .count();
+    crate::services::channel_credential_continuity::rewrap_fixture(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.bot,
+        &["app_secret_encrypted"],
+    )
+    .await;
+    bots::verify_serialized_bot(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.state.http_client,
+        &f.adapter,
+        &f.bot.id,
+        &f.bot.user_id,
+        &f.url,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.mock
+            .lock()
+            .await
+            .requests
+            .iter()
+            .filter(|(method, url)| method == "POST" && url.starts_with("/v1/subscriptions"))
+            .count(),
+        writes
+    );
     f.mock.lock().await.subscriptions[0]["detailLevel"] = json!("signal");
     bots::verify_serialized_bot(
         &f.state.db,

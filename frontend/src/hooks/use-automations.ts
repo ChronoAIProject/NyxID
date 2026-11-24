@@ -5,12 +5,17 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import {
   runsSchema,
   runSchema,
   type ScheduleSpec,
 } from "@/schemas/automations";
+
+export function isAutomationHistoryAccessError(error: unknown): error is ApiError {
+  return error instanceof ApiError && [401, 403, 404].includes(error.status);
+}
+
 export function useAutomationRuns(id: string | undefined) {
   return useInfiniteQuery({
     queryKey: ["triggers", id, "runs"],
@@ -18,12 +23,21 @@ export function useAutomationRuns(id: string | undefined) {
     initialPageParam: undefined as
       | { before: string; before_id: string }
       | undefined,
-    queryFn: async ({ pageParam }) =>
-      runsSchema.parse(
-        await api.get(
-          `/triggers/${encodeURIComponent(id!)}/runs${pageParam ? `?${new URLSearchParams(pageParam)}` : ""}`,
-        ),
-      ),
+    queryFn: async ({ pageParam, client, queryKey, signal }) => {
+      try {
+        return runsSchema.parse(
+          await api.get(
+            `/triggers/${encodeURIComponent(id!)}/runs${pageParam ? `?${new URLSearchParams(pageParam)}` : ""}`,
+          ),
+        );
+      } catch (error) {
+        if (isAutomationHistoryAccessError(error) && !signal.aborted) {
+          // Discard retained pages so a later transient failure cannot reveal them.
+          client.setQueryData(queryKey, { pages: [], pageParams: [] });
+        }
+        throw error;
+      }
+    },
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: 5000,
   });

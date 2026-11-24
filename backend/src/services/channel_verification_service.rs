@@ -60,6 +60,10 @@ pub struct CredentialSnapshot {
 }
 
 impl CredentialSnapshot {
+    pub(super) fn bot(&self) -> &ChannelBot {
+        &self.bot
+    }
+
     pub(crate) fn local(bot: &ChannelBot) -> Self {
         Self {
             bot: bot.clone(),
@@ -85,7 +89,7 @@ impl CredentialSnapshot {
         })
     }
 
-    pub(crate) fn fingerprint(&self) -> AppResult<String> {
+    fn fingerprint_fields(&self) -> AppResult<Document> {
         let mut fields = credential_filter(&self.bot)?;
         // A matching webhook can activate a bot while verification is in flight.
         fields.remove("status");
@@ -101,6 +105,35 @@ impl CredentialSnapshot {
                 },
             );
         }
+        Ok(fields)
+    }
+
+    pub(super) fn dependencies(
+        &self,
+        evidence: &crate::models::channel_bot::CredentialContinuity,
+    ) -> AppResult<String> {
+        let mut fields = self.fingerprint_fields()?;
+        for name in super::channel_credential_continuity::VERIFIED {
+            fields.remove(name);
+        }
+        super::channel_credential_continuity::dependencies(
+            &self.bot,
+            "verification",
+            &super::channel_credential_continuity::VERIFIED,
+            &(&fields, self.platform.as_ref().map(|p| p.producer_ids())),
+            evidence,
+        )
+    }
+
+    pub(crate) fn fingerprint(&self) -> AppResult<String> {
+        if let Some(evidence) = super::channel_credential_continuity::verified(&self.bot)? {
+            return Ok(super::channel_credential_continuity::select(
+                evidence,
+                "verification",
+                self.dependencies(evidence)?,
+            ));
+        }
+        let fields = self.fingerprint_fields()?;
         let bytes = bson::to_vec(&fields)
             .map_err(|_| AppError::Internal("Unable to encode credential check".into()))?;
         Ok(hex::encode(Sha256::digest(bytes)))
@@ -151,6 +184,45 @@ impl CredentialSnapshot {
         Ok(secrets)
     }
 
+    fn write_filter(&self, mut filter: Document) -> AppResult<Document> {
+        super::channel_credential_continuity::verified(&self.bot)?;
+        filter.extend(super::channel_credential_continuity::physical_filter(
+            &self.bot,
+        )?);
+        Ok(filter)
+    }
+
+    fn rebound_filter(&self, bot: ChannelBot, mut filter: Document) -> AppResult<Option<Document>> {
+        if bot.credential_continuity.is_none()
+            || bot.ownership_version != self.bot.ownership_version
+        {
+            return Ok(None);
+        }
+        let current = Self {
+            bot,
+            platform: self.platform.clone(),
+        };
+        if current.fingerprint()? != self.fingerprint()? {
+            return Ok(None);
+        }
+        let fields = credential_filter(&current.bot)?;
+        for name in super::channel_credential_continuity::VERIFIED {
+            filter.insert(name, fields.get(name).cloned());
+        }
+        current.write_filter(filter).map(Some)
+    }
+
+    pub(super) async fn fence_signing_source(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        match &self.platform {
+            Some(platform) => platform.fence_projection(db, session).await,
+            None => Ok(self.bot.credential_source != "platform"),
+        }
+    }
+
     /// Join the existing sender-authority transaction. Both bot-specific and
     /// shared platform key changes conflict with admission under this snapshot.
     pub(crate) async fn fence_in_session(
@@ -158,26 +230,35 @@ impl CredentialSnapshot {
         db: &mongodb::Database,
         session: &mut mongodb::ClientSession,
     ) -> AppResult<bool> {
-        if let Some(platform) = &self.platform {
-            let guard = doc! {"_id":&platform.id,"secrets":bson::to_bson(&platform.secrets)
-            .map_err(|_|AppError::Internal("Unable to encode platform credentials".into()))?};
-            if db
-                .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-                .update_one(guard, doc! {"$inc":{"channel_observation_version":1_i64}})
-                .session(&mut *session)
-                .await?
-                .matched_count
-                != 1
-            {
-                return Ok(false);
-            }
+        if let Some(platform) = &self.platform
+            && !platform.fence_projection(db, session).await?
+        {
+            return Ok(false);
         }
-        Ok(db
-            .collection::<ChannelBot>(COLLECTION_NAME)
-            .update_one(
-                credential_filter(&self.bot)?,
-                doc! {"$inc":{"platform_entry_effect_revision":1_i64}},
-            )
+        let bots = db.collection::<ChannelBot>(COLLECTION_NAME);
+        let filter = credential_filter(&self.bot)?;
+        let update = doc! {"$inc":{"platform_entry_effect_revision":1_i64}};
+        if bots
+            .update_one(self.write_filter(filter.clone())?, update.clone())
+            .session(&mut *session)
+            .await?
+            .matched_count
+            == 1
+        {
+            return Ok(true);
+        }
+        let Some(current) = bots
+            .find_one(doc! {"_id":&self.bot.id})
+            .session(&mut *session)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Some(filter) = self.rebound_filter(current, filter)? else {
+            return Ok(false);
+        };
+        Ok(bots
+            .update_one(filter, update)
             .session(session)
             .await?
             .matched_count
@@ -191,6 +272,31 @@ impl CredentialSnapshot {
         update: impl Into<mongodb::options::UpdateModifications>,
     ) -> AppResult<bool> {
         let update = update.into();
+        if self
+            .update_exact(db, self.write_filter(filter.clone())?, update.clone())
+            .await?
+        {
+            return Ok(true);
+        }
+        let Some(current) = db
+            .collection::<ChannelBot>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&self.bot.id})
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Some(filter) = self.rebound_filter(current, filter)? else {
+            return Ok(false);
+        };
+        self.update_exact(db, filter, update).await
+    }
+
+    async fn update_exact(
+        &self,
+        db: &mongodb::Database,
+        filter: Document,
+        update: mongodb::options::UpdateModifications,
+    ) -> AppResult<bool> {
         let Some(platform) = &self.platform else {
             return Ok(db
                 .collection::<ChannelBot>(COLLECTION_NAME)
@@ -199,40 +305,25 @@ impl CredentialSnapshot {
                 .matched_count
                 == 1);
         };
-        let guard = doc! { "_id": &platform.id, "secrets": bson::to_bson(&platform.secrets).map_err(|_| AppError::Internal("Unable to encode platform credentials".into()))? };
-        let mut session = db.client().start_session().await?;
-        // Writing the shared credential row makes rotation conflict with this transaction.
-        // A snapshot read alone would permit an old signature to activate after rotation.
-        let matched = session
-            .start_transaction()
-            .and_run(
-                (db.clone(), guard, filter, update),
-                |session, (db, guard, filter, update)| {
-                    Box::pin(async move {
-                        let locked = db
-                            .collection::<Document>(
-                                crate::models::platform_credential::COLLECTION_NAME,
-                            )
-                            .update_one(
-                                guard.clone(),
-                                doc! { "$inc": { "channel_observation_version": 1_i64 } },
-                            )
-                            .session(&mut *session)
-                            .await?;
-                        if locked.matched_count != 1 {
-                            return Ok(false);
-                        }
-                        let result = db
-                            .collection::<ChannelBot>(COLLECTION_NAME)
-                            .update_one(filter.clone(), update.clone())
-                            .session(&mut *session)
-                            .await?;
-                        Ok(result.matched_count == 1)
-                    })
-                },
-            )
-            .await?;
-        Ok(matched)
+        super::transaction_service::run_db_only(
+            db,
+            &(db, platform, filter, update),
+            |session, (db, platform, filter, update)| {
+                Box::pin(async move {
+                    if !platform.fence_projection(db, session).await? {
+                        return Ok(false);
+                    }
+                    Ok(db
+                        .collection::<ChannelBot>(COLLECTION_NAME)
+                        .update_one(filter.clone(), update.clone())
+                        .session(session)
+                        .await?
+                        .matched_count
+                        == 1)
+                })
+            },
+        )
+        .await
     }
 
     /// Record callback reachability only after verification, fenced to these credentials.
@@ -429,6 +520,63 @@ mod tests {
         super::super::channel_bot_service::get_bot(db, &bot.id)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rewrap_preserves_inflight_verification_through_two_storage_writes() {
+        let (db, state, bot) = fixture(false).await;
+        let original = CredentialSnapshot::local(&bot);
+        let check = begin(&db, &original).await.unwrap();
+        let first = super::super::channel_credential_continuity::rewrap_fixture(
+            &db,
+            &state.encryption_keys,
+            &bot,
+            &["app_secret_encrypted"],
+        )
+        .await;
+        let mut config = crate::test_utils::test_app_config();
+        config.encryption_key_previous = config.encryption_key.replace("22".repeat(32));
+        let rotated = crate::crypto::aes::EncryptionKeys::from_config(&config);
+        let current = super::super::channel_credential_continuity::rewrap_fixture(
+            &db,
+            &rotated,
+            &first,
+            &["bot_token_encrypted", "app_secret_encrypted"],
+        )
+        .await;
+        assert_ne!(first.app_secret_encrypted, current.app_secret_encrypted);
+        assert_eq!(
+            CredentialSnapshot::local(&current).fingerprint().unwrap(),
+            check.credential_fingerprint
+        );
+        assert!(original.record_callback_challenge(&db).await.unwrap());
+        assert!(original.activate(&db).await.unwrap());
+        assert!(!original.record_callback_challenge(&db).await.unwrap());
+        let finished = finish(&db, &original, &check, &Ok(())).await.unwrap();
+        assert!(matches!(finished.status, VerificationStatus::Verified));
+        let mut damaged = current.clone();
+        damaged
+            .credential_continuity
+            .as_mut()
+            .unwrap()
+            .pins
+            .get_mut("verification")
+            .unwrap()
+            .value = "00".repeat(32);
+        assert!(CredentialSnapshot::local(&damaged).fingerprint().is_err());
+        let mut transferred = current.clone();
+        transferred.ownership_version += 1;
+        assert!(
+            CredentialSnapshot::local(&transferred)
+                .fingerprint()
+                .is_err()
+        );
+        let fresh = read(&db, &bot).await;
+        let successor = begin(&db, &CredentialSnapshot::local(&fresh))
+            .await
+            .unwrap();
+        assert_ne!(successor.attempt_id, check.attempt_id);
+        assert!(finish(&db, &original, &check, &Ok(())).await.is_err());
     }
 
     #[tokio::test]
@@ -646,6 +794,13 @@ mod tests {
             .await
             .unwrap();
         let check = begin(&db, &snapshot).await.unwrap();
+        super::super::channel_credential_continuity::rewrap_fixture(
+            &db,
+            &state.encryption_keys,
+            &bot,
+            &["app_secret_encrypted"],
+        )
+        .await;
         let updated = super::super::channel_bot_service::update_bot(
             &db,
             &state.encryption_keys,

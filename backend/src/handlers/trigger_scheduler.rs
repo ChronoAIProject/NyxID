@@ -436,23 +436,13 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         )
         .await;
     }
-    let running = state
-        .db
-        .collection::<TriggerRun>(RUNS)
-        .count_documents(doc! {
-            "trigger_id": &trigger.id,
-            "_id": { "$ne": &run.id },
-            "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
-        })
-        .await?;
-    if running > 0 {
+    if let Some(blocking_run_id) = schedules::find_running_blocker(&state.db, &run, None).await? {
         if trigger.overlap == OverlapPolicy::Skip {
-            return schedules::finish_claimed(
+            return schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await;
@@ -460,7 +450,11 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         let oldest = state
             .db
             .collection::<TriggerRun>(RUNS)
-            .find_one(doc! { "trigger_id": &trigger.id, "outcome": RunOutcome::Pending.as_str() })
+            .find_one(doc! {
+                "trigger_id": &trigger.id,
+                "user_id": &run.user_id,
+                "outcome": RunOutcome::Pending.as_str(),
+            })
             .sort(doc! { "scheduled_at": 1, "_id": 1 })
             .await?;
         if oldest.is_some_and(|other| other.id != run.id) {
@@ -604,13 +598,12 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         Ok(super::assistant_team::Started::Busy) => defer(state, job, &run, "target_busy").await,
         Ok(super::assistant_team::Started::PoolFull) => defer(state, job, &run, "pool_full").await,
         Err(AppError::TriggerRateLimited) => defer(state, job, &run, "budget_exhausted").await,
-        Err(AppError::Conflict(reason)) if reason == "trigger_overlap_skip" => {
-            schedules::finish_claimed(
+        Err(AppError::TriggerOverlapSkip { blocking_run_id }) => {
+            schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await
@@ -783,6 +776,16 @@ async fn deliver_existing(
     if let Err(error) = admitted {
         return match error {
             AppError::TriggerRateLimited => defer(state, job, run, "budget_exhausted").await,
+            AppError::TriggerOverlapSkip { blocking_run_id } => {
+                schedules::finish_overlap_skip(
+                    &state.db,
+                    job,
+                    &run.id,
+                    &blocking_run_id,
+                    &state.config.frontend_url,
+                )
+                .await
+            }
             AppError::Conflict(_) => defer(state, job, run, "overlap").await,
             other => Err(other),
         };

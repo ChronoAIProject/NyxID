@@ -141,6 +141,7 @@ impl TelegramNewService<'_> {
                 poll_error_count: 0,
                 last_poll_notice: None,
                 error: None,
+                credential_continuity: None,
                 secret_context_versions: Default::default(),
                 registration_pin_encrypted: None,
                 webhook_secret_encrypted: Some(self.keys.encrypt(secret.as_bytes()).await?),

@@ -706,7 +706,7 @@ pub async fn transfer_with_keys(
     // Authenticate captured material after ACL admission and before the retrying
     // transaction. The exact raw source predicate fences ownership, ciphertext,
     // markers, headers and formerly absent fields together at commit.
-    let catalog_rebind = if kind == ResourceKind::Service {
+    let credential_rebind = if kind == ResourceKind::Service {
         let source = db
             .collection::<Document>(SERVICES)
             .find_one(doc! {"_id":&resource_id,"is_active":true})
@@ -770,10 +770,7 @@ pub async fn transfer_with_keys(
         }
         // SSH CA authority is platform/service-bound and does not change owner.
         Some((source, set))
-    } else {
-        None
-    };
-    let bot_rebind = if kind == ResourceKind::ChannelBot {
+    } else if kind == ResourceKind::ChannelBot {
         let source = db
             .collection::<Document>(BOTS)
             .find_one(doc! {"_id": &resource_id, "is_active": true})
@@ -781,7 +778,9 @@ pub async fn transfer_with_keys(
             .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
         let bot: ChannelBot = bson::from_document(source.clone())
             .map_err(|_| AppError::Internal("Invalid channel transfer storage".into()))?;
-        let rebound = if bot.secret_context_versions.is_empty() {
+        let rebound = if bot.credential_continuity.is_some() {
+            super::channel_credential_continuity::transfer(&bot, &destination, keys).await?
+        } else if bot.secret_context_versions.is_empty() {
             Document::new()
         } else {
             let keys = keys.ok_or_else(|| {
@@ -839,8 +838,7 @@ pub async fn transfer_with_keys(
                 let destination = destination.clone();
                 let expected_version = expected_version.clone();
                 let refresh_key_id = refresh_key_id.clone();
-                let catalog_rebind = catalog_rebind.clone();
-                let bot_rebind = bot_rebind.clone();
+                let credential_rebind = credential_rebind.clone();
                 let fresh_oauth_handle = fresh_oauth_handle.clone();
                 Box::pin(async move {
                     let result: AppResult<OwnershipTransfer> = async {
@@ -985,10 +983,7 @@ pub async fn transfer_with_keys(
             };
             let mut set = doc! { "updated_at": now };
             set.insert(owner_field, &destination);
-            if let Some((_, rebound)) = &catalog_rebind {
-                set.extend(rebound.clone());
-            }
-            if let Some((_, rebound)) = &bot_rebind {
+            if let Some((_, rebound)) = &credential_rebind {
                 set.extend(rebound.clone());
             }
             let mut update = doc! { "$set": set };
@@ -1017,14 +1012,14 @@ pub async fn transfer_with_keys(
                     resource_filter.insert("user_id", &reviewed.previous_owner_user_id);
                 }
             }
-            if let Some((source, _)) = &catalog_rebind {
-                let mut exact = super::record_storage::exact_document_predicate(source);
-                resource_filter.insert("$expr", exact.remove("$expr").ok_or_else(||AppError::Internal("Catalog transfer source is invalid".into()))?);
-            }
-            if let Some((source, _)) = &bot_rebind {
-                let mut exact = super::channel_registration::transfer_source_predicate(source);
+            if let Some((source, _)) = &credential_rebind {
+                let mut exact = if kind == ResourceKind::ChannelBot && source.get_document("credential_continuity").is_err() {
+                    super::channel_registration::transfer_source_predicate(source)
+                } else {
+                    super::record_storage::exact_document_predicate(source)
+                };
                 resource_filter.insert("$expr", exact.remove("$expr").ok_or_else(||
-                    AppError::Internal("Channel transfer source is invalid".into()))?);
+                    AppError::Internal("Credential transfer source is invalid".into()))?);
             }
             let resource_update = db
                 .collection::<Document>(kind.collection())

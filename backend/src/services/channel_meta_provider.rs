@@ -422,11 +422,22 @@ async fn reconcile_target(
             {
                 // A verified deauth retires credentials but keeps the
                 // reconnectable management identity for this grant.
-                state.db.collection::<bson::Document>(BOTS).update_one(
-                        doc! {"_id": &bot.id, "meta_binding.grant_id": grant_id, "meta_binding.provider_revoked": true},
-                        doc! {"$set": {"bot_token_encrypted": binary(Vec::new())},
-                            "$unset": {"secret_context_versions.bot_token_encrypted": ""}},
-                    ).await?;
+                let (filter, update) = credential_update(
+                    &bot,
+                    doc! {"_id": &bot.id, "meta_binding.grant_id":grant_id, "meta_binding.provider_revoked":true},
+                    doc! {"bot_token_encrypted":binary(Vec::new())},
+                    doc! {"secret_context_versions.bot_token_encrypted":""},
+                )?;
+                if state
+                    .db
+                    .collection::<ChannelBot>(BOTS)
+                    .update_one(filter, update)
+                    .await?
+                    .matched_count
+                    != 1
+                {
+                    return Err(conflict());
+                }
             } else {
                 if bot.is_active {
                     return Err(conflict());

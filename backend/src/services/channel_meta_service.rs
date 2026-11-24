@@ -92,6 +92,19 @@ fn conflict() -> AppError {
 fn fingerprint(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
+/// Keep a prepared bot's credential evidence in sync with every provider
+/// token replacement. A concurrent storage rewrap forces the caller to reload.
+fn credential_update(
+    bot: &ChannelBot,
+    mut filter: bson::Document,
+    mut set: bson::Document,
+    mut unset: bson::Document,
+) -> AppResult<(bson::Document, bson::Document)> {
+    filter.extend(super::channel_credential_continuity::physical_filter(bot)?);
+    super::channel_credential_continuity::replacement(bot, &mut set, &mut unset)?;
+    Ok((filter, doc! {"$set":set, "$unset":unset}))
+}
+
 fn binary(bytes: Vec<u8>) -> bson::Bson {
     bson::Bson::Binary(bson::Binary {
         subtype: bson::spec::BinarySubtype::Generic,
@@ -1065,10 +1078,11 @@ impl MetaService<'_> {
                     .delete_many(doc! {"bot_id": bot_id})
                     .session(&mut *tx)
                     .await?;
-                let changed = db.collection::<ChannelBot>(BOTS).update_one(
+                let (filter, update) = credential_update(
+                    &old,
                     doc! {"_id": bot_id, "user_id": &s.owner_id, "is_active": true,
                         "meta_binding.generation": s.expected_generation},
-                    doc! {"$set": {
+                    doc! {
                         "bot_token_encrypted": binary(encrypted.clone()), "app_id": &s.app_id,
                         "credential_source": "platform", "app_secret_encrypted": null,
                         "meta_binding": bson::to_bson(&binding).map_err(|_| conflict())?,
@@ -1077,11 +1091,13 @@ impl MetaService<'_> {
                         "error": bson::Bson::Null,
                         "diagnostics.failure_reason": preserve_suspension.then_some("meta_delivery_suspended"),
                         "updated_at": bson::DateTime::now(),
-                    }, "$unset": {
+                    }, doc! {
                         "secret_context_versions.bot_token_encrypted": "",
                         "secret_context_versions.app_secret_encrypted": "",
-                    }},
-                ).session(&mut *tx).await?;
+                    },
+                )?;
+                let changed = db.collection::<ChannelBot>(BOTS)
+                    .update_one(filter, update).session(&mut *tx).await?;
                 if changed.matched_count != 1 { return Err(conflict()); }
                 if old.app_id.as_deref() != Some(s.app_id.as_str()) {
                     let mut cursor = db
@@ -1424,19 +1440,24 @@ impl MetaService<'_> {
                 }
             }
         }
-        self.db
+        let (filter, update) = credential_update(
+            &current,
+            doc! {"_id":&bot.id, "is_active":false,
+            "meta_binding.generation":if current.is_active {generation+1} else {generation}},
+            doc! {"meta_binding.subscription":"removed", "bot_token_encrypted":binary(Vec::new()),
+            "updated_at":bson::DateTime::now()},
+            doc! {"secret_context_versions.bot_token_encrypted":""},
+        )?;
+        if self
+            .db
             .collection::<ChannelBot>(BOTS)
-            .update_one(
-                doc! {"_id":&bot.id,
-                "is_active":false,
-                "meta_binding.generation":if current.is_active {generation+1} else {generation}},
-                doc! {"$set":{"meta_binding.subscription":"removed",
-                "bot_token_encrypted":binary(Vec::new()),
-                "updated_at":bson::DateTime::now()},
-                "$unset":{"secret_context_versions.bot_token_encrypted":""}},
-            )
-            .await?;
-
+            .update_one(filter, update)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(conflict());
+        }
         Ok(())
     }
     pub async fn refresh(&self, bot: &ChannelBot) -> AppResult<()> {
@@ -1528,20 +1549,27 @@ impl MetaService<'_> {
             .as_i64()
             .filter(|seconds| *seconds > 0 && *seconds <= 366 * 86400)
             .ok_or_else(conflict)?;
-        let changed = self.db.collection::<ChannelBot>(BOTS).update_one(
+        let (filter, update) = credential_update(
+            &current,
             doc! {
                 "_id": &bot.id, "is_active": true, "user_id": &bot.user_id,
                 "platform_bot_id": &bot.platform_bot_id,
                 "meta_binding.generation": binding.generation,
                 "meta_binding.token_fingerprint": &binding.token_fingerprint,
             },
-            doc! {"$set": {
+            doc! {
                 "bot_token_encrypted": binary(self.keys.encrypt(fresh.as_bytes()).await?),
                 "meta_binding.token_fingerprint": meta::token_fingerprint(&fresh),
                 "meta_binding.expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(ttl)),
                 "updated_at": bson::DateTime::now(),
-            }, "$unset": {"secret_context_versions.bot_token_encrypted": ""}},
-        ).await?;
+            },
+            doc! {"secret_context_versions.bot_token_encrypted": ""},
+        )?;
+        let changed = self
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(filter, update)
+            .await?;
         if changed.matched_count != 1 {
             return Err(conflict());
         }

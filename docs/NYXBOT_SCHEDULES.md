@@ -184,6 +184,11 @@ execute the task again. A transport error, timeout or uncertain crash does not
 authorize retry. Expiry/exhaustion is a visible actionable failure. Delivery waits
 retain ordinary overlap behavior; they do not clear live executions.
 
+When Skip suppresses an occurrence, run history can include `blocking_run_id`
+for the run that occupied the same automation at the overlap check. In
+Automations, open that run to see its current status and any available
+thread or Cancel action. A legacy skip can have no recorded blocking run.
+
 Fields are additive and old unclaimed rows can use this settlement. Legacy
 claimed sends remain non-replayable and receive an uncertainty notice on new
 workers. Old workers retain the `result_claimed` guard, preventing duplicate
