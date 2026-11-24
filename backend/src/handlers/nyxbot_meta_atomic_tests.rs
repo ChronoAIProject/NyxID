@@ -8,7 +8,7 @@ async fn combined_meta_patch_preserves_assignment_and_closed_or_open_access_on_r
         let (_router, _token, _first, row) = assigned(&state, "instagram").await;
         let second = specialist_named(&state, "atomic-second").await;
         if initially_open {
-            link_channel(
+            let Json(result) = link_channel(
                 State(state.clone()),
                 crate::test_utils::test_auth_user(OWNER),
                 Path(row.id.clone()),
@@ -21,6 +21,7 @@ async fn combined_meta_patch_preserves_assignment_and_closed_or_open_access_on_r
             )
             .await
             .unwrap();
+            assert_eq!(result["private_chats"], "everyone");
         }
         let before = load_channel(&state, OWNER, &row.id).await.unwrap();
         let thread_id = Uuid::new_v4().to_string();
@@ -80,7 +81,7 @@ async fn combined_meta_patch_preserves_assignment_and_closed_or_open_access_on_r
         );
         assert_eq!(untouched.get_bool("allow_posts"), Ok(false));
         // Closing remains independently available despite the broken callback.
-        link_channel(
+        let Json(result) = link_channel(
             State(state.clone()),
             crate::test_utils::test_auth_user(OWNER),
             Path(row.id.clone()),
@@ -93,6 +94,7 @@ async fn combined_meta_patch_preserves_assignment_and_closed_or_open_access_on_r
         )
         .await
         .unwrap();
+        assert_eq!(result["private_chats"], "owner");
         let closed = load_channel(&state, OWNER, &row.id).await.unwrap();
         assert_eq!(closed.private_chats.as_deref(), Some("owner"));
         assert_eq!(closed.agent_id, before.agent_id);
@@ -105,7 +107,7 @@ async fn combined_meta_patch_preserves_assignment_and_closed_or_open_access_on_r
             ),
         )
         .await;
-        link_channel(
+        let Json(result) = link_channel(
             State(state.clone()),
             crate::test_utils::test_auth_user(OWNER),
             Path(row.id.clone()),
@@ -118,6 +120,7 @@ async fn combined_meta_patch_preserves_assignment_and_closed_or_open_access_on_r
         )
         .await
         .unwrap();
+        assert_eq!(result["private_chats"], "everyone");
         let accepted = load_channel(&state, OWNER, &row.id).await.unwrap();
         assert_eq!(accepted.agent_id.as_deref(), Some(second.id.as_str()));
         assert_eq!(accepted.private_chats.as_deref(), Some("everyone"));
@@ -399,7 +402,7 @@ async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_
     .await
     .unwrap()
     .unwrap();
-    crate::handlers::org_specialist_channels::update(
+    let Json(result) = crate::handlers::org_specialist_channels::update(
         State(state.clone()),
         crate::test_utils::test_auth_user(OWNER),
         Path(row.id.clone()),
@@ -414,6 +417,7 @@ async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_
     )
     .await
     .unwrap();
+    assert_eq!(result["guest_enabled"], true);
     let before = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(before.org_specialist.as_ref().unwrap().guests.enabled);
     crate::services::durable_wake_tests::resume_after(
@@ -462,7 +466,7 @@ async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_
         )
         .await
         .unwrap();
-    crate::handlers::org_specialist_channels::update(
+    let Json(result) = crate::handlers::org_specialist_channels::update(
         State(state.clone()),
         crate::test_utils::test_auth_user(OWNER),
         Path(row.id.clone()),
@@ -477,6 +481,7 @@ async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_
     )
     .await
     .unwrap();
+    assert_eq!(result["guest_enabled"], false);
     let closed = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(!closed.org_specialist.as_ref().unwrap().guests.enabled);
     assert_eq!(closed.agent_id, before.agent_id);
