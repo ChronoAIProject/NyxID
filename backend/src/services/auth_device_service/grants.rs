@@ -165,32 +165,26 @@ pub async fn poll_agent_key(
         grant.key_was_created,
     )
     .await?;
-    let claimed = if let Some(revision) = row.mfa_policy_revision.as_deref() {
-        let context = (db.clone(), collection.clone(), row.clone());
-        let result = crate::services::transaction_service::run_db_only(db, &context, |tx, c| {
-            Box::pin(async move {
-                let (db, collection, row) = c;
-                app_policy::fence(
-                    db,
-                    row.approved_user_id
-                        .as_deref()
-                        .ok_or(AppError::AuthDeviceCodeDenied)?,
-                    row.mfa_policy_revision.as_deref(),
-                    tx,
-                )
-                .await?;
-                claim_agent_key_delivery(collection, row, Some(tx)).await
-            })
+    let context = (db, &collection, &row, delivery.api_key.owner_id.as_str());
+    let claimed = crate::services::transaction_service::run_db_only(db, &context, |tx, c| {
+        Box::pin(async move {
+            let (db, collection, row, key_owner) = c;
+            let actor = row
+                .approved_user_id
+                .as_deref()
+                .ok_or(AppError::AuthDeviceCodeDenied)?;
+            app_policy::fence(db, actor, row.mfa_policy_revision.as_deref(), tx).await?;
+            agent::fence_delivery_owners(db, actor, key_owner, tx).await?;
+            claim_agent_key_delivery(collection, row, tx).await
         })
-        .await;
-        if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
-            app_policy::deny_undelivered(db, collection.name(), &row.id, revision).await?;
-        }
-        result?
-    } else {
-        claim_agent_key_delivery(&collection, &row, None).await?
-    };
-    if claimed.is_none() {
+    })
+    .await;
+    if matches!(claimed, Err(AppError::AuthDeviceCodeDenied))
+        && let Some(revision) = row.mfa_policy_revision.as_deref()
+    {
+        app_policy::deny_undelivered(db, collection.name(), &row.id, revision).await?;
+    }
+    if claimed?.is_none() {
         return Err(current_decision_error(&collection, &row.id).await?);
     }
     audit_service::log_async(
@@ -211,7 +205,7 @@ pub async fn poll_agent_key(
 async fn claim_agent_key_delivery(
     collection: &Collection<AuthDeviceCode>,
     row: &AuthDeviceCode,
-    transaction: Option<&mut mongodb::ClientSession>,
+    transaction: &mut mongodb::ClientSession,
 ) -> AppResult<Option<AuthDeviceCode>> {
     let now = Utc::now();
     let claim = collection.find_one_and_update(
@@ -220,11 +214,7 @@ async fn claim_agent_key_delivery(
             "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
             "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}},
     );
-    let claimed = if let Some(tx) = transaction {
-        claim.session(tx).await?
-    } else {
-        claim.await?
-    };
+    let claimed = claim.session(transaction).await?;
     Ok(claimed)
 }
 

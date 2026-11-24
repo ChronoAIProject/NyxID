@@ -1131,30 +1131,128 @@ pub fn build_callback_payload(
 pub(crate) async fn consume_reply_token_use(
     db: &mongodb::Database,
     usage: &crate::models::reply_token_use::ReplyTokenUse,
+    owner_id: &str,
 ) -> AppResult<()> {
-    match db
-        .collection::<crate::models::reply_token_use::ReplyTokenUse>(
-            crate::models::reply_token_use::COLLECTION_NAME,
-        )
-        .insert_one(usage)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error)
+    let result = super::transaction_service::run_db_only(
+        db,
+        &(db, usage, owner_id),
+        |tx, (db, usage, owner_id)| {
+            Box::pin(async move {
+                fence_reply_token_owners(db, usage, owner_id, tx).await?;
+                db.collection::<crate::models::reply_token_use::ReplyTokenUse>(
+                    crate::models::reply_token_use::COLLECTION_NAME,
+                )
+                .insert_one(*usage)
+                .session(tx)
+                .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    match result {
+        Err(AppError::DatabaseError(error))
             if matches!(error.kind.as_ref(),
             mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write))
                 if write.code == 11000) =>
         {
             Err(AppError::Unauthorized("Reply token already used".into()))
         }
-        Err(error) => Err(error.into()),
+        result => result,
     }
+}
+
+pub(crate) async fn fence_reply_token_owners(
+    db: &mongodb::Database,
+    usage: &crate::models::reply_token_use::ReplyTokenUse,
+    owner_id: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &usage.api_key_id, "is_active": true})
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Relay agent key is unavailable".into()))?;
+    super::erasure_admission::fence_in_session(db, owner_id, tx).await?;
+    if key.user_id != owner_id {
+        super::erasure_admission::fence_in_session(db, &key.user_id, tx).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
+
+    #[tokio::test]
+    async fn reply_token_claim_respects_owner_erasure() {
+        use crate::models::{
+            api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
+            reply_token_use::{COLLECTION_NAME as TOKEN_USES, ReplyTokenUse},
+            user::{COLLECTION_NAME as USERS, User, UserType},
+        };
+        use crate::test_utils::{connect_transaction_test_database, test_user};
+        let db = connect_transaction_test_database("relay_reply_erasure").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let key_owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&owner, UserType::Person),
+                test_user(&key_owner, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(API_KEYS)
+            .insert_one(
+                doc! {"_id": &key_id, "user_id": &key_owner, "name": "Fixture",
+                "key_prefix": "fixture", "key_hash": "fixture-hash", "scopes": "proxy",
+                "is_active": true, "created_at": bson::DateTime::now()},
+            )
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<ApiKey>(API_KEYS)
+                .find_one(doc! {"_id": &key_id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let use_token = || ReplyTokenUse {
+            id: uuid::Uuid::new_v4().to_string(),
+            exp_at: Utc::now() + chrono::Duration::minutes(1),
+            api_key_id: key_id.clone(),
+            conversation_id: "synthetic-conversation".into(),
+            consumed_at: Utc::now(),
+        };
+        let first = use_token();
+        consume_reply_token_use(&db, &first, &owner).await.unwrap();
+        assert!(matches!(
+            consume_reply_token_use(&db, &first, &owner).await,
+            Err(AppError::Unauthorized(_))
+        ));
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        let held = use_token();
+        assert!(matches!(
+            consume_reply_token_use(&db, &held, &owner).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(
+            db.collection::<ReplyTokenUse>(TOKEN_USES)
+                .find_one(doc! {"_id": &held.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn native_event_id_uses_update_identity_and_rejects_invalid_telegram_ids() {

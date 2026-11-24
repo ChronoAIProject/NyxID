@@ -691,6 +691,7 @@ pub async fn delete_user(
     auth_user: AuthUser,
     _headers: HeaderMap,
     Path(user_id): Path<String>,
+    Query(query): Query<super::users::ErasureResponseQuery>,
 ) -> AppResult<Json<super::users::DeleteAccountResponse>> {
     require_admin(&state, &auth_user).await?;
     let actor = auth_user.user_id.to_string();
@@ -708,7 +709,8 @@ pub async fn delete_user(
     let job = crate::services::personal_erasure_service::accept(&state.db, &user_id, &actor, None)
         .await?;
     Ok(Json(
-        super::users::DeleteAccountResponse::from_job(&state.db, job).await?,
+        super::users::DeleteAccountResponse::from_job(&state.db, job, query.include_retained)
+            .await?,
     ))
 }
 
@@ -717,6 +719,8 @@ pub async fn delete_user(
 pub struct ErasureStatusQuery {
     pub after: Option<String>,
     pub nodes_after: Option<String>,
+    #[serde(default)]
+    pub include_retained: bool,
 }
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureEffectResponse {
@@ -788,7 +792,10 @@ pub async fn erasure_status(
     let next_node_after =
         (node_drains.len() == 64).then(|| node_drains.last().unwrap().node_id.clone());
     let erasure = match job {
-        Some(job) => Some(super::users::DeleteAccountResponse::from_job(&state.db, job).await?),
+        Some(job) => Some(
+            super::users::DeleteAccountResponse::from_job(&state.db, job, query.include_retained)
+                .await?,
+        ),
         None => None,
     };
     Ok(Json(ErasureProgressResponse {
@@ -3379,6 +3386,7 @@ mod operator_route_tests {
             Query(ErasureStatusQuery {
                 after: None,
                 nodes_after: None,
+                include_retained: false,
             }),
         )
         .await
@@ -3439,6 +3447,7 @@ mod operator_route_tests {
             Query(ErasureStatusQuery {
                 after: None,
                 nodes_after: None,
+                include_retained: false,
             }),
         )
         .await

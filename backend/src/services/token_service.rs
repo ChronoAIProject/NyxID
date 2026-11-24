@@ -258,14 +258,16 @@ pub(crate) async fn create_session_with_transaction_and_mfa_authority(
         last_active_at: now,
     };
 
-    let collection = db.collection::<Session>(SESSIONS);
-    let insert = collection.insert_one(&new_session);
     if let Some(transaction) = transaction {
         // The transaction owner aborts definite preparation failures. Helpers
         // must not abort a borrowed transaction behind its owner's back.
-        insert.session(&mut *transaction).await?;
+        super::erasure_admission::fence_in_session(db, user_id, transaction).await?;
+        db.collection::<Session>(SESSIONS)
+            .insert_one(&new_session)
+            .session(transaction)
+            .await?;
     } else {
-        insert.await?;
+        super::erasure_admission::insert_owned(db, SESSIONS, user_id, &new_session).await?;
     }
 
     Ok(IssuedSession {
@@ -379,6 +381,7 @@ impl PreparedSessionRows {
         db: &mongodb::Database,
         transaction: &mut mongodb::ClientSession,
     ) -> AppResult<()> {
+        super::erasure_admission::fence_in_session(db, &self.session.user_id, transaction).await?;
         db.collection::<Session>(SESSIONS)
             .insert_one(&self.session)
             .session(&mut *transaction)
@@ -1091,6 +1094,11 @@ pub async fn refresh_tokens_for_client(
         created_at: now,
     };
 
+    #[cfg(test)]
+    if let Ok(gate) = BEFORE_REFRESH_ROTATION.try_with(std::sync::Arc::clone) {
+        gate.reached.notify_one();
+        gate.resume.notified().await;
+    }
     if !rotate_refresh_row(db, &active_token, &new_refresh).await? {
         if legacy_upgrade {
             return Err(super::consent_service::grant_changed());
@@ -1167,6 +1175,18 @@ pub async fn refresh_tokens_for_client(
         access_expires_in: config.jwt_access_ttl_secs,
         resource_uris: token_resource_scope.resource_uris,
     })
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct RefreshRotationGate {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_REFRESH_ROTATION: std::sync::Arc<RefreshRotationGate>;
 }
 
 /// Publish the successor and its predecessor link in a single commit.
@@ -1452,6 +1472,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn held_first_party_refresh_rotation_cannot_mint_after_erasure_acceptance() {
+        let db = connect_transaction_test_database("held_refresh_erasure").await;
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let tokens = create_session_and_issue_tokens(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let first = std::sync::Arc::new(RefreshRotationGate::default());
+        let second = std::sync::Arc::new(RefreshRotationGate::default());
+        let rotate = || {
+            refresh_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &tokens.refresh_token,
+                None,
+                None,
+            )
+        };
+        let (winner, retry, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(
+                BEFORE_REFRESH_ROTATION.scope(first.clone(), rotate()),
+                BEFORE_REFRESH_ROTATION.scope(second.clone(), rotate()),
+                async {
+                    first.reached.notified().await;
+                    second.reached.notified().await;
+                    first.resume.notify_one();
+                    second.resume.notify_one();
+                },
+            )
+        })
+        .await
+        .expect("both active requests reached the rotation boundary");
+        let active = winner.unwrap();
+        let reused = retry.unwrap();
+        let claims =
+            |token: &str| jwt::verify_token(&state.jwt_keys, &state.config, token).unwrap();
+        assert_eq!(
+            claims(&active.refresh_token).jti,
+            claims(&reused.refresh_token).jti
+        );
+
+        let gate = std::sync::Arc::new(RefreshRotationGate::default());
+        let held = BEFORE_REFRESH_ROTATION.scope(
+            gate.clone(),
+            refresh_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &active.refresh_token,
+                None,
+                None,
+            ),
+        );
+        let accept = async {
+            gate.reached.notified().await;
+            super::super::personal_erasure_service::accept(&db, &user_id, &user_id, None)
+                .await
+                .unwrap();
+            gate.resume.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(held, accept)
+        })
+        .await
+        .expect("refresh reached the rotation boundary and resumed");
+        assert!(matches!(
+            result.map_err(AppError::into_refresh_source),
+            Err(AppError::Conflict(_))
+        ));
+        let rows = db.collection::<RefreshToken>(REFRESH_TOKENS);
+        assert_eq!(
+            rows.count_documents(doc! {"user_id": &user_id})
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            rows.count_documents(doc! {"user_id": &user_id, "revoked": false})
+                .await
+                .unwrap(),
+            0
+        );
+        let predecessor = rows
+            .find_one(doc! {"user_id": &user_id, "replaced_by": null})
+            .await
+            .unwrap()
+            .expect("last legitimate token");
+        assert!(predecessor.revoked);
+        assert!(predecessor.replaced_by.is_none());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn dead_bound_refresh_rejects_before_reuse_without_cascading_again() {
         let db = connect_transaction_test_database("refresh_early_gate").await;
         let state = test_app_state(db.clone());
@@ -1567,6 +1692,96 @@ mod tests {
         assert_eq!(row.get_bool("mfa_assured"), Ok(false));
         assert!(!row.contains_key("mfa_exemption"));
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_first_party_session_respects_account_erasure_at_persistence() {
+        let db = connect_transaction_test_database("first_party_session_erasure").await;
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let prepare = || {
+            prepare_mobile_social_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &user_id,
+                None,
+                None,
+                false,
+            )
+        };
+        let active = prepare().await.unwrap();
+        let held = prepare().await.unwrap();
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id": &user_id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
+        create_mfa_pending_session_with_method(&db, &user_id, "synthetic-before", Some("social"))
+            .await
+            .unwrap();
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        insert_prepared_session(&db, &active, &mut tx)
+            .await
+            .unwrap();
+        tx.commit_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {"_id": &active.tokens.session_id})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"session_id": &active.tokens.session_id})
+                .await
+                .unwrap(),
+            1
+        );
+        super::super::personal_erasure_service::accept(&db, &user_id, &user_id, None)
+            .await
+            .unwrap();
+
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        assert!(matches!(
+            insert_prepared_session(&db, &held, &mut tx).await,
+            Err(AppError::Conflict(_))
+        ));
+        tx.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {"_id": &held.tokens.session_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"session_id": &held.tokens.session_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            create_session(&db, &user_id, None, None).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            create_mfa_pending_session_with_method(
+                &db,
+                &user_id,
+                "synthetic-after",
+                Some("social")
+            )
+            .await,
+            Err(AppError::AuthenticationFailed(_))
+        ));
     }
 
     #[tokio::test]

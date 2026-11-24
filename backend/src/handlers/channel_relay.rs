@@ -657,10 +657,12 @@ fn validate_message_bot_scope(
 async fn consume_reply_token_use(
     state: &AppState,
     claims: &jwt::RelayReplyClaims,
+    owner_id: &str,
 ) -> AppResult<()> {
     crate::services::channel_relay_service::consume_reply_token_use(
         &state.db,
         &reply_token_use(claims)?,
+        owner_id,
     )
     .await
 }
@@ -826,7 +828,7 @@ async fn resolve_reply_token_message_context_classified(
                 .into());
             }
         } else if consume {
-            consume_reply_token_use(state, &claims).await?;
+            consume_reply_token_use(state, &claims, &original.user_id).await?;
         }
 
         Ok(ReplyRequestContext {

@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, header},
     response::Response,
 };
@@ -16,7 +16,7 @@ use crate::models::user::{
     ServiceViewState, ServiceViewType, User,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, role_service};
+use crate::services::{admin_user_service, personal_data_registry, role_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -730,8 +730,16 @@ pub struct DeleteAccountResponse {
     pub accepted_at: String,
     pub completed_at: Option<String>,
     pub domains: Vec<ErasureDomainResponse>,
+    /// Registry policy for retained collections, independent of this job's progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained: Option<Vec<ErasureRetainedCollectionResponse>>,
     pub effects: Vec<super::admin::ErasureEffectResponse>,
     pub next_effect_after: Option<String>,
+}
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ErasureRetainedCollectionResponse {
+    pub collection: &'static str,
+    pub reason: &'static str,
 }
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureDomainResponse {
@@ -741,21 +749,43 @@ pub struct ErasureDomainResponse {
     pub reason: Option<String>,
     pub completed_at: Option<String>,
 }
+#[derive(Default, Deserialize)]
+pub struct ErasureResponseQuery {
+    #[serde(default)]
+    pub include_retained: bool,
+}
+
 impl DeleteAccountResponse {
     pub(crate) async fn from_job(
         db: &mongodb::Database,
         job: crate::models::personal_erasure::PersonalErasureJob,
+        include_retained: bool,
     ) -> AppResult<Self> {
         let effects =
             crate::services::personal_erasure_service::issuance::outcomes(db, &job.user_id, None)
                 .await?;
         let next_effect_after = (effects.len() == 64).then(|| effects.last().unwrap().id.clone());
+        let retained = include_retained.then(|| {
+            personal_data_registry::entries()
+                .iter()
+                .filter_map(|entry| match entry.erasure {
+                    personal_data_registry::Erasure::Retained(category) => {
+                        Some(ErasureRetainedCollectionResponse {
+                            collection: entry.collection,
+                            reason: category.disclosure_phrase(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
         Ok(Self {
             effects: effects
                 .into_iter()
                 .map(super::admin::ErasureEffectResponse::from)
                 .collect(),
             next_effect_after,
+            retained,
             job_id: job.id,
             status: job.status,
             accepted_at: job.accepted_at.to_rfc3339(),
@@ -1005,6 +1035,7 @@ pub async fn delete_me(
     auth_user: AuthUser,
     tele: TelemetryContext,
     headers: HeaderMap,
+    Query(query): Query<ErasureResponseQuery>,
 ) -> AppResult<Json<DeleteAccountResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     let deletion_policy = headers
@@ -1030,7 +1061,9 @@ pub async fn delete_me(
     // Acceptance closes authority immediately. Remote/local work continues
     // durably; analytics must not describe this transition as completed.
     let _ = tele;
-    Ok(Json(DeleteAccountResponse::from_job(&state.db, job).await?))
+    Ok(Json(
+        DeleteAccountResponse::from_job(&state.db, job, query.include_retained).await?,
+    ))
 }
 
 #[cfg(test)]
@@ -1858,6 +1891,7 @@ mod tests {
             accepted_at: "2025-06-15T14:00:00+00:00".to_string(),
             completed_at: None,
             domains: vec![],
+            retained: None,
             effects: vec![],
             next_effect_after: None,
         };
@@ -1866,6 +1900,7 @@ mod tests {
         assert_eq!(json["status"], "accepted");
         assert!(json["completed_at"].is_null());
         assert_eq!(json["accepted_at"], "2025-06-15T14:00:00+00:00");
+        assert!(json.get("retained").is_none());
     }
 
     // --- Deserialization tests: UpdateProfileRequest ---
