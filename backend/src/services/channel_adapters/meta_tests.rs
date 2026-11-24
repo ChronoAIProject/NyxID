@@ -51,6 +51,15 @@ pub(crate) async fn fixture(
     let server = MockServer::start().await;
     let mut adapter = MetaAdapter::new(inbox);
     adapter.graph_base = server.uri();
+    let bot = registered_bot(&state, &owner, platform).await;
+    (state, adapter, server, bot)
+}
+
+pub(crate) async fn registered_bot(
+    state: &crate::AppState,
+    owner: &str,
+    platform: &str,
+) -> ChannelBot {
     let binding = MetaCredentialBinding {
         operator_suspended: false,
         grant_reconnect_required: false,
@@ -62,7 +71,7 @@ pub(crate) async fn fixture(
         generation: 1,
         grant_start_generation: 1,
         token_fingerprint: token_fingerprint("fixture-token"),
-        grant_actor_id: owner.clone(),
+        grant_actor_id: owner.to_owned(),
         grant_subject_id: "900".into(),
         app_id: "111".into(),
         exclusive_routing_verified: true,
@@ -71,7 +80,7 @@ pub(crate) async fn fixture(
         expires_at: Some(Utc::now() + Duration::days(60)),
     };
     let doc = doc! {"_id":uuid::Uuid::new_v4().to_string(),
-    "user_id":&owner,
+    "user_id":owner,
     "platform":platform,
     "label":"Fixture inbox",
     "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,
@@ -94,10 +103,21 @@ pub(crate) async fn fixture(
         .insert_one(&bot)
         .await
         .unwrap();
-    (state, adapter, server, bot)
+    bot
 }
 
 pub(crate) async fn original(state: &crate::AppState, bot: &ChannelBot) -> ChannelMessage {
+    inbound_for(state, bot, "route", "route-key", "333", "mid.1").await
+}
+
+pub(crate) async fn inbound_for(
+    state: &crate::AppState,
+    bot: &ChannelBot,
+    route: &str,
+    route_key: &str,
+    sender: &str,
+    mid: &str,
+) -> ChannelMessage {
     let inbound = parse_event(
         if bot.platform == "messenger" {
             Inbox::Messenger
@@ -106,35 +126,35 @@ pub(crate) async fn original(state: &crate::AppState, bot: &ChannelBot) -> Chann
         },
         &bot.id,
         &bot.platform_bot_id,
-        &event(&bot.platform_bot_id, "333", "mid.1"),
+        &event(&bot.platform_bot_id, sender, mid),
     )
     .unwrap();
     let mut message = channel_relay_service::inbound_metadata(
         &bot.id,
-        "route",
+        route,
         &bot.user_id,
         &bot.platform,
         &inbound,
-        "route-key",
+        route_key,
         &uuid::Uuid::new_v4().to_string(),
     );
     message.meta_authority = Some(authority(bot, &inbound, 1800).unwrap());
     state
         .db
         .collection::<bson::Document>(CONTROLS)
-        .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),
-        "identity_key":format!("{}:{}",
-        bot.id,
-        inbound.conversation_id),
-        "bot_id":&bot.id,
-        "controlled":true,
-        "generation": bot.meta_binding.as_ref().unwrap().generation})
+        .update_one(
+            doc! {"identity_key":format!("{}:{}", bot.id, inbound.conversation_id)},
+            doc! {"$setOnInsert":{
+            "_id":uuid::Uuid::new_v4().to_string(), "bot_id":&bot.id,
+            "controlled":true, "generation":bot.meta_binding.as_ref().unwrap().generation}},
+        )
+        .upsert(true)
         .await
         .unwrap();
     message
 }
 
-async fn admit_original(state: &crate::AppState, message: &ChannelMessage) {
+pub(crate) async fn admit_original(state: &crate::AppState, message: &ChannelMessage) {
     use crate::services::{
         channel_admission_service as admission, coordination_service::EventDedupClaimResult,
     };

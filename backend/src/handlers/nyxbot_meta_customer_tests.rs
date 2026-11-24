@@ -100,7 +100,22 @@ async fn specialist_named(
 
 async fn signed_customer_message(state: &AppState, channel_id: &str, sender: &str, text: &str) {
     let row = load_channel(state, OWNER, channel_id).await.unwrap();
-    let id = Uuid::new_v4().to_string();
+    use crate::services::channel_adapters::meta::tests::{admit_original, inbound_for};
+    let bot = crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let participant = sender.rsplit(':').next().unwrap();
+    let source = inbound_for(
+        state,
+        &bot,
+        &row.route_id,
+        &row.route_api_key_id,
+        participant,
+        &Uuid::new_v4().to_string(),
+    )
+    .await;
+    admit_original(state, &source).await;
+    let id = source.id;
     let body = json!({
         "message_id":id, "correlation_id":format!("jti-{id}"), "platform":row.platform,
         "agent":{"api_key_id":row.route_api_key_id,"name":"support"},
@@ -109,7 +124,6 @@ async fn signed_customer_message(state: &AppState, channel_id: &str, sender: &st
         "timestamp":Utc::now().to_rfc3339(),
         "raw_platform_data":{"asset_id":"222","sender":{"id":sender.rsplit(':').next().unwrap()}},
     });
-    store_direct_source(state, &row, &body).await;
     let bytes = serde_json::to_vec(&body).unwrap();
     let proof = crate::crypto::jwt::generate_relay_callback_token(
         &state.jwt_keys,
@@ -146,14 +160,10 @@ async fn meta_personal_customer_setup_prepares_then_enables_without_rotating_on_
     for platform in ["messenger", "instagram"] {
         let (state, calls, server) = setup("meta_customer_personal").await;
         let agent = specialist(&state).await;
-        let bot = bot_doc(platform, "Customer inbox");
-        let bot_id = bot.get_str("_id").unwrap().to_owned();
-        state
-            .db
-            .collection::<bson::Document>("channel_bots")
-            .insert_one(bot)
-            .await
-            .unwrap();
+        let bot =
+            crate::services::channel_adapters::meta::tests::registered_bot(&state, OWNER, platform)
+                .await;
+        let bot_id = bot.id;
         let (router, token) = app(&state).await;
         let (status, assigned) = action(&router, &token, &bot_id, &agent.id, "assign").await;
         assert_eq!(status, StatusCode::OK, "{assigned}");
