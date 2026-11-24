@@ -204,11 +204,6 @@ export const DataDeletionPage = lazy(() =>
     default: m.DataDeletionPage,
   })),
 );
-export const NotificationSettingsPage = lazy(() =>
-  import("@/pages/notification-settings").then((m) => ({
-    default: m.NotificationSettingsPage,
-  })),
-);
 export const ApprovalHistoryPage = lazy(() =>
   import("@/pages/approval-history").then((m) => ({
     default: m.ApprovalHistoryPage,

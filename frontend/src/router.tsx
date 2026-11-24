@@ -116,7 +116,6 @@ import {
   PrivacyPage,
   TermsPage,
   DataDeletionPage,
-  NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
@@ -830,7 +829,9 @@ const designSystemRoute = createRoute({
 const notificationSettingsRoute = createRoute({
   path: "/approvals/settings",
   getParentRoute: () => dashboardLayout,
-  component: NotificationSettingsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings", search: { tab: "notifications" }, replace: true });
+  },
 });
 
 const approvalHistoryRoute = createRoute({
