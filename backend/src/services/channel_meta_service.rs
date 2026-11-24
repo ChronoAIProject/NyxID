@@ -1883,6 +1883,7 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
     use mongodb::{IndexModel, options::IndexOptions};
     scopes::ensure_indexes(db).await?;
     targets::ensure_indexes(db).await?;
+    scope_erasure::ensure_indexes(db).await?;
     db.collection::<bson::Document>(provider::REQUESTS)
         .create_index(
             IndexModel::builder()
@@ -2044,3 +2045,6 @@ pub(crate) mod scopes;
 
 #[path = "channel_meta_targets.rs"]
 pub(crate) mod targets;
+
+#[path = "channel_meta_scope_erasure.rs"]
+pub(crate) mod scope_erasure;

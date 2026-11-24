@@ -100,6 +100,7 @@ pub(crate) async fn lane_for_grant(
                     "created_at":{"$ifNull":["$created_at","$$NOW"]},
                     "conversation_id":{"$cond":[{"$eq":["$meta_grant.grant_id",&grant.grant_id]},"$conversation_id",reserved]},
                     "meta_grant":{"$literal":bson::to_bson(grant).map_err(|_|super::denied())?},
+                    "channel_bot_id":{"$literal":&grant.bot_id},
                 }}]).upsert(true).return_document(mongodb::options::ReturnDocument::After).session(tx).await?.ok_or_else(super::denied)
             })
         }).await?;

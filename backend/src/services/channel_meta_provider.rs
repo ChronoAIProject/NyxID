@@ -704,7 +704,7 @@ async fn reconcile_job(
             id,
             claim,
             &target,
-            result.err().map(|error| error.error_code()),
+            result.map_err(|error| error.error_code()),
         )
         .await?;
     }
@@ -731,7 +731,7 @@ async fn reconcile_target(
     grant_id: &str,
     cutoff: Option<&bson::DateTime>,
     scope_id: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     if !erase && cutoff.is_none() {
         return Err(super::grants::incomplete());
     }
@@ -766,7 +766,8 @@ async fn reconcile_target(
                 &(&state.db, bot_id, grant_id),
                 |tx, &(db, bot, grant)| Box::pin(super::scopes::mark_complete(db, tx, bot, grant)),
             )
-            .await;
+            .await
+            .map(|()| true);
         }
         if let Some(cutoff) = cutoff {
             let authorized = row
@@ -784,14 +785,22 @@ async fn reconcile_target(
                         "_id":id,"authorized_at":authorized,"erasure_cutoff":{"$type":"date","$lte":authorized},
                     },doc! {"$set":{"erasure_requested":false},"$unset":{"erasure_cutoff":""},"$inc":{"revision":1_i64}}).await?;
                 }
-                return Ok(());
+                return Ok(true);
             }
         }
     }
     if erase && super::scopes::has_history(&state.db, bot_id).await? {
-        // The scoped eraser owns multi-grant records. Never fall through
-        // to a whole-inbox purge or acknowledge unprocessed prior data.
-        return Err(super::grants::incomplete());
+        if scope.is_none() {
+            return Err(super::grants::incomplete());
+        }
+        return super::scope_erasure::pass(
+            state,
+            service,
+            bot_id,
+            grant_id,
+            *cutoff.ok_or_else(super::grants::incomplete)?,
+        )
+        .await;
     }
     let cutoff = if let Some(cutoff) = cutoff {
         cutoff
@@ -806,7 +815,8 @@ async fn reconcile_target(
             return super::super::personal_erasure_service::erase_provider_inbox(
                 state, bot_id, grant_id,
             )
-            .await;
+            .await
+            .map(|()| true);
         }
         return Err(super::grants::incomplete());
     };
@@ -824,7 +834,7 @@ async fn reconcile_target(
                 .get_datetime("authorized_at")
                 .map_err(|_| super::grants::incomplete())?;
             if authorized >= cutoff {
-                return Ok(());
+                return Ok(true);
             }
             let bot: ChannelBot =
                 bson::from_document(raw.clone()).map_err(|_| super::grants::incomplete())?;
@@ -839,7 +849,7 @@ async fn reconcile_target(
             )
             .await?;
             if !applied {
-                return Ok(());
+                return Ok(true);
             }
         }
     } else if erase {
@@ -860,7 +870,7 @@ async fn reconcile_target(
                 .get_datetime("authorized_at")
                 .map_err(|_| super::grants::incomplete())?;
             if authorized >= cutoff {
-                return Ok(());
+                return Ok(true);
             }
         }
     }
@@ -929,12 +939,12 @@ async fn reconcile_target(
         }
         _ => {} // A successor grant is outside this request's authority.
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Caller has proved the exact grant lies before the authenticated cutoff.
 /// Capture and delayed chronology recovery use the same local transition.
-async fn apply_callback_state(
+pub(super) async fn apply_callback_state(
     db: &mongodb::Database,
     tx: &mut mongodb::ClientSession,
     bot: &ChannelBot,

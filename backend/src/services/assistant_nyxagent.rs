@@ -2133,7 +2133,15 @@ pub(crate) async fn write_checkpoint_in_session(
             .filter(|goal| !goal.is_empty()),
         _ => None,
     };
+    let goal_turn_id = if request.is_some() {
+        Some(reply.turn_id.clone())
+    } else {
+        previous
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.goal_turn_id.clone())
+    };
     let goal = request.or_else(|| previous.as_ref().and_then(|p| p.goal.clone()));
+    let goal_turn_id = goal_turn_id.filter(|_| goal.is_some());
     // A failed turn continues the open window of a previous failure; a
     // successful turn closes it and records only its own actions.
     let open = previous
@@ -2157,7 +2165,33 @@ pub(crate) async fn write_checkpoint_in_session(
     keep_newest(&mut completed_actions);
     keep_newest(&mut failed_actions);
     let succeeded = reply.status == "completed";
+    let output = Some(excerpt(
+        &super::voice::links::message_text(reply, &reply.text),
+        CHECKPOINT_OUTPUT_CHARS,
+    ))
+    .filter(|text| !text.is_empty());
+    let source_turn_ids = if goal.is_none() || goal_turn_id.is_some() {
+        Some(
+            output
+                .iter()
+                .map(|_| reply.turn_id.clone())
+                .chain(goal_turn_id.iter().cloned())
+                .chain(
+                    completed_actions
+                        .iter()
+                        .chain(&failed_actions)
+                        .map(|action| action.turn_id.clone()),
+                )
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        None
+    };
     let mut checkpoint = AssistantCheckpoint {
+        source_turn_ids,
+        goal_turn_id,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: reply.turn_id.clone(),
@@ -2166,11 +2200,7 @@ pub(crate) async fn write_checkpoint_in_session(
         goal,
         completed_actions,
         failed_actions,
-        output: Some(excerpt(
-            &super::voice::links::message_text(reply, &reply.text),
-            CHECKPOINT_OUTPUT_CHARS,
-        ))
-        .filter(|text| !text.is_empty()),
+        output,
         last_successful_turn_id: if succeeded {
             Some(reply.turn_id.clone())
         } else {
@@ -3750,13 +3780,42 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         }
     }
-    if let Some(grant) = start
-        .channel_context
+    let admitted_meta_grants: Vec<_> = row
+        .active_turn
         .as_ref()
-        .and_then(|source| source.meta_grant.as_ref())
-    {
+        .into_iter()
+        .flat_map(|turn| {
+            turn.channel_context
+                .iter()
+                .chain(turn.events.iter().flat_map(|event| &event.channel_contexts))
+        })
+        .filter_map(|source| source.meta_grant.as_ref())
+        .cloned()
+        .collect();
+    if let Some(grant) = admitted_meta_grants.first() {
         super::channel_meta_service::scopes::fence_reference(db, session, grant, true).await?;
         if start.guest {
+            if admitted_meta_grants
+                .iter()
+                .any(|source| source.bot_id != grant.bot_id || source.grant_id != grant.grant_id)
+            {
+                return Err(AppError::Conflict(
+                    "Visitor turn contains different provider grants".into(),
+                ));
+            }
+            if row.meta_grant.is_none()
+                && start.conversation_id.is_some()
+                && db
+                    .collection::<bson::Document>(MESSAGES)
+                    .find_one(doc! {"conversation_id":&row.id,"user_id":&row.user_id})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "Visitor history needs verified grant attribution before reuse".into(),
+                ));
+            }
             if row.meta_grant.as_ref().is_some_and(|prior| {
                 prior.bot_id != grant.bot_id || prior.grant_id != grant.grant_id
             }) {
@@ -3766,6 +3825,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             }
             row.meta_grant = Some(grant.clone());
         }
+    } else if start.guest && row.meta_grant.is_some() {
+        return Err(AppError::Conflict(
+            "Visitor session requires its original provider grant".into(),
+        ));
     }
     if start.conversation_id.is_some() {
         collection

@@ -348,6 +348,29 @@ persistence also takes the message owner's personal-erasure barrier, including
 settlement against a retired scope; another owner's retirement does not widen
 that erasure authority.
 
+The provider worker erases an individual grant through indexed pages of 100,
+with its collection and record cursors on the existing scope. It audits records
+by their original bot or channel parent, including non-null grant tags, and
+compares any surviving inbound proof before deletion. Contradictory or malformed
+attribution keeps that target pending. Positive provenance stays on the original
+records before their finite-lived sources disappear. Only deletion of the exact
+current grant can remove the live subscription and bot; deleting a superseded
+grant preserves the successor's credentials, assignment, policy and independent
+verification. A thread pointer is cleared only while it still names the erased
+source and grant.
+
+An ordinary guest-conversation cascade requires positive grant proof for every
+retained turn and its children. Untagged or mixed legacy history stays pending.
+Shared owner history is erased by exact turn and child references. Checkpoints
+retain a goal's origin turn and a bounded set of content-source turn IDs on the
+original checkpoint, under its existing account/conversation lifetime. Cleanup
+removes the erased turn's goal, output or action labels individually; an
+independently derived successor checkpoint survives even after its source joins
+expire. Unknown legacy goal provenance requires verified repair. These internal
+fields add no provider subject, owner list or copied content and do not change
+the public checkpoint response. An unsettled external operation retains its
+existing cancellation obligation before its turn data can be removed.
+
 Signed callback confirmation records the keyed subject and cutoff with a
 durable scope cursor. Historical reconnects are captured in indexed pages of
 100 scopes by the existing request worker. Current and retired compatibility capture share one

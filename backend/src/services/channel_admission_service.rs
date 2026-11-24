@@ -89,6 +89,7 @@ async fn admit_fenced(
                             doc! {"$inc":{"channel_metadata_admission_revision":1_i64}},
                         ).session(&mut *session).await?;
                     if owner.matched_count != 1 { return Ok(false); }
+                    let mut meta_grant = None;
                     if let Some(authority) = &message.meta_authority {
                         let bot = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                             doc! {"_id":&message.channel_bot_id,"user_id":&message.user_id,"is_active":true,"meta_binding.generation":authority.generation,"meta_binding.subscription":"active"},
@@ -99,7 +100,7 @@ async fn admit_fenced(
                             .find_one(doc! {"_id":&message.channel_bot_id}).session(&mut *session).await?
                             .ok_or_else(||mongodb::error::Error::custom("Meta admission parent is unavailable"))?;
                         if authority.grant_id.as_ref().is_some_and(|grant|live.meta_binding.as_ref().is_none_or(|binding|&binding.grant_id != grant)) {return Ok(false);}
-                        super::channel_meta_service::scopes::fence_current(db,session,&live).await.map_err(mongodb::error::Error::custom)?;
+                        meta_grant = Some(super::channel_meta_service::scopes::fence_current(db,session,&live).await.map_err(mongodb::error::Error::custom)?);
                         let chat = message.platform_conversation_id.as_deref().unwrap_or_default();
                         let control = db.collection::<Document>(super::channel_adapters::meta::CONTROLS).update_one(
                             doc! {"identity_key":format!("{}:{chat}",message.channel_bot_id.as_deref().unwrap_or_default()),
@@ -112,7 +113,7 @@ async fn admit_fenced(
                     let mut committed = doc! {"state":"committed", "updated_at":"$$NOW", "expires_at":{"$dateAdd":{"startDate":"$$NOW", "unit":"day", "amount":30}}};
                     if message.meta_authority.is_some() {
                         committed.insert("channel_bot_id", doc! {"$literal": &message.channel_bot_id});
-                        committed.insert("meta_grant_id",doc! {"$literal":message.meta_authority.as_ref().and_then(|authority|authority.grant_id.as_deref())});
+                        committed.insert("meta_grant_id",doc! {"$literal":meta_grant.as_ref().map(|grant|grant.grant_id.as_str())});
                     }
                     let fenced = db.collection::<Document>(EVENT_DEDUP_COLLECTION_NAME)
                         .update_one(
@@ -126,8 +127,14 @@ async fn admit_fenced(
                             "platform":&message.platform, "direction":"inbound", "platform_message_id":&message.platform_message_id,
                         }).session(&mut *session).await?;
                     if existing.is_some() { return Ok(false); }
-                    db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))
-                        .insert_one(&*message).session(&mut *session).await?;
+                    if let Some(grant) = meta_grant {
+                        let mut stored=bson::to_document(message).map_err(mongodb::error::Error::custom)?;
+                        stored.insert("meta_grant",bson::to_bson(&grant).map_err(mongodb::error::Error::custom)?);
+                        db.collection::<Document>(super::channel_activity_service::collection(message)).insert_one(stored).session(&mut *session).await?;
+                    } else {
+                        db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))
+                            .insert_one(&*message).session(&mut *session).await?;
+                    }
                     Ok(true)
                 })
             },

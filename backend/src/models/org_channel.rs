@@ -59,6 +59,8 @@ pub struct Execution {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SenderLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_bot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta_grant: Option<super::channel_meta::GrantRef>,
     #[serde(rename = "_id")]
     pub id: String,

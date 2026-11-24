@@ -238,7 +238,7 @@ pub(crate) async fn mark_complete(
     let changed=rows.update_one(filter,doc! {"$set":{"status":"completed","outstanding":false,"local_data_erased_at":at,"completed_grant_id":grant},
         "$unset":{"identity":"","platform":"","app_id":"","from_generation":"","to_generation":"","legacy_history":"",
             "binding_fingerprint":"","authorized_at":"","bot_created_at":"","created_at":"","sealed_at":"","erasure_cutoff":"",
-            "attribution_pending":"","completed_at":"","erasure_requested":""},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+            "attribution_pending":"","completed_at":"","erasure_requested":"","purge":""},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
     if changed.matched_count != 1 {
         return Err(super::grants::incomplete());
     }
@@ -660,6 +660,7 @@ pub(crate) async fn record_thread(
                 "conversation_id":{"$cond":[{"$ne":[{"$ifNull":["$meta_grant.grant_id",null]},&grant.grant_id]},null,"$conversation_id"]},
                 "owner_seen":{"$cond":[{"$ne":[{"$ifNull":["$meta_grant.grant_id",null]},&grant.grant_id]},false,"$owner_seen"]},
                 "meta_grant":{"$literal":bson::to_bson(&grant).map_err(|_|super::grants::incomplete())?},
+                "channel_bot_id":{"$literal":bot},
             }});
             db.collection::<crate::models::nyxbot_channel::NyxbotThread>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
                 .find_one_and_update(partition.clone(),update).upsert(true).return_document(mongodb::options::ReturnDocument::After)

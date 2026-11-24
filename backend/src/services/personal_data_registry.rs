@@ -528,7 +528,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "assistant_checkpoints stores the person-owned assistant checkpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "assistant_checkpoints stores the person-owned assistant checkpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence. Original checkpoint goal/source turn UUIDs record bounded content derivation for grant-specific redaction after finite-lived joins expire; they share the checkpoint's existing account/conversation lifetime, contain no provider subject or copied content, and are excluded from its public checkpoint DTO.",
     },
     Entry {
         collection: "assistant_cma_agents",

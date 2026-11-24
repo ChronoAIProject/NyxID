@@ -1454,6 +1454,14 @@ async fn update_bot_inner(
     )
     .await?;
 
+    if is_meta && !fields.0.is_empty() {
+        super::transaction_service::run_db_only(db, &(db, &bot), |tx, &(db, bot)| {
+            Box::pin(super::channel_meta_service::scopes::fence_reconnect(
+                db, tx, bot,
+            ))
+        })
+        .await?;
+    }
     let rebuilt_bot_token =
         maybe_rebuild_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?;
     let meta_token_replacement = is_meta && rebuilt_bot_token.is_some();
@@ -1557,18 +1565,33 @@ async fn update_bot_inner(
             actor_id.to_owned(),
             owner_id.to_owned(),
             bot.platform.clone(),
+            meta_rotation,
             filter,
             update_doc,
         );
         super::transaction_service::run_db_only(
             db,
             &context,
-            |tx, (db, actor, owner, platform, filter, update)| {
+            |tx, (db, actor, owner, platform, rotating, filter, update)| {
                 Box::pin(async move {
                     super::channel_meta_service::MetaService::fence_installation_authority(
                         db, tx, actor, owner, platform, false,
                     )
                     .await?;
+                    if *rotating {
+                        let live = db
+                            .collection::<ChannelBot>(COLLECTION_NAME)
+                            .find_one(filter.clone())
+                            .session(&mut *tx)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::Conflict(
+                                    "Inbox credential authority changed; refresh before updating"
+                                        .into(),
+                                )
+                            })?;
+                        super::channel_meta_service::scopes::fence_reconnect(db, tx, &live).await?;
+                    }
                     let changed = db
                         .collection::<ChannelBot>(COLLECTION_NAME)
                         .update_one(filter.clone(), update.clone())
@@ -2972,7 +2995,13 @@ pub(crate) async fn erase_personal_bot(
                 .as_ref()
                 .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
                 .grant_id;
-            super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant).await?;
+            if super::channel_meta_service::scopes::has_history(db, bot_id).await? {
+                // Progress keeps the ordinary channel domain pending while
+                // the exact manual obligation drains its bounded pages.
+                super::channel_meta_service::scope_erasure::manual_pass(state, &stopped).await?;
+            } else {
+                super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant).await?;
+            }
             return Ok(());
         }
         // Personal erasure retires only the departing owner's authority. A

@@ -323,6 +323,7 @@ async fn insert_response_event_inner(
                         bson::to_bson(&grant)
                             .map_err(|_| super::channel_meta_service::grants::incomplete())?,
                     );
+                    document.insert("channel_bot_id", bot);
                 }
                 db.collection::<bson::Document>(EVENTS)
                     .insert_one(&document)

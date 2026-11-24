@@ -47,9 +47,15 @@ pub(crate) async fn issue(db: &Database, actor: &str, channel: &NyxbotChannel) -
     ));
     let expires = Utc::now() + Duration::minutes(10);
     let binding = channel.org_specialist.as_ref().ok_or_else(super::denied)?;
-    db.collection::<Document>(CHALLENGES).insert_one(doc!{"_id":&id,"channel_id":&channel.id,"org_id":&binding.org_id,
-        "user_id":actor,"binding_revision":&binding.revision,"code_hash":crate::crypto::token::hash_token(&code),
-        "state":"issued","created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(expires)}).await?;
+    let mut challenge = doc! {"_id":&id,"channel_id":&channel.id,"org_id":&binding.org_id,
+    "user_id":actor,"binding_revision":&binding.revision,"code_hash":crate::crypto::token::hash_token(&code),
+    "state":"issued","created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(expires)};
+    if super::super::channel_adapters::meta::is_meta(&channel.platform) {
+        challenge.insert("channel_bot_id", &channel.channel_bot_id);
+    }
+    db.collection::<Document>(CHALLENGES)
+        .insert_one(challenge)
+        .await?;
     Ok(json!({"id":id,"code":code.as_str(),"expires_at":expires,"state":"issued"}))
 }
 
@@ -175,11 +181,12 @@ pub(crate) async fn confirm(
         if let Some(existing)=existing {
             let prior_grant = existing.meta_grant.as_ref().zip(grant.as_ref()).is_some_and(|(old,new)|old.bot_id!=new.bot_id || old.grant_id!=new.grant_id);
             if existing.user_id!=*actor && !prior_grant {return Err(AppError::Conflict("This chat account is already linked to a different person".into()));}
-            db.collection::<SenderLink>(LINKS).update_one(doc!{"_id":&existing.id},doc!{"$set":{"active":true,"user_id":actor,
-                "meta_grant":bson::to_bson(&grant).map_err(|_|super::denied())?,"revision":new_revision,"binding_revision":&b.revision}}).session(tx).await?;
+            let mut fields=doc! {"active":true,"user_id":actor,"revision":new_revision,"binding_revision":&b.revision};
+            if let Some(grant)=&grant {fields.insert("channel_bot_id",&channel.channel_bot_id);fields.insert("meta_grant",bson::to_bson(grant).map_err(|_|super::denied())?);}
+            db.collection::<SenderLink>(LINKS).update_one(doc!{"_id":&existing.id},doc!{"$set":fields}).session(tx).await?;
         } else {
             db.collection::<SenderLink>(LINKS).insert_one(SenderLink{id:link_id.clone(),channel_id:channel.id.clone(),org_id:b.org_id.clone(),
-                meta_grant:grant,revision:new_revision.clone(),binding_revision:b.revision.clone(),sender_hash:hash.into(),user_id:actor.clone(),active:true,created_at:Utc::now()}).session(tx).await?;
+                channel_bot_id:grant.as_ref().map(|grant|grant.bot_id.clone()),meta_grant:grant,revision:new_revision.clone(),binding_revision:b.revision.clone(),sender_hash:hash.into(),user_id:actor.clone(),active:true,created_at:Utc::now()}).session(tx).await?;
         }
         Ok(())
     })).await?;

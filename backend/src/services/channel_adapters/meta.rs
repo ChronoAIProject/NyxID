@@ -1433,6 +1433,8 @@ impl PlatformAdapter for MetaAdapter {
                 .json(&body),
         )
         .await;
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("meta_reply_provider_confirmed").await;
         let (id, uncertain, error) = match outcome {
             GraphSend::Accepted(id) => (Some(id), false, None),
             GraphSend::Refused(error) => (None, false, Some(error)),

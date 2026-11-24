@@ -769,6 +769,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     assert!(prompt.contains(SCHEDULE_PROMPT));
     assert!(prompt.len() <= base.len() + 16384);
     context.set_checkpoint(Some(AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "checkpoint-turn".into(),
@@ -9359,6 +9361,8 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
 
 fn token_checkpoint(row: &AssistantConversation) -> AssistantCheckpoint {
     AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "turn".into(),

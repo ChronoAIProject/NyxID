@@ -57,8 +57,7 @@ pub(crate) async fn stop_for_delete(
         Box::pin(async move {
             let binding=observed.meta_binding.as_ref().ok_or_else(incomplete)?;
             if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":&observed.id}).session(&mut *tx).await?.is_none() {
-                let proof=db.collection::<Document>("channel_meta_erasure_fences").find_one(doc! {"_id":&observed.id}).session(&mut *tx).await?.ok_or_else(incomplete)?;
-                if completed(&proof,&binding.grant_id)? {return Ok(observed.clone());}
+                if completion(db,&observed.id,&binding.grant_id,Some(&mut *tx)).await? {return Ok(observed.clone());}
                 return Err(incomplete());
             }
             super::MetaService::fence_installation_authority(db,tx,actor,&observed.user_id,&observed.platform,false).await?;
@@ -216,14 +215,42 @@ pub(crate) async fn completion_for(
     bot: &str,
     grant: &str,
 ) -> AppResult<bool> {
-    match db
-        .collection::<Document>("channel_meta_erasure_fences")
-        .find_one(doc! {"_id":bot})
-        .await?
+    completion(db, bot, grant, None).await
+}
+
+async fn completion(
+    db: &mongodb::Database,
+    bot: &str,
+    grant: &str,
+    mut tx: Option<&mut mongodb::ClientSession>,
+) -> AppResult<bool> {
+    let fences = db.collection::<Document>("channel_meta_erasure_fences");
+    let query = fences.find_one(doc! {"_id":bot});
+    let fence = if let Some(tx) = tx.as_deref_mut() {
+        query.session(tx).await?
+    } else {
+        query.await?
+    };
+    if let Some(fence) = fence
+        && completed(&fence, grant)?
     {
-        Some(row) => completed(&row, grant),
-        None => Ok(false),
+        return Ok(true);
     }
+    let scopes = db.collection::<Document>(crate::models::channel_meta::GRANT_SCOPES);
+    let query = scopes.find_one(doc! {"bot_id":bot,"grant_id":grant});
+    let scope = if let Some(tx) = tx {
+        query.session(tx).await?
+    } else {
+        query.await?
+    };
+    if let Some(scope) = scope {
+        let proof = completed(&scope, grant)?;
+        if !proof && scope.get_str("status") == Ok("completed") {
+            return Err(incomplete());
+        }
+        return Ok(proof);
+    }
+    Ok(false)
 }
 
 /// Remove only proved completed context in bounded independent commits. The
