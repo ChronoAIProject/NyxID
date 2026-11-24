@@ -460,6 +460,7 @@ mod tests {
             connection_webhook_url: Some(url),
             connection_webhook_secret_encrypted: Some(encrypted_secret),
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: Some(owner.to_string()),
             created_at: now,

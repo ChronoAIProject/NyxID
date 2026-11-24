@@ -1,5 +1,6 @@
 //! Developer-app connection lifecycle webhook configuration and delivery.
 
+use super::oauth_client_webhook_record as webhook_record;
 use chrono::{DateTime, Utc};
 use mongodb::{Database, bson::doc, options::ReturnDocument};
 use serde::Serialize;
@@ -201,7 +202,14 @@ impl DeveloperWebhookDispatcher {
         ) else {
             return Ok(());
         };
-        let secret = match self.encryption_keys.decrypt(encrypted_secret).await {
+        let secret = match webhook_record::open(
+            &self.encryption_keys,
+            &client,
+            webhook_record::CONNECTION,
+            encrypted_secret,
+        )
+        .await
+        {
             Ok(secret) => secret,
             Err(error) => {
                 tracing::warn!(app_id, %error, "failed to decrypt developer webhook secret");
@@ -335,22 +343,37 @@ async fn store_configuration(
         "{CONNECTION_WEBHOOK_SECRET_PREFIX}{}",
         generate_random_token()
     );
-    let encrypted_secret = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
+    let encrypted_secret = webhook_record::encrypt(
+        encryption_keys,
+        client_id,
+        created_by,
+        webhook_record::CONNECTION,
+        &raw_secret,
+    )
+    .await?;
     let key_id = webhook_delivery_service::generate_signing_key_id();
+    let mut set = doc! {
+        "connection_webhook_url": url,
+        "connection_webhook_secret_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: encrypted_secret,
+        },
+        "connection_webhook_key_id": &key_id,
+        "connection_webhook_enabled": true,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+    let mut unset = bson::Document::new();
+    super::credential_record_service::mark_classic_update(
+        &mut set,
+        &mut unset,
+        encryption_keys,
+        webhook_record::CONNECTION,
+    );
     let updated = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one_and_update(
             doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-            doc! { "$set": {
-                "connection_webhook_url": url,
-                "connection_webhook_secret_encrypted": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: encrypted_secret,
-                },
-                "connection_webhook_key_id": &key_id,
-                "connection_webhook_enabled": true,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
+            doc! { "$set": set, "$unset": unset },
         )
         .return_document(ReturnDocument::After)
         .await?
@@ -400,6 +423,7 @@ pub async fn disable(db: &Database, client_id: &str, created_by: &str) -> AppRes
                 },
                 "$unset": {
                     "connection_webhook_secret_encrypted": "",
+                    "secret_context_versions.connection_webhook_secret_encrypted": "",
                     "connection_webhook_key_id": "",
                 },
             },
@@ -440,6 +464,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some(owner.to_string()),
             created_at: now,
@@ -541,15 +566,17 @@ mod tests {
             Some(first_key_id.as_str())
         );
         assert!(!format!("{configured:?}").contains(&first_secret));
-        let stored_first = keys
-            .decrypt(
-                configured
-                    .connection_webhook_secret_encrypted
-                    .as_deref()
-                    .expect("encrypted secret"),
-            )
-            .await
-            .expect("decrypt first secret");
+        let stored_first = webhook_record::open(
+            &keys,
+            &configured,
+            webhook_record::CONNECTION,
+            configured
+                .connection_webhook_secret_encrypted
+                .as_deref()
+                .expect("encrypted secret"),
+        )
+        .await
+        .expect("decrypt first secret");
         assert_eq!(stored_first.as_slice(), first_secret.as_bytes());
 
         let (rotated, second_secret, second_key_id) = rotate_secret(&db, &keys, &client_id, &owner)
@@ -557,15 +584,17 @@ mod tests {
             .expect("rotate webhook secret");
         assert_ne!(first_secret, second_secret);
         assert_ne!(first_key_id, second_key_id);
-        let stored_second = keys
-            .decrypt(
-                rotated
-                    .connection_webhook_secret_encrypted
-                    .as_deref()
-                    .expect("rotated encrypted secret"),
-            )
-            .await
-            .expect("decrypt rotated secret");
+        let stored_second = webhook_record::open(
+            &keys,
+            &rotated,
+            webhook_record::CONNECTION,
+            rotated
+                .connection_webhook_secret_encrypted
+                .as_deref()
+                .expect("rotated encrypted secret"),
+        )
+        .await
+        .expect("decrypt rotated secret");
         assert_eq!(stored_second.as_slice(), second_secret.as_bytes());
 
         let disabled = disable(&db, &client_id, &owner)

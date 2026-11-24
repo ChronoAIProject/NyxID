@@ -137,3 +137,67 @@ pub(super) const LABELS: &[super::FieldLabels] = &[
     ("user_service_connections", &["credential_encrypted"]),
     ("async_service_operation_artifacts", &["data_encrypted"]),
 ];
+
+// #2896 replaced three entries and appended seven. Keep this view independent
+// of future live-registry edits so retained counters keep their original names.
+pub(super) const RECONCILED_DIGEST: &str =
+    "97d55ec8edff7d0599c59dc342e6a46fb5d580650d4be4b6e9cad693773d3b4c";
+pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
+    const ADDED: &[super::FieldLabels] = &[
+        ("assistant_cma_sandboxes", &["request_ciphertext"]),
+        ("assistant_cma_creations", &["request_ciphertext"]),
+        (
+            "nyxbot_event_bindings",
+            &["provider_key_ciphertext", "producer_secret_ciphertext"],
+        ),
+        ("nyxbot_gateway_responses", &["payload_ciphertext"]),
+        (
+            "channel_whatsapp_native",
+            &["native_verify_token_encrypted"],
+        ),
+        (
+            "assistant_conversations",
+            &["active_turn.restart_admission.window.input"],
+        ),
+        (
+            "approval_requests",
+            &[
+                "execution_proposal.v1.payload",
+                "execution_proposal.v1.result",
+                "execution_proposal.v2.payload",
+                "execution_proposal.v2.result",
+                "execution_proposal.v3.payload",
+                "execution_proposal.v3.result",
+                "execution_proposal.v4.payload",
+                "execution_proposal.v4.result",
+            ],
+        ),
+    ];
+    LABELS
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, entry)| -> super::FieldLabels {
+            match index {
+                21 => (
+                    "auth_device_codes_v2",
+                    &[
+                        "agent_key_grant.delivery_credential_encrypted",
+                        "delivery_access_token_encrypted",
+                        "delivery_refresh_token_encrypted",
+                    ],
+                ),
+                29 => (
+                    "nyxbot_events",
+                    &[
+                        "delivery.target_ciphertext",
+                        "event_context_ciphertext",
+                        "guest_setup_payload",
+                    ],
+                ),
+                30 => ("mobile_social_deliveries", &["ciphertext"]),
+                _ => entry,
+            }
+        })
+        .chain(ADDED.iter().copied())
+}

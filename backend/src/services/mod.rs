@@ -186,6 +186,7 @@ pub mod oauth_app_source;
 pub(crate) mod oauth_broker_record_service;
 pub mod oauth_broker_service;
 pub mod oauth_client_service;
+mod oauth_client_webhook_record;
 pub mod oauth_consent_request_service;
 pub mod oauth_flow;
 pub mod oauth_resource_service;
