@@ -746,6 +746,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        meta_contexts: Vec::new(),
         activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
@@ -793,12 +794,7 @@ pub async fn record_auto_allowed_for_activity(
         machine_context: None,
         routing: None,
     };
-    if db
-        .collection::<AssistantAcknowledgement>(ACKS)
-        .insert_one(&row)
-        .await
-        .is_err()
-    {
+    if source::insert_receipt(db, chat, &row).await.is_err() {
         tracing::warn!(conversation_id = %chat.conversation_id, tool, code = "receipt_insert_failed", "Automatic action receipt write failed");
         return;
     }
@@ -2514,6 +2510,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        meta_contexts: Vec::new(),
         activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
@@ -2615,15 +2612,26 @@ async fn request_candidate_in_session(
         db, chat, candidate, origin, approval, session,
     ))
     .await?;
-    super::assistant_activity_decision::bind(
-        db,
-        chat,
-        "acknowledgement",
-        &result.0.id,
-        false,
-        Some(session),
-    )
-    .await?;
+    if !result.0.meta_contexts.is_empty() {
+        super::assistant_activity_decision::bind_meta_in_session(
+            db,
+            chat,
+            "acknowledgement",
+            &result.0.id,
+            session,
+        )
+        .await?;
+    } else {
+        super::assistant_activity_decision::bind(
+            db,
+            chat,
+            "acknowledgement",
+            &result.0.id,
+            false,
+            Some(session),
+        )
+        .await?;
+    }
     Ok(result)
 }
 
@@ -2638,6 +2646,28 @@ async fn request_candidate_inner(
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
     let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    // A captured Meta request cannot borrow a successor turn's input, even
+    // when both turns use the same home and credential. Ordinary idle action
+    // callers retain their existing behavior.
+    if origin.is_none()
+        && let Some(turn) = chat.turn_id.as_deref()
+    {
+        let captured = super::channel_meta_service::scopes::assistant_turn_references(
+            db,
+            session,
+            &chat.user_id,
+            &chat.conversation_id,
+            turn,
+        )
+        .await?;
+        if !captured.is_empty() {
+            super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
+            for proof in captured {
+                super::channel_meta_service::scopes::fence_reference(db, session, &proof, true)
+                    .await?;
+            }
+        }
+    }
     if access
         .as_ref()
         .and_then(|a| a.channel())
@@ -2684,6 +2714,8 @@ async fn request_candidate_inner(
     approval.require_request_support()?;
     let mut row = candidate.clone();
     row.routing = routing;
+    row.meta_contexts =
+        super::async_service_operation::meta_lineage::capture(db, session, &conversation).await?;
     // Ordinary denials stay bound to the initiating user/orchestrator
     // message across event turns. Only trigger runs use the active turn.
     let mut initiating_filter = doc! {
@@ -2698,6 +2730,15 @@ async fn request_candidate_inner(
         .and_then(|t| t.initiating_message_seq)
     {
         initiating_filter.insert("seq", doc! {"$lte": seq});
+    }
+    if !row.meta_contexts.is_empty() {
+        super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
+        let turn = conversation
+            .active_turn
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        initiating_filter.insert("turn_id", &turn.turn_id);
+        initiating_filter.insert("role", doc! {"$in":["user","orchestrator","event"]});
     }
     let started_by = db
         .collection::<AssistantMessage>(MESSAGES)
@@ -2787,7 +2828,7 @@ async fn request_candidate_inner(
     // A pending or denied duplicate is reused only when the same decider
     // would see it with the same NyxBot routing: work assigned from two
     // NyxBot threads, or direct work after an assignment, gets its own card.
-    let filter = doc! {"conversation_id": &chat.conversation_id,
+    let mut filter = doc! {"conversation_id": &chat.conversation_id,
     "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
     "service_id": &row.service_id, "tool_name": &row.tool_name,
     "arguments_digest": &row.arguments_digest,
@@ -2795,6 +2836,15 @@ async fn request_candidate_inner(
     "decider": &row.decider, "routing": routing_bson(row.routing.as_ref()),
     "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
         {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
+    if row.meta_contexts.is_empty() {
+        filter.insert("meta_contexts.0", doc! {"$exists":false});
+    } else {
+        filter.insert(
+            "meta_contexts",
+            bson::to_bson(&row.meta_contexts)
+                .map_err(|_| super::channel_meta_service::grants::incomplete())?,
+        );
+    }
     // A valid allowed action can be reused only by explicitly presenting its id.
     if let Some(mut existing) = db
         .collection::<AssistantAcknowledgement>(ACKS)
@@ -4036,3 +4086,6 @@ mod reply_selection_tests {
 #[cfg(test)]
 #[path = "assistant_invisible_card_tests.rs"]
 mod invisible_card_tests;
+
+#[path = "assistant_acknowledgement_source.rs"]
+pub(crate) mod source;

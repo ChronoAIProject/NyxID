@@ -2,7 +2,7 @@
 use super::*;
 use crate::models::assistant_conversation::ChannelTurnContext;
 
-pub(super) async fn capture(
+pub(crate) async fn capture(
     db: &Database,
     tx: &mut ClientSession,
     row: &AssistantConversation,

@@ -361,31 +361,12 @@ pub(crate) async fn owner_denial_decided(
     owner: &str,
     row: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
 ) {
-    if row.automation_work.is_some() {
-        return;
+    if matches!(
+        acks::source::publish_owner_denial(&state.db, owner, &row.id, &row.conversation_id).await,
+        Ok(true)
+    ) {
+        Box::pin(wake(state, owner, &row.conversation_id)).await;
     }
-    if row.decider != "user"
-        || row.status != "denied"
-        || row.trigger_run_id.is_some()
-        || row.voice_request_id.is_some()
-        || row.invocation_id.is_some()
-    {
-        return;
-    }
-    let mut event = crate::models::assistant_acknowledgement::bind_continuation(
-        row.routing.as_ref(),
-        team::event(
-            "action_denied",
-            format!(
-                "The owner denied: {}. Do not execute or retry this action. Explain plainly what you skipped. {}",
-                engine::excerpt(&row.summary, 2000),
-                acks::decision_narration(false)
-            ),
-            None,
-        ),
-    );
-    event.execution_task = row.execution_task.clone();
-    notify(state, owner, &row.conversation_id, vec![event]).await;
 }
 
 /// Type-erased settlement hook. `run_turn` awaits this so the detached turn's
