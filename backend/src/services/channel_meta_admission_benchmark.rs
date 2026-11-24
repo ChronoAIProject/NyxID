@@ -322,14 +322,16 @@ async fn concurrent_first_dm_reservations_and_owner_presence_on_one_page() {
                 .await
                 .unwrap();
             }
+            let now = bson::DateTime::now();
             let projection = nyxbot_chat_settings_service::record_update(
                 &channel,
                 true,
                 doc! {
-                    "kind":"private","platform_chat_id":&sender,"last_message_id":&source.id,"last_relay_message_id":&source.id,
+                    "kind":"private","platform_chat_id":&sender,"last_message_id":&source.id,
+                    "last_relay_message_id":&source.id,"updated_at":now,"last_message_at":now,
                     "owner_chat":lane==0
                 },
-                bson::DateTime::now(),
+                now,
             );
             threads.push(
                 scopes::record_thread(&db, &bot.id, &source.id, partition, projection)
