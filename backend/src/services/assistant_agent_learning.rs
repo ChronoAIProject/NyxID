@@ -72,13 +72,25 @@ pub(crate) struct GeneratedFile {
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
-    for field in ["owner_id", "agent_id"] {
-        db.collection::<bson::Document>(
-            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
-        )
-        .create_index(IndexModel::builder().keys(doc! {field:1}).build())
+    let claims = db.collection::<bson::Document>(
+        crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+    );
+    claims
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"owner_id": 1}).build(),
+            IndexModel::builder().keys(doc! {"agent_id": 1}).build(),
+            IndexModel::builder()
+                .keys(doc! {"claim.proposal_id": 1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {
+                    "claim.meta_contexts.meta_grant.bot_id": 1,
+                    "claim.meta_contexts.meta_grant.grant_id": 1,
+                    "_id": 1,
+                })
+                .build(),
+        ])
         .await?;
-    }
     db.collection::<bson::Document>(CONFIG_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
