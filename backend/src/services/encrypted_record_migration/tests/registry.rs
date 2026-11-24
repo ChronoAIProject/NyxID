@@ -367,3 +367,67 @@ async fn pending_sources_are_reported_and_preserved_by_both_walk_modes() {
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn shared_signing_sources_stay_exact_and_report_a_blocked_finding_until_the_bot_is_gone() {
+    use bson::spec::BinarySubtype;
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let keys = crate::test_utils::test_encryption_keys();
+    for coll in ["provider_configs", "platform_credentials"] {
+        let db =
+            crate::test_utils::connect_transaction_test_database("channel_signing_guard").await;
+        let rows = db.collection::<Document>(coll);
+        let secret = bson::Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: keys.encrypt(b"channel-test-secret").await.unwrap(),
+        };
+        let (source, platform, origin) = if coll == "provider_configs" {
+            (
+                doc! {"_id":"fixture-source","slug":"twitter","client_secret_encrypted":secret},
+                "x",
+                "connection",
+            )
+        } else {
+            (
+                doc! {"_id":"fixture-source","provider":"meta","secrets":{"app_secret":secret},"fields":{},"updated_by":"test","updated_at":bson::DateTime::now()},
+                "whatsapp",
+                "platform",
+            )
+        };
+        rows.insert_one(&source).await.unwrap();
+        let bots = db.collection::<Document>("channel_bots");
+        bots.insert_one(doc!{"_id":"fixture-bot","platform":platform,"credential_source":origin,"is_active":false}).await.unwrap();
+        let index = REGISTRY.iter().position(|e| e.collection == coll).unwrap();
+        let generation = start(&db, &keys, Mode::Migrate, None).await.unwrap();
+        db.collection::<Document>(RUNS)
+            .update_one(doc! {"_id":RUN_ID}, doc! {"$set":{"entry":index as i32}})
+            .await
+            .unwrap();
+        advance(&db, &keys, &generation).await.unwrap();
+        let blocked = list_findings(&db, None).await.unwrap();
+        assert_eq!(blocked.findings.len(), 1);
+        assert_eq!(blocked.findings[0].collection, coll);
+        assert_eq!(
+            blocked.findings[0].category,
+            "authentication_binding_or_lifecycle_unresolved"
+        );
+        assert_eq!(
+            rows.find_one(doc! {"_id":"fixture-source"}).await.unwrap(),
+            Some(source.clone())
+        );
+        bots.delete_one(doc! {"_id":"fixture-bot"}).await.unwrap();
+        assert!(
+            migrate(&REGISTRY[index], &db, &keys, &source)
+                .await
+                .unwrap()
+        );
+        let current = rows
+            .find_one(doc! {"_id":"fixture-source"})
+            .await
+            .unwrap()
+            .unwrap();
+        verify(&REGISTRY[index], &db, &keys, &current)
+            .await
+            .unwrap();
+    }
+}

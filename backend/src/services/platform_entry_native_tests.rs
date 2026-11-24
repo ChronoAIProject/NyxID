@@ -667,6 +667,51 @@ pub(crate) fn stored_x_message(bot: &ChannelBot, text: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn credential_snapshot_rechecks_an_originally_absent_auxiliary_row() {
+    use super::super::platform_entry_credentials::EntryCredentialSnapshot;
+    use bson::{Document, doc};
+
+    let (state, bot, _, _) = stored_x_fixture().await;
+    let adapter = crate::services::channel_adapters::x::XAdapter::default();
+    let descriptor = adapter.platform_credentials().unwrap();
+    let rows = state
+        .db
+        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME);
+    let auxiliary = rows
+        .find_one_and_delete(doc! {"provider":descriptor.provider})
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = EntryCredentialSnapshot::load(&state.db, &adapter, &bot)
+        .await
+        .unwrap();
+    let projected = crate::services::platform_credential_service::load(&state.db, &descriptor)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Deterministically reproduce an auxiliary insertion at the same provider
+    // timestamp. The bot-local capture and admitted native effect both recheck it.
+    rows.insert_one(auxiliary).await.unwrap();
+    let mut tx = state.db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    assert!(
+        !projected
+            .fence_projection(&state.db, &mut tx)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !snapshot
+            .fence_sources_for_rewrap(&state.db, &mut tx)
+            .await
+            .unwrap()
+    );
+    assert!(!snapshot.fence_in_session(&state.db, &mut tx).await.unwrap());
+    tx.abort_transaction().await.unwrap();
+}
+
+#[tokio::test]
 async fn stored_connection_signing_rotation_and_epoch_replacement_refuse_native_receipt_admission()
 {
     use bson::doc;
@@ -1247,6 +1292,7 @@ pub(crate) fn bot() -> ChannelBot {
         poll_error_count: 0,
         last_poll_notice: None,
         error: None,
+        credential_continuity: None,
         secret_context_versions: Default::default(),
         registration_pin_encrypted: None,
         webhook_secret_encrypted: None,

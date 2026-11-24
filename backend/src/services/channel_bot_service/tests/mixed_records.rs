@@ -54,10 +54,10 @@ async fn fingerprints(
         );
     }
     // Aurinko persists SHA-256 of this exact column on its subscription handshake.
-    if let Some(app_secret) = &bot.app_secret_encrypted {
+    if bot.app_secret_encrypted.is_some() {
         pins.insert(
             "aurinko_app_secret",
-            hex::encode(Sha256::digest(app_secret)),
+            crate::services::channel_credential_continuity::field_pin(bot, APP).unwrap(),
         );
     }
     pins
@@ -148,7 +148,19 @@ async fn mutate(
         .await
         .unwrap()
         .unwrap();
-    assert!(!updated.contains_key("secret_context_versions"));
+    if row.contains_key("credential_continuity") {
+        assert!(bot.secret_context_versions.is_empty());
+        assert_ne!(
+            fixture
+                .get_document("pins")
+                .unwrap()
+                .get_str("verification")
+                .unwrap(),
+            CredentialSnapshot::local(&bot).fingerprint().unwrap()
+        );
+    } else {
+        assert!(!updated.contains_key("secret_context_versions"));
+    }
     if replace {
         for field in [TOKEN, APP, VERIFY, ENCRYPT] {
             assert!(row.get(field) != updated.get(field), "{field}");
@@ -325,6 +337,7 @@ async fn check(
 
 #[tokio::test]
 async fn channel_bot_mixed_records() {
+    crate::test_utils::init_test_audit_chain_hmac_key();
     let step = std::env::var("NYXID_RECORD_FIXTURE_STEP").unwrap_or_else(|_| "roundtrip".into());
     let file = std::env::var_os("NYXID_RECORD_FIXTURE_FILE");
     let mut cfg = crate::test_utils::test_app_config();
@@ -362,6 +375,47 @@ async fn channel_bot_mixed_records() {
         bson::from_slice(&std::fs::read(file.as_ref().unwrap()).unwrap()).unwrap()
     };
     match step.as_str() {
+        "read-pinned-strict" => {
+            check(
+                &db,
+                &keys,
+                &adapter,
+                bundle.get_document("manual").unwrap(),
+                "read",
+            )
+            .await;
+            return;
+        }
+        "rewrap-pinned" => {
+            // The base fixture contains pins produced by a separately built writer.
+            let fixture = bundle.get_document_mut("manual").unwrap();
+            let rows = db.collection::<Document>(COLLECTION_NAME);
+            let raw = fixture.get_document("row").unwrap().clone();
+            rows.insert_one(&raw).await.unwrap();
+            let bot = bson::from_document(raw).unwrap();
+            let bot = crate::services::channel_credential_continuity::rewrap_fixture(
+                &db,
+                &keys,
+                &bot,
+                &[APP, VERIFY],
+            )
+            .await;
+            let bot = crate::services::channel_credential_continuity::rewrap_fixture(
+                &db,
+                &keys,
+                &bot,
+                &[TOKEN, APP, VERIFY, ENCRYPT],
+            )
+            .await;
+            assert_eq!(
+                fingerprints(&db, &adapter, &bot).await,
+                *fixture.get_document("pins").unwrap()
+            );
+            fixture.insert(
+                "row",
+                rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap(),
+            );
+        }
         "replace" | "clear" => {
             let fixture = bundle.get_document_mut("manual").unwrap();
             db.collection::<Document>(COLLECTION_NAME)
