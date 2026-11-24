@@ -108,6 +108,8 @@ pub enum XChannelEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// Additional Telegram manager webhook identity. Legacy default has no suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_instance: Option<i64>,
@@ -381,6 +383,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

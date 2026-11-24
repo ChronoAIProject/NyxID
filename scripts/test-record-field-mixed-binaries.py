@@ -14,6 +14,8 @@ def main():
     parser.add_argument("candidate", type=Path)
     parser.add_argument("test", help="fully qualified Rust test name")
     parser.add_argument("--mutations", nargs="*", default=[], help="family-specific rejection fixtures")
+    parser.add_argument("--reader-preparation", action="store_true",
+                        help="check unchanged writers in both modes and a test-built contextual row")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -50,7 +52,17 @@ def main():
             run(reader, "read", fixture)
         # Keep a populated legacy row for strict-mode and transition checks.
         run("base", "write", "old")
-        run("candidate", "write", "current", writes=True)
+        if args.reader_preparation:
+            for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                run(writer, "write", "writer-on", writes=True)
+                run(reader, "read", "writer-on")
+                run(writer, "replace", "writer-on", writes=True)
+                run(reader, "read", "writer-on")
+                run(writer, "clear", "writer-on", writes=True)
+                run(reader, "read", "writer-on")
+            run("candidate", "contextual-fixture", "current", writes=True)
+        else:
+            run("candidate", "write", "current", writes=True)
         run("candidate", "read", "old", writes=True)
         run("candidate", "read", "current", writes=True, legacy=False)
         run("candidate", "reject", "old", writes=True, legacy=False)
@@ -58,6 +70,8 @@ def main():
             run("candidate", mutation, "current", writes=True)
         run("base", "reject", "current")
         run("candidate", "read", "current")
+        if args.reader_preparation:
+            return
         for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
             run(writer, "registry-write", "generation", writes=True)
             run(writer, "registry-live", "generation", writes=True)

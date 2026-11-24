@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 30 implemented adapters
-and 19 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 31 implemented adapters
+and 18 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -84,6 +84,12 @@ disabling the connection webhook clears its material and marker. The migration
 compares the exact observed client document before replacing stored material.
 
 ### Production storage for Pending fields
+
+- Channel bot registration and delivery readers select each local credential by bot ID,
+  owner and stored field version. The writers still emit the historical format in both
+  writer modes, so serving these rows requires legacy reads. The registry entry stays
+  Pending through the reader rollout.
+  [Channel bot field reader](../../backend/src/services/channel_registration.rs)
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response. CMA
   sandbox recovery opens the sandbox request and checks the creation’s request

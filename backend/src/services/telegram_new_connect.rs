@@ -140,6 +140,7 @@ impl TelegramNewService<'_> {
                 poll_error_count: 0,
                 last_poll_notice: None,
                 error: None,
+                secret_context_versions: Default::default(),
                 registration_pin_encrypted: None,
                 webhook_secret_encrypted: Some(self.keys.encrypt(secret.as_bytes()).await?),
                 managed_setup: None,
@@ -186,11 +187,10 @@ impl TelegramNewService<'_> {
         }
         self.check_owner(actor, &bot.user_id).await?;
         let token = super::channel_bot_service::decrypt_bot_token(self.keys, &bot).await?;
-        let encrypted = bot
-            .webhook_secret_encrypted
-            .as_deref()
-            .ok_or_else(|| AppError::Internal("Saved webhook secret is missing".into()))?;
-        let secret = self.keys.decrypt(encrypted).await?;
+        let secret =
+            super::channel_registration::open_secret(self.keys, &bot, "webhook_secret_encrypted")
+                .await?
+                .ok_or_else(|| AppError::Internal("Saved webhook secret is missing".into()))?;
         let secret = std::str::from_utf8(&secret)
             .map_err(|_| AppError::Internal("Invalid webhook secret encoding".into()))?;
         let callback = format!(

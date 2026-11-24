@@ -162,6 +162,46 @@ impl<'a> RegistrationValues<'a> {
     }
 }
 
+/// Read the field named by the registration descriptor or the consuming protocol.
+/// The owner, record ID, version and ciphertext all come from the same bot.
+pub(super) async fn open_secret(
+    keys: &EncryptionKeys,
+    bot: &ChannelBot,
+    field: &str,
+) -> AppResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    let ciphertext = match field {
+        "bot_token_encrypted" => Some(bot.bot_token_encrypted.as_slice()),
+        "registration_pin_encrypted" => bot.registration_pin_encrypted.as_deref(),
+        "webhook_secret_encrypted" => bot.webhook_secret_encrypted.as_deref(),
+        "app_secret_encrypted" => bot.app_secret_encrypted.as_deref(),
+        "lark_verification_token_encrypted" => bot.lark_verification_token_encrypted.as_deref(),
+        "lark_encrypt_key_encrypted" => bot.lark_encrypt_key_encrypted.as_deref(),
+        _ => {
+            return Err(AppError::Internal(
+                "Unknown channel bot credential field".into(),
+            ));
+        }
+    };
+    let version = bot.secret_context_versions.get(field).copied();
+    match ciphertext {
+        Some(bytes) => crate::crypto::record_field::decrypt(
+            keys,
+            crate::models::channel_bot::COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            field,
+            version,
+            bytes,
+        )
+        .await
+        .map(Some),
+        None if version.is_none() => Ok(None),
+        None => Err(AppError::Internal(
+            "Missing versioned channel bot credential".into(),
+        )),
+    }
+}
+
 impl RegistrationDescriptor {
     pub fn all_fields(&self) -> impl Iterator<Item = &RegistrationField> {
         self.fields.iter().chain(
@@ -242,12 +282,9 @@ impl RegistrationDescriptor {
         keys: &EncryptionKeys,
         bot: &ChannelBot,
     ) -> AppResult<super::channel_platform::PlatformVerifySecrets> {
-        let document = bson::to_document(bot)
-            .map_err(|_| AppError::Internal("Unable to serialize channel bot".to_string()))?;
         let mut secrets = super::channel_platform::PlatformVerifySecrets::default();
         for field in self.fields.iter().filter(|field| field.webhook_secret) {
-            if let Ok(encrypted) = document.get_binary_generic(field.storage) {
-                let bytes = keys.decrypt(encrypted).await?;
+            if let Some(bytes) = open_secret(keys, bot, field.storage).await? {
                 let value = std::str::from_utf8(&bytes).map_err(|_| {
                     AppError::Internal("invalid webhook secret encoding".to_string())
                 })?;
@@ -284,6 +321,41 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
             billing: None,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn bind_fixture_fields(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    id: &str,
+    fields: &[&str],
+) {
+    use bson::{Document, doc};
+    let collection = crate::models::channel_bot::COLLECTION_NAME;
+    let rows = db.collection::<Document>(collection);
+    let row = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+    let owner = row.get_str("user_id").unwrap();
+    let mut set = Document::new();
+    for &field in fields {
+        let plain = keys
+            .decrypt(row.get_binary_generic(field).unwrap())
+            .await
+            .unwrap();
+        let path = [field];
+        let context =
+            crate::crypto::record_field::RecordContext::new(collection, id, owner, &path).unwrap();
+        set.insert(
+            field,
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: keys.encrypt_record(&plain, &context).await.unwrap(),
+            },
+        );
+        set.insert(format!("secret_context_versions.{field}"), 3);
+    }
+    rows.update_one(doc! {"_id":id}, doc! {"$set":set})
+        .await
+        .unwrap();
 }
 
 #[cfg(test)]
@@ -576,7 +648,7 @@ mod tests {
             crate::crypto::local_key_provider::LocalKeyProvider::new([0x11; 32], None),
         ));
         let encrypted = keys.encrypt(b"meta-secret").await.unwrap();
-        let bot: ChannelBot = bson::from_document(bson::doc! {
+        let mut bot: ChannelBot = bson::from_document(bson::doc! {
             "_id": "bot", "user_id": "user", "platform": "whatsapp", "label": "Support",
             "platform_bot_id": "123456", "platform_bot_username": "+123456", "app_id": "654321",
             "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
@@ -599,6 +671,20 @@ mod tests {
                 ("waba_id".to_string(), "654321".to_string())
             ]
             .into()
+        );
+        bot.secret_context_versions
+            .insert("app_secret_encrypted".into(), 3);
+        assert!(adapter.build_verify_secrets(&keys, &bot).await.is_err());
+        bot.app_secret_encrypted = None;
+        assert!(adapter.build_verify_secrets(&keys, &bot).await.is_err());
+        bot.secret_context_versions.clear();
+        assert!(
+            adapter
+                .build_verify_secrets(&keys, &bot)
+                .await
+                .unwrap()
+                .get("app_secret")
+                .is_none()
         );
     }
 }

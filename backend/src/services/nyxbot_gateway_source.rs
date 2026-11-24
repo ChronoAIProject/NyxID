@@ -227,15 +227,14 @@ pub async fn credentials(
                     "native_whatsapp_identity_mismatch".into(),
                 ));
             }
-            let app_secret = state
-                .encryption_keys
-                .decrypt(
-                    bot.app_secret_encrypted
-                        .as_deref()
-                        .ok_or_else(|| AppError::OAuthAuthorityUnavailable)?,
-                )
-                .await
-                .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+            let app_secret = super::channel_registration::open_secret(
+                &state.encryption_keys,
+                bot,
+                "app_secret_encrypted",
+            )
+            .await
+            .map_err(|_| AppError::OAuthAuthorityUnavailable)?
+            .ok_or_else(|| AppError::OAuthAuthorityUnavailable)?;
             let app_secret = crate::crypto::guarded_utf8(app_secret)
                 .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
             let token =
