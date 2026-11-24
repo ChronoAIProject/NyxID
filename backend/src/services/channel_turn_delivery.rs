@@ -554,6 +554,24 @@ pub(crate) async fn enqueue_in_session(
             .await?
             .trace_request
     } else {
+        if super::channel_adapters::meta::is_meta(&accepted_origin.platform) {
+            let grant: crate::models::channel_meta::GrantRef = bson::from_bson(
+                source_row
+                    .get("meta_grant")
+                    .cloned()
+                    .ok_or_else(super::channel_meta_service::grants::incomplete)?,
+            )
+            .map_err(|_| super::channel_meta_service::grants::incomplete())?;
+            let supplied = incoming
+                .channel_contexts
+                .iter()
+                .find(|context| context.source_event_id == source)
+                .and_then(|context| context.meta_grant.as_ref());
+            if supplied != Some(&grant) {
+                return Err(super::channel_meta_service::grants::incomplete());
+            }
+            super::channel_meta_service::scopes::fence_reference(db, session, &grant, true).await?;
+        }
         rows.update_one(
             doc! {"_id": &conversation, "user_id": &owner},
             doc! {"$set": {"pending_events": bson::to_bson(&row.pending_events)
@@ -597,16 +615,50 @@ pub(crate) async fn enqueue_in_session(
 /// their exact agent/generation/child authority, never a text-only match.
 fn compatible_grants<'a>(
     existing: impl Iterator<Item = &'a crate::models::assistant_conversation::ChannelTurnContext>,
-    incoming: &[crate::models::assistant_conversation::ChannelTurnContext],
+    incoming: &'a [crate::models::assistant_conversation::ChannelTurnContext],
 ) -> bool {
-    !existing
-        .filter_map(|context| context.meta_grant.as_ref())
-        .any(|old| {
-            incoming
-                .iter()
-                .filter_map(|context| context.meta_grant.as_ref())
-                .any(|new| old.bot_id == new.bot_id && old.grant_id != new.grant_id)
-        })
+    let scope = |context: &'a crate::models::assistant_conversation::ChannelTurnContext| {
+        context
+            .meta_grant
+            .as_ref()
+            .map(|grant| (grant.bot_id.as_str(), grant.grant_id.as_str()))
+    };
+    let expected = incoming.first().and_then(scope);
+    let mut existing = existing.map(scope).peekable();
+    if existing.peek().is_none() && expected.is_some() {
+        return false;
+    }
+    existing.all(|item| item == expected)
+        && incoming.iter().all(|context| scope(context) == expected)
+}
+
+#[cfg(test)]
+mod grant_compatibility_tests {
+    use super::compatible_grants;
+    use crate::models::{assistant_conversation::ChannelTurnContext, channel_meta::GrantRef};
+
+    #[test]
+    fn identical_questions_from_independently_erasable_inboxes_stay_separate() {
+        fn context(bot: &str, grant: Option<&str>) -> ChannelTurnContext {
+            bson::from_document(bson::doc! {
+                "meta_grant": grant.map(|grant| bson::to_bson(&GrantRef {
+                    bot_id:bot.to_owned(), grant_id: grant.to_owned(), generation:1
+                }).unwrap()),
+                "source_event_id":"event","channel_id":"home","channel_bot_id":bot,
+                "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true,
+            }).unwrap()
+        }
+        let first = [context("first", Some("a"))];
+        let second = [context("second", Some("b"))];
+        let successor = [context("first", Some("b"))];
+        let ordinary = [context("other", None)];
+        assert!(compatible_grants(first.iter(), &first));
+        assert!(compatible_grants(ordinary.iter(), &ordinary));
+        assert!(!compatible_grants(first.iter(), &second));
+        assert!(!compatible_grants(first.iter(), &successor));
+        assert!(!compatible_grants(first.iter(), &ordinary));
+        assert!(!compatible_grants([].iter(), &first));
+    }
 }
 
 fn compatible_sources(

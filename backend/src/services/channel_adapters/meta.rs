@@ -675,6 +675,14 @@ pub(crate) async fn require_reply(
         .as_ref()
         .ok_or_else(|| unreachable("message_binding_required"))?;
     let now = Utc::now();
+    #[cfg(test)]
+    let now = TEST_REPLY_NOW
+        .try_with(|clock| {
+            chrono::DateTime::from_timestamp_millis(clock.load(std::sync::atomic::Ordering::SeqCst))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(now);
     if authority.event_at > now {
         return Err(unreachable("event_time_invalid"));
     }
@@ -1531,6 +1539,8 @@ impl PlatformAdapter for MetaAdapter {
 #[path = "meta_tests.rs"]
 pub(crate) mod tests;
 
+#[cfg(test)]
+tokio::task_local! {static TEST_REPLY_NOW: std::sync::Arc<std::sync::atomic::AtomicI64>;}
 #[cfg(test)]
 tokio::task_local! {static TEST_GRAPH_BASE:String;}
 #[cfg(test)]

@@ -18,6 +18,7 @@ pub(crate) async fn decide_owner_reply(
     owner: &str,
     conversation_id: &str,
     text: &str,
+    grant: Option<&crate::models::channel_meta::GrantRef>,
 ) -> AppResult<Option<AssistantAcknowledgement>> {
     if acks::parse_reply(text).is_none() {
         return Ok(None);
@@ -33,14 +34,26 @@ pub(crate) async fn decide_owner_reply(
     let decided = session
         .start_transaction()
         .and_run2(async move |session| {
-            let result = Box::pin(acks::decide_reply_in_session(
-                &decision_db,
-                session,
-                &decision_owner,
-                &conversation_ids,
-                &text,
-                since,
-            ))
+            let result = async {
+                if let Some(grant) = grant {
+                    super::channel_meta_service::scopes::fence_reference(
+                        &decision_db,
+                        session,
+                        grant,
+                        true,
+                    )
+                    .await?;
+                }
+                Box::pin(acks::decide_reply_in_session(
+                    &decision_db,
+                    session,
+                    &decision_owner,
+                    &conversation_ids,
+                    &text,
+                    since,
+                ))
+                .await
+            }
             .await;
             transactions::transaction_result(result)
         })

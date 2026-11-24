@@ -6403,6 +6403,66 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
         .unwrap()
         .unwrap();
     assert_eq!(b_ref.grant_id, b.meta_binding.as_ref().unwrap().grant_id);
+    let reserved = scopes::bind_thread_conversation(&state.db, &b_ref, &current, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scopes::bind_thread_conversation(&state.db, &b_ref, &current, None)
+            .await
+            .unwrap(),
+        reserved
+    );
+    let owner_home = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    assert_eq!(
+        scopes::bind_thread_conversation(&state.db, &b_ref, &current, Some(&owner_home))
+            .await
+            .unwrap(),
+        owner_home
+    );
+    for destination in [None, Some(old_session.as_str())] {
+        assert!(
+            scopes::bind_thread_conversation(&state.db, &a_ref, &thread, destination)
+                .await
+                .is_err()
+        );
+    }
+    let saved = state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .find_one(doc! {"_id": &thread.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.get_str("conversation_id"), Ok(owner_home.as_str()));
+    let cards = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    for word in ["yes", "no"] {
+        let card = uuid::Uuid::new_v4().to_string();
+        cards.insert_one(doc!{"_id": &card, "kind":"action", "summary":"Confirmation", "status":"pending", "decider":"user",
+            "user_id": &b.user_id, "conversation_id": &owner_home, "api_key_id": "test-key",
+            "created_at": bson::DateTime::now(), "expires_at": bson::DateTime::from_chrono(Utc::now()+Duration::hours(1))}).await.unwrap();
+        assert!(matches!(
+            super::super::assistant_platform_reply_decision::decide_owner_reply(
+                &state.db,
+                &b.user_id,
+                &owner_home,
+                word,
+                Some(&a_ref)
+            )
+            .await,
+            Err(AppError::ChannelConversationNotReachable(_))
+        ));
+        assert_eq!(
+            cards
+                .find_one(doc! {"_id":&card})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("status"),
+            Ok("pending")
+        );
+    }
     state
         .db
         .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
@@ -7649,6 +7709,17 @@ async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_wit
     state.db.drop().await.unwrap();
 }
 
+async fn assert_stopped_with_removed_webhook(response: impl axum::response::IntoResponse) {
+    let response = response.into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16384)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["local_delivery_stopped"], true);
+    assert_eq!(result["webhook_cleanup"], "removed");
+}
+
 #[tokio::test]
 async fn http_manual_delete_reports_stopped_during_paged_cleanup_and_sweeper_finishes_exact_scope()
 {
@@ -7703,10 +7774,8 @@ async fn http_manual_delete_reports_stopped_during_paged_cleanup_and_sweeper_fin
         Path(bot.id.clone()),
     )
     .await
-    .unwrap()
-    .0;
-    assert_eq!(response.local_delivery_stopped, Some(true));
-    assert_eq!(response.webhook_cleanup, Some("removed"));
+    .unwrap();
+    assert_stopped_with_removed_webhook(response).await;
     assert!(
         !grants::completion_for(&state.db, &bot.id, &current.grant_id)
             .await
@@ -7938,10 +8007,8 @@ async fn managed_http_delete_stop_can_overlap_signed_scoped_cleanup_without_manu
                 Path(b.id.clone()),
             )
             .await
-            .unwrap()
-            .0;
-            assert_eq!(response.local_delivery_stopped, Some(true));
-            assert_eq!(response.webhook_cleanup, Some("removed"));
+            .unwrap();
+            assert_stopped_with_removed_webhook(response).await;
         },
         async {
             let s = service(&state, &server);
