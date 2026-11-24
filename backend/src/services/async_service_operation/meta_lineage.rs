@@ -7,6 +7,12 @@ pub(crate) async fn capture(
     tx: &mut ClientSession,
     row: &AssistantConversation,
 ) -> AppResult<Vec<ChannelTurnContext>> {
+    let contexts = contexts(row)?;
+    fence(db, tx, &contexts, true).await?;
+    Ok(contexts)
+}
+
+pub(crate) fn contexts(row: &AssistantConversation) -> AppResult<Vec<ChannelTurnContext>> {
     let mut contexts: Vec<ChannelTurnContext> = Vec::new();
     for source in row.active_turn.iter().flat_map(|turn| {
         turn.channel_context
@@ -31,7 +37,6 @@ pub(crate) async fn capture(
         context.original_message = false;
         contexts.push(context);
     }
-    fence(db, tx, &contexts, true).await?;
     Ok(contexts)
 }
 
@@ -59,7 +64,7 @@ pub(crate) async fn fence(
 
 /// A successful exact read can establish permanent loss. Storage errors and
 /// malformed or missing scope evidence propagate for retry/repair instead.
-async fn current(
+pub(crate) async fn current(
     db: &Database,
     tx: &mut ClientSession,
     context: &ChannelTurnContext,

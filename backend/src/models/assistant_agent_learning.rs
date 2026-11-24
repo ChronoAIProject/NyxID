@@ -19,6 +19,10 @@ pub const AUTHORED_CLAIMS_COLLECTION_NAME: &str = "assistant_authored_draft_clai
 /// A generation's original review surface, retained across interrupted preparation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuthoredDraftClaim {
+    #[serde(default)]
+    pub initiating_input_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meta_contexts: Vec<super::assistant_conversation::ChannelTurnContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub proposal_id: String,

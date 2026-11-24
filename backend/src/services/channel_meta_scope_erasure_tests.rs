@@ -1463,7 +1463,7 @@ async fn shared_turn_erases_real_cards_and_bindings_and_refuses_late_publication
     db.collection::<Document>("assistant_messages")
         .update_many(
             doc! {"conversation_id":&row.id,"turn_id":turn},
-            doc! {"$set":{"meta_grants":[bson::to_bson(&proof).unwrap()]}},
+            doc! {"$set":{"meta_grants":[bson::to_bson(&proof).unwrap()],"meta_contexts":[bson::to_bson(&card_sources::context(&f.bot)).unwrap()]}},
         )
         .await
         .unwrap();

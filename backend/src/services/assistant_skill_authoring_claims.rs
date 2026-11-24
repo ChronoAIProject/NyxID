@@ -1,9 +1,8 @@
 //! Serialize draft generations without holding a transaction across Ornn reads.
 use super::*;
 use crate::{
-    models::{
-        assistant_agent_learning::{AUTHORED_CLAIMS_COLLECTION_NAME as CLAIMS, AuthoredDraftClaim},
-        assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
+    models::assistant_agent_learning::{
+        AUTHORED_CLAIMS_COLLECTION_NAME as CLAIMS, AuthoredDraftClaim,
     },
     services::api_key_mutation_service as mutations,
 };
@@ -114,6 +113,19 @@ fn reusable_card(card: &AssistantAcknowledgement) -> bool {
         || (card.status == "allowed" && card.kind == "action")
 }
 
+fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
+    acks::RequestOrigin {
+        initiating_input_id: claim.initiating_input_id.clone(),
+        meta_contexts: claim.meta_contexts.clone(),
+        invocation_id: claim.invocation_id.clone(),
+        creation_turn_id: claim.creation_turn_id.clone(),
+        requested_turn_id: claim.requested_turn_id.clone(),
+        voice_request_id: claim.voice_request_id.clone(),
+        trigger_run_id: claim.trigger_run_id.clone(),
+        routing: claim.routing.clone(),
+    }
+}
+
 async fn reuse(
     db: &Database,
     claim_id: &str,
@@ -137,7 +149,17 @@ async fn reuse(
         return Ok(None);
     };
     // Serialize against key replacement, conversation deletion and publication.
-    acks::fence(db, &chat, session).await?;
+    let (conversation, _, _) = acks::fence(db, &chat, session).await?;
+    let source = acks::source::select(
+        db,
+        session,
+        &chat,
+        &conversation,
+        Some(&origin(&claim)),
+        false,
+    )
+    .await?;
+    acks::source::fence_selection(db, session, &source).await?;
     touch_proposal(db, &proposal, session).await?;
     Ok(Some(Reservation {
         claim_id: claim_id.into(),
@@ -203,6 +225,7 @@ pub(super) async fn reserve(
                     let card = latest_card(db, &proposal, session).await?.ok_or_else(||
                         AppError::Conflict("Review or discard the interrupted draft before creating another; its original review conversation was not recorded".into()))?;
                     let claim = AuthoredDraftClaim {
+                        initiating_input_id:None,meta_contexts:card.meta_contexts.clone(),
                         invocation_id:card.invocation_id.clone(),
                         proposal_id: proposal.id.clone(), conversation_id: card.conversation_id.clone(),
                         api_key_id: card.api_key_id.clone(), turn_id: card.requested_turn_id.clone().unwrap_or_default(),
@@ -226,19 +249,15 @@ pub(super) async fn reserve(
             let (conversation, _, _) = acks::fence(db, chat, session).await?;
             let turn = conversation.active_turn.as_ref().filter(|t| &t.turn_id == turn_id && !t.stop_requested)
                 .ok_or_else(|| AppError::Forbidden("Draft from an active owner turn".into()))?;
-            let mut initiating = doc! {"conversation_id":&conversation.id,"user_id":&chat.user_id,
-                "role":{"$in":["user","orchestrator"]},"steering":bson::Bson::Null,"execution_pending":{"$ne":true}};
-            if let Some(seq) = turn.initiating_message_seq {
-                initiating.insert("seq", doc! {"$lte":seq});
-            }
-            let started_by = db.collection::<AssistantMessage>(MESSAGES).find_one(initiating)
-                .sort(doc! {"seq":-1}).session(&mut *session).await?;
+            let source=acks::source::select(db,session,chat,&conversation,None,false).await?;
+            acks::source::fence_selection(db,session,&source).await?;
             let claim = AuthoredDraftClaim {
+                initiating_input_id:source.input_id,meta_contexts:source.contexts,
                 invocation_id:chat.invocation_id.clone(),
                 proposal_id: candidate.id.clone(), conversation_id: chat.conversation_id.clone(),
                 api_key_id: chat.api_key_id.clone(), turn_id: turn_id.clone(),
-                creation_turn_id: Some(turn_id.clone()),
-                requested_turn_id: if turn.trigger_run_id.is_some() { Some(turn_id.clone()) } else { started_by.map(|m| m.turn_id) },
+                creation_turn_id: source.creation_turn_id,
+                requested_turn_id: source.requested_turn_id,
                 voice_request_id: turn.voice_request_id.clone(), trigger_run_id: turn.trigger_run_id.clone(),
                 // Recovery re-raises the card with the drafting turn's routing, not a later turn's.
                 routing: Some(super::super::assistant_access_policy::routing_for(chat, &conversation)),
@@ -292,17 +311,20 @@ pub(super) async fn finalize(
             touch_proposal(db, &reservation.proposal, session).await?;
             let claim = &reservation.claim;
             let chat = source_authority(db, &reservation.proposal.owner_id, &claim.api_key_id, &claim.conversation_id).await?;
-            acks::fence(db, &chat, session).await?;
+            let (conversation,_,_)=acks::fence(db, &chat, session).await?;
             if let Some(card) = latest_card(db, &reservation.proposal, session).await? {
                 if reusable_card(&card)
                     && card.api_key_id == claim.api_key_id && card.conversation_id == claim.conversation_id
                     && card.authored_skill.as_ref().is_some_and(|r| r.revision == reservation.proposal.revision)
                 {
+                    let source=acks::source::select(db,session,&chat,&conversation,Some(&origin(claim)),false).await?;
+                    acks::source::fence_selection(db,session,&source).await?;
                     return Ok((card, None));
                 }
                 return Err(conflict());
             }
             let origin = acks::RequestOrigin {
+                initiating_input_id:claim.initiating_input_id.clone(),meta_contexts:claim.meta_contexts.clone(),
                 invocation_id:claim.invocation_id.clone(),
                 creation_turn_id: claim.creation_turn_id.clone(),
                 requested_turn_id: claim.requested_turn_id.clone(), voice_request_id: claim.voice_request_id.clone(),
