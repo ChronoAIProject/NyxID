@@ -378,24 +378,36 @@ pub(crate) async fn connect(
             if guarded_default {
                 super::durable_wake_tests::after("meta_reuse_before_link").await;
             }
-            link(state, owner, &existing.id, agent).await?;
             let code = new_link_code();
-            crate::services::nyxbot_channel_continuity_service::restore_existing(
-                &state.db,
-                &existing.id,
-                owner,
-                agent.is_nyxbot(),
-                &sha256_hex(code.as_bytes()),
-                guarded_default
-                    .then(|| {
-                        super::nyxbot_channel_query_service::direct_callback(
-                            &state.config.base_url,
-                            &existing.id,
-                        )
-                    })
-                    .as_deref(),
-            )
-            .await?;
+            let hash = sha256_hex(code.as_bytes());
+            if guarded_default && existing.transport == "direct" {
+                let changed = existing.agent_id.as_deref() != Some(agent.id.as_str())
+                    && !(existing.agent_id.is_none() && agent.is_nyxbot());
+                let (current, _) = super::nyxbot_channel_setup_service::mutate_meta_assignment(
+                    state,
+                    owner,
+                    &existing,
+                    Some(agent),
+                    None,
+                    Some((&hash, agent.is_nyxbot())),
+                )
+                .await?;
+                if changed {
+                    super::nyxbot_channel_setup_service::after_link(state, owner, &current, agent)
+                        .await;
+                }
+            } else {
+                link(state, owner, &existing.id, agent).await?;
+                crate::services::nyxbot_channel_continuity_service::restore_existing(
+                    &state.db,
+                    &existing.id,
+                    owner,
+                    agent.is_nyxbot(),
+                    &hash,
+                    None,
+                )
+                .await?;
+            }
             let existing = load_channel(state, owner, &existing.id).await?;
             let link = LinkInstructions {
                 url: link_url(&existing, &code),

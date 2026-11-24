@@ -2114,8 +2114,14 @@ async fn settle_and_wake(
             .await;
         }
     } else if watch.wake_claim.is_some() {
-        if crate::services::assistant_wake_service::watch::settle(&state.db, watch, kind, error)
-            .await?
+        if crate::services::assistant_wake_service::watch::settle(
+            &state.db,
+            watch,
+            kind,
+            error,
+            Some(&state.config.base_url),
+        )
+        .await?
         {
             #[cfg(test)]
             crate::services::durable_wake_tests::after("watch_settled").await;
@@ -2875,17 +2881,29 @@ pub async fn link_channel(
         private_chat_posts: body.private_chat_posts,
         apply_to_existing: body.apply_to_existing,
     };
-    if settings.private_chats.is_some()
+    let has_settings = settings.private_chats.is_some()
         || settings.private_chat_posts.is_some()
-        || settings.apply_to_existing
-    {
+        || settings.apply_to_existing;
+    let combined = has_settings && body.agent_id.is_some();
+    if combined {
+        result = crate::services::nyxbot_channel_setup_service::update_assignment_access(
+            &state,
+            &owner,
+            &id,
+            body.agent_id.as_deref().expect("combined assignment"),
+            &settings,
+        )
+        .await?;
+    } else if has_settings {
         result = chats::update_access(&state, &owner, &id, &settings).await?;
     }
     if let Some(agent_id) = body.agent_id.as_deref() {
-        let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
-        let linked = link(&state, &owner, &id, &agent).await?;
-        if let (Some(result), Some(linked)) = (result.as_object_mut(), linked.as_object()) {
-            result.extend(linked.clone());
+        if !combined {
+            let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
+            let linked = link(&state, &owner, &id, &agent).await?;
+            if let (Some(result), Some(linked)) = (result.as_object_mut(), linked.as_object()) {
+                result.extend(linked.clone());
+            }
         }
         // A combined relink/audience PATCH must describe the final target, not
         // the agent loaded before linking. Diagnostics cannot undo a saved change.

@@ -192,21 +192,62 @@ pub(crate) async fn restore_existing(
     let owner_id = owner_id.to_owned();
     let link_hash = link_hash.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let work:AppResult<_>=Box::pin(async {
-            let row=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&id,"user_id":&owner_id,"status":"active"}).session(&mut *session).await?
-                .ok_or_else(conflict)?;
-            super::platform_bot_authority::fence_personal_routes(&db,&row.channel_bot_id,owner(&row),session).await?;
-            if row.org_specialist.is_some() {super::org_channel_service::fence_management(&db,session,&row,&row.user_id).await?;}
-            super::nyxbot_channel_query_service::fence_meta_default(
-                &db, &row, expected_callback.as_deref(), session,
-            ).await?;
-            if row.continuity_from_channel_id.is_none() {restore(&db,&row,None,default_agent,session).await?;}
-            db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"active"},doc! {"$set":{"link_code_hash":&link_hash,
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let work: AppResult<_> = Box::pin(async {
+                let row = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id":&id,"user_id":&owner_id,"status":"active"})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(conflict)?;
+                let meta = row.transport == "direct"
+                    && super::channel_adapters::meta::is_meta(&row.platform);
+                if !meta {
+                    super::platform_bot_authority::fence_personal_routes(
+                        &db,
+                        &row.channel_bot_id,
+                        owner(&row),
+                        session,
+                    )
+                    .await?;
+                }
+                if row.org_specialist.is_some() {
+                    super::org_channel_service::fence_management(&db, session, &row, &row.user_id)
+                        .await?;
+                }
+                let row = super::nyxbot_channel_query_service::fence_meta_default(
+                    &db,
+                    &row,
+                    expected_callback.as_deref(),
+                    session,
+                )
+                .await?;
+                restore_existing_in_session(&db, &row, default_agent, &link_hash, session).await?;
+                Ok(())
+            })
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+pub(crate) async fn restore_existing_in_session(
+    db: &Database,
+    row: &NyxbotChannel,
+    default_agent: bool,
+    link_hash: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let id = &row.id;
+    if row.continuity_from_channel_id.is_none() {
+        restore(db, row, None, default_agent, session).await?;
+    }
+    db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"active"},doc! {"$set":{"link_code_hash":link_hash,
                 "link_code_expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),"gateway_groups_retry_at":if row.transport=="gateway" {bson::Bson::DateTime(bson::DateTime::now())} else {bson::Bson::Null}}}).session(&mut *session).await?;
-            Ok(())
-        }).await;transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+    Ok(())
 }
 
 /// Rotate only the owner challenge of a live personal connection. Readiness,
@@ -232,8 +273,10 @@ pub(crate) async fn rotate_owner_link(
     );
     super::transaction_service::run_db_only(db, &args, |tx, (db, row, hash, expires, callback)| {
         Box::pin(async move {
-            super::platform_bot_authority::fence_personal_routes(db, &row.channel_bot_id, owner(row), tx).await?;
-            super::nyxbot_channel_query_service::fence_meta_default(db, row, Some(callback), tx).await?;
+            if row.transport != "direct" || !super::channel_adapters::meta::is_meta(&row.platform) {
+                super::platform_bot_authority::fence_personal_routes(db, &row.channel_bot_id, owner(row), tx).await?;
+            }
+            let row = super::nyxbot_channel_query_service::fence_meta_default(db, row, Some(callback), tx).await?;
             let changed = db.collection::<NyxbotChannel>(CHANNELS).update_one(
                 doc! {"_id": &row.id, "user_id": &row.user_id, "status": "active", "agent_id": &row.agent_id, "org_specialist": null},
                 doc! {"$set": {"link_code_hash": hash, "link_code_expires_at": bson::DateTime::from_chrono(*expires)}},

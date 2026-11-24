@@ -159,6 +159,10 @@ pub async fn customer_setup(
                         daily_credits: None,
                         expected_revision: facts["guest_revision"].as_str().map(str::to_owned),
                     },
+                    Some(&super::nyxbot_channel_query_service::direct_callback(
+                        &state.config.base_url,
+                        &row.id,
+                    )),
                 )
                 .await?;
             }

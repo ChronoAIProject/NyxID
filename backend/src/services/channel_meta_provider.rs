@@ -61,55 +61,131 @@ pub(crate) async fn retire_account_inbox(
     #[cfg(test)]
     super::super::durable_wake_tests::after("meta_account_before_retirement").await;
     let args = (db.clone(), owner.to_owned(), bot_id.to_owned());
-    super::super::transaction_service::run_db_only(db, &args, |tx, (db, owner, id)| Box::pin(async move {
-        super::super::org_channel_service::live_doc(db, tx, crate::models::user::COLLECTION_NAME,
-            doc! {"_id":owner,"is_active":false,"platform_personal_deleting":true}, true).await?;
-        let Some(bot) = db.collection::<ChannelBot>(BOTS).find_one(
+    super::super::transaction_service::run_db_only(db, &args, |tx, (db, owner, id)| {
+        Box::pin(retire_account_inbox_in_session(db, tx, owner, id))
+    })
+    .await
+}
+
+async fn retire_account_inbox_in_session(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    owner: &str,
+    id: &str,
+) -> AppResult<()> {
+    super::super::org_channel_service::live_doc(
+        db,
+        tx,
+        crate::models::user::COLLECTION_NAME,
+        doc! {"_id":owner,"is_active":false,"platform_personal_deleting":true},
+        true,
+    )
+    .await?;
+    let Some(bot) = db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(
             doc! {"_id":id,"user_id":owner,"is_active":false,"meta_binding.subscription":"removed"},
-        ).session(&mut *tx).await? else {
-            if db.collection::<bson::Document>(BOTS).find_one(doc! {"_id":id}).session(&mut *tx).await?.is_none() {return Ok(());}
-            return Err(conflict());
-        };
-        let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
-        if binding.grant_subject_id.is_empty() {
-            // A manual grant has no login subject to receive managed signed
-            // callbacks. Do not invent a permanent authority for an empty ID.
-            db.collection::<bson::Document>("channel_meta_erasure_fences").update_one(
-                doc! {"_id":id},doc! {"$set":{"requested_at":bson::DateTime::now()},"$unset":{"retired_grant":""}},
-            ).upsert(true).session(&mut *tx).await?;
-        } else {
-            super::super::feature_flag_service::fence_meta_enrollment_in_session(db, &bot.platform, tx).await?;
+        )
+        .session(&mut *tx)
+        .await?
+    else {
+        if db
+            .collection::<bson::Document>(BOTS)
+            .find_one(doc! {"_id":id})
+            .session(&mut *tx)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        return Err(conflict());
+    };
+    let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
+    if binding.grant_subject_id.is_empty() {
+        // A manual grant has no login subject to receive managed signed
+        // callbacks. Do not invent a permanent authority for an empty ID.
+        db.collection::<bson::Document>("channel_meta_erasure_fences")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"requested_at":bson::DateTime::now()},"$unset":{"retired_grant":""}},
+            )
+            .upsert(true)
+            .session(&mut *tx)
+            .await?;
+    } else {
+        super::super::feature_flag_service::fence_meta_enrollment_in_session(db, &bot.platform, tx)
+            .await?;
         let identity = grant_identity(&bot.platform, &binding.app_id, &binding.grant_subject_id)?;
         // The exact same write is acquired by accept_provider_request before
         // it reads either live bots or retired attribution. Neither order can
         // lose a captured obligation or acknowledge a wider successor grant.
-        db.collection::<bson::Document>("channel_meta_grant_authority").update_one(
-            doc! {"identity":&identity}, doc! {"$inc":{"revision":1_i64},
+        db.collection::<bson::Document>("channel_meta_grant_authority")
+            .update_one(
+                doc! {"identity":&identity},
+                doc! {"$inc":{"revision":1_i64},
                 "$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"identity":&identity,
                     "platform":&bot.platform,"app_id":&binding.app_id}},
-        ).upsert(true).session(&mut *tx).await?;
-        let account = db.collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
-            .find_one(doc! {"user_id":owner}).projection(doc! {"_id":1}).session(&mut *tx).await?.ok_or_else(conflict)?;
-        let retired = crate::models::channel_meta::RetiredGrant {grant_id:binding.grant_id.clone(),
-            identity, platform:bot.platform.clone(), account_erasure_id:account.get_str("_id").map_err(|_|conflict())?.into(),
-            bot_created_at:bot.created_at, authorized_at:binding.authorized_at};
-        db.collection::<bson::Document>("channel_meta_erasure_fences").update_one(
-            doc! {"_id":id},doc! {"$set":{"requested_at":bson::DateTime::now(),
+            )
+            .upsert(true)
+            .session(&mut *tx)
+            .await?;
+        let account = db
+            .collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+            .find_one(doc! {"user_id":owner})
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?
+            .ok_or_else(conflict)?;
+        let retired = crate::models::channel_meta::RetiredGrant {
+            grant_id: binding.grant_id.clone(),
+            identity,
+            platform: bot.platform.clone(),
+            account_erasure_id: account.get_str("_id").map_err(|_| conflict())?.into(),
+            bot_created_at: bot.created_at,
+            authorized_at: binding.authorized_at,
+        };
+        db.collection::<bson::Document>("channel_meta_erasure_fences")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"requested_at":bson::DateTime::now(),
                 "retired_grant":bson::to_bson(&retired).map_err(|_|invalid())?}},
-        ).upsert(true).session(&mut *tx).await?;
-        }
-        for (collection, filter) in [
-            (meta::CONTROLS,doc! {"bot_id":id}),
-            (crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME,doc! {"channel_bot_id":id}),
-            (SESSIONS,doc! {"bot_id":id}),
-        ] {db.collection::<bson::Document>(collection).delete_many(filter).session(&mut *tx).await?;}
-        super::super::org_channel_service::defaults::erase_in_session(db,doc! {"channel_bot_id":id},tx).await?;
-        if db.collection::<ChannelBot>(BOTS).delete_one(doc! {"_id":id,"user_id":owner,
-            "is_active":false,"meta_binding.grant_id":&binding.grant_id,
-            "meta_binding.generation":binding.generation,"meta_binding.subscription":"removed"})
-            .session(&mut *tx).await?.deleted_count != 1 {return Err(conflict());}
-        Ok(())
-    })).await
+            )
+            .upsert(true)
+            .session(&mut *tx)
+            .await?;
+    }
+    for (collection, filter) in [
+        (meta::CONTROLS, doc! {"bot_id":id}),
+        (
+            crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME,
+            doc! {"channel_bot_id":id},
+        ),
+        (SESSIONS, doc! {"bot_id":id}),
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(filter)
+            .session(&mut *tx)
+            .await?;
+    }
+    super::super::org_channel_service::defaults::erase_in_session(
+        db,
+        doc! {"channel_bot_id":id},
+        tx,
+    )
+    .await?;
+    if db
+        .collection::<ChannelBot>(BOTS)
+        .delete_one(doc! {"_id":id,"user_id":owner,
+        "is_active":false,"meta_binding.grant_id":&binding.grant_id,
+        "meta_binding.generation":binding.generation,"meta_binding.subscription":"removed"})
+        .session(&mut *tx)
+        .await?
+        .deleted_count
+        != 1
+    {
+        return Err(conflict());
+    }
+    Ok(())
 }
 
 pub(crate) async fn fence_grant_in_session(

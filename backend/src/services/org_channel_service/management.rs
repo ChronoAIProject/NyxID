@@ -44,6 +44,7 @@ pub(crate) async fn patch(
     actor: &str,
     row: &NyxbotChannel,
     input: GuestSettingsPatch,
+    callback: Option<&str>,
 ) -> AppResult<()> {
     if input.enabled.is_none() && input.service_ids.is_none() && input.daily_credits.is_none() {
         return Err(AppError::ValidationError(
@@ -67,6 +68,7 @@ pub(crate) async fn patch(
         },
         input.enabled.is_some(),
         false,
+        callback,
     )
     .await
 }
@@ -173,8 +175,9 @@ pub(crate) async fn update(
     actor: &str,
     row: &NyxbotChannel,
     input: GuestSettings,
+    callback: Option<&str>,
 ) -> AppResult<()> {
-    update_choice(db, actor, row, input, true, false).await
+    update_choice(db, actor, row, input, true, false, callback).await
 }
 
 pub(crate) async fn enable_customer_dms(
@@ -182,8 +185,9 @@ pub(crate) async fn enable_customer_dms(
     actor: &str,
     row: &NyxbotChannel,
     input: GuestSettings,
+    callback: Option<&str>,
 ) -> AppResult<()> {
-    update_choice(db, actor, row, input, true, true).await
+    update_choice(db, actor, row, input, true, true, callback).await
 }
 
 async fn update_choice(
@@ -193,6 +197,7 @@ async fn update_choice(
     input: GuestSettings,
     explicit_enabled: bool,
     open_private_chats: bool,
+    callback: Option<&str>,
 ) -> AppResult<()> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
     super::require_admin(db, actor, &b.org_id).await?;
@@ -291,6 +296,10 @@ async fn update_choice(
     if !unchanged {
         policy.revision = uuid::Uuid::new_v4().to_string();
     }
+    #[cfg(test)]
+    if policy.enabled {
+        crate::services::durable_wake_tests::after("org_guest_before_meta_write").await;
+    }
     let context = (
         db.clone(),
         actor.to_owned(),
@@ -302,8 +311,12 @@ async fn update_choice(
         migration_off,
         author_services,
         open_private_chats,
+        callback.map(str::to_owned),
     );
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats)|Box::pin(async move{
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,callback)|Box::pin(async move{
+        if policy.enabled {
+            crate::services::nyxbot_channel_query_service::fence_meta_default(db,row,callback.as_deref(),tx).await?;
+        }
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;
         super::fence_management(db,tx,row,actor).await?;
         if *ready && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }

@@ -160,6 +160,7 @@ impl Fixture {
                 service_ids: Some(ids),
                 daily_credits: Some(Credits::from_whole(1)),
             },
+            None,
         )
         .await
         .unwrap();
@@ -455,7 +456,8 @@ async fn exact_guest_billing_lane_preserves_ordinary_platform_key_payers() {
                 enabled: true,
                 service_ids: Some(vec![]),
                 daily_credits: Some(Credits::from_whole(1))
-            }
+            },
+            None
         )
         .await
         .is_err()
@@ -570,7 +572,8 @@ async fn guest_delegation_requires_admin_and_live_agent_policy_intersection() {
                     enabled: true,
                     service_ids: Some(vec![id.clone()]),
                     daily_credits: Some(Credits::from_whole(1))
-                }
+                },
+                None
             )
             .await
             .is_err()
@@ -779,6 +782,7 @@ async fn guest_budget_reserves_fractional_tax_upward_at_the_exact_cap() {
                 service_ids: Some(vec![]),
                 daily_credits: Some(Credits::from_pico(cap).unwrap()),
             },
+            None,
         )
         .await
         .unwrap();
@@ -1293,6 +1297,7 @@ async fn org_channel_rotated_guest_key_keeps_typed_lane_and_is_revoked_with_expo
             service_ids: Some(vec![]),
             daily_credits: Some(Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -1734,6 +1739,7 @@ async fn narrowing_guest_exposure_stops_guest_and_setup_keys_but_preserves_membe
             service_ids: Some(vec![]),
             daily_credits: Some(Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();

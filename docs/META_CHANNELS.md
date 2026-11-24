@@ -401,6 +401,16 @@ Meta default and dedicated callback under the same write fences. Route drift
 returns a repair conflict before changing the assignment or challenge. Repairing
 the same organization specialist retains its deliberately saved guest policy;
 preview describes that retained policy.
+Combined specialist/audience PATCH and ordinary or assistant Connect on an
+existing Meta assignment commit the relink, inherited-thread changes and requested
+audience or owner challenge atomically. They reload the confirmed assignment and
+delivery health inside that transaction. Personal and organization guest enabling
+use the same live route proof before opening access. Explicitly closing access
+remains available on a failing route, subject to the existing owner/admin checks.
+Hosted assistant setup stores only its server-computed expected callback in the
+trusted wake reference. Wake admission verifies that callback and the live route
+before minting an owner code. An older Meta wake without that proof gives repair
+guidance and issues no new code; ordinary-channel wakes retain their behavior.
 Marked credentials are
 authenticated under their old owner and rebound to the destination in the same
 fenced ownership transfer, following the existing staged/strict record writer

@@ -120,6 +120,11 @@ pub(crate) async fn link(
     {
         return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": false}));
     }
+    if row.transport == "direct" && super::channel_adapters::meta::is_meta(&row.platform) {
+        mutate_meta_assignment(state, owner, &row, Some(agent), None, None).await?;
+        after_link(state, owner, &row, agent).await;
+        return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": true}));
+    }
     let callback = (row.transport == "direct"
         && super::channel_adapters::meta::is_meta(&row.platform))
     .then(|| super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &row.id));
@@ -161,6 +166,186 @@ pub(crate) async fn link(
     )
     .await;
     Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": true}))
+}
+
+/// The only Meta relink/access/challenge commit. No provider/model I/O runs
+/// inside this retryable transaction; refusal rolls every requested write back.
+pub(crate) async fn mutate_meta_assignment(
+    state: &AppState,
+    actor: &str,
+    expected: &NyxbotChannel,
+    agent: Option<&crate::models::assistant_agent::AssistantAgent>,
+    settings: Option<&crate::services::nyxbot_chat_settings_service::AccessSettings>,
+    owner_challenge: Option<(&str, bool)>,
+) -> AppResult<(NyxbotChannel, u64)> {
+    if let Some(agent) = agent {
+        super::org_channel_service::require_target(&state.db, actor, agent).await?;
+        let bot = accessible_bot(state, actor, &expected.channel_bot_id).await?;
+        let binding =
+            super::org_channel_service::link_target(&state.db, actor, &bot, agent).await?;
+        if binding.is_some() != expected.org_specialist.is_some() || agent.destroyed_at.is_some() {
+            return Err(AppError::Conflict(
+                "Review this specialist's inbox assignment before continuing".into(),
+            ));
+        }
+    }
+    if let Some(settings) = settings {
+        settings.validate()?;
+    }
+    #[cfg(test)]
+    {
+        super::durable_wake_tests::after("meta_relink_before_commit").await;
+        if owner_challenge.is_some() {
+            super::durable_wake_tests::after("meta_owner_link_before_commit").await;
+        }
+    }
+    let callback =
+        super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &expected.id);
+    let args = (
+        state.db.clone(),
+        actor.to_owned(),
+        expected.clone(),
+        agent.cloned(),
+        settings.cloned(),
+        owner_challenge.map(|(hash, default)| (hash.to_owned(), default)),
+        callback,
+    );
+    super::transaction_service::run_db_only(
+        &state.db,
+        &args,
+        |tx, (db, actor, expected, agent, settings, challenge, callback)| {
+            Box::pin(async move {
+                let mut row = super::nyxbot_channel_query_service::fence_meta_default(
+                    db,
+                    expected,
+                    Some(callback),
+                    tx,
+                )
+                .await?;
+                super::channel_bot_service::fence_owner_management(
+                    db,
+                    tx,
+                    actor,
+                    row.bot_owner_id.as_deref().unwrap_or(&row.user_id),
+                )
+                .await?;
+                if row.org_specialist.is_some() {
+                    super::org_channel_service::fence_management(db, tx, &row, actor).await?;
+                }
+                if let Some(agent) = agent {
+                    super::org_channel_service::live_doc(
+                        db,
+                        tx,
+                        "assistant_agents",
+                        doc! {"_id":&agent.id,"user_id":&agent.user_id,"destroyed_at":null},
+                        true,
+                    )
+                    .await?;
+                    if row.agent_id.as_deref() != Some(agent.id.as_str())
+                        && !(row.agent_id.is_none() && agent.is_nyxbot())
+                    {
+                        super::channel_thread_follow_service::relink_in_session(
+                            db, &row, actor, &agent.id, tx,
+                        )
+                        .await?;
+                        row = db
+                            .collection::<NyxbotChannel>(CHANNELS)
+                            .find_one(doc! {"_id":&row.id})
+                            .session(&mut *tx)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::Conflict("Channel assignment changed".into())
+                            })?;
+                    }
+                }
+                let applied = if let Some(settings) = settings {
+                    super::nyxbot_chat_settings_service::update_in_session(
+                        db, tx, &row, actor, settings, true,
+                    )
+                    .await?
+                } else {
+                    0
+                };
+                if let Some((hash, default)) = challenge {
+                    super::nyxbot_channel_continuity_service::restore_existing_in_session(
+                        db, &row, *default, hash, tx,
+                    )
+                    .await?;
+                }
+                let row = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id":&row.id})
+                    .session(&mut *tx)
+                    .await?
+                    .ok_or_else(|| AppError::Conflict("Channel assignment changed".into()))?;
+                Ok((row, applied))
+            })
+        },
+    )
+    .await
+}
+
+pub(crate) async fn after_link(
+    state: &AppState,
+    actor: &str,
+    row: &NyxbotChannel,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) {
+    if row.org_specialist.is_none() && row.private_chats.as_deref() == Some("everyone") {
+        let _ = prepare_guest_model(state, actor, Some(&agent.id), None).await;
+    }
+    audit(
+        state,
+        actor,
+        "nyxbot_channel_linked",
+        json!({"channel_agent_id":&row.id,"agent_id":&agent.id}),
+    )
+    .await;
+}
+
+pub(crate) async fn update_assignment_access(
+    state: &AppState,
+    actor: &str,
+    id: &str,
+    agent_id: &str,
+    settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
+) -> AppResult<Value> {
+    let row = load_channel(state, actor, id).await?;
+    if row.transport != "direct" || !super::channel_adapters::meta::is_meta(&row.platform) {
+        let mut result = update_access_inner(state, actor, row, settings, false).await?;
+        let agent = super::assistant_team_service::agent(&state.db, actor, agent_id).await?;
+        let linked = link(state, actor, id, &agent).await?;
+        if let (Some(result), Some(linked)) = (result.as_object_mut(), linked.as_object()) {
+            result.extend(linked.clone());
+        }
+        return Ok(result);
+    }
+    let agent = super::assistant_team_service::agent(&state.db, actor, agent_id).await?;
+    let audience =
+        if settings.private_chats.as_deref() == Some("everyone") && row.org_specialist.is_none() {
+            Some(
+                super::assistant_service_execution::readiness::audience_readiness(
+                    &state.db,
+                    &state.encryption_keys,
+                    &row.user_id,
+                    Some(&agent.id),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+    let changed = row.agent_id.as_deref() != Some(agent.id.as_str())
+        && !(row.agent_id.is_none() && agent.is_nyxbot());
+    let (current, applied) =
+        mutate_meta_assignment(state, actor, &row, Some(&agent), Some(settings), None).await?;
+    let mut result = access_result(state, actor, &current, settings, applied, audience).await?;
+    if changed {
+        after_link(state, actor, &current, &agent).await;
+    }
+    result["agent"] = json!(agent.name);
+    result["changed"] = json!(changed);
+    Ok(result)
 }
 
 pub(crate) async fn prepare_guest_model(
@@ -316,7 +501,7 @@ async fn update_access_inner(
         .await?;
     }
     // Read before mutation: diagnostics must not turn a committed change into a failure.
-    let mut audience =
+    let audience =
         if settings.private_chats.as_deref() == Some("everyone") && row.org_specialist.is_none() {
             Some(
                 crate::services::assistant_service_execution::readiness::audience_readiness(
@@ -330,15 +515,38 @@ async fn update_access_inner(
         } else {
             None
         };
+    let callback =
+        super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &row.id);
     let applied = if confirm_assignment {
         crate::services::nyxbot_chat_settings_service::update_confirmed_as(
-            &state.db, &row, owner, settings,
+            &state.db,
+            &row,
+            owner,
+            settings,
+            Some(&callback),
         )
         .await?
     } else {
-        crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
-            .await?
+        crate::services::nyxbot_chat_settings_service::update_as(
+            &state.db,
+            &row,
+            owner,
+            settings,
+            Some(&callback),
+        )
+        .await?
     };
+    access_result(state, owner, &row, settings, applied, audience).await
+}
+
+async fn access_result(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+    settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
+    applied: u64,
+    mut audience: Option<super::assistant_service_execution::readiness::AudienceReadiness>,
+) -> AppResult<Value> {
     audit(
         state,
         owner,

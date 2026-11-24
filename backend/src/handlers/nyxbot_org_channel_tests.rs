@@ -818,6 +818,7 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             service_ids: Some(vec![]),
             daily_credits: Some(crate::models::credits::Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();

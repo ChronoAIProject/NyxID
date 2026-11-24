@@ -544,6 +544,7 @@ async fn personal_meta_enable_refuses_assignment_changed_after_readiness_before_
                 private_chat_posts: None,
                 apply_to_existing: false,
             },
+            None,
         )
         .await
         .unwrap();

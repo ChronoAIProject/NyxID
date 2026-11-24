@@ -128,7 +128,7 @@ async fn durable_wake_claim_crash_survives_ttl_and_two_replicas_admit_once() {
             .contains("finished connecting")
     );
     assert!(
-        !watch::settle(&f.state.db, &claimed, "connection_finished", None)
+        !watch::settle(&f.state.db, &claimed, "connection_finished", None, None)
             .await
             .unwrap()
     );
@@ -164,7 +164,7 @@ async fn durable_wake_expired_claim_fences_the_original_settler() {
     .await
     .unwrap();
     assert!(
-        !watch::settle(&f.state.db, &claimed, "connection_finished", None)
+        !watch::settle(&f.state.db, &claimed, "connection_finished", None, None)
             .await
             .unwrap()
     );
@@ -210,7 +210,7 @@ async fn durable_wake_unfinished_preparation_does_not_block_a_browser_turn() {
     assert_eq!(browser.pending_events.len(), 1);
     assert!(browser.active_turn.as_ref().unwrap().events.is_empty());
     assert!(
-        watch::settle(&f.state.db, &claimed, "connection_finished", None)
+        watch::settle(&f.state.db, &claimed, "connection_finished", None, None)
             .await
             .unwrap()
     );
@@ -567,7 +567,7 @@ async fn durable_wake_owner_step_hash_commits_with_admission_and_relink_refuses_
         .await
         .unwrap()
         .unwrap();
-    watch::settle(&f.state.db, &claimed, "channel_bot_linked", None)
+    watch::settle(&f.state.db, &claimed, "channel_bot_linked", None, None)
         .await
         .unwrap();
     let pending = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
@@ -579,7 +579,7 @@ async fn durable_wake_owner_step_hash_commits_with_admission_and_relink_refuses_
     );
     let mut tx = f.state.db.client().start_session().await.unwrap();
     tx.start_transaction().await.unwrap();
-    watch::verification(&f.state.db, &f.owner, &channel, &bot, agent, &mut tx)
+    watch::verification(&f.state.db, &f.owner, &channel, &bot, agent, &mut tx, None)
         .await
         .unwrap();
     tx.abort_transaction().await.unwrap();
@@ -634,7 +634,7 @@ async fn durable_wake_owner_step_hash_commits_with_admission_and_relink_refuses_
         .await
         .unwrap();
     tx.start_transaction().await.unwrap();
-    let result = watch::verification(&f.state.db, &f.owner, &channel, &bot, agent, &mut tx)
+    let result = watch::verification(&f.state.db, &f.owner, &channel, &bot, agent, &mut tx, None)
         .await
         .unwrap();
     tx.commit_transaction().await.unwrap();
@@ -664,7 +664,7 @@ async fn durable_wake_owner_step_hash_commits_with_admission_and_relink_refuses_
         .await
         .unwrap();
     tx.start_transaction().await.unwrap();
-    let result = watch::verification(&f.state.db, &f.owner, &channel, &bot, agent, &mut tx)
+    let result = watch::verification(&f.state.db, &f.owner, &channel, &bot, agent, &mut tx, None)
         .await
         .unwrap();
     tx.commit_transaction().await.unwrap();
@@ -679,6 +679,106 @@ async fn durable_wake_owner_step_hash_commits_with_admission_and_relink_refuses_
         .unwrap();
     assert!(retained.link_code_hash == stored.link_code_hash);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_meta_wake_rechecks_its_trusted_callback_before_issuing_an_owner_code() {
+    use crate::models::nyxbot_channel::{COLLECTION_NAME as CHANNELS, NyxbotChannel};
+    for (trusted, drift) in [(true, true), (true, false), (false, false)] {
+        let (f, mut watch) = watch_fixture("meta_wake_live_route").await;
+        let bot = uuid::Uuid::new_v4().to_string();
+        let now = bson::DateTime::now();
+        f.state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&bot,"user_id":&f.owner,"platform":"instagram","label":"Hosted inbox",
+                "credential_source":"user","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
+                "platform_bot_id":"222","webhook_registered":false,"webhook_secret_hash":"",
+                "is_active":true,"status":"active","created_at":now,"updated_at":now}).await.unwrap();
+        let agent = crate::services::assistant_team_service::agent(
+            &f.state.db,
+            &f.owner,
+            f.row.agent_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let (channel, _) = crate::services::nyxbot_channel_setup_service::connect_meta(
+            &f.state, &f.owner, None, &bot, &agent, true, None,
+        )
+        .await
+        .unwrap();
+        watch.kind = "channel_bot".into();
+        watch.channel_bot_id = Some(bot);
+        watch.agent_id = Some(agent.id);
+        f.state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .replace_one(doc! {"_id":&watch.id}, &watch)
+            .await
+            .unwrap();
+        let claimed = watch::claim(&f.state.db, &watch, doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        watch::settle(
+            &f.state.db,
+            &claimed,
+            "channel_bot_linked",
+            None,
+            trusted.then_some(f.state.config.base_url.as_str()),
+        )
+        .await
+        .unwrap();
+        if drift {
+            crate::services::key_service::update_api_key_scope_with_scope_authorization(
+                &f.state.db,
+                &f.owner,
+                Some(&f.owner),
+                &channel.route_api_key_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Some("https://callbacks.example.test/drift")),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        finish(&f, &f.row).await;
+        let admitted = engine::begin_turn(
+            &f.state.db,
+            &f.owner,
+            start(&f, TurnOrigin::Event),
+            &f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let events = &admitted.active_turn.as_ref().unwrap().events;
+        let after = f
+            .state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"_id":&channel.id})
+            .await
+            .unwrap()
+            .unwrap();
+        if trusted && !drift {
+            assert!(events.iter().any(|event| event.text.contains("nyxlink_")));
+            assert_ne!(after.link_code_hash, channel.link_code_hash);
+        } else {
+            assert!(events.iter().any(|event| event.text.contains("repair")));
+            assert!(events.iter().all(|event| !event.text.contains("nyxlink_")));
+            assert_eq!(after.link_code_hash, channel.link_code_hash);
+            assert_eq!(after.link_code_expires_at, channel.link_code_expires_at);
+        }
+        f.state.db.drop().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -731,7 +831,7 @@ async fn durable_wake_review_fast_replica_leaves_live_preparation_and_consumes_o
         "other"
     );
     assert!(
-        watch::settle(&f.state.db, &claimed, "connection_finished", None)
+        watch::settle(&f.state.db, &claimed, "connection_finished", None, None)
             .await
             .unwrap()
     );
@@ -805,7 +905,7 @@ async fn durable_wake_review_command_costs_for_group_publication_and_watch_admis
         .await
         .unwrap()
         .unwrap();
-    watch::settle(&f.state.db, &claimed, "connection_finished", None)
+    watch::settle(&f.state.db, &claimed, "connection_finished", None, None)
         .await
         .unwrap();
     finish(&f, &f.row).await;

@@ -568,7 +568,7 @@ async fn meta_org_preview_uses_the_same_live_callback_proof_for_both_lookup_mode
         Path(row.id.clone()),
         Json(LinkRequest {
             agent_id: Some(second.id),
-            private_chats: None,
+            private_chats: Some("everyone".into()),
             private_chat_posts: None,
             apply_to_existing: false,
         }),
@@ -679,11 +679,7 @@ async fn meta_reused_connect_and_owner_link_refuse_callback_drift_before_committ
                         crate::test_utils::test_auth_user(OWNER),
                         Json(ConnectRequest {
                             bot_id: row.channel_bot_id.clone(),
-                            agent_id: Some(if entry == "owner-code" {
-                                agent.id.clone()
-                            } else {
-                                second.id.clone()
-                            }),
+                            agent_id: Some(second.id.clone()),
                         }),
                     )
                     .await
@@ -831,6 +827,26 @@ async fn meta_default_reactivation_reconciles_defaults_and_check_rejects_legacy_
         "https://callbacks.example.test/replacement",
     )
     .await;
+    routes::update_conversation(
+        &state.db,
+        row.route_id.as_deref().unwrap(),
+        OWNER,
+        None,
+        None,
+        Some(false),
+        None,
+    )
+    .await
+    .unwrap();
+    let inactive = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.route_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inactive.get_bool("is_active"), Ok(false));
+    assert_eq!(inactive.get_bool("default_agent"), Ok(true));
     let replacement = routes::create_conversation(
         &state.db,
         OWNER,
@@ -845,7 +861,7 @@ async fn meta_default_reactivation_reconciles_defaults_and_check_rejects_legacy_
     )
     .await
     .unwrap();
-    // Explicit default replacement deactivated the older default, retaining its flag.
+    // Reactivate an explicitly disabled default whose saved flag stayed true.
     routes::update_conversation(
         &state.db,
         row.route_id.as_deref().unwrap(),
@@ -1040,3 +1056,6 @@ async fn meta_route_creation_preserves_storage_and_credential_error_categories()
         );
     }
 }
+
+#[path = "nyxbot_meta_atomic_tests.rs"]
+mod atomic;

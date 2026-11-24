@@ -49,6 +49,7 @@ async fn reference(
     error: Option<String>,
     ready_at: chrono::DateTime<Utc>,
     tx: &mut ClientSession,
+    base_url: Option<&str>,
 ) -> AppResult<WakeReference> {
     let source_status = if watch.kind == "connect_link" {
         document(
@@ -62,11 +63,26 @@ async fn reference(
     } else {
         None
     };
-    let channel_id = if watch.kind == "channel_bot" {
-        document(db,crate::models::nyxbot_channel::COLLECTION_NAME,doc! {"user_id":&watch.user_id,"channel_bot_id":&watch.channel_bot_id,"agent_id":&watch.agent_id,"status":"active"},tx).await?.and_then(|d|d.get_str("_id").ok().map(str::to_owned))
+    let channel = if watch.kind == "channel_bot" {
+        document(db,crate::models::nyxbot_channel::COLLECTION_NAME,doc! {"user_id":&watch.user_id,"channel_bot_id":&watch.channel_bot_id,"agent_id":&watch.agent_id,"status":"active"},tx).await?
     } else {
         None
     };
+    let channel_id = channel
+        .as_ref()
+        .and_then(|row| row.get_str("_id").ok())
+        .map(str::to_owned);
+    let expected_callback = channel
+        .as_ref()
+        .filter(|row| {
+            row.get_str("transport") == Ok("direct")
+                && row
+                    .get_str("platform")
+                    .is_ok_and(super::super::channel_adapters::meta::is_meta)
+        })
+        .and_then(|_| base_url)
+        .zip(channel_id.as_deref())
+        .map(|(base, id)| super::super::nyxbot_channel_query_service::direct_callback(base, id));
     Ok(WakeReference::Watch(Box::new(WatchWake {
         watch_id: watch.id.clone(),
         claim_id: watch
@@ -80,6 +96,7 @@ async fn reference(
         source_id: watch.connect_link_id.clone(),
         bot_id: watch.channel_bot_id.clone(),
         channel_id,
+        expected_callback,
         agent_id: watch.agent_id.clone(),
         reason: error,
         source_status,
@@ -134,7 +151,7 @@ pub async fn claim(
             // rather than claiming that a gateway operation completed.
             let unfinished =
                 (claimed.kind == "channel_bot").then(|| "wake_preparation_interrupted".to_owned());
-            event.wake = Some(reference(db, &claimed, unfinished, until, tx).await?);
+            event.wake = Some(reference(db, &claimed, unfinished, until, tx, None).await?);
             // A deleted destination ends only its notification, never setup.
             // Queue pressure still returns an error and rolls back the claim.
             super::super::assistant_nyxagent::append_events_in_session(
@@ -156,14 +173,16 @@ pub async fn settle(
     watch: &NyxbotWatch,
     kind: &str,
     error: Option<&str>,
+    base_url: Option<&str>,
 ) -> AppResult<bool> {
     let context = (
         db.clone(),
         watch.clone(),
         kind.to_owned(),
         error.map(str::to_owned),
+        base_url.map(str::to_owned),
     );
-    super::super::transaction_service::run_db_only(db, &context, |tx, (db, watch, kind, error)| {
+    super::super::transaction_service::run_db_only(db, &context, |tx, (db, watch, kind, error, base_url)| {
         Box::pin(async move {
             let mut filter = snapshot(watch);
             filter.insert("status", "claimed");
@@ -175,7 +194,7 @@ pub async fn settle(
             if result.modified_count != 1 {
                 return Ok(false);
             }
-            let reference = reference(db, watch, error.clone(), watch.created_at, tx).await?;
+            let reference = reference(db, watch, error.clone(), watch.created_at, tx, base_url.as_deref()).await?;
             let reference = bson::to_bson(&reference).map_err(|_| AppError::Internal("Invalid wake reference".into()))?;
             // This intent already exists. Never recreate an event which admission
             // consumed after the preparation lease expired.
@@ -222,6 +241,7 @@ pub async fn verification(
     bot: &str,
     agent: &str,
     tx: &mut ClientSession,
+    expected_callback: Option<&str>,
 ) -> AppResult<String> {
     use crate::models::nyxbot_channel::{COLLECTION_NAME, LINK_CODE_TTL_HOURS, NyxbotChannel};
     use sha2::{Digest, Sha256};
@@ -233,19 +253,27 @@ pub async fn verification(
     if !row.owner_sender_ids.is_empty() {
         return Ok("Their account there is already verified. Tell them to open the bot and press Start (or send a message) to check the first reply. A reply has not been verified yet.".into());
     }
-    match super::super::platform_bot_authority::fence_personal_routes(
-        db,
-        bot,
-        row.bot_owner_id.as_deref().unwrap_or(owner),
-        tx,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(error) if error.is_forbidden() => {
-            return Ok("The bot's setup authority changed. Check its current status; do not recreate it automatically.".into());
+    if row.transport == "direct" && super::super::channel_adapters::meta::is_meta(&row.platform) {
+        match super::super::nyxbot_channel_query_service::fence_meta_default(db,&row,expected_callback,tx).await {
+            Ok(_) => {},
+            Err(AppError::Conflict(_)) | Err(AppError::Forbidden(_)) => return Ok("The inbox route or setup authority changed. Assign its specialist again to repair the default callback, then request a fresh owner code. No code was issued.".into()),
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
+    } else {
+        match super::super::platform_bot_authority::fence_personal_routes(
+            db,
+            bot,
+            row.bot_owner_id.as_deref().unwrap_or(owner),
+            tx,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(error) if error.is_forbidden() => {
+                return Ok("The bot's setup authority changed. Check its current status; do not recreate it automatically.".into());
+            }
+            Err(error) => return Err(error),
+        }
     }
     let code = new_link_code();
     let hash = hex::encode(Sha256::digest(code.as_bytes()));

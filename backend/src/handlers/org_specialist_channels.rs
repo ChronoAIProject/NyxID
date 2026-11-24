@@ -59,7 +59,19 @@ pub async fn update(
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     let row = org::management::load(&state.db, &actor, &id, true).await?;
-    org::management::update(&state.db, &actor, &row, input).await?;
+    org::management::update(
+        &state.db,
+        &actor,
+        &row,
+        input,
+        Some(
+            &crate::services::nyxbot_channel_query_service::direct_callback(
+                &state.config.base_url,
+                &row.id,
+            ),
+        ),
+    )
+    .await?;
     let row = org::management::load(&state.db, &actor, &id, true).await?;
     Ok(Json(org::management::view(&state.db, &actor, &row).await?))
 }
@@ -75,7 +87,19 @@ pub(crate) async fn update_tool(
     let input: org::management::GuestSettingsPatch = serde_json::from_value(input.clone())
         .map_err(|_| AppError::ValidationError("Invalid organization guest settings".into()))?;
     let row = org::management::load(&state.db, actor, id, true).await?;
-    org::management::patch(&state.db, actor, &row, input).await?;
+    org::management::patch(
+        &state.db,
+        actor,
+        &row,
+        input,
+        Some(
+            &crate::services::nyxbot_channel_query_service::direct_callback(
+                &state.config.base_url,
+                &row.id,
+            ),
+        ),
+    )
+    .await?;
     let row = org::management::load(&state.db, actor, id, true).await?;
     org::management::view(&state.db, actor, &row).await
 }

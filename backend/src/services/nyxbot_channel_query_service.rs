@@ -114,17 +114,25 @@ pub(crate) async fn meta_default_matches(
 /// as route mutations. Relinking and owner challenges must not bless drift.
 pub(crate) async fn fence_meta_default(
     db: &Database,
-    row: &NyxbotChannel,
+    expected: &NyxbotChannel,
     callback: Option<&str>,
     tx: &mut mongodb::ClientSession,
-) -> AppResult<()> {
-    if row.transport != "direct" || !super::channel_adapters::meta::is_meta(&row.platform) {
-        return Ok(());
+) -> AppResult<NyxbotChannel> {
+    if expected.transport != "direct" || !super::channel_adapters::meta::is_meta(&expected.platform)
+    {
+        return Ok(expected.clone());
     }
     let repair = || {
         AppError::Conflict("The inbox route changed. Assign the specialist again to repair its default callback before continuing".into())
     };
     let callback = callback.ok_or_else(repair)?;
+    let row = db.collection::<NyxbotChannel>(COLLECTION_NAME).find_one_and_update(
+        doc! {"_id":&expected.id,"user_id":&expected.user_id,"channel_bot_id":&expected.channel_bot_id,
+            "bot_owner_id":&expected.bot_owner_id,"agent_id":&expected.agent_id,"platform":&expected.platform,
+            "transport":"direct","status":"active","$expr":{"$eq":[
+                {"$ifNull":["$execution_policy_revision",0_i64]},expected.execution_policy_revision]}},
+        doc! {"$inc":{"follow_capacity_revision":1_i64}},
+    ).return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?.ok_or_else(repair)?;
     let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
     super::platform_bot_authority::fence_personal_routes(db, &row.channel_bot_id, owner, tx)
         .await?;
@@ -142,10 +150,11 @@ pub(crate) async fn fence_meta_default(
                 error => error,
             })?;
     }
-    if !meta_default_matches(db, row, callback, Some(tx)).await? {
+    require_no_competing_meta_default(db, tx, &row).await?;
+    if !meta_default_matches(db, &row, callback, Some(tx)).await? {
         return Err(repair());
     }
-    Ok(())
+    Ok(row)
 }
 
 /// The same committed route/key proof is used by reuse, repair and activation.

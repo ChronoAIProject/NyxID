@@ -266,42 +266,80 @@ pub async fn relink(
     let channel = channel.to_owned();
     let agent = agent.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-            let db=&db;
-            let owner=owner.as_str();
-            let channel=channel.as_str();
-            let agent=agent.as_str();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = &db;
+            let owner = owner.as_str();
+            let channel = channel.as_str();
+            let agent = agent.as_str();
 
-        let work:AppResult<()>=Box::pin(async {
-            let current=fence(db,channel,owner,session).await?;
-            super::super::nyxbot_channel_query_service::fence_meta_default(
-                db, &current, expected_callback.as_deref(), session,
-            ).await?;
-            if let Some(mut binding)=current.org_specialist.clone() {
-                super::super::org_channel_service::fence_management(db,session,&current,&manager).await?;
-                super::super::org_channel_service::live_doc(db,session,"assistant_agents",doc!{"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},true).await?;
-                binding.revision=uuid::Uuid::new_v4().to_string();
-                let enabled = binding.guests.enabled;
-                binding.guests=super::super::org_channel_service::new_guest_policy(
-                    super::super::org_channel_service::guest_grants_ready(db).await?);
-                binding.guests.enabled=enabled;
-                db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":channel},doc!{"$set":{"org_specialist":bson::to_bson(&binding).map_err(|_|not_found())?},"$inc":{"notification_epoch":1_i64}}).session(&mut *session).await?;
-                super::super::org_channel_service::lifecycle::retire_in_session(db,session,channel,None).await?;
-            }
-            db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":channel,"user_id":owner},
+            let work: AppResult<()> = Box::pin(async {
+                let current = fence(db, channel, owner, session).await?;
+                super::super::nyxbot_channel_query_service::fence_meta_default(
+                    db,
+                    &current,
+                    expected_callback.as_deref(),
+                    session,
+                )
+                .await?;
+                relink_in_session(db, &current, &manager, agent, session).await?;
+                Ok(())
+            })
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+/// The caller owns assignment, bot/key and actor fences in this transaction.
+pub(crate) async fn relink_in_session(
+    db: &Database,
+    current: &NyxbotChannel,
+    manager: &str,
+    agent: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let owner = current.user_id.as_str();
+    let channel = current.id.as_str();
+    if let Some(mut binding) = current.org_specialist.clone() {
+        super::super::org_channel_service::fence_management(db, session, current, manager).await?;
+        super::super::org_channel_service::live_doc(
+            db,
+            session,
+            "assistant_agents",
+            doc! {"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},
+            true,
+        )
+        .await?;
+        binding.revision = uuid::Uuid::new_v4().to_string();
+        let enabled = binding.guests.enabled;
+        binding.guests = super::super::org_channel_service::new_guest_policy(
+            super::super::org_channel_service::guest_grants_ready(db).await?,
+        );
+        binding.guests.enabled = enabled;
+        db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":channel},doc!{"$set":{"org_specialist":bson::to_bson(&binding).map_err(|_|not_found())?},"$inc":{"notification_epoch":1_i64}}).session(&mut *session).await?;
+        super::super::org_channel_service::lifecycle::retire_in_session(db, session, channel, None)
+            .await?;
+    }
+    db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":channel,"user_id":owner},
                 doc! {"$set":{"agent_id":agent,"updated_at":bson::DateTime::now()},"$inc":{"follow_capacity_revision":1,"follow_binding_generation":1,"execution_policy_revision":1_i64}})
                 .session(&mut *session).await?;
-            let parents:Vec<NyxbotThread>=db.collection(THREADS).find(doc! {"channel_id":channel,"user_id":owner,"agent_id":bson::Bson::Null,"record_scope":{"$ne":SCOPE}})
+    let parents:Vec<NyxbotThread>=db.collection(THREADS).find(doc! {"channel_id":channel,"user_id":owner,"agent_id":bson::Bson::Null,"record_scope":{"$ne":SCOPE}})
                 .session(&mut *session).await?.stream(&mut *session).try_collect().await?;
-            let ids:Vec<&str>=parents.iter().map(|r|r.id.as_str()).collect();
-            db.collection::<NyxbotThread>(THREADS).update_many(doc! {"_id":{"$in":&ids}},doc! {"$set":{"conversation_id":bson::Bson::Null}}).session(&mut *session).await?;
-            db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":channel,"record_scope":SCOPE,"settings_chat_id":{"$in":&ids}},
+    let ids: Vec<&str> = parents.iter().map(|r| r.id.as_str()).collect();
+    db.collection::<NyxbotThread>(THREADS)
+        .update_many(
+            doc! {"_id":{"$in":&ids}},
+            doc! {"$set":{"conversation_id":bson::Bson::Null}},
+        )
+        .session(&mut *session)
+        .await?;
+    db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":channel,"record_scope":SCOPE,"settings_chat_id":{"$in":&ids}},
                 doc! {"$set":{"follow_state":"stopped","follow_stop_reason":"agent_changed","follow_stopped_at":bson::DateTime::now()},"$inc":{"follow_revision":1}})
                 .session(&mut *session).await?;
-            Ok(())
-        }).await;
-        transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+    Ok(())
 }
 
 pub async fn delete_conversation(
