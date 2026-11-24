@@ -38,7 +38,12 @@ fn digest(material: &impl Serialize) -> AppResult<String> {
 }
 
 fn authentication(bot: &ChannelBot, evidence: &CredentialContinuity) -> AppResult<Hmac<Sha256>> {
-    if evidence.version != 1 || evidence.generations.len() != FIELDS.len() {
+    let version = if evidence.shared_producers.is_empty() {
+        1
+    } else {
+        2
+    };
+    if evidence.version != version || evidence.generations.len() != FIELDS.len() {
         return Err(invalid());
     }
     let mut fields = Vec::new();
@@ -62,12 +67,21 @@ fn authentication(bot: &ChannelBot, evidence: &CredentialContinuity) -> AppResul
         &evidence.pins,
     ))
     .map_err(|_| invalid())?;
+    if evidence.version == 2 {
+        let mut mac = continuity_mac(b"nyxid-channel-credential-continuity:v2", &material)?;
+        mac.update(&serde_json::to_vec(&evidence.shared_producers).map_err(|_| invalid())?);
+        return Ok(mac);
+    }
+    continuity_mac(b"nyxid-channel-credential-continuity:v1", &material)
+}
+
+pub(super) fn continuity_mac(domain: &[u8], material: &[u8]) -> AppResult<Hmac<Sha256>> {
     let key = super::audit_service::audit_chain_hmac_key().ok_or_else(invalid)?;
     let mut derive = Hmac::<Sha256>::new_from_slice(key).map_err(|_| invalid())?;
-    derive.update(b"nyxid-channel-credential-continuity:v1");
+    derive.update(domain);
     let subkey = zeroize::Zeroizing::new(<[u8; 32]>::from(derive.finalize().into_bytes()));
     let mut mac = Hmac::<Sha256>::new_from_slice(subkey.as_slice()).map_err(|_| invalid())?;
-    mac.update(&material);
+    mac.update(material);
     Ok(mac)
 }
 
@@ -210,6 +224,71 @@ pub(super) fn replacement(
     Ok(())
 }
 
+/// Capture the values issued by the current readers before changing their dependencies.
+pub(super) fn capture(
+    entry: &super::platform_entry_credentials::EntryCredentialSnapshot,
+    sources: Option<BTreeMap<String, String>>,
+) -> AppResult<CredentialContinuity> {
+    let verify = entry.channel_snapshot();
+    let bot = verify.bot();
+    let mut evidence = match verified(bot)? {
+        Some(previous) => previous.clone(),
+        None => {
+            let mut evidence = CredentialContinuity {
+                version: 1,
+                generations: FIELDS
+                    .iter()
+                    .map(|name| (name.to_string(), uuid::Uuid::new_v4().to_string()))
+                    .collect(),
+                pins: BTreeMap::new(),
+                shared_producers: BTreeMap::new(),
+                authentication: String::new(),
+            };
+            for name in [TOKEN, APP] {
+                if super::channel_registration::stored_secret(bot, name)?.is_some() {
+                    evidence.pins.insert(
+                        name.into(),
+                        RetainedCredentialPin {
+                            dependencies: dependencies(bot, name, &[name], &(), &evidence)?,
+                            value: field_pin(bot, name)?,
+                        },
+                    );
+                }
+            }
+            evidence
+        }
+    };
+    let shared = sources.is_some();
+    if let Some(sources) = sources {
+        evidence.version = 2;
+        evidence.shared_producers = sources;
+    }
+    if shared || bot.credential_continuity.is_none() {
+        let verification = verify.fingerprint()?;
+        let native = entry.fingerprint()?;
+        let verification_key = verify.pin_name(shared);
+        let native_key = entry.pin_name(shared);
+        let vd = verify.dependencies(&evidence, verification_key)?;
+        let nd = entry.pin_dependencies(&evidence, &verification, native_key)?;
+        evidence.pins.insert(
+            verification_key.into(),
+            RetainedCredentialPin {
+                dependencies: vd,
+                value: verification,
+            },
+        );
+        evidence.pins.insert(
+            native_key.into(),
+            RetainedCredentialPin {
+                dependencies: nd,
+                value: native,
+            },
+        );
+    }
+    sign(bot, &mut evidence)?;
+    Ok(evidence)
+}
+
 /// Run inside the exact-source write transaction. The registry keeps channel_bots
 /// pending until all business writers and owner transfer can seal contextual rows.
 pub(super) async fn publish_rewrap(
@@ -231,7 +310,6 @@ pub(super) async fn publish_rewrap(
         std::sync::Arc::new(super::provider_token_exchange_service::TokenExchangeCache::new());
     let adapter = super::channel_adapters::resolve_adapter(&bot.platform, &cache)?;
     let entry = EntryCredentialSnapshot::load(db, adapter.as_ref(), &bot).await?;
-    let verify = entry.channel_snapshot();
     let db = super::transaction_service::durable_database(db);
     let mut session = db.client().start_session().await?;
     session
@@ -253,50 +331,7 @@ pub(super) async fn publish_rewrap(
                 return Err(invalid());
             }
         }
-        let mut evidence = match verified(&bot)? {
-            Some(previous) => previous.clone(),
-            None => {
-                let mut evidence = CredentialContinuity {
-                    version: 1,
-                    generations: FIELDS
-                        .iter()
-                        .map(|field| (field.to_string(), uuid::Uuid::new_v4().to_string()))
-                        .collect(),
-                    pins: BTreeMap::new(),
-                    authentication: String::new(),
-                };
-                let verification = verify.fingerprint()?;
-                let verify_deps = verify.dependencies(&evidence)?;
-                let entry_deps = entry.pin_dependencies(&evidence, &verification)?;
-                evidence.pins.insert(
-                    "native".into(),
-                    RetainedCredentialPin {
-                        dependencies: entry_deps,
-                        value: entry.fingerprint()?,
-                    },
-                );
-                evidence.pins.insert(
-                    "verification".into(),
-                    RetainedCredentialPin {
-                        dependencies: verify_deps,
-                        value: verification,
-                    },
-                );
-                for name in [TOKEN, APP] {
-                    if super::channel_registration::stored_secret(&bot, name)?.is_some() {
-                        let deps = dependencies(&bot, name, &[name], &(), &evidence)?;
-                        evidence.pins.insert(
-                            name.into(),
-                            RetainedCredentialPin {
-                                dependencies: deps,
-                                value: field_pin(&bot, name)?,
-                            },
-                        );
-                    }
-                }
-                evidence
-            }
-        };
+        let mut evidence = capture(&entry, None)?;
         sign(&updated, &mut evidence)?;
         set.insert(
             "credential_continuity",

@@ -860,8 +860,14 @@ async fn instagram_oauth_full_path_is_actor_bound_single_use_and_selects_only_se
 
 #[tokio::test]
 async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migration() {
+    use crate::models::platform_credential::COLLECTION_NAME as SHARED;
     use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
-    let (state, _, server, bot) = fixture("instagram").await;
+    use crate::services::{
+        channel_signing_migration as signing, platform_credential_service,
+        platform_entry_credentials::EntryCredentialSnapshot,
+    };
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let (state, adapter, server, bot) = fixture("instagram").await;
     configure(&state, &bot).await;
     instagram(&server).await;
     let bots = state.db.collection::<ChannelBot>(BOTS);
@@ -871,6 +877,21 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
     )
     .await
     .unwrap();
+    // The shared producer completed preparation while this inbox still used
+    // manual credentials. Reconnect must enroll it in the same transaction.
+    let mut other = bot.clone();
+    other.id = uuid::Uuid::new_v4().to_string();
+    other.platform_bot_id = "888".into();
+    other.credential_source = "platform".into();
+    bots.insert_one(&other).await.unwrap();
+    let producers = state.db.collection::<bson::Document>(SHARED);
+    let filter = doc! {"provider":"instagram"};
+    let source = producers.find_one(filter.clone()).await.unwrap().unwrap();
+    assert!(
+        signing::prepare_page(&state.db, SHARED, &source)
+            .await
+            .unwrap()
+    );
     let s = service(&state, &server);
     let start = s
         .start(
@@ -904,6 +925,48 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
         .unwrap();
     assert_eq!(managed.id, bot.id);
     assert_eq!(managed.credential_source, "platform");
+    let producer_id = source.get_str("_id").unwrap();
+    assert_eq!(
+        managed
+            .credential_continuity
+            .as_ref()
+            .unwrap()
+            .shared_producers
+            .get(SHARED)
+            .map(String::as_str),
+        Some(producer_id)
+    );
+    let pin = EntryCredentialSnapshot::load(&state.db, &adapter, &managed)
+        .await
+        .unwrap()
+        .fingerprint()
+        .unwrap();
+    let prepared = producers.find_one(filter).await.unwrap().unwrap();
+    assert!(
+        prepared
+            .get_document(signing::SIGNING_PREPARATION_FIELD)
+            .unwrap()
+            .get_bool("complete")
+            .unwrap()
+    );
+    assert!(
+        platform_credential_service::migrate_storage_snapshot(
+            &state.db,
+            &state.encryption_keys,
+            &prepared
+        )
+        .await
+        .unwrap()
+    );
+    let reloaded = bots.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
+    assert_eq!(
+        EntryCredentialSnapshot::load(&state.db, &adapter, &reloaded)
+            .await
+            .unwrap()
+            .fingerprint()
+            .unwrap(),
+        pin
+    );
     assert_eq!(
         settings
             .find_one(id)

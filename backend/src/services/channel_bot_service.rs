@@ -810,7 +810,7 @@ async fn insert_registered_bot_inner(
     let meta_session = meta_session.cloned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = async {
-            super::channel_signing_migration::fence_registration(&db, session).await?;
+            super::channel_signing_migration::registration_fence(&db, session).await?;
             let approved_setup = if let Some(request) = &captured_request {
                 super::platform_provisioning_service::fence_request(&db, request, true, session).await?
             } else {
@@ -916,9 +916,13 @@ async fn insert_registered_bot_inner(
                 let binding=bot.meta_binding.as_ref().ok_or_else(||AppError::Conflict("Missing Meta grant authority".into()))?;
                 super::channel_meta_service::fence_grant_in_session(&db,session,&bot.platform,&binding.app_id,&binding.grant_subject_id,meta.created_at).await?;
             }
-            bots.insert_one(&bot).session(&mut *session).await?;
+            let mut inserted = bot.clone();
+            if let Some(value) = super::channel_signing_migration::capture_attachment(&db,session,&bot).await? {
+                inserted.credential_continuity = Some(value);
+            }
+            bots.insert_one(&inserted).session(&mut *session).await?;
             if super::channel_adapters::meta::is_meta(&bot.platform) {
-                super::channel_meta_service::scopes::ensure_current(&db,session,&bot,true).await?;
+                super::channel_meta_service::scopes::ensure_current(&db,session,&inserted,true).await?;
             }
             if let Some(meta) = &meta_session {
                 let done = db.collection::<bson::Document>(crate::models::channel_meta::SESSIONS).update_one(
@@ -1089,12 +1093,13 @@ async fn reconnect_bot_inner(
                     "poll_backoff_until": backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
                     "last_polled_at": last_polled_at, "status": "active", "error": null, "updated_at": bson::DateTime::now(),
                 } },
-            ).session(session).await?;
+            ).session(&mut *session).await?;
             if result.matched_count == 0 {
                 return Err(AppError::Conflict(
                     "Channel bot changed during reconnect; retry".to_string(),
                 ));
             }
+            super::channel_signing_migration::prepare_observed(&db,session,&bot.id).await?;
             Ok(())
         }.await;
         super::api_key_mutation_service::transaction_result(operation)

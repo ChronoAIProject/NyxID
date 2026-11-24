@@ -1088,7 +1088,7 @@ impl MetaService<'_> {
                     "platform_bot_id": asset, "meta_binding.generation": s.expected_generation,
                 }).session(&mut *tx).await?.ok_or_else(conflict)?;
                 if old.credential_source != "platform" {
-                    super::channel_signing_migration::fence_registration(db, tx).await?;
+                    super::channel_signing_migration::registration_fence(db, tx).await?;
                 }
                 let preserve_suspension = old
                     .meta_binding
@@ -1136,6 +1136,9 @@ impl MetaService<'_> {
                 let changed = db.collection::<ChannelBot>(BOTS)
                     .update_one(filter, update).session(&mut *tx).await?;
                 if changed.matched_count != 1 { return Err(conflict()); }
+                if old.credential_source != "platform" {
+                    super::channel_signing_migration::prepare_observed(db, tx, bot_id).await?;
+                }
                 if old.app_id.as_deref() != Some(s.app_id.as_str()) {
                     let mut cursor = db
                         .collection::<crate::models::nyxbot_channel::NyxbotChannel>(

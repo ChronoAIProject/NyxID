@@ -60,6 +60,10 @@ pub struct CredentialSnapshot {
 }
 
 impl CredentialSnapshot {
+    pub(super) fn signing_producer(&self) -> Option<&PlatformCredentialSnapshot> {
+        self.platform.as_ref()
+    }
+
     pub(super) fn bot(&self) -> &ChannelBot {
         &self.bot
     }
@@ -83,6 +87,9 @@ impl CredentialSnapshot {
         } else {
             None
         };
+        if let Some(producer) = &platform {
+            producer.check_proofs(bot)?;
+        }
         Ok(Self {
             bot: bot.clone(),
             platform,
@@ -108,17 +115,33 @@ impl CredentialSnapshot {
         Ok(fields)
     }
 
+    pub(super) fn pin_name(&self, shared: bool) -> &'static str {
+        if self.platform.is_some() && shared {
+            "verification_shared"
+        } else {
+            "verification"
+        }
+    }
+
     pub(super) fn dependencies(
         &self,
         evidence: &crate::models::channel_bot::CredentialContinuity,
+        purpose: &str,
     ) -> AppResult<String> {
         let mut fields = self.fingerprint_fields()?;
         for name in super::channel_credential_continuity::VERIFIED {
             fields.remove(name);
         }
+        if purpose == "verification_shared" {
+            fields.insert(
+                "platform_credentials",
+                bson::to_bson(&self.platform.as_ref().map(|p| &p.generations))
+                    .map_err(|_| changed())?,
+            );
+        }
         super::channel_credential_continuity::dependencies(
             &self.bot,
-            "verification",
+            purpose,
             &super::channel_credential_continuity::VERIFIED,
             &(&fields, self.platform.as_ref().map(|p| p.producer_ids())),
             evidence,
@@ -127,10 +150,11 @@ impl CredentialSnapshot {
 
     pub(crate) fn fingerprint(&self) -> AppResult<String> {
         if let Some(evidence) = super::channel_credential_continuity::verified(&self.bot)? {
+            let purpose = self.pin_name(evidence.version == 2);
             return Ok(super::channel_credential_continuity::select(
                 evidence,
-                "verification",
-                self.dependencies(evidence)?,
+                purpose,
+                self.dependencies(evidence, purpose)?,
             ));
         }
         let fields = self.fingerprint_fields()?;
@@ -307,19 +331,23 @@ impl CredentialSnapshot {
         };
         super::transaction_service::run_db_only(
             db,
-            &(db, platform, filter, update),
-            |session, (db, platform, filter, update)| {
+            &(db, platform, filter, update, &self.bot.id),
+            |session, (db, platform, filter, update, id)| {
                 Box::pin(async move {
                     if !platform.fence_projection(db, session).await? {
                         return Ok(false);
                     }
-                    Ok(db
+                    let matched = db
                         .collection::<ChannelBot>(COLLECTION_NAME)
                         .update_one(filter.clone(), update.clone())
-                        .session(session)
+                        .session(&mut *session)
                         .await?
                         .matched_count
-                        == 1)
+                        == 1;
+                    if matched {
+                        super::channel_signing_migration::prepare_observed(db, session, id).await?;
+                    }
+                    Ok(matched)
                 })
             },
         )
@@ -577,6 +605,119 @@ mod tests {
             .unwrap();
         assert_ne!(successor.attempt_id, check.attempt_id);
         assert!(finish(&db, &original, &check, &Ok(())).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_scan_resumes_inactive_bots_and_captures_registration_behind_cursor() {
+        use super::super::{
+            channel_signing_migration as migration, platform_credential_service as platform,
+        };
+        use crate::models::platform_credential::COLLECTION_NAME as SHARED;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let (db, state, bot) = fixture(true).await;
+        let original = CredentialSnapshot::load(&db, &WhatsAppAdapter, &bot)
+            .await
+            .unwrap();
+        let attempt = begin(&db, &original).await.unwrap();
+        let rows = db.collection::<Document>(SHARED);
+        let source = rows.find_one(doc! {}).await.unwrap().unwrap();
+        let fingerprint = |bot: ChannelBot| {
+            let db = db.clone();
+            async move {
+                CredentialSnapshot::load(&db, &WhatsAppAdapter, &bot)
+                    .await
+                    .unwrap()
+                    .fingerprint()
+                    .unwrap()
+            }
+        };
+        let mut expected = vec![(bot.id.clone(), original.fingerprint().unwrap())];
+        for n in 0..10 {
+            let mut inactive = bot.clone();
+            inactive.id = format!("page-{n:02}");
+            inactive.is_active = false;
+            db.collection::<ChannelBot>(COLLECTION_NAME)
+                .insert_one(&inactive)
+                .await
+                .unwrap();
+            expected.push((inactive.id.clone(), fingerprint(inactive).await));
+        }
+        assert!(migration::prepare_page(&db, SHARED, &source).await.unwrap());
+        let page = rows.find_one(doc! {}).await.unwrap().unwrap();
+        assert_eq!(page.get("secrets"), source.get("secrets"));
+        assert!(
+            !page
+                .get_document(migration::SIGNING_PREPARATION_FIELD)
+                .unwrap()
+                .get_bool("complete")
+                .unwrap()
+        );
+        assert!(
+            platform::migrate_storage_snapshot(&db, &state.encryption_keys, &page)
+                .await
+                .is_err()
+        );
+        let mut attached = bot.clone();
+        attached.id = "!behind-cursor".into();
+        attached.platform_bot_id = "attached".into();
+        expected.push((attached.id.clone(), fingerprint(attached.clone()).await));
+        super::super::channel_bot_service::insert_registered_bot(&db, &attached, 20, None)
+            .await
+            .unwrap();
+        assert!(read(&db, &attached).await.credential_continuity.is_some());
+        assert!(migration::prepare_page(&db, SHARED, &page).await.unwrap());
+        let page = rows.find_one(doc! {}).await.unwrap().unwrap();
+        assert!(migration::prepare_page(&db, SHARED, &page).await.unwrap());
+        let ready = rows.find_one(doc! {}).await.unwrap().unwrap();
+        assert!(
+            ready
+                .get_document(migration::SIGNING_PREPARATION_FIELD)
+                .unwrap()
+                .get_bool("complete")
+                .unwrap()
+        );
+        assert!(
+            platform::migrate_storage_snapshot(&db, &state.encryption_keys, &ready)
+                .await
+                .unwrap()
+        );
+        assert_ne!(
+            rows.find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap()
+                .get("secrets"),
+            source.get("secrets")
+        );
+        for (id, pin) in expected {
+            let current = super::super::channel_bot_service::get_bot(&db, &id)
+                .await
+                .unwrap();
+            assert!(current.credential_continuity.is_some());
+            assert_eq!(fingerprint(current).await, pin);
+        }
+        finish(&db, &original, &attempt, &Ok(())).await.unwrap();
+        let descriptor = WhatsAppAdapter.platform_credentials().unwrap();
+        let replacement = [(
+            "app_secret".into(),
+            Some(zeroize::Zeroizing::new("test-app-secret".into())),
+        )]
+        .into();
+        platform::update(
+            &db,
+            &state.encryption_keys,
+            &descriptor,
+            "operator",
+            &replacement,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(finish(&db, &original, &attempt, &Ok(())).await.is_err());
+        assert_ne!(
+            fingerprint(read(&db, &bot).await).await,
+            attempt.credential_fingerprint
+        );
     }
 
     #[tokio::test]
