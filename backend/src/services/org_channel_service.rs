@@ -219,8 +219,19 @@ pub(crate) async fn link_target(
         version: 1,
         org_id: agent.user_id.clone(),
         revision: uuid::Uuid::new_v4().to_string(),
-        guests: new_guest_policy(guest_grants_ready(db).await?),
+        guests: initial_guest_policy(guest_grants_ready(db).await?, &bot.platform),
     }))
+}
+
+/// Meta assignment requires a separate customer-access confirmation. Ordinary
+/// channels retain their established open default; restored policies supersede
+/// this initial choice through the shared continuity path.
+pub(crate) fn initial_guest_policy(grants_ready: bool, platform: &str) -> GuestPolicy {
+    let mut policy = new_guest_policy(grants_ready);
+    if super::channel_adapters::meta::is_meta(platform) {
+        policy.enabled = false;
+    }
+    policy
 }
 
 pub(crate) fn new_guest_policy(grants_ready: bool) -> GuestPolicy {

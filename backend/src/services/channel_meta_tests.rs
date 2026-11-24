@@ -617,6 +617,16 @@ async fn manual_signing_secret_patch_does_not_repair_failed_grant() {
         )
         .await
         .unwrap();
+    state.db.collection::<bson::Document>(BOTS).update_one(
+        doc! {"_id": &bot.id}, doc! {"$set": {"app_secret_encrypted": binary(state.encryption_keys.encrypt(b"old-signing-secret").await.unwrap())}},
+    ).await.unwrap();
+    super::super::channel_registration::bind_fixture_fields(
+        &state.db,
+        &state.encryption_keys,
+        &bot.id,
+        &["bot_token_encrypted", "app_secret_encrypted"],
+    )
+    .await;
     let mut signing_adapter = adapter;
     signing_adapter.graph_base = server.uri();
     let before = channel_bot_service::get_bot(&state.db, &bot.id)
@@ -645,6 +655,30 @@ async fn manual_signing_secret_patch_does_not_repair_failed_grant() {
     )
     .await
     .unwrap();
+    assert!(
+        !updated
+            .secret_context_versions
+            .contains_key("app_secret_encrypted")
+    );
+    assert_eq!(
+        updated.secret_context_versions.get("bot_token_encrypted"),
+        Some(&3)
+    );
+    assert_eq!(
+        signing_adapter
+            .build_verify_secrets(&state.encryption_keys, &updated)
+            .await
+            .unwrap()
+            .get("app_secret"),
+        Some("rotated-signing-secret")
+    );
+    assert_eq!(
+        channel_bot_service::decrypt_bot_token(&state.encryption_keys, &updated)
+            .await
+            .unwrap()
+            .as_str(),
+        "fixture-token"
+    );
     let binding = updated.meta_binding.as_ref().unwrap();
     assert!(binding.grant_reconnect_required);
     assert!(binding.provider_revoked);

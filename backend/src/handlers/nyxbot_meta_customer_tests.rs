@@ -384,6 +384,18 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
             .insert_one(fresh)
             .await
             .unwrap();
+        let preview = crate::services::org_channel_service::preview::load(
+            &state.db,
+            &state.encryption_keys,
+            &other_admin,
+            &fresh_id,
+            &agent.id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!preview.guest_enabled);
+        assert_eq!(preview.private_chats, "owner");
         let (status, assigned) = action(&router, &token, &fresh_id, &agent.id, "assign").await;
         assert_eq!(status, StatusCode::OK, "{assigned}");
         assert_eq!(assigned["guests_enabled"], false);

@@ -313,15 +313,8 @@ pub(crate) async fn connect(
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
     let bot: ChannelBot = accessible_bot(state, owner, bot_id).await?;
-    let mut org_binding =
+    let org_binding =
         crate::services::org_channel_service::link_target(&state.db, owner, &bot, agent).await?;
-    let explicit_customer_setup = super::channel_adapters::meta::is_meta(&bot.platform);
-    if explicit_customer_setup && let Some(binding) = &mut org_binding {
-        // Assignment establishes routing only. Opening customer access is a
-        // separate, readiness-checked action; restoration below preserves an
-        // administrator's previously committed exposure choice.
-        binding.guests.enabled = false;
-    }
     crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     // An org bot's route and route key belong to the org.
     let bot_owner_id = bot.user_id.clone();
@@ -525,11 +518,11 @@ pub(crate) async fn connect(
         link_code_expires_at: None,
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
-        private_chats: org_binding.as_ref().map(|_| {
-            if explicit_customer_setup {
-                "owner"
-            } else {
+        private_chats: org_binding.as_ref().map(|binding| {
+            if binding.guests.enabled {
                 "everyone"
+            } else {
+                "owner"
             }
             .to_owned()
         }),

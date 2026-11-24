@@ -128,8 +128,8 @@ pub(crate) async fn load(
             (previous, false)
         }
     };
-    let mut policy = new_guest_policy(ready);
-    let mut private = "everyone".to_owned();
+    let mut policy = initial_guest_policy(ready, &bot.platform);
+    let mut private = if policy.enabled { "everyone" } else { "owner" }.to_owned();
     let mut carried = false;
     if let Some(previous) = previous {
         if !reused {
@@ -168,7 +168,9 @@ pub(crate) async fn load(
     } else {
         None
     };
-    let mut description = if !policy.enabled {
+    let mut description = if !policy.enabled && !carried {
+        "Customer access starts off. Assigning a specialist keeps private chats restricted to verified organization members; explicitly enable customer conversations after setup is ready.".to_owned()
+    } else if !policy.enabled {
         "Saved guest access is off and stays off. Only verified organization members can talk to this bot.".to_owned()
     } else if carried && private != "everyone" {
         "Saved guest access stays on. Private chats stay restricted to verified organization members. Guests can talk in groups that allow everyone; the organization pays for their messages and tool use.".to_owned()
