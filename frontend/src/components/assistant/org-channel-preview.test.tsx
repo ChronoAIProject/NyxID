@@ -10,11 +10,13 @@ it("describes a closed inbox in each language and only lists capabilities when g
     private_chats: "owner", guest_policy_mode: "legacy",
     description: "Customer access starts off. Only verified organization members can use private chats until an administrator enables customer conversations.",
     effective_guest_services: [{ id: "calendar", label: "Calendar", access: "read", limited_operations: false }],
-    audience_readiness: { guest_readiness: { status: "not_ready" }, note: "" },
+    audience_readiness: { guest_readiness: { status: "ready" }, note: "" },
   };
   const view = render(<OrgChannelDisclosure preview={preview} />);
   try {
     expect(screen.getByText(preview.description)).toBeVisible();
+    expect(screen.getByText(/The organization pays for guest usage when guest access is enabled/)).toBeVisible();
+    expect(screen.queryByText(/billed to you/)).toBeNull();
     expect(screen.queryByText(/Calendar/)).toBeNull();
     expect(screen.queryByText("Guests can use")).toBeNull();
     await act(async () => { await appI18n.changeLanguage("zh-CN"); });

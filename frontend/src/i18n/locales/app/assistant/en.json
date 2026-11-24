@@ -764,6 +764,7 @@
   "Service already updated": "Service already updated",
   "Service connection": "Service connection",
   "Service credential rotated": "Service credential rotated",
+  "Service permissions still apply. The organization pays for guest usage when guest access is enabled.": "Service permissions still apply. The organization pays for guest usage when guest access is enabled.",
   "Service permissions still apply. Visitor usage is billed to you.": "Service permissions still apply. Visitor usage is billed to you.",
   "Service routing updated": "Service routing updated",
   "Session ID": "Session ID",

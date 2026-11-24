@@ -23,7 +23,7 @@ export function OrgChannelDisclosure({ preview }: { readonly preview: OrgChannel
       <p>{translateUi("Guests can use")}</p>
       <GuestServices services={preview.effective_guest_services} />
     </>}
-    <GuestReadiness readiness={preview.audience_readiness.guest_readiness} />
+    <GuestReadiness readiness={preview.audience_readiness.guest_readiness} billingOwner="organization" />
     <AudienceReadiness configuration={preview.audience_readiness.configuration} />
     {preview.health ? <p role="status">{translateUi(preview.health.text)}</p> : null}
   </div>;

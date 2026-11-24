@@ -764,6 +764,7 @@
   "Service already updated": "服務已更新",
   "Service connection": "服務連線",
   "Service credential rotated": "服務憑證已輪替",
+  "Service permissions still apply. The organization pays for guest usage when guest access is enabled.": "服務權限仍然適用。啟用訪客存取權後，組織會支付訪客使用服務的費用。",
   "Service permissions still apply. Visitor usage is billed to you.": "服務權限仍然適用。訪客用量的費用由你支付。",
   "Service routing updated": "服務路由已更新",
   "Session ID": "工作階段 ID",
