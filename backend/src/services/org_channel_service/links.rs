@@ -55,12 +55,24 @@ pub(crate) async fn issue(db: &Database, actor: &str, channel: &NyxbotChannel) -
 
 /// Returns true only for a recognized challenge. Call only for authenticated,
 /// original human messages in a private chat, never for bots/forwarded posts.
+#[cfg(test)]
 pub(crate) async fn receive(
     db: &Database,
     channel: &NyxbotChannel,
     sender: &str,
     text: &str,
     label: Option<&str>,
+) -> AppResult<bool> {
+    receive_for_grant(db, channel, sender, text, label, None).await
+}
+
+pub(crate) async fn receive_for_grant(
+    db: &Database,
+    channel: &NyxbotChannel,
+    sender: &str,
+    text: &str,
+    label: Option<&str>,
+    grant: Option<&crate::models::channel_meta::GrantRef>,
 ) -> AppResult<bool> {
     let Some(code) = text
         .split_whitespace()
@@ -78,9 +90,31 @@ pub(crate) async fn receive(
     let Some(row) = row else { return Ok(false) };
     let actor = row.get_str("user_id").map_err(|_| super::denied())?;
     member(db, actor, channel).await?;
-    Ok(db.collection::<Document>(CHALLENGES).update_one(doc!{"_id":row.get_str("_id").map_err(|_|super::denied())?,"state":"issued"},
-        doc!{"$set":{"state":"observed","sender_hash":super::sender_identity(channel,sender),
-            "sender_label":label.unwrap_or("Chat account").chars().take(80).collect::<String>()},"$unset":{"code_hash":""}}).await?.matched_count==1)
+    let mut fields = doc! {"state":"observed","sender_hash":super::sender_identity(channel,sender),
+    "sender_label":label.unwrap_or("Chat account").chars().take(80).collect::<String>()};
+    let grant = if super::super::channel_adapters::meta::is_meta(&channel.platform) {
+        let grant = grant
+            .filter(|grant| grant.bot_id == channel.channel_bot_id)
+            .ok_or_else(super::denied)?;
+        fields.insert(
+            "meta_grant",
+            bson::to_bson(grant).map_err(|_| super::denied())?,
+        );
+        Some(grant)
+    } else {
+        None
+    };
+    Ok(super::super::channel_meta_service::scopes::update_record(
+        db,
+        grant,
+        true,
+        CHALLENGES,
+        doc! {"_id":row.get_str("_id").map_err(|_|super::denied())?,"state":"issued"},
+        doc! {"$set":fields,"$unset":{"code_hash":""}},
+    )
+    .await?
+    .matched_count
+        == 1)
 }
 
 pub(crate) async fn status(
@@ -130,13 +164,22 @@ pub(crate) async fn confirm(
             "binding_revision":&b.revision,"state":"observed","expires_at":{"$gt":bson::DateTime::now()}},
             doc!{"$set":{"state":"confirmed"}}).session(&mut *tx).await?.ok_or_else(super::denied)?;
         let hash=challenge.get_str("sender_hash").map_err(|_|super::denied())?;
+        let grant = if super::super::channel_adapters::meta::is_meta(&channel.platform) {
+            let grant:crate::models::channel_meta::GrantRef = bson::from_bson(challenge.get("meta_grant").cloned().ok_or_else(super::denied)?)
+                .map_err(|_|super::denied())?;
+            if grant.bot_id!=channel.channel_bot_id {return Err(super::denied());}
+            super::super::channel_meta_service::scopes::fence_reference(db,tx,&grant,true).await?;
+            Some(grant)
+        } else {None};
         let existing=db.collection::<SenderLink>(LINKS).find_one(doc!{"channel_id":&channel.id,"sender_hash":hash}).session(&mut *tx).await?;
         if let Some(existing)=existing {
-            if existing.user_id!=*actor {return Err(AppError::Conflict("This chat account is already linked to a different person".into()));}
-            db.collection::<SenderLink>(LINKS).update_one(doc!{"_id":&existing.id},doc!{"$set":{"active":true,"revision":new_revision,"binding_revision":&b.revision}}).session(tx).await?;
+            let prior_grant = existing.meta_grant.as_ref().zip(grant.as_ref()).is_some_and(|(old,new)|old.bot_id!=new.bot_id || old.grant_id!=new.grant_id);
+            if existing.user_id!=*actor && !prior_grant {return Err(AppError::Conflict("This chat account is already linked to a different person".into()));}
+            db.collection::<SenderLink>(LINKS).update_one(doc!{"_id":&existing.id},doc!{"$set":{"active":true,"user_id":actor,
+                "meta_grant":bson::to_bson(&grant).map_err(|_|super::denied())?,"revision":new_revision,"binding_revision":&b.revision}}).session(tx).await?;
         } else {
             db.collection::<SenderLink>(LINKS).insert_one(SenderLink{id:link_id.clone(),channel_id:channel.id.clone(),org_id:b.org_id.clone(),
-                revision:new_revision.clone(),binding_revision:b.revision.clone(),sender_hash:hash.into(),user_id:actor.clone(),active:true,created_at:Utc::now()}).session(tx).await?;
+                meta_grant:grant,revision:new_revision.clone(),binding_revision:b.revision.clone(),sender_hash:hash.into(),user_id:actor.clone(),active:true,created_at:Utc::now()}).session(tx).await?;
         }
         Ok(())
     })).await?;
