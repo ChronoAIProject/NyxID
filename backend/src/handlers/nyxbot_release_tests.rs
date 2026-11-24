@@ -2242,6 +2242,89 @@ async fn release_delete_authority_refusal_escalates_without_changing_authority()
     state.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn telegram_setup_custody_review_does_not_change_other_transport_releases() {
+    for platform in ["telegram", "discord", "whatsapp", "lark"] {
+        for status in [400, 409] {
+            let (state, mut row, _, server, upstream) = fixture("release_transport_scope").await;
+            row.platform = platform.into();
+            state
+                .db
+                .collection::<Document>(CHANNELS)
+                .update_one(doc! {"_id":&row.id}, doc! {"$set":{"platform":platform}})
+                .await
+                .unwrap();
+            state
+                .db
+                .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&row.channel_bot_id},
+                    doc! {"$set":{"platform":platform}},
+                )
+                .await
+                .unwrap();
+            let reserved = reserve(&state, &row).await;
+            release::dispatch(&state.db, &reserved).await.unwrap();
+            release::record_ack(&state.db, &reserved, "cmaeg1.ch.remote", 1)
+                .await
+                .unwrap();
+            release::retire_attempt(&state, &reserved.id, ReleaseReason::SetupFailed)
+                .await
+                .unwrap();
+            // Keep the known setup failure identical; only Telegram may select
+            // its new operator-dependent review path over existing transitions.
+            state
+                .db
+                .collection::<Document>(CHANNELS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"last_error":"gateway_provider_not_registered"}},
+                )
+                .await
+                .unwrap();
+            mount_remote(&server, &reserved, 1).await;
+            let body = if status == 400 {
+                json!({"code":"invalid_request","detail":"nyxbot"})
+            } else {
+                json!({"code":"conflict","detail":"expected version 1, actual Some(1)"})
+            };
+            Mock::given(method("DELETE"))
+                .and(path("/channels/cmaeg1.ch.remote"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            assert!(!execute(&state, &reserved.id).await);
+            let after = current(&state, &reserved.id).await;
+            let (expected_state, expected_reason) = if platform == "telegram" {
+                (
+                    ReleaseState::ReviewRequired,
+                    "gateway_provider_setup_required",
+                )
+            } else if status == 400 {
+                (ReleaseState::Due, "release_unconfirmed")
+            } else {
+                (ReleaseState::ReviewRequired, "remote_version_changed")
+            };
+            assert_eq!(after.state, expected_state, "{platform} HTTP {status}");
+            assert_eq!(after.last_error.as_deref(), Some(expected_reason));
+            assert_eq!(after.expected_version, Some(1));
+            assert!(after.resolution.is_none());
+            assert_eq!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.method.as_str() == "DELETE")
+                    .count(),
+                1
+            );
+            upstream.abort();
+            state.db.drop().await.unwrap();
+        }
+    }
+}
+
 struct CapturedReleaseLog(Arc<std::sync::Mutex<Vec<u8>>>);
 impl std::io::Write for CapturedReleaseLog {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

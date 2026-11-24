@@ -638,10 +638,12 @@ fn gateway_diagnostic_audit(mut details: Value, row: &NyxbotChannel) -> Value {
     details
 }
 
-/// Only known pre-effect refusals establish absence. CMA reserves its record
-/// before provider binding: unknown-provider, invalid_binding and generic 400s
-/// must keep the durable release obligation for record-based reconciliation.
-fn gateway_create_refused(response: &GatewayResponse) -> bool {
+/// Telegram keeps post-reservation and unknown 400s for record-based recovery.
+/// Other transports retain their established definitive-refusal/fallback contract.
+fn gateway_create_refused(platform: &str, response: &GatewayResponse) -> bool {
+    if canonical_platform(platform) != "telegram" {
+        return matches!(response.status, 400 | 401 | 403 | 422);
+    }
     if matches!(response.status, 401 | 403) {
         return true;
     }
@@ -1588,7 +1590,7 @@ async fn connect_gateway(
     };
     if created.status != 201 && created.status != 200 {
         record_gateway_rejection(state, row, &release.id, &created, "create").await?;
-        if gateway_create_refused(&created) {
+        if gateway_create_refused(&row.platform, &created) {
             releases::not_created(&state.db, &release)
                 .await
                 .map_err(|_| "storage_unavailable")?;
@@ -2139,7 +2141,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
             {
                 return Err(discard(code).await);
             }
-            if gateway_create_refused(&refused) {
+            if gateway_create_refused(&next.platform, &refused) {
                 releases::not_created(&state.db, &release)
                     .await
                     .map_err(|_| "storage_unavailable")?;

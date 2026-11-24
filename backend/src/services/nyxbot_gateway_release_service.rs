@@ -1875,9 +1875,10 @@ async fn execute_claimed(
                     .await
                 }
                 Ok(r)
-                    if (r.status == 400 && gateway::unknown_nyxbot_provider(&r.body))
-                        || (r.status == 409
-                            && known_provider_setup_failure(&state.db, &release).await?) =>
+                    if release.platform == "telegram"
+                        && ((r.status == 400 && gateway::unknown_nyxbot_provider(&r.body))
+                            || (r.status == 409
+                                && known_provider_setup_failure(&state.db, &release).await?)) =>
                 {
                     transition(
                         &state.db,

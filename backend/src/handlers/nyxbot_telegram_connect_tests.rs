@@ -607,7 +607,9 @@ fn telegram_gateway_400_contract_classification_and_redaction() {
     ] {
         let response = GatewayResponse { status: 400, body };
         assert_eq!(gateway_error_code(&response), expected);
-        assert_eq!(gateway_create_refused(&response), absent);
+        for platform in ["telegram", "telegram-new"] {
+            assert_eq!(gateway_create_refused(platform, &response), absent);
+        }
         let diagnostic = crate::services::channel_bot_health::nyxbot::SetupDiagnostic::new(
             "create",
             Some(&response),
