@@ -388,6 +388,13 @@ checks nested queued and active contexts, revisiting queue cleanup if needed.
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved
 for repair. Untagged or mixed legacy history stays pending.
+The worker audits the ordinary conversation inventories in indexed pages, then
+destroys at most 100 records per transaction. It retains message witnesses until
+the other descendants have drained and stores both cursors on the existing
+scope. Parent and key retirement follows a final empty-inventory check. A
+restart resumes those pages; history size does not enlarge the final retirement
+transaction. Unexpected voice children and unproven legacy recap data remain
+pending instead of being adopted into the guest's authority.
 Shared owner history is erased by exact turn and child references. Checkpoints
 retain a goal's origin turn and a bounded set of content-source turn IDs on the
 original checkpoint, under its existing account/conversation lifetime. Cleanup

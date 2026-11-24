@@ -158,8 +158,13 @@ pub(crate) async fn manual_pass(state: &crate::AppState, bot: &ChannelBot) -> Ap
         .collection::<Document>(BOTS)
         .find_one(doc! {"_id":&bot.id,"user_id":&bot.user_id,
         "is_active":false,"meta_binding.generation":binding.generation})
-        .await?
-        .ok_or_else(grants::incomplete)?;
+        .await?;
+    let Some(row) = row else {
+        if grants::completion_for(&state.db, &bot.id, &binding.grant_id).await? {
+            return Ok(true);
+        }
+        return Err(grants::incomplete());
+    };
     let obligation = row
         .get_document("meta_manual_purge")
         .map_err(|_| grants::incomplete())?
@@ -787,6 +792,236 @@ async fn clear_threads(
     Ok(Step::stay(doc! {"phase":phase}))
 }
 
+/// Match the ordinary cascade's inventories, retaining the original six
+/// audit positions so an interrupted prior page resumes conservatively.
+fn guest_inventories(owner: &str, conversation: &str) -> Vec<(&'static str, Document)> {
+    let mut collections = vec![
+        "assistant_messages",
+        crate::models::assistant_tool_result::COLLECTION_NAME,
+        crate::models::assistant_attachment::COLLECTION_NAME,
+        crate::models::assistant_resource::COLLECTION_NAME,
+        crate::models::generated_artifact::COLLECTION_NAME,
+        crate::models::async_service_operation::COLLECTION_NAME,
+    ];
+    for &collection in crate::services::assistant_nyxagent::CONVERSATION_CHILD_COLLECTIONS {
+        if collection != crate::models::assistant_agent_credential::COLLECTION_NAME
+            && !collections.contains(&collection)
+        {
+            collections.push(collection);
+        }
+    }
+    let mut inventories: Vec<_> = collections
+        .into_iter()
+        .map(|collection| {
+            let filter = if collection == crate::models::nyxbot_gateway_response::COLLECTION_NAME {
+                // Organization replay belongs to the transport administrator.
+                doc! {"conversation_id":conversation}
+            } else {
+                doc! {"user_id":owner,"conversation_id":conversation}
+            };
+            (collection, filter)
+        })
+        .collect();
+    for collection in [
+        crate::models::org_channel::LANES,
+        crate::models::org_channel::MESSAGES,
+    ] {
+        inventories.push((collection, doc! {"conversation_id":conversation}));
+    }
+    inventories.push((
+        crate::models::assistant_notification::COLLECTION_NAME,
+        doc! {"source.conversation_id":conversation},
+    ));
+    inventories.push((
+        crate::models::assistant_checkpoint::COLLECTION_NAME,
+        doc! {"_id":conversation,"user_id":owner},
+    ));
+    inventories.push((EVENTS,doc! {"$or":[{"conversation_id":conversation},{"resolved_conversation_id":conversation},{"guest_setup_conversation_id":conversation}]}));
+    inventories
+}
+
+async fn guest_child_proof(
+    db: &Database,
+    tx: &mut ClientSession,
+    collection: &str,
+    record: &Document,
+    owner: &str,
+    conversation: &str,
+    scope: &Document,
+) -> AppResult<GrantRef> {
+    if matches!(
+        collection,
+        crate::models::assistant_voice::REQUESTS
+            | crate::models::assistant_voice_session::COLLECTION_NAME
+            | crate::models::assistant_voice_announcement::COLLECTION_NAME
+    ) {
+        // Visitor execution has no voice lane. In particular, never erase a
+        // live-session row before ordinary retirement can enforce its stop.
+        return Err(grants::incomplete());
+    }
+    if collection == "assistant_messages" {
+        validate_turn_events(
+            db,
+            tx,
+            conversation,
+            record
+                .get_str("turn_id")
+                .map_err(|_| grants::incomplete())?,
+            scope,
+        )
+        .await?;
+        return single_grant_message(record, scope);
+    }
+    let stored = match record.get("meta_grant") {
+        None | Some(Bson::Null) => None,
+        Some(value) => {
+            let proof: GrantRef =
+                bson::from_bson(value.clone()).map_err(|_| grants::incomplete())?;
+            reference_in_range(&proof, scope)?;
+            Some(proof)
+        }
+    };
+    let mut proven = stored.clone();
+    let mut turns = std::collections::BTreeSet::new();
+    for field in [
+        "turn_id",
+        "source_turn_id",
+        "originating_turn_id",
+        "event_turn_id",
+        "requested_turn_id",
+        "creation_turn_id",
+    ] {
+        match record.get(field) {
+            None | Some(Bson::Null) => {}
+            Some(Bson::String(turn)) if !turn.is_empty() => {
+                turns.insert(turn.as_str());
+            }
+            _ => return Err(grants::incomplete()),
+        }
+    }
+    if collection == crate::models::org_channel::MESSAGES
+        && let Some(value) = record.get("request_id")
+    {
+        turns.insert(
+            value
+                .as_str()
+                .filter(|turn| !turn.is_empty())
+                .ok_or_else(grants::incomplete)?,
+        );
+    }
+    if let Ok(source) = record.get_document("source")
+        && let Some(value) = source.get("turn_id")
+    {
+        turns.insert(
+            value
+                .as_str()
+                .filter(|turn| !turn.is_empty())
+                .ok_or_else(grants::incomplete)?,
+        );
+    }
+    if collection == crate::models::assistant_checkpoint::COLLECTION_NAME {
+        // Guest execution never authors owner checkpoints. Do not infer that
+        // a legacy/injected recap shares the guest parent's authority.
+        return Err(grants::incomplete());
+    }
+    if collection == EVENTS {
+        if original_parent(db, tx, record).await?
+            != scope.get_str("bot_id").map_err(|_| grants::incomplete())?
+        {
+            return Err(grants::incomplete());
+        }
+        let proof = source_grant(db, tx, record, Some("relay_message_id"))
+            .await?
+            .ok_or_else(grants::incomplete)?;
+        reference_in_range(&proof, scope)?;
+        if stored.as_ref().is_some_and(|stored| stored != &proof) {
+            return Err(grants::incomplete());
+        }
+        return Ok(proof);
+    }
+    // Expiry receipts and image-delivery metadata retain exact attachment or
+    // message references after bytes expire. Use the surviving transcript;
+    // do not adopt them from the guest parent's tag alone.
+    let mut witness_filter = doc! {"conversation_id":conversation,"user_id":owner};
+    let linked = if let Ok(message) = record.get_str("message_id") {
+        witness_filter.insert("_id", message);
+        true
+    } else if let Some(attachment) = record.get_str("attachment_id").ok().or_else(|| {
+        (collection == crate::models::assistant_upload_retention::TOMBSTONES)
+            .then(|| record.get_str("_id").ok())
+            .flatten()
+    }) {
+        witness_filter.insert("attachments.id", attachment);
+        true
+    } else {
+        false
+    };
+    if linked {
+        if let Some(witness) = db
+            .collection::<Document>("assistant_messages")
+            .find_one(witness_filter)
+            .session(&mut *tx)
+            .await?
+        {
+            let proof = single_grant_message(&witness, scope)?;
+            if proven.as_ref().is_some_and(|proven| proven != &proof) {
+                return Err(grants::incomplete());
+            }
+            proven = Some(proof);
+        } else if stored.is_none() {
+            return Err(grants::incomplete());
+        }
+    }
+    if collection == crate::models::nyxbot_gateway_response::COLLECTION_NAME {
+        let mut matches = db
+            .collection::<Document>(EVENTS)
+            .find(doc! {"gateway_response_id":record.get("_id").cloned(),
+            "$or":[{"conversation_id":conversation},{"resolved_conversation_id":conversation}]})
+            .limit(2)
+            .session(&mut *tx)
+            .await?;
+        if let Some(event) = matches.next(&mut *tx).await.transpose()? {
+            if matches.next(&mut *tx).await.transpose()?.is_some() {
+                return Err(grants::incomplete());
+            }
+            if record.get_str("channel_id") != event.get_str("channel_id")
+                || record.get_str("user_id") != event.get_str("user_id")
+                || original_parent(db, tx, &event).await?
+                    != scope.get_str("bot_id").map_err(|_| grants::incomplete())?
+            {
+                return Err(grants::incomplete());
+            }
+            let proof = source_grant(db, tx, &event, Some("relay_message_id"))
+                .await?
+                .ok_or_else(grants::incomplete)?;
+            reference_in_range(&proof, scope)?;
+            if proven.as_ref().is_some_and(|proven| proven != &proof) {
+                return Err(grants::incomplete());
+            }
+            proven = Some(proof);
+        }
+    }
+    for turn in turns {
+        let witness = db
+            .collection::<Document>("assistant_messages")
+            .find_one(doc! {"conversation_id":conversation,"user_id":owner,"turn_id":turn})
+            .session(&mut *tx)
+            .await?;
+        let Some(witness) = witness else {
+            if stored.is_none() {
+                return Err(grants::incomplete());
+            }
+            continue;
+        };
+        let proof = single_grant_message(&witness, scope)?;
+        if proven.as_ref().is_some_and(|proven| proven != &proof) {
+            return Err(grants::incomplete());
+        }
+        proven = Some(proof);
+    }
+    proven.ok_or_else(grants::incomplete)
+}
+
 async fn erase_guest(
     db: &Database,
     tx: &mut ClientSession,
@@ -809,85 +1044,53 @@ async fn erase_guest(
     if row
         .get("active_turn")
         .is_some_and(|value| !matches!(value, Bson::Null))
-        || row
-            .get_array("pending_events")
-            .is_ok_and(|events| !events.is_empty())
+        || match row.get("pending_events") {
+            None | Some(Bson::Null) => false,
+            Some(Bson::Array(events)) => !events.is_empty(),
+            _ => true,
+        }
     {
         return Err(grants::incomplete());
     }
-    // The parent tag cannot certify a populated legacy conversation that was
-    // adopted by a preceding writer. Prove every retained turn positively,
-    // then its children, in restartable pages before using the normal cascade.
     let mut progress = if progress.get_str("guest") == Ok(id) {
         progress.clone()
     } else {
         doc! {"phase":phase,"guest":id}
     };
+    let inventories = guest_inventories(owner, id);
     let stage = progress.get_i32("guest_stage").unwrap_or(0);
-    let collections = [
-        "assistant_messages",
-        crate::models::assistant_tool_result::COLLECTION_NAME,
-        crate::models::assistant_attachment::COLLECTION_NAME,
-        crate::models::assistant_resource::COLLECTION_NAME,
-        crate::models::generated_artifact::COLLECTION_NAME,
-        crate::models::async_service_operation::COLLECTION_NAME,
-    ];
-    if let Some(collection) = collections.get(stage as usize) {
-        let rows = page(
-            db,
-            tx,
-            collection,
-            doc! {"conversation_id":id,"user_id":owner},
-            &progress,
-        )
-        .await?;
+    if stage < 0 {
+        return Err(grants::incomplete());
+    }
+    if let Some((collection, filter)) = inventories.get(stage as usize) {
+        let rows = page(db, tx, collection, filter.clone(), &progress).await?;
         for record in &rows {
-            let proof = if stage == 0 {
-                validate_turn_events(
-                    db,
-                    tx,
-                    id,
-                    record
-                        .get_str("turn_id")
-                        .map_err(|_| grants::incomplete())?,
-                    scope,
-                )
-                .await?;
-                single_grant_message(record, scope)?
-            } else {
-                let turn = record
-                    .get_str("turn_id")
-                    .map_err(|_| grants::incomplete())?;
-                let witness = db
-                    .collection::<Document>("assistant_messages")
-                    .find_one(doc! {"conversation_id":id,"user_id":owner,"turn_id":turn})
-                    .session(&mut *tx)
-                    .await?
-                    .ok_or_else(grants::incomplete)?;
-                if *collection == crate::models::async_service_operation::COLLECTION_NAME
-                    && !matches!(record.get_str("state"), Ok("cancelled" | "delivered"))
-                {
+            let proof = guest_child_proof(db, tx, collection, record, owner, id, scope).await?;
+            if *collection == crate::models::async_service_operation::COLLECTION_NAME
+                && !matches!(record.get_str("state"), Ok("cancelled" | "delivered"))
+            {
+                if matches!(
+                    record.get_str("state"),
+                    Ok("submitting" | "waiting" | "ready" | "queued")
+                ) {
+                    db.collection::<Document>(collection).update_one(doc! {"_id":record.get("_id").cloned(),"state":record.get("state").cloned()},
+                        doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling","result_encrypted":null,
+                        "lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *tx).await?;
+                } else if record.get_str("state") != Ok("cancelling") {
                     return Err(grants::incomplete());
                 }
-                single_grant_message(&witness, scope)?
-            };
-            if stage != 0 {
-                match record.get("meta_grant") {
-                    None | Some(Bson::Null) => {}
-                    Some(value) => {
-                        let stored: GrantRef =
-                            bson::from_bson(value.clone()).map_err(|_| grants::incomplete())?;
-                        reference_in_range(&stored, scope)?;
-                        // This original child already carries authority. Do
-                        // not replace it with a different turn's witness.
-                        if stored != proof {
-                            return Err(grants::incomplete());
-                        }
-                        continue;
-                    }
-                }
-                db.collection::<Document>(collection).update_one(doc! {"_id":record.get("_id").cloned(),"conversation_id":id,"user_id":owner,"meta_grant":null},
-                    doc! {"$set":{"meta_grant":bson::to_bson(&proof).map_err(|_|grants::incomplete())?}}).session(&mut *tx).await?;
+                return Ok(Step::stay(progress));
+            }
+            if *collection != "assistant_messages"
+                && !record
+                    .get("meta_grant")
+                    .is_some_and(|value| !matches!(value, Bson::Null))
+            {
+                let mut exact = filter.clone();
+                exact.insert("_id", record.get("_id").cloned());
+                exact.insert("meta_grant", Bson::Null);
+                if db.collection::<Document>(collection).update_one(exact,doc! {"$set":{"meta_grant":bson::to_bson(&proof).map_err(|_|grants::incomplete())?}})
+                    .session(&mut *tx).await?.matched_count!=1 {return Err(grants::incomplete());}
             }
         }
         if rows.len() < PAGE as usize {
@@ -903,8 +1106,66 @@ async fn erase_guest(
         }
         return Ok(Step::stay(progress));
     }
-    // Voice is unavailable to visitor execution. An unexpected child is not
-    // evidence that it shares the parent's grant; preserve it for repair.
+    // Keep message witnesses until every other descendant page is absent.
+    let mut destruction: Vec<_> = inventories
+        .iter()
+        .filter(|(collection, _)| *collection != "assistant_messages")
+        .collect();
+    destruction.extend(
+        inventories
+            .iter()
+            .filter(|(collection, _)| *collection == "assistant_messages"),
+    );
+    let stage = progress.get_i32("guest_delete_stage").unwrap_or(0);
+    if stage < 0 {
+        return Err(grants::incomplete());
+    }
+    if let Some((collection, filter)) = destruction.get(stage as usize) {
+        let rows = page(db, tx, collection, filter.clone(), &Document::new()).await?;
+        for record in &rows {
+            if *collection == "assistant_messages" {
+                single_grant_message(record, scope)?;
+            } else {
+                let proof: GrantRef = bson::from_bson(
+                    record
+                        .get("meta_grant")
+                        .cloned()
+                        .ok_or_else(grants::incomplete)?,
+                )
+                .map_err(|_| grants::incomplete())?;
+                reference_in_range(&proof, scope)?;
+            }
+        }
+        if rows.is_empty() {
+            progress.insert("guest_delete_stage", stage + 1);
+        } else {
+            let ids: Vec<_> = rows
+                .iter()
+                .map(|row| row.get("_id").cloned().ok_or_else(grants::incomplete))
+                .collect::<AppResult<_>>()?;
+            db.collection::<Document>(collection)
+                .delete_many(doc! {"$and":[filter.clone(),{"_id":{"$in":ids}}]})
+                .session(&mut *tx)
+                .await?;
+        }
+        return Ok(Step::stay(progress));
+    }
+    // Revisit a straggler before the ordinary retirement helper. Its payload
+    // delete_many calls now see empty, fenced inventories; parent/key retirement
+    // has constant work independently of the conversation's history size.
+    for (index, (collection, filter)) in destruction.iter().enumerate() {
+        if db
+            .collection::<Document>(collection)
+            .find_one(filter.clone())
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            progress.insert("guest_delete_stage", index as i32);
+            return Ok(Step::stay(progress));
+        }
+    }
     if db
         .collection::<Document>("assistant_conversations")
         .find_one(doc! {"voice_parent_conversation_id":id})
@@ -913,6 +1174,20 @@ async fn erase_guest(
         .await?
         .is_some()
     {
+        return Err(grants::incomplete());
+    }
+    let mut credentials = db
+        .collection::<Document>(crate::models::assistant_agent_credential::COLLECTION_NAME)
+        .find(doc! {"user_id":owner,"conversation_id":id})
+        .limit(2)
+        .session(&mut *tx)
+        .await?;
+    let credential_count = credentials
+        .stream(&mut *tx)
+        .try_collect::<Vec<_>>()
+        .await?
+        .len();
+    if credential_count > 1 {
         return Err(grants::incomplete());
     }
     crate::services::assistant_nyxagent::delete_in_session(db, owner, id, tx).await?;
@@ -1544,6 +1819,60 @@ async fn step(
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::IndexModel;
+    db.collection::<Document>("assistant_messages")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"attachments.id":1})
+                .build(),
+        )
+        .await?;
+    for field in ["conversation_id", "resolved_conversation_id"] {
+        db.collection::<Document>(EVENTS)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"gateway_response_id":1,field:1,"_id":1})
+                    .build(),
+            )
+            .await?;
+    }
+    for &collection in crate::services::assistant_nyxagent::CONVERSATION_CHILD_COLLECTIONS {
+        db.collection::<Document>(collection)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"user_id":1,"conversation_id":1,"_id":1})
+                    .build(),
+            )
+            .await?;
+    }
+    for collection in [
+        crate::models::org_channel::LANES,
+        crate::models::org_channel::MESSAGES,
+        crate::models::nyxbot_gateway_response::COLLECTION_NAME,
+    ] {
+        db.collection::<Document>(collection)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"conversation_id":1,"_id":1})
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"source.conversation_id":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    for field in [
+        "conversation_id",
+        "resolved_conversation_id",
+        "guest_setup_conversation_id",
+    ] {
+        db.collection::<Document>(EVENTS)
+            .create_index(IndexModel::builder().keys(doc! {field:1,"_id":1}).build())
+            .await?;
+    }
     for collection in [
         MESSAGES,
         REPLIES,

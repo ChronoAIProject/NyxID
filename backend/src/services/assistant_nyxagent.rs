@@ -7333,6 +7333,32 @@ pub async fn rename(
         .await
         .map_err(transactions::map_transaction_error)
 }
+/// Payload inventories shared by ordinary conversation retirement and the
+/// bounded Meta guest eraser. Credentials remain until parent retirement.
+pub(crate) const CONVERSATION_CHILD_COLLECTIONS: &[&str] = &[
+    crate::models::async_service_operation::COLLECTION_NAME,
+    crate::models::generated_artifact::COLLECTION_NAME,
+    crate::models::generated_artifact::DELIVERIES,
+    crate::models::generated_artifact::SERIES,
+    crate::models::cma_session_origin::COLLECTION_NAME,
+    crate::models::assistant_voice::REQUESTS,
+    crate::models::assistant_voice_session::COLLECTION_NAME,
+    crate::models::assistant_voice_announcement::COLLECTION_NAME,
+    crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    super::assistant_service_execution::COLLECTION,
+    crate::models::assistant_attachment::COLLECTION_NAME,
+    crate::models::assistant_resource::COLLECTION_NAME,
+    crate::models::assistant_tool_result::COLLECTION_NAME,
+    crate::models::nyxbot_gateway_response::COLLECTION_NAME,
+    crate::models::nyxbot_image_delivery::COLLECTION_NAME,
+    crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
+    crate::models::execution_permission_channel::COLLECTION_NAME,
+    crate::models::assistant_upload_retention::TOMBSTONES,
+    crate::models::assistant_agent_credential::COLLECTION_NAME,
+    MESSAGES,
+    crate::models::assistant_message_feedback::COLLECTION_NAME,
+];
+
 /// Delete one thread with its key, credential, cards, attachments and
 /// transcript in one transaction. The agent itself remains.
 pub async fn delete(
@@ -7498,29 +7524,7 @@ pub(crate) async fn delete_with_retirement_in_session(
             Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
-        for collection in [
-            crate::models::async_service_operation::COLLECTION_NAME,
-            crate::models::generated_artifact::COLLECTION_NAME,
-            crate::models::generated_artifact::DELIVERIES,
-            crate::models::generated_artifact::SERIES,
-            crate::models::cma_session_origin::COLLECTION_NAME,
-            crate::models::assistant_voice::REQUESTS,
-            crate::models::assistant_voice_session::COLLECTION_NAME,
-            crate::models::assistant_voice_announcement::COLLECTION_NAME,
-            crate::models::assistant_acknowledgement::COLLECTION_NAME,
-            super::assistant_service_execution::COLLECTION,
-            crate::models::assistant_attachment::COLLECTION_NAME,
-            crate::models::assistant_resource::COLLECTION_NAME,
-            crate::models::assistant_tool_result::COLLECTION_NAME,
-            crate::models::nyxbot_gateway_response::COLLECTION_NAME,
-            crate::models::nyxbot_image_delivery::COLLECTION_NAME,
-            crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
-            crate::models::execution_permission_channel::COLLECTION_NAME,
-            crate::models::assistant_upload_retention::TOMBSTONES,
-            crate::models::assistant_agent_credential::COLLECTION_NAME,
-            MESSAGES,
-            crate::models::assistant_message_feedback::COLLECTION_NAME,
-        ] {
+        for &collection in CONVERSATION_CHILD_COLLECTIONS {
             db.collection::<bson::Document>(collection)
                 .delete_many(doc! {"conversation_id": id, "user_id": user_id})
                 .session(&mut *session)
