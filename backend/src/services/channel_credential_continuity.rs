@@ -224,7 +224,7 @@ async fn prepare_update(
     mut filter: Document,
     mut set: Document,
     mut unset: Document,
-    mut tx: Option<&mut mongodb::ClientSession>,
+    tx: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<Option<CredentialUpdate>> {
     let rows = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
     let touches_secret = FIELDS
@@ -239,7 +239,7 @@ async fn prepare_update(
             filter.remove(field);
         }
         let query = rows.find_one(filter.clone());
-        let raw = if let Some(tx) = tx.as_deref_mut() {
+        let raw = if let Some(tx) = tx {
             query.session(tx).await?
         } else {
             query.await?
@@ -259,8 +259,8 @@ async fn prepare_update(
                 set.remove(field);
                 unset.insert(field, "");
             }
-            set.remove(&format!("secret_context_versions.{field}"));
-            unset.remove(&format!("secret_context_versions.{field}"));
+            set.remove(format!("secret_context_versions.{field}"));
+            unset.remove(format!("secret_context_versions.{field}"));
         }
         let evidence = match verified(bot)? {
             Some(previous) => Some(previous.clone()),
