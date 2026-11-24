@@ -213,3 +213,6 @@ pub(super) const WHATSAPP_DIGEST: &str =
 
 pub(super) const CHANNEL_KEY_DIGEST: &str =
     "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9";
+
+pub(super) const EVENT_BINDING_DIGEST: &str =
+    "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";

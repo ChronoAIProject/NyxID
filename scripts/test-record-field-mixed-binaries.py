@@ -30,6 +30,8 @@ def main():
                         help="exercise managed channel-key replacement, removal and retained migration")
     parser.add_argument("--event-bindings", action="store_true",
                         help="check metadata-only serving and storage verification for two retained credentials")
+    parser.add_argument("--gateway-setup", action="store_true",
+                        help="replay a retained setup at its loopback gateway on both server revisions")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -66,6 +68,32 @@ def main():
                 result.check_returncode()
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
+
+        if args.gateway_setup:
+            for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                run(writer, "write", writer)
+                run(reader, "read", writer)
+                run(reader, "replace", writer)
+                run(writer, "read", writer)
+                run(writer, "retire", writer)
+            run("base", "write", "old")
+            run("candidate", "read", "old", writes=True)
+            run("candidate", "reject", "old", writes=True, legacy=False)
+            run("candidate", "migrate", "old", writes=True)
+            run("candidate", "read", "old", legacy=False)
+            run("base", "reject", "old")
+            run("candidate", "write", "current", writes=True)
+            run("candidate", "read", "current", writes=True, legacy=False)
+            run("base", "reject", "current")
+            run("candidate", "read", "current")
+            run("candidate", "replace", "current")
+            run("base", "read", "current")
+            registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+            for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                run(writer, "registry-write", "generation", writes=True, test=registry)
+                run(writer, "registry-live", "generation", writes=True, test=registry)
+                run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
 
         run("base", "write", "old")
         run("candidate", "read", "old")

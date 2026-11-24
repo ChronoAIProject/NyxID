@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 35 implemented adapters
-and 14 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 36 implemented adapters
+and 13 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -61,7 +61,7 @@ A collection may use separate adapters for different fields.
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
 | `oracle_login_profiles` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `oracle_login_snapshots` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
-| `platform_entry_gateway_transports` | `request_ciphertext` | — | Pending |
+| `platform_entry_gateway_transports` | `request_ciphertext` | [platform_entry_gateway_service.rs](../../backend/src/services/platform_entry_gateway_service.rs) | Implemented |
 | `platform_native_reply_handles` | `ciphertext` | — | Pending |
 | `platform_setups` | `facts_ciphertext` | [platform_setup_record_service.rs](../../backend/src/services/platform_setup_record_service.rs) | Implemented |
 | `triggers` | `verification_secret_encrypted`, `delivery_secret_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
@@ -174,8 +174,10 @@ version-map validation and exact-source migration stay in services.
   and issued child. Platform setup facts bind their row and owner; anonymous
   native setup also binds its server-keyed sender scope, and adoption must
   re-encrypt for the new owner in the same fenced transaction.
-- Platform gateway setup uses the historical unbound envelope, then verifies
-  the decrypted request against its stored SHA-256 before dispatch. Native
+- Platform gateway setup binds the serialized request to the transport ID,
+  credential owner and field. Replay and migration check the exact bytes
+  against the retained SHA-256, including for historical unbound envelopes.
+  Retirement retains the request and its hash. Native
   replies authenticate the binding digest bytes as AES AAD.
   [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
 - Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
