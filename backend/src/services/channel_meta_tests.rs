@@ -2568,7 +2568,7 @@ async fn ordinary_delivery_handler_fences_org_admin_demotion_for_suspend_and_res
 #[tokio::test]
 async fn ownerless_scoped_metadata_erases_only_without_an_unattributed_saved_reply_and_never_acknowledges_a_blocked_request()
  {
-    use crate::services::channel_text_delivery as journal;
+    use crate::services::{channel_bot_service, channel_text_delivery as journal};
     for has_parentless_receipt in [false, true] {
         let (state, _, server, bot) = fixture("instagram").await;
         configure(&state, &bot).await;
