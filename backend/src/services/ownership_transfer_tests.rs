@@ -2737,6 +2737,13 @@ async fn marked_channel_transfer_rebinds_credentials_in_staged_and_strict_modes_
             let moved = bots::get_bot(&f.db, &bot.id).await.unwrap();
             assert_eq!(moved.user_id, f.destination);
             assert_eq!(moved.meta_binding.as_ref().unwrap().generation, 8);
+            assert!(
+                moved
+                    .meta_binding
+                    .as_ref()
+                    .unwrap()
+                    .grant_reconnect_required
+            );
             assert_eq!(
                 moved.meta_binding.as_ref().unwrap().subscription,
                 "reconnect_required"
@@ -2789,10 +2796,13 @@ async fn marked_channel_transfer_rebinds_credentials_in_staged_and_strict_modes_
             };
             assert!(matches!(service.verify(&moved).await,
                 Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"));
-            // Verify records the reconnect requirement and advances the grant
-            // generation. Ordinary Delete loads that current management row.
             let current = bots::get_bot(&f.db, &bot.id).await.unwrap();
-            service.disconnect(&current).await.unwrap();
+            assert_eq!(current.meta_binding.as_ref().unwrap().generation, 8);
+            assert_eq!(current.error, moved.error);
+            assert_eq!(current.status, moved.status);
+            // A refused Verify preserves the transfer's management snapshot,
+            // so cleanup can still use its correctly rebound credentials.
+            service.disconnect(&moved).await.unwrap();
             let retired = bots::get_bot(&f.db, &bot.id).await.unwrap();
             assert!(!retired.is_active);
             assert_eq!(

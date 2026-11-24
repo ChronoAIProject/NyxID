@@ -998,7 +998,8 @@ pub async fn transfer_with_keys(
                 if moving_bot.as_ref().and_then(|row|row.get_str("platform").ok()).is_some_and(super::channel_adapters::meta::is_meta) {
                     increments.insert("meta_binding.generation",1_i64);
                     update.get_document_mut("$set").map_err(|_|AppError::Internal("Invalid channel transfer".into()))?.extend(doc! {
-                        "meta_binding.subscription":"reconnect_required","meta_binding.exclusive_routing_verified":false,
+                        "meta_binding.subscription":"reconnect_required","meta_binding.grant_reconnect_required":true,
+                        "meta_binding.exclusive_routing_verified":false,
                         "webhook_registered":false,"status":"failed","error":"Reauthorize this inbox for its new owner before delivery can resume"
                     });
                 }
