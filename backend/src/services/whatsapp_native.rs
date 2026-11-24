@@ -135,14 +135,10 @@ pub async fn verify_platform_identity(
     if !matches_bot(config, bot) {
         return Err(refusal("native_whatsapp_identity_changed"));
     }
-    let app_secret = keys
-        .decrypt(
-            bot.app_secret_encrypted
-                .as_deref()
-                .ok_or_else(|| refusal("whatsapp_credentials_required"))?,
-        )
+    let app_secret = super::channel_registration::open_secret(keys, bot, "app_secret_encrypted")
         .await
-        .map_err(|_| refusal("whatsapp_credentials_required"))?;
+        .map_err(|_| refusal("whatsapp_credentials_required"))?
+        .ok_or_else(|| refusal("whatsapp_credentials_required"))?;
     let app_secret = crate::crypto::guarded_utf8(app_secret)
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
@@ -480,14 +476,10 @@ async fn activate_gateway_inner(
     if !matches_bot(&config, bot) || config.callback.phase != CallbackPhase::Relay {
         return Err(refusal("native_whatsapp_callback_state_changed"));
     }
-    let secret = keys
-        .decrypt(
-            bot.app_secret_encrypted
-                .as_deref()
-                .ok_or_else(|| refusal("whatsapp_credentials_required"))?,
-        )
+    let secret = super::channel_registration::open_secret(keys, bot, "app_secret_encrypted")
         .await
-        .map_err(|_| refusal("whatsapp_credentials_required"))?;
+        .map_err(|_| refusal("whatsapp_credentials_required"))?
+        .ok_or_else(|| refusal("whatsapp_credentials_required"))?;
     let secret = crate::crypto::guarded_utf8(secret)
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
@@ -621,14 +613,10 @@ pub async fn restore_relay(
     {
         return Err(refusal("native_whatsapp_callback_not_active"));
     }
-    let secret = keys
-        .decrypt(
-            bot.app_secret_encrypted
-                .as_deref()
-                .ok_or_else(|| refusal("whatsapp_credentials_required"))?,
-        )
+    let secret = super::channel_registration::open_secret(keys, bot, "app_secret_encrypted")
         .await
-        .map_err(|_| refusal("whatsapp_credentials_required"))?;
+        .map_err(|_| refusal("whatsapp_credentials_required"))?
+        .ok_or_else(|| refusal("whatsapp_credentials_required"))?;
     let secret = crate::crypto::guarded_utf8(secret)
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
