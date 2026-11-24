@@ -85,8 +85,15 @@ export const channelBotHealthSchema = z.object({
   error: z.string().nullable(),
   recommended_action: z.enum(RECOMMENDED_ACTIONS),
   recommended_action_text: z.string(),
+  recommendation_cause: z.enum(["gateway_configuration_required", "gateway_not_authenticated", "gateway_permission_required", "gateway_provider_not_registered", "gateway_rejected_request", "gateway_unavailable"]).nullable().optional(),
   /** NyxBot linkage evidence, omitted for bots without a NyxBot row. */
   nyxbot_status: z.string().optional(),
+  nyxbot_setup_diagnostic: z.object({
+    operation: z.enum(["configuration", "catalog_read", "create", "channel_update", "routing_update"]),
+    outcome: z.enum(["not_sent", "rejected", "unknown"]),
+    http_status: z.number().int().nullable(),
+    field: z.string().nullable(),
+  }).optional(),
   nyxbot_last_error: z.string().nullable().optional(),
   nyxbot_restore_state: z.string().optional(),
   /** Whether the caller may run the recovery action. */

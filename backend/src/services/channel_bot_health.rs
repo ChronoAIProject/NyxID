@@ -8,6 +8,7 @@
 
 pub mod answer;
 pub mod discord;
+pub(crate) mod nyxbot;
 
 use super::channel_platform::platform_name;
 use std::sync::{Arc, OnceLock};
@@ -199,10 +200,17 @@ pub struct Recommendation {
     /// `enable_billing`, `contact_admin` or `gateway`.
     pub action: &'static str,
     pub text: String,
+    /// Stable cause selected by this recommendation, never inferred from text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 fn advice(action: &'static str, text: String) -> Recommendation {
-    Recommendation { action, text }
+    Recommendation {
+        action,
+        text,
+        cause: None,
+    }
 }
 
 pub(crate) async fn org_guest_billing(
@@ -419,6 +427,46 @@ pub(crate) const GATEWAY_NOT_RECEIVED_REASON: &str = "NyxID recorded a successfu
 
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
+    recommend_with_gateway_failure(facts, None)
+}
+
+pub(crate) fn recommend_with_gateway_failure(
+    facts: &HealthFacts<'_>,
+    failure: Option<&str>,
+) -> Recommendation {
+    // A current failed setup prevents every new message. Old delivery errors
+    // cannot explain that failure. Retain genuine bot credential faults first.
+    if let Some(code) = failure.filter(|code| {
+        !super::assistant_wake_service::text::gateway_error_guidance(code).is_empty()
+    }) {
+        if let Some(found) = facts
+            .failure_reason
+            .and_then(|reason| for_code(reason, facts, false))
+        {
+            return found;
+        }
+        if facts.status == "failed" {
+            return advice(
+                "reconnect",
+                format!(
+                    "Reconnect the {} account, then select Verify.",
+                    platform_name(facts.platform)
+                ),
+            );
+        }
+        let guidance = super::assistant_wake_service::text::gateway_error_guidance(code);
+        let mut recommendation = advice(
+            match code {
+                "gateway_not_authenticated" | "gateway_unavailable" => "reconnect",
+                _ => "contact_admin",
+            },
+            format!(
+                "{code}: Last connection attempt: {guidance} Retry after correcting the issue; health does not probe the gateway."
+            ),
+        );
+        recommendation.cause = Some(code.to_owned());
+        return recommendation;
+    }
     if let Some(code) = facts.failure_reason
         && let Some(found) = for_code(code, facts, false)
         && matches!(
@@ -932,14 +980,26 @@ pub async fn setup_evidence(
     {
         facts.discord_intake = Some(intake);
     }
-    let action = recommend(&facts);
+    let row = if matches!(bot.platform.as_str(), "telegram" | "telegram-new") {
+        nyxbot::latest_nyxbot_rows(db, std::slice::from_ref(bot))
+            .await?
+            .remove(&bot.id)
+    } else {
+        None
+    };
+    facts.gateway = nyxbot::current_gateway(bot, row.as_ref(), gateway);
+    let action = recommend_with_gateway_failure(
+        &facts,
+        row.as_ref()
+            .and_then(|row| nyxbot::gateway_failure(bot, row)),
+    );
     let d = &bot.diagnostics;
     let mut value = json!({
         "contract_version": 1, "observed_at": Utc::now().to_rfc3339(),
         "bot_id": bot.id, "platform": bot.platform, "platform_bot_username": bot.platform_bot_username,
         "credential_source": bot.credential_source, "credential_connection_id": bot.connection_id,
         "provider_slug": if is_x(&bot.platform) { Some("twitter") } else { None },
-        "authorization": "not_probed", "mode": facts.mode(), "gateway": gateway,
+        "authorization": "not_probed", "mode": facts.mode(), "gateway": facts.gateway,
         "webhook_registered": bot.webhook_registered,
         "subscription": d.subscription_state.as_ref().map(|s| json!({
             "registered": s.registered, "checked_at": s.checked_at.to_rfc3339(), "last_error": s.last_error,
@@ -953,12 +1013,23 @@ pub async fn setup_evidence(
         "last_inbound_outcome": d.last_inbound_outcome.as_ref().map(|o| json!({"code":o.code,"at":o.at.to_rfc3339()})),
         "inbound_outcomes": d.inbound_outcomes.iter().map(|(code,c)| (code.clone(),json!({"count":c.count,"at":c.at.to_rfc3339()}))).collect::<serde_json::Map<_,_>>(),
         "receive_limitations": if is_x(&bot.platform) {Some(super::channel_inbound_diagnostics::CAPABILITY)} else {None},
-        "recommended_action": action.action, "recommended_action_text": action.text,
+        "recommended_action": action.action, "recommended_action_text": action.text, "recommendation_cause":action.cause,
         "automatic_reply": "not_verified",
         "evidence_note": "Configured credentials, a registered subscription and historical traffic are separate evidence. No Verify, Resubscribe or test send was run. Gateway support and end-to-end automatic replies need their own evidence.",
     });
     if let Some(intake) = &facts.discord_intake {
         value["discord_intake"] = json!(intake);
+    }
+    if let Some(row) = row {
+        value["nyxbot_status"] = json!(row.status);
+        value["nyxbot_last_error"] = json!(nyxbot::gateway_failure(bot, &row));
+        if nyxbot::gateway_failure(bot, &row).is_some() {
+            value["nyxbot_setup_diagnostic"] = json!(
+                row.setup_diagnostic
+                    .as_ref()
+                    .and_then(nyxbot::SetupDiagnostic::from_document)
+            );
+        }
     }
     Ok(value)
 }

@@ -25,6 +25,11 @@ use uuid::Uuid;
 #[path = "nyxbot_gateway_release_recovery.rs"]
 mod recovery;
 use recovery::Answer;
+#[path = "nyxbot_telegram_setup_recovery.rs"]
+mod telegram_setup;
+use telegram_setup::known_provider_setup_failure;
+pub(crate) use telegram_setup::preflight as telegram_setup_preflight;
+
 pub(crate) use recovery::reason as diagnostic_reason;
 
 const MIGRATIONS: &str = "schema_migrations";
@@ -740,11 +745,11 @@ pub(crate) async fn retire_connection(
                 .delete_many(doc! {"source.channel_id":&current.id}).session(&mut *session).await?;
             db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME).delete_many(
                 doc!{"task.channel_source.channel_id":&current.id}).session(&mut *session).await?;
-            for key in [Some(current.route_api_key_id.as_str()),current.pending_route_api_key_id.as_deref()].into_iter().flatten() {
+            for key in [Some(current.route_api_key_id.as_str()),current.pending_route_api_key_id.as_deref()].into_iter().flatten().filter(|key|!key.is_empty()) {
                 super::channel_routing_service::retire_key_routes_in_session(&db,bot_owner(&current),&current.channel_bot_id,key,session).await?;
                 revoke_in_session(&db,bot_owner(&current),key,session).await?;
             }
-            for key in [current.agent_api_key_id.as_deref(),current.pending_agent_api_key_id.as_deref()].into_iter().flatten() {
+            for key in [current.agent_api_key_id.as_deref(),current.pending_agent_api_key_id.as_deref()].into_iter().flatten().filter(|key|!key.is_empty()) {
                 revoke_in_session(&db,&current.user_id,key,session).await?;
             }
             if reason == ReleaseReason::OrgAccessLost {
@@ -1869,6 +1874,43 @@ async fn execute_claimed(
                     )
                     .await
                 }
+                Ok(r)
+                    if (r.status == 400 && gateway::unknown_nyxbot_provider(&r.body))
+                        || (r.status == 409
+                            && known_provider_setup_failure(&state.db, &release).await?) =>
+                {
+                    transition(
+                        &state.db,
+                        &release,
+                        ReleaseState::ReviewRequired,
+                        "gateway_provider_setup_required",
+                        Some(version),
+                        Answer::RequestRefused,
+                    )
+                    .await?;
+                    Ok(false)
+                }
+                Ok(r)
+                    if release.platform == "telegram"
+                        && r.status == 409
+                        && r.body["code"] == "conflict"
+                        && r.body["detail"].as_str()
+                            == Some(
+                                format!("expected version {version}, actual Some({version})")
+                                    .as_str(),
+                            ) =>
+                {
+                    transition(
+                        &state.db,
+                        &release,
+                        ReleaseState::ReviewRequired,
+                        "gateway_setup_custody_required",
+                        Some(version),
+                        Answer::RequestRefused,
+                    )
+                    .await?;
+                    Ok(false)
+                }
                 Ok(r) if r.status == 409 => {
                     transition(
                         &state.db,
@@ -2902,11 +2944,23 @@ pub(crate) async fn resolve(
     dispatch_drained: bool,
 ) -> AppResult<()> {
     let release = get(&state.db, id).await?;
-    if release.revision != revision || release.state != ReleaseState::ReviewRequired {
+    // Older replicas falsely settled all create 400s as not_created. A
+    // deliberate admin inspection can recover only positively matching custody;
+    // neither missing history nor a generic refusal grants deletion authority.
+    let historical_refusal = release.platform == "telegram"
+        && release.reason == ReleaseReason::SetupFailed
+        && release.state == ReleaseState::Settled
+        && release.resolution.as_deref() == Some("not_created")
+        && release.dispatch_started_at.is_some();
+    if release.revision != revision
+        || (release.state != ReleaseState::ReviewRequired && !historical_refusal)
+        || (historical_refusal && !matches!(&action, Resolution::RetryOriginal))
+    {
         return Err(conflict());
     }
     let fresh = observe(state, &release).await?;
-    if fresh != inspected {
+    if fresh != inspected || (historical_refusal && !matches!(fresh, Observation::Matching { .. }))
+    {
         return Err(conflict());
     }
     let (next, resolution) = match action {
@@ -2955,7 +3009,10 @@ pub(crate) async fn resolve(
             let mut set=doc! {"state":bson::to_bson(&next).map_err(|_| conflict())?,"resolution":resolution,"reviewed_by":actor,
                 "claim_id":bson::Bson::Null,"lease_until":bson::Bson::Null,"next_attempt_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()};
             if next==ReleaseState::Settled {set.insert("settled_at",bson::DateTime::now());}
-            if db.collection::<Release>(RELEASES).update_one(doc! {"_id":id,"state":"review_required","revision":revision},doc! {"$set":set,"$inc":{"revision":1_i64}})
+            if next==ReleaseState::Due && release.due_at.is_none() {set.insert("due_at",bson::DateTime::now());}
+            let mut update=doc! {"$set":set,"$inc":{"revision":1_i64}};
+            if next==ReleaseState::Due {update.insert("$unset",doc! {"settled_at":""});}
+            if db.collection::<Release>(RELEASES).update_one(doc! {"_id":id,"state":bson::to_bson(&release.state).map_err(|_|conflict())?,"revision":revision},update)
                 .session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             audit(db,session,actor,"nyxbot_gateway_release_reviewed",json!({"obligation_id":id,"channel_id":release.channel_id,"resolution":resolution,"observation_status":observation_status})).await?;
             if next==ReleaseState::Settled {audit(db,session,actor,"nyxbot_gateway_release_settled",json!({"obligation_id":id,"resolution":resolution,"observation_status":observation_status})).await?;}

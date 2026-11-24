@@ -1107,3 +1107,13 @@ mod reply_contract_tests {
         assert!(retry_after("18446744073709551615").unwrap() >= now + chrono::Duration::hours(24));
     }
 }
+
+// CMA 70761e9b returns UnknownProvider's inner slug verbatim. Retain the
+// explicit historical response too; a validation pointer/prose is not evidence.
+pub(crate) fn unknown_nyxbot_provider(body: &Value) -> bool {
+    body["code"] == "invalid_request"
+        && matches!(
+            body["detail"].as_str(),
+            Some("nyxbot" | "unknown provider: nyxbot" | "provider is not registered")
+        )
+}

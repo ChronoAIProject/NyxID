@@ -1802,3 +1802,88 @@ channel summaries explain the local `gateway_native_draining` fence; web hides
 native activation retry only for `gateway_native_draining`, alongside the existing
 intake evidence; the previous `relay_draining` text and retry action are unchanged. None of these
 observations relaxes exclusive ingress or the persisted 90-second drain.
+
+### Telegram connection request diagnostics (#1974)
+
+CMA `70761e9b` bounds both the channel `name` and `profile.metadata.name` to
+80 **UTF-8 bytes**. NyxID retains its 60-character display cap and truncates
+both request names at a UTF-8 boundary before create and full attachment update.
+Telegram relay issuers must be HTTPS origins. The local connect regression checks
+these nested constraints in addition to the management request schema, uses the
+registered gateway client's real introspection path, pairs the owner and executes
+a personal specialist turn for both `telegram-new` and `telegram`.
+
+HTTP 400 alone does not prove that a channel was never saved. CMA saves an
+owner-reserved record and mutation intent before provider binding. In particular,
+`invalid_request` with exact detail `nyxbot` means the NyxBot provider was not
+registered; `provider_rejected` / `invalid_binding` can also arrive after that
+reservation. These and unknown 400s retain the existing release obligation for
+record-ID reconciliation and the admin release review API. Only known pre-effect
+validation/authentication refusals settle as `not_created`. Local authority and
+keys are retired independently of remote cleanup availability.
+
+Failed Telegram connection health surfaces a bounded last-attempt code and
+allowlisted operation, HTTP status and validation pointer, never remote detail
+prose, submitted values, URLs or credentials. A configuration refusal records
+`configuration` / `not_sent` without allocating route or agent credentials.
+Health does not probe whether an administrator has since fixed the dependency;
+reconnect performs the next attempt. Active, pending and disconnected current
+bindings suppress stale failed setup advice. Bot credential faults retain their
+higher priority, while historical outbound errors do not mask the current setup
+failure. Telegram projections bind to the bot's current owner and ownership
+generation, including org-owned bots. A row's bot owner is `bot_owner_id`,
+falling back to `org_specialist.org_id` on older org-specialist rows and then
+`user_id` on personal rows; any explicit specialist org must also match. Versioned rows
+must match the live bot generation recorded under its transactional write fence.
+Unversioned rows for bots that have never transferred retain legacy behavior.
+For a bot with a positive ownership generation, an unversioned row is eligible
+only with its exact still-active route owned by the current bot owner and bot ID,
+without `retired_by_transfer`; transfer retires all prior routes. This preserves
+valid active connections created after transfer by older binaries while hiding
+pre-transfer failures and routes, including a transfer away and back. Health
+eligibility does not grant execution authority. The optional `recommendation_cause`
+is emitted only when gateway setup advice actually wins the recommendation;
+clients use it for localization and retain server text for older responses.
+
+The Unicode-byte mismatch and missing-provider failure have each been reproduced
+against CMA `70761e9b` in local review. Neither establishes which condition caused
+the November 23 staging attempts without their gateway trace or configuration
+snapshot. No production delivery assertion follows from the local fixtures.
+
+An exact known missing-provider refusal applies a 60-second backoff from the
+attempt's start time, scoped to the current owner and generation. It allocates
+no further keys or remote reservations during that interval. Once the interval
+passes, the owner can reconnect normally after configuration is corrected; no
+admin reset or replay advertisement is required. A generic historical 400,
+including an old Unicode name refusal, does not impose this delay or block a
+repaired connection. Release custody is independent of that new admission.
+
+CMA `70761e9b` can retain a CREATE mutation intent after its missing-provider
+refusal. DELETE can then return a conflict even with the observed record version;
+without a held intent, unbind can itself return `invalid_request` / `nyxbot`.
+These known cases park the exact obligation for operator review as
+`gateway_provider_setup_required` (or `gateway_setup_custody_required` when the
+provider cause is not proven). They do not run an endless automatic DELETE loop,
+change the captured deletion version, cancel upstream intent, or make the owner
+resolve old custody before reconnecting. Configure the provider on every gateway
+replica and inspect the retained record through the existing release review API.
+For a matching record that has become deletable, `retry_original` requeues only
+the captured authority. If CMA still holds CREATE, that action remains in review;
+NyxID has no supported cancellation protocol at this pinned CMA version. A CMA
+operator must resolve that intent through a supported upstream recovery path or
+upgrade. After actual removal, the existing missing-record resolution applies.
+NyxID never clears the intent or claims release on the operator's behalf.
+
+Older replicas incorrectly marked all create 400s `not_created`. Historical
+cleanup is inspected on demand through the existing paginated release review
+API (`states=settled` or the captured obligation ID). If the exact original record
+is still present and matches, a platform administrator may explicitly use
+`retry_original` with that inspection and revision, even on a legacy Telegram
+`not_created` setup release. The same live authority checks, audit and original
+version rules apply. Missing, changed or malformed observations cannot use this
+exception. It adds no global history scan or automatic historical mutation.
+A held CREATE still returns to custody review; this action never cancels it.
+Upgrade all NyxID connection writers to obtain the new refusal classification
+and backoff across the fleet; older writers can still create and falsely settle
+additional reservations. A historical error grants no execution authority and
+never prevents a repaired owner connection.
