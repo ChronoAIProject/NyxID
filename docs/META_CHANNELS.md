@@ -384,6 +384,13 @@ single consent. Owner DMs and queued message inputs
 retain the contexts that supplied their text; cleanup removes their exact
 turns while preserving unrelated web turns in the same home. Completion also
 checks nested queued and active contexts, revisiting queue cleanup if needed.
+Before shared-turn destruction, the worker audits every message in that turn,
+including untagged and foreign-only rows, in pages of 100. The audit cursor and
+turn identity remain on the existing closed scope until the turn drains; each
+destructive message page checks the complete proof again. Contradictory proof
+leaves both the messages and their descendants pending for repair. Owner feed
+cleanup matches the notification's current conversation and turn, preserving a
+coalesced row that already points to an independent successor reply.
 
 An ordinary guest-conversation cascade requires positive grant proof for every
 retained turn and its children. Existing contradictory child proof is preserved

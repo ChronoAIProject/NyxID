@@ -623,7 +623,9 @@ async fn erase_page(
         .get_str("grant_id")
         .map_err(|_| grants::incomplete())?;
     for row in &rows {
-        if matches!(collection, MESSAGES | REPLIES | PLANS) {
+        if collection == "assistant_messages" {
+            single_grant_message(row, scope)?;
+        } else if matches!(collection, MESSAGES | REPLIES | PLANS) {
             if row.get_str("channel_bot_id") != Ok(bot) {
                 return Err(grants::incomplete());
             }
@@ -1308,6 +1310,7 @@ async fn erase_turn(
     db: &Database,
     tx: &mut ClientSession,
     scope: &Document,
+    progress: &Document,
     phase: i32,
 ) -> AppResult<Step> {
     let bot = scope.get_str("bot_id").map_err(|_| grants::incomplete())?;
@@ -1318,6 +1321,7 @@ async fn erase_turn(
     let Some(message) = db
         .collection::<Document>("assistant_messages")
         .find_one(filter.clone())
+        .sort(doc! {"_id":1})
         .session(&mut *tx)
         .await?
     else {
@@ -1333,6 +1337,40 @@ async fn erase_turn(
     let turn = message
         .get_str("turn_id")
         .map_err(|_| grants::incomplete())?;
+    // A tagged input cannot authorize another message in the turn. Audit
+    // every retained proof before touching the parent or any descendant,
+    // including a reply that carries only a foreign tag or no tag at all.
+    let mut progress = if progress.get_str("turn_audit_conversation") == Ok(conversation)
+        && progress.get_str("turn_audit_turn") == Ok(turn)
+    {
+        progress.clone()
+    } else {
+        doc! {"phase":phase,"turn_audit_conversation":conversation,"turn_audit_turn":turn}
+    };
+    if progress.get_bool("turn_audited") != Ok(true) {
+        let rows = page(
+            db,
+            tx,
+            "assistant_messages",
+            doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn},
+            &progress,
+        )
+        .await?;
+        for row in &rows {
+            single_grant_message(row, scope)?;
+        }
+        if rows.len() == PAGE as usize {
+            progress.insert(
+                "after",
+                rows.last()
+                    .and_then(|row| row.get_str("_id").ok())
+                    .ok_or_else(grants::incomplete)?,
+            );
+            return Ok(Step::stay(progress));
+        }
+        progress.remove("after");
+        progress.insert("turn_audited", true);
+    }
     validate_turn_events(db, tx, conversation, turn, scope).await?;
     if let Some(parent) = db
         .collection::<Document>("assistant_conversations")
@@ -1343,7 +1381,7 @@ async fn erase_turn(
         if let Ok(active) = parent.get_document("active_turn")
             && active.get_str("turn_id") != Ok(turn)
         {
-            return Ok(Step::stay(doc! {"phase":phase}));
+            return Ok(Step::stay(progress));
         }
         // Fence the old worker before removing any turn child. A successor's
         // stored messages survive; its next execution rebuilds context from
@@ -1375,7 +1413,31 @@ async fn erase_turn(
                 return Err(grants::incomplete());
             }
         }
-        return Ok(Step::stay(doc! {"phase":phase}));
+        return Ok(Step::stay(progress));
+    }
+    // A coalesced notification may already point to B's newer reply. Delete
+    // only while its current source still names this exact erased turn.
+    let notifications = crate::models::assistant_notification::COLLECTION_NAME;
+    let notification_filter =
+        doc! {"user_id":owner,"source.conversation_id":conversation,"source.turn_id":turn};
+    let rows = page(
+        db,
+        tx,
+        notifications,
+        notification_filter.clone(),
+        &Document::new(),
+    )
+    .await?;
+    if !rows.is_empty() {
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|row| row.get("_id").cloned().ok_or_else(grants::incomplete))
+            .collect::<AppResult<_>>()?;
+        db.collection::<Document>(notifications)
+            .delete_many(doc! {"$and":[notification_filter,{"_id":{"$in":ids}}]})
+            .session(&mut *tx)
+            .await?;
+        return Ok(Step::stay(progress));
     }
     for (collection, linkage) in [
         (
@@ -1428,7 +1490,7 @@ async fn erase_turn(
                 .delete_many(doc! {"$and":[filter,{"_id":{"$in":ids}}]})
                 .session(&mut *tx)
                 .await?;
-            return Ok(Step::stay(doc! {"phase":phase}));
+            return Ok(Step::stay(progress));
         }
     }
     erase_checkpoint(db, tx, owner, conversation, turn).await?;
@@ -1438,7 +1500,11 @@ async fn erase_turn(
     filter.insert("conversation_id", conversation);
     filter.insert("user_id", owner);
     filter.insert("turn_id", turn);
-    erase_page(db, tx, scope, "assistant_messages", filter, phase).await
+    let mut result = erase_page(db, tx, scope, "assistant_messages", filter, phase).await?;
+    if result.progress.get_i32("phase") == Ok(phase) {
+        result.progress = progress;
+    }
+    Ok(result)
 }
 
 async fn validate_turn_events(
@@ -1768,7 +1834,7 @@ async fn step(
         3 => attribute_events(db, tx, scope, progress, phase).await,
         4 => erase_queued(db, tx, scope, phase).await,
         5 => erase_guest(db, tx, scope, progress, phase).await,
-        6 => erase_turn(db, tx, scope, phase).await,
+        6 => erase_turn(db, tx, scope, progress, phase).await,
         7 => clear_threads(db, tx, scope, phase).await,
         8..=14 => {
             let collection = match phase {
@@ -1987,6 +2053,13 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             )
             .await?;
     }
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"source.conversation_id":1,"source.turn_id":1,"_id":1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(crate::models::assistant_attachment::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
