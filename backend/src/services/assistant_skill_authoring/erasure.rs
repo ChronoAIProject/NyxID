@@ -73,7 +73,10 @@ pub(crate) async fn erase_page(
                 p.verified_at.is_some() && p.skill_id.as_ref().is_some_and(|id| !id.is_empty())
             });
             if !completed {
-                if p.is_some_and(|p| {
+                if !matches!(
+                    proposal.status.as_str(),
+                    "pending" | "publishing" | "publication_failed" | "rejected" | "invalidated"
+                ) || p.is_some_and(|p| {
                     p.started
                         || p.uncertain_dispatch
                         || p.verified_at.is_some()
@@ -88,11 +91,38 @@ pub(crate) async fn erase_page(
                         p.target_skill_id.as_deref().ok_or_else(incomplete)?,
                         p.version
                     );
-                    if let Some(holder)=db.collection::<bson::Document>(TARGETS).find_one(doc! {"_id":&target,"proposal_id":&proposal.id,
-                        "owner_id":owner,"agent_id":agent,"operation_id":&p.operation_id,"package_sha256":&p.sha256}).session(&mut *tx).await? {
-                        if holder.get_str("state")!=Ok("reserved") {pending=true;continue;}
-                        if db.collection::<bson::Document>(TARGETS).delete_one(doc! {"_id":target,"proposal_id":&proposal.id,
-                            "operation_id":&p.operation_id,"package_sha256":&p.sha256,"state":"reserved"}).session(&mut *tx).await?.deleted_count!=1 {return Err(incomplete())}
+                    if let Some(holder) = db
+                        .collection::<bson::Document>(TARGETS)
+                        .find_one(doc! {"_id":&target})
+                        .session(&mut *tx)
+                        .await?
+                        && (holder.get_str("proposal_id") == Ok(proposal.id.as_str())
+                            || holder.get_str("operation_id") == Ok(p.operation_id.as_str()))
+                    {
+                        if holder.get_str("proposal_id") != Ok(proposal.id.as_str())
+                            || holder.get_str("owner_id") != Ok(owner)
+                            || holder.get_str("agent_id") != Ok(agent)
+                            || holder.get_str("operation_id") != Ok(p.operation_id.as_str())
+                            || holder.get_str("package_sha256") != Ok(p.sha256.as_str())
+                        {
+                            return Err(incomplete());
+                        }
+                        if holder.get_str("state") != Ok("reserved") {
+                            pending = true;
+                            continue;
+                        }
+                        if db
+                            .collection::<bson::Document>(TARGETS)
+                            .delete_one(doc! {"_id":target,"proposal_id":&proposal.id,
+                            "owner_id":owner,"agent_id":agent,"operation_id":&p.operation_id,
+                            "package_sha256":&p.sha256,"state":"reserved"})
+                            .session(&mut *tx)
+                            .await?
+                            .deleted_count
+                            != 1
+                        {
+                            return Err(incomplete());
+                        }
                     }
                 }
                 let mut exact = doc! {"_id":&proposal.id,"owner_id":owner,"agent_id":agent,"source":"authored",

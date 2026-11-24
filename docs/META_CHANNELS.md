@@ -420,6 +420,19 @@ source contexts beside their grant proof; cards and authored-skill draft claims
 bind the initiating input and those contexts together. Recovery reuses that
 recorded source. A normal card reads the input once and fences each distinct
 grant once. Retained ordinary web inputs still permit delayed actions.
+Authored-skill renewal revalidates the original card, draft operation and saved
+initiating input in one transaction; an unrelated active turn cannot select the
+renewed review's source. Interrupted review recovery validates the saved source
+in its original home and binds any MCP activity to the retrying caller's chat.
+Before removing initiating history, grant cleanup scans original authored-draft
+claims in pages of 100. It removes exact unstarted proposals and their matching
+reserved publication targets, allowing a fresh draft afterward. First dispatch
+checks the original grant in the dispatch-marker transaction. A dispatched or
+uncertain operation keeps cleanup pending until reconciliation establishes its
+outcome. A verified publication and its attached skill retain their independent
+lifetime; only the original grant-bearing claim is removed. Mixed-grant or
+contradictory claim/operation evidence remains pending for repair. Final grant
+inventory checks these claims again before recording completion.
 Denial continuations retain the original requesting question, so explaining a
 denial does not create a new approval. Queue pruning removes only the exact
 continuation after positively established source loss and preserves it for
@@ -442,7 +455,10 @@ inventory until admitted or retired. Database read failures and unresolved
 scope proof keep the encrypted result for retry or verified repair; they do
 not become evidence of authority loss. Ordinary web-watch delivery keeps its
 existing lifecycle.
-The pending-delivery deadline does not cancel a result already admitted to its
+First admission checks the pending-delivery deadline before selecting a Meta
+result and again when binding it. An expired pending result is retired in the
+admission transaction, allowing an independent queued event to proceed. The
+pending-delivery deadline does not cancel a result already admitted to its
 exact active event turn. The consumer may read and settle that result under its
 existing payload-retention and grant-erasure limits. Timeout retirement and
 admission serialize on the same conversation record; unrelated active turns do
