@@ -1149,7 +1149,14 @@ impl MetaService<'_> {
         {
             return Err(conflict());
         }
-        let bot = &current;
+        let result = self.verify_current(&current).await;
+        if matches!(&result,Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required")
+        {
+            self.reconnect_required(&current).await?;
+        }
+        result
+    }
+    async fn verify_current(&self, bot: &ChannelBot) -> AppResult<()> {
         if bot
             .meta_binding
             .as_ref()
@@ -1784,9 +1791,8 @@ pub(crate) async fn sweep_service(
             }
         };
         if let Err(error)=result {
-            if matches!(&error,AppError::ChannelConversationNotReachable(reason) if reason == "meta:reconnect_required")
-                && bot.meta_binding.as_ref().is_none_or(|binding| binding.subscription != "suspended")
-            { let _=service.reconnect_required(&bot).await; }
+            // Provider rejection is recorded where its exact credential was
+            // observed. The sweep's claimed token may have been refreshed.
             tracing::warn!(platform=%bot.platform,bot_id=%bot.id,error_code=error.error_code(),"Meta inbox lifecycle reconciliation deferred");
         }
         service.db.collection::<bson::Document>(BOTS).update_one(doc! {"_id":&bot.id,
