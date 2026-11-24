@@ -14,6 +14,7 @@
 use crate::models::nyxbot_gateway_release::ReleaseReason;
 use crate::services::assistant_links::AssistantPage;
 use crate::services::channel_inbound_diagnostics::{self as x_diagnostics, Outcome as XOutcome};
+use crate::services::nyxbot_channel_key as channel_key;
 use crate::services::nyxbot_dispatch_identity as dispatch_identity;
 use crate::services::nyxbot_gateway_release_service as releases;
 use crate::services::org_channel_service::OrgAccess;
@@ -997,10 +998,14 @@ async fn connect_inner(
     if gateway {
         let agent = create_gateway_agent_key(state, owner, &label).await?;
         agent_key_ciphertext = Some(
-            state
-                .encryption_keys
-                .encrypt(agent.full_key.as_bytes())
-                .await?,
+            channel_key::seal(
+                &state.encryption_keys,
+                &id,
+                owner,
+                &agent.id,
+                &agent.full_key,
+            )
+            .await?,
         );
         agent_key_id = Some(agent.id.clone());
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
@@ -1033,6 +1038,11 @@ async fn connect_inner(
         route_api_key_id: route_key.id.clone(),
         route_id: None,
         agent_api_key_id: agent_key_id.clone(),
+        secret_context_versions: if gateway && state.encryption_keys.contextual_record_writes() {
+            [(channel_key::FIELD.to_owned(), 3)].into()
+        } else {
+            Default::default()
+        },
         agent_key_ciphertext,
         gateway_channel_id: None,
         gateway_record_id: None,
@@ -2210,10 +2220,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     releases::record_ack(&state.db, &release, &channel_id, version)
         .await
         .map_err(|_| "storage_unavailable")?;
-    let Ok(ciphertext) = state
-        .encryption_keys
-        .encrypt(agent.full_key.as_bytes())
-        .await
+    let Ok(ciphertext) = channel_key::seal(&state.encryption_keys, &row.id, owner, &agent.id, &agent.full_key).await
     else {
         return Err(discard("encryption_unavailable").await);
     };
@@ -2237,12 +2244,17 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     if let Some(bot_id) = next.gateway_bot_id.as_deref() {
         set.insert("gateway_bot_id", bot_id);
     }
-    let swap = doc! {"$set": set, "$unset": {"pending_agent_api_key_id": "",
-    "pending_route_api_key_id": "",
-    "gateway_groups": "", "gateway_fallback_at": "",
-    "relay_attempted_at": ""}};
-    let fence = doc! {"_id": &row.id, "status": "active", "transport": "direct",
-    "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": &agent.id};
+    let mut unset = doc! {"pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+        "gateway_groups": "", "gateway_fallback_at": "", "relay_attempted_at": ""};
+    if state.encryption_keys.contextual_record_writes() {
+        set.insert(channel_key::VERSION_PATH, 3);
+    } else {
+        unset.insert(channel_key::VERSION_PATH, "");
+    }
+    let swap = doc! {"$set": set, "$unset": unset};
+    let fence = doc! {"_id": &row.id, "user_id":owner, "status": "active", "transport": "direct",
+        "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": &agent.id,
+        "pending_route_api_key_id": &route_key.id, "gateway_setup_release_id": &release.id};
     let swapped = transport::swap_route(state, row, &route_key.id, fence, swap).await;
     match swapped {
         Ok(true) => {}
@@ -2306,13 +2318,7 @@ async fn decrypt_agent_key(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> AppResult<Option<Zeroizing<String>>> {
-    let Some(ciphertext) = row.agent_key_ciphertext.as_ref() else {
-        return Ok(None);
-    };
-    let bytes = state.encryption_keys.decrypt(ciphertext).await?;
-    Ok(Some(crate::crypto::guarded_utf8(bytes).map_err(|_| {
-        AppError::Internal("Channel key unavailable".into())
-    })?))
+    channel_key::open(&state.encryption_keys, row).await
 }
 
 /// Stop NyxBot answering a bot: delete the gateway channel (gateway path),
