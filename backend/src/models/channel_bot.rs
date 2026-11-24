@@ -207,6 +207,8 @@ pub struct CredentialContinuity {
     pub version: u8,
     pub generations: std::collections::BTreeMap<String, String>,
     pub pins: std::collections::BTreeMap<String, RetainedCredentialPin>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_producers: std::collections::BTreeMap<String, String>,
     pub authentication: String,
 }
 

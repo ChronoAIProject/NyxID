@@ -18,6 +18,10 @@ def main():
                         help="check unchanged writers in both modes and a test-built contextual row")
     parser.add_argument("--pin-continuity", action="store_true",
                         help="rewrap a base writer's pinned credentials and read them after writer rollback")
+    parser.add_argument("--shared-signing", action="store_true",
+                        help="prepare shared signing producers and verify reader-capable rollback")
+    parser.add_argument("--base-reads-local-pins", action="store_true",
+                        help="the base already implements bot-local continuity")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -61,12 +65,15 @@ def main():
             run(reader, "read", fixture)
         # Keep a populated legacy row for strict-mode and transition checks.
         run("base", "write", "old")
-        if args.pin_continuity:
+        if args.pin_continuity or args.shared_signing:
             run("base", "write", "pinned")
             run("candidate", "rewrap-pinned", "pinned", writes=True)
             run("candidate", "read", "pinned", writes=True)
             run("candidate", "read-pinned-strict", "pinned", writes=True, legacy=False)
-            run("base", "read", "pinned", expect_pin_mismatch=True)
+            if args.shared_signing:
+                run("base", "reject-shared", "pinned")
+            else:
+                run("base", "read", "pinned", expect_pin_mismatch=not args.base_reads_local_pins)
             run("candidate", "read", "pinned")
             run("candidate", "replace", "pinned")
             run("candidate", "read", "pinned")
