@@ -13,6 +13,9 @@ use wiremock::{
     matchers::{header, method, path, query_param},
 };
 
+#[path = "channel_meta_admission_benchmark.rs"]
+mod admission_benchmark;
+
 async fn configure(state: &crate::AppState, bot: &ChannelBot) {
     ensure_indexes(&state.db).await.unwrap();
     let descriptor = adapter(&bot.platform)
