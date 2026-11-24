@@ -1380,10 +1380,15 @@ async fn transferred_inbox_account_erasure_preserves_former_history_until_indepe
             .insert_one(&sibling)
             .await
             .unwrap();
-        let sibling_plan = super::super::channel_text_delivery::begin_bound(
+        messages
+            .insert_one(doc! {"_id":"sibling-source","user_id":&bot.user_id,
+            "channel_bot_id":&sibling.id})
+            .await
+            .unwrap();
+        let sibling_plan = super::super::channel_text_delivery::begin(
             &state.db,
             "retained-sibling",
-            &sibling,
+            &sibling.user_id,
             "sibling-source",
             "sibling-receipt",
             1,
@@ -1511,6 +1516,18 @@ async fn transferred_inbox_account_erasure_preserves_former_history_until_indepe
                 .unwrap()
                 .is_none()
         );
+        // Exact sibling proof must survive its own source's TTL too.
+        assert!(
+            plans
+                .find_one(doc! {"_id":&sibling_plan.id,"channel_bot_id":&sibling.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        messages
+            .delete_one(doc! {"_id":"sibling-source"})
+            .await
+            .unwrap();
         // Exact attribution now lives on the original receipt and survives TTL.
         messages.delete_one(doc! {"_id":&source}).await.unwrap();
         if !callback_first {
@@ -3536,4 +3553,172 @@ async fn disconnect_retires_contextual_token_and_decoder_marker_together() {
             .contains_key("bot_token_encrypted")
     );
     server.verify().await;
+}
+
+#[tokio::test]
+async fn manual_account_retirement_sweeper_preserves_transferred_history_without_explicit_delete() {
+    use crate::services::ownership_transfer_service as transfer;
+    let (state, _, server, mut bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+    bot.credential_source = "user".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    let recipient = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &recipient,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let source = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&source,"user_id":&bot.user_id,"channel_bot_id":&bot.id})
+        .await
+        .unwrap();
+    let receipt = super::super::channel_text_delivery::begin(
+        &state.db,
+        "manual-former-history",
+        &bot.user_id,
+        &source,
+        "receipt",
+        1,
+    )
+    .await
+    .unwrap();
+    let preview = transfer::preview(
+        &state.db,
+        &bot.user_id,
+        transfer::ResourceKind::ChannelBot,
+        &bot.id,
+        &recipient,
+        5,
+    )
+    .await
+    .unwrap();
+    transfer::transfer_with_keys(
+        &state.db,
+        Some(&state.encryption_keys),
+        transfer::TransferCommand {
+            actor: &bot.user_id,
+            api_key_id: None,
+            first_party_human: true,
+            kind: transfer::ResourceKind::ChannelBot,
+            resource_id: &bot.id,
+            destination: &recipient,
+            request_id: &uuid::Uuid::new_v4().to_string(),
+            expected_version: &preview.version,
+            capacity: 5,
+        },
+    )
+    .await
+    .unwrap();
+    // Confirm remote removal using the existing test provider before account cleanup.
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let live = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    service(&state, &server).disconnect(&live).await.unwrap();
+    super::super::durable_wake_tests::resume_after(
+        "meta_account_before_retirement",
+        erase_personal_owner(&state, &recipient),
+        async {
+            let s = service(&state, &server);
+            state
+                .db
+                .collection::<bson::Document>(BOTS)
+                .update_one(
+                    doc! {"_id":&bot.id},
+                    doc! {"$set":{"meta_binding.next_reconcile_at":bson::DateTime::now()}},
+                )
+                .await
+                .unwrap();
+            sweep_service(&state, &s).await.unwrap();
+            assert!(
+                super::super::channel_text_delivery::load(&state.db, "manual-former-history")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        },
+    )
+    .await;
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .find_one(doc! {"_id":receipt.id,"channel_bot_id":&bot.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn unknown_managed_grant_chronology_and_malformed_completion_never_acknowledge_deletion() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    state.db.collection::<bson::Document>(BOTS).update_one(doc! {"_id":&bot.id},
+        doc! {"$set":{"credential_source":"platform"},"$unset":{"meta_binding.authorized_at":""}}).await.unwrap();
+    let s = service(&state, &server);
+    let accepted = accept_provider_request(
+        &s,
+        "instagram",
+        &provider_request(json!(900), Utc::now().timestamp()),
+        true,
+    )
+    .await
+    .unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(
+            &state.db,
+            "instagram",
+            accepted["confirmation_code"].as_str().unwrap()
+        )
+        .await
+        .unwrap()["status"],
+        "pending"
+    );
+    // A present malformed field cannot use the absent-field legacy compatibility rule.
+    state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .delete_one(doc! {"_id":&bot.id})
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .update_one(
+            doc! {"_id":&bot.id},
+            doc! {"$set":{"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":42}},
+        )
+        .upsert(true)
+        .await
+        .unwrap();
+    assert!(matches!(
+        super::super::personal_erasure_service::erase_provider_inbox(
+            &state,
+            &bot.id,
+            &bot.meta_binding.as_ref().unwrap().grant_id
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
 }

@@ -101,6 +101,14 @@ async fn retire_account_inbox_in_session(
         return Err(conflict());
     };
     let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
+    db.collection::<bson::Document>("channel_meta_erasure_fences")
+        .update_one(
+            doc! {"_id":id},
+            doc! {"$setOnInsert":{"requested_at":bson::DateTime::now()}},
+        )
+        .upsert(true)
+        .session(&mut *tx)
+        .await?;
     if binding.grant_subject_id.is_empty() {
         // A manual grant has no login subject to receive managed signed
         // callbacks. Do not invent a permanent authority for an empty ID.
@@ -144,13 +152,14 @@ async fn retire_account_inbox_in_session(
             bot_created_at: bot.created_at,
             authorized_at: binding.authorized_at,
         };
+        let mut retired = bson::to_document(&retired).map_err(|_| invalid())?;
+        retired.insert("app_id", &binding.app_id);
         db.collection::<bson::Document>("channel_meta_erasure_fences")
             .update_one(
-                doc! {"_id":id},
+                doc! {"_id":id,"local_data_erased_at":{"$exists":false}},
                 doc! {"$set":{"requested_at":bson::DateTime::now(),
-                "retired_grant":bson::to_bson(&retired).map_err(|_|invalid())?}},
+                "retired_grant":retired}},
             )
-            .upsert(true)
             .session(&mut *tx)
             .await?;
     }
@@ -296,7 +305,8 @@ pub async fn accept_provider_request(
                 let mut cursor = db.collection::<ChannelBot>(BOTS).find(doc! {
                     "platform": platform, "meta_binding.app_id": app,
                     "meta_binding.grant_subject_id": subject,
-                    "meta_binding.authorized_at": {"$lt": cutoff},
+                    "$or":[{"meta_binding.authorized_at":{"$lt":cutoff}},
+                        {"meta_binding.authorized_at":null}],
                 }).session(&mut *tx).await?;
                 let bots: Vec<ChannelBot> = cursor.stream(&mut *tx).try_collect().await?;
                 let mut targets = Vec::new();
@@ -340,7 +350,9 @@ pub async fn accept_provider_request(
                 if *erase {
                     let mut retired = db.collection::<bson::Document>("channel_meta_erasure_fences")
                         .find(doc! {"retired_grant.identity":&identity,
-                            "retired_grant.authorized_at":{"$lt":cutoff},"local_data_erased_at":{"$exists":false}})
+                            "$or":[{"retired_grant.authorized_at":{"$lt":cutoff}},
+                                {"retired_grant.authorized_at":null}],
+                            "local_data_erased_at":{"$exists":false}})
                         .projection(doc! {"retired_grant.grant_id":1}).session(&mut *tx).await?;
                     while let Some(row) = retired.stream(&mut *tx).try_next().await? {
                         let id = row.get_str("_id").map_err(|_|invalid())?;
@@ -489,6 +501,13 @@ async fn reconcile_target(
                 .as_ref()
                 .is_some_and(|binding| binding.grant_id == grant_id) =>
         {
+            if erase
+                && bot.meta_binding.as_ref().is_some_and(|binding| {
+                    !binding.grant_subject_id.is_empty() && binding.authorized_at.is_none()
+                })
+            {
+                return Err(AppError::Conflict("The retained Meta grant authorization time needs verified repair before deletion can complete".into()));
+            }
             if bot.is_active
                 && !erase
                 && bot

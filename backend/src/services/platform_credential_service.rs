@@ -578,21 +578,15 @@ async fn require_drained_meta_app(
     // A revoked grant can still receive its first signed deletion after the
     // owner's account has gone. Preserve that application's verifier until
     // the independently captured retired scope is actually purged.
-    let mut retired = db
-        .collection::<bson::Document>("channel_meta_grant_authority")
-        .aggregate([
-            doc! {"$match":{"platform":platform,"app_id":app}},
-            doc! {"$lookup":{"from":"channel_meta_erasure_fences","let":{"grant":"$identity"},
-            "pipeline":[{"$match":{"$expr":{"$eq":["$retired_grant.identity","$$grant"]}}},
-                {"$limit":1},{"$project":{"_id":1}}],"as":"retired"}},
-            doc! {"$match":{"retired.0":{"$exists":true}}},
-            doc! {"$limit":1},
-            doc! {"$project":{"_id":1}},
-        ])
+    let retired = db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .find_one(doc! {"retired_grant.platform":platform,
+        "retired_grant.app_id":{"$in":[app,bson::Bson::Null]}})
+        .projection(doc! {"_id":1})
         .max_time(std::time::Duration::from_secs(5))
         .session(&mut *tx)
         .await?;
-    if retired.next(&mut *tx).await.transpose()?.is_some() {
+    if retired.is_some() {
         return Err(AppError::Conflict("Complete the retired Meta grant's signed deletion before changing its application ID or login secret".into()));
     }
     Ok(())
