@@ -1241,41 +1241,38 @@ async fn push_failure_event(
     if !code.requires_new_package() || row.source != ProposalSource::Authored {
         return Ok(());
     }
-    let ack = db
-        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-            crate::models::assistant_acknowledgement::COLLECTION_NAME,
-        )
-        .find_one(
-            if let Some(ack_id) = publication.acknowledgement_id.as_deref() {
-                doc! {"_id":ack_id,"user_id":&row.owner_id,"tool_name":TOOL,
-                "authored_skill.proposal_id":&row.id,"authored_skill.revision":row.revision}
-            } else {
-                doc! {"user_id":&row.owner_id,"tool_name":TOOL,
-                "authored_skill.proposal_id":&row.id,
-                "authored_skill.revision":row.revision}
-            },
-        )
-        .sort(doc! {"created_at":-1})
-        .session(&mut *session)
-        .await?;
-    let (conversation, routing, invocation_id, contexts) = if let Some(ack) = ack {
-        (ack.conversation_id, ack.routing, ack.invocation_id, ack.meta_contexts)
-    } else if let Some(claim) = db
-        .collection::<DraftOrigin>(
-            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
-        )
-        .find_one(doc! {"claim.proposal_id": &row.id, "owner_id": &row.owner_id, "agent_id": &row.agent_id})
-        .session(&mut *session)
-        .await?
+    let (conversation, routing, invocation_id, contexts) = if let Some(origin) =
+        super::assistant_skill_authoring::saved_origin(db, session, row).await?
     {
         (
-            claim.claim.conversation_id,
-            claim.claim.routing,
-            claim.claim.invocation_id,
-            claim.claim.meta_contexts,
+            origin.conversation_id,
+            origin.routing,
+            origin.invocation_id,
+            origin.meta_contexts,
         )
     } else {
-        return Ok(());
+        let mut filter = doc! {"user_id": &row.owner_id, "tool_name": TOOL,
+        "authored_skill.proposal_id": &row.id, "authored_skill.revision": row.revision};
+        if let Some(id) = publication.acknowledgement_id.as_deref() {
+            filter.insert("_id", id);
+        }
+        let Some(ack) = db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(filter)
+            .sort(doc! {"created_at": -1})
+            .session(&mut *session)
+            .await?
+        else {
+            return Ok(());
+        };
+        (
+            ack.conversation_id,
+            ack.routing,
+            ack.invocation_id,
+            ack.meta_contexts,
+        )
     };
     // A definitive validation failure can settle after consent ends. Its
     // optional repair notice still requires the original delivery authority.

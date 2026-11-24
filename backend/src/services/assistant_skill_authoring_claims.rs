@@ -157,7 +157,7 @@ async fn retain_origin(
     Ok(())
 }
 
-pub(super) async fn saved_origin(
+pub(crate) async fn saved_origin(
     db: &Database,
     tx: &mut ClientSession,
     proposal: &AssistantAgentLearningProposal,
