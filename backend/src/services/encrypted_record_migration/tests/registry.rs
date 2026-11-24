@@ -199,6 +199,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241",
         "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96",
     ];
+    let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
     for digest in [
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
@@ -206,7 +207,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
-        Some("1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d"),
+        Some(dev_gateway_checkpoint),
         Some(previous_labels::CHANNEL_KEY_DIGEST),
         Some(previous_labels::EVENT_BINDING_DIGEST),
         Some("unknown"),
@@ -260,10 +261,10 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             )),
             Some(value)
                 if includes_meta
+                    || value == dev_gateway_checkpoint
                     || matches!(
                         value,
-                        previous_labels::GATEWAY_TRANSPORT_DIGEST
-                            | previous_labels::CHANNEL_KEY_DIGEST
+                        previous_labels::CHANNEL_KEY_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST
                             | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST
