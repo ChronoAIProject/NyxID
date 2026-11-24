@@ -2622,7 +2622,11 @@ async fn request_candidate_in_session(
         db, chat, candidate, origin, approval, session,
     ))
     .await?;
-    let binding = if !result.0.meta_contexts.is_empty() {
+    // A durable origin is validated in its own home. Its recovering caller
+    // binds the MCP activity after commit using the caller's actual turn.
+    let binding = if origin.is_some() {
+        None
+    } else if !result.0.meta_contexts.is_empty() {
         super::assistant_activity_decision::bind_meta_in_session(
             db,
             chat,
