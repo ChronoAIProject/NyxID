@@ -436,6 +436,44 @@ pub(crate) async fn fence_assistant_turn(
     Ok(())
 }
 
+/// Minimal provenance from original turn messages, retained independently of
+/// channel event TTL. Callers choose fresh admission or late settlement fences.
+pub(crate) async fn assistant_turn_references(
+    db: &Database,
+    tx: &mut ClientSession,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+) -> AppResult<Vec<GrantRef>> {
+    let mut cursor = db
+        .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .find(doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn})
+        .projection(doc! {"meta_grants":1})
+        .limit(101)
+        .session(&mut *tx)
+        .await?;
+    let mut grants = Vec::new();
+    let mut count = 0;
+    while let Some(row) = cursor.next(&mut *tx).await.transpose()? {
+        count += 1;
+        if count > 100 {
+            return Err(super::grants::incomplete());
+        }
+        let proofs: Vec<GrantRef> = match row.get("meta_grants") {
+            None | Some(bson::Bson::Null) => Vec::new(),
+            Some(value) => {
+                bson::from_bson(value.clone()).map_err(|_| super::grants::incomplete())?
+            }
+        };
+        for proof in proofs {
+            if !grants.contains(&proof) {
+                grants.push(proof);
+            }
+        }
+    }
+    Ok(grants)
+}
+
 pub(crate) async fn source_document_in_session(
     db: &Database,
     tx: &mut ClientSession,
