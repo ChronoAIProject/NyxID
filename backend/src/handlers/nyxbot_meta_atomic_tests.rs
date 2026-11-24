@@ -481,3 +481,273 @@ async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_
     assert!(!closed.org_specialist.as_ref().unwrap().guests.enabled);
     assert_eq!(closed.agent_id, before.agent_id);
 }
+
+#[tokio::test]
+async fn reused_meta_connect_returns_its_committed_assignment_and_challenge_during_rotation() {
+    let (state, _calls, _server) = setup("meta_reuse_committed_response").await;
+    let (_, _, first, row) = assigned(&state, "instagram").await;
+    let second = specialist_named(&state, "concurrent-specialist").await;
+    let committed = std::sync::Mutex::new(None);
+    crate::services::durable_wake_tests::resume_after(
+        "meta_reuse_after_commit",
+        async {
+            let Json(response) = connect_channel(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(OWNER),
+                Json(ConnectRequest {
+                    bot_id: row.channel_bot_id.clone(),
+                    agent_id: Some(first.id.clone()),
+                }),
+            )
+            .await
+            .unwrap();
+            let snapshot: NyxbotChannel = committed.lock().unwrap().clone().unwrap();
+            assert_eq!(
+                response["channel_agent"]["agent_id"],
+                json!(snapshot.agent_id)
+            );
+            assert_eq!(
+                response["link"]["expires_at"],
+                json!(snapshot.link_code_expires_at.unwrap())
+            );
+            assert_eq!(
+                snapshot.link_code_hash.as_deref(),
+                Some(
+                    crate::crypto::token::hash_token(response["link"]["code"].as_str().unwrap())
+                        .as_str()
+                )
+            );
+            let current = load_channel(&state, OWNER, &row.id).await.unwrap();
+            assert_eq!(current.agent_id.as_deref(), Some(second.id.as_str()));
+            assert_ne!(current.link_code_hash, snapshot.link_code_hash);
+        },
+        async {
+            *committed.lock().unwrap() = Some(load_channel(&state, OWNER, &row.id).await.unwrap());
+            // Separate request/task: it must not inherit the first request's pause hook.
+            let state = state.clone();
+            let bot = row.channel_bot_id.clone();
+            let agent = second.id.clone();
+            tokio::spawn(async move {
+                connect_channel(
+                    State(state),
+                    crate::test_utils::test_auth_user(OWNER),
+                    Json(ConnectRequest {
+                        bot_id: bot,
+                        agent_id: Some(agent),
+                    }),
+                )
+                .await
+                .unwrap();
+            })
+            .await
+            .unwrap();
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_org_meta_guest_reductions_remain_available_on_callback_failure() {
+    use crate::services::{org_channel_service as org, security_readiness_service as readiness};
+    let (state, _calls, _server) = setup("meta_legacy_org_narrowing").await;
+    let (mut row, mut agent, org_id) = org_meta(&state).await;
+    let replica = readiness::overlapping_test_replica(&state.db).await;
+    readiness::remove_test_replica_capability(&state.db, &replica, org::GUEST_GRANTS_READINESS)
+        .await;
+    assert!(!org::guest_grants_ready(&state.db).await.unwrap());
+    let service_ids: Vec<_> = (0..2).map(|_| Uuid::new_v4().to_string()).collect();
+    for (i, id) in service_ids.iter().enumerate() {
+        state
+            .db
+            .collection::<crate::models::user_service::UserService>("user_services")
+            .insert_one(crate::test_utils::test_user_service(
+                id,
+                &org_id,
+                &format!("narrowing-{i}"),
+                &Uuid::new_v4().to_string(),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+    agent.grants.service_ids = service_ids.clone();
+    state
+        .db
+        .collection::<crate::models::assistant_agent::AssistantAgent>("assistant_agents")
+        .replace_one(doc! {"_id":&agent.id}, &agent)
+        .await
+        .unwrap();
+    let policy = &mut row.org_specialist.as_mut().unwrap().guests;
+    policy.enabled = true;
+    policy.revision = Uuid::new_v4().to_string();
+    policy.daily_credits = Some(crate::models::credits::Credits::from_whole(10));
+    policy.service_ids = service_ids.clone();
+    policy.service_authority = service_ids
+        .iter()
+        .map(|id| (id.clone(), org::management::service_digest(&agent, id)))
+        .collect();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    callback_for(
+        &state,
+        &org_id,
+        &row.route_api_key_id,
+        "https://callbacks.example.test/drift",
+    )
+    .await;
+    let revision = || async {
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .org_specialist
+            .unwrap()
+            .guests
+            .revision
+    };
+    let patch = |value: Value| {
+        let state = &state;
+        let id = &row.id;
+        async move {
+            crate::handlers::org_specialist_channels::update_tool(state, OWNER, id, &value).await
+        }
+    };
+    patch(json!({"daily_credits":"5","expected_revision":revision().await}))
+        .await
+        .unwrap();
+    let lower = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        lower.org_specialist.as_ref().unwrap().guests.daily_credits,
+        Some(crate::models::credits::Credits::from_whole(5))
+    );
+    assert!(matches!(
+        patch(json!({"daily_credits":"6","expected_revision":revision().await})).await,
+        Err(AppError::Conflict(_))
+    ));
+    patch(json!({"service_ids":[&service_ids[0]],"expected_revision":revision().await}))
+        .await
+        .unwrap();
+    let narrower = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        narrower.org_specialist.as_ref().unwrap().guests.service_ids,
+        vec![service_ids[0].clone()]
+    );
+    assert!(matches!(
+        patch(json!({"service_ids":service_ids,"expected_revision":revision().await})).await,
+        Err(AppError::Conflict(_))
+    ));
+    assert!(matches!(patch(json!({"daily_credits":"4","expected_revision":lower.org_specialist.as_ref().unwrap().guests.revision})).await,Err(AppError::Conflict(_))));
+    state
+        .db
+        .collection::<bson::Document>("org_memberships")
+        .update_one(
+            doc! {"org_user_id":&org_id,"member_user_id":OWNER},
+            doc! {"$set":{"role":"viewer"}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(patch(json!({"daily_credits":"4","expected_revision":narrower.org_specialist.as_ref().unwrap().guests.revision})).await,Err(AppError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn combined_org_meta_patch_shares_authority_and_preserves_old_and_new_binding_checks() {
+    for enabled in [false, true] {
+        let (state, _calls, _server) = setup("meta_org_shared_patch_authority").await;
+        let (mut row, _, org_id) = org_meta(&state).await;
+        row.org_specialist.as_mut().unwrap().guests.enabled = enabled;
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        let (second, _) = crate::services::assistant_team_service::create_specialist_for(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            &org_id,
+            crate::services::assistant_team_service::CreateRequest {
+                name: "shared-authority-second".into(),
+                description: "Support".into(),
+                display_name: None,
+                persona: None,
+                voice_instructions: None,
+                targets: Default::default(),
+                account_read: false,
+                specialty: None,
+                machines: None,
+                logins: None,
+                created_by: "user",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let users = state.db.collection::<bson::Document>("users");
+        let before = users
+            .find_one(doc! {"_id":&org_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("org_channel_fence")
+            .unwrap_or(0);
+        link_channel(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(OWNER),
+            Path(row.id.clone()),
+            Json(LinkRequest {
+                agent_id: Some(second.id.clone()),
+                private_chats: Some("owner".into()),
+                private_chat_posts: Some(false),
+                apply_to_existing: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(after.agent_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(after.private_chats.as_deref(), Some("owner"));
+        assert_ne!(
+            after.org_specialist.as_ref().unwrap().revision,
+            row.org_specialist.as_ref().unwrap().revision
+        );
+        assert_eq!(
+            after.org_specialist.as_ref().unwrap().guests.enabled,
+            enabled
+        );
+        let written = users
+            .find_one(doc! {"_id":&org_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("org_channel_fence")
+            .unwrap();
+        assert_eq!(
+            written - before,
+            1,
+            "one actor/org authority write across relink and access"
+        );
+        assert!(matches!(
+            crate::services::nyxbot_channel_setup_service::mutate_meta_assignment(
+                &state,
+                OWNER,
+                &row,
+                None,
+                Some(
+                    &crate::services::nyxbot_chat_settings_service::AccessSettings {
+                        private_chats: Some("everyone".into()),
+                        private_chat_posts: None,
+                        apply_to_existing: false,
+                    }
+                ),
+                None
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+    }
+}

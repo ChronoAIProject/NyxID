@@ -300,6 +300,19 @@ async fn update_choice(
     if policy.enabled {
         crate::services::durable_wake_tests::after("org_guest_before_meta_write").await;
     }
+    // Reductions remain available when delivery is unhealthy. Any new
+    // authority, including a changed service digest, keeps the live route gate.
+    let widening = policy.enabled
+        && (!b.guests.enabled
+            || open_private_chats
+            || (!ready
+                && (policy.daily_credits.unwrap_or_else(default_daily_credits)
+                    > b.guests.daily_credits.unwrap_or_else(default_daily_credits)
+                    || policy.service_ids.iter().any(|id| {
+                        !b.guests.service_ids.contains(id)
+                            || policy.service_authority.get(id)
+                                != b.guests.service_authority.get(id)
+                    }))));
     let context = (
         db.clone(),
         actor.to_owned(),
@@ -311,10 +324,11 @@ async fn update_choice(
         migration_off,
         author_services,
         open_private_chats,
+        widening,
         callback.map(str::to_owned),
     );
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,callback)|Box::pin(async move{
-        if policy.enabled {
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,widening,callback)|Box::pin(async move{
+        if *widening {
             crate::services::nyxbot_channel_query_service::fence_meta_default(db,row,callback.as_deref(),tx).await?;
         }
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;

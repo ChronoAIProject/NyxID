@@ -283,7 +283,7 @@ pub async fn relink(
                     session,
                 )
                 .await?;
-                relink_in_session(db, &current, &manager, agent, session).await?;
+                relink_in_session(db, &current, &manager, agent, session, false).await?;
                 Ok(())
             })
             .await;
@@ -300,11 +300,17 @@ pub(crate) async fn relink_in_session(
     manager: &str,
     agent: &str,
     session: &mut ClientSession,
+    management_fenced: bool,
 ) -> AppResult<()> {
     let owner = current.user_id.as_str();
     let channel = current.id.as_str();
     if let Some(mut binding) = current.org_specialist.clone() {
-        super::super::org_channel_service::fence_management(db, session, current, manager).await?;
+        if !management_fenced {
+            super::super::org_channel_service::fence_management(db, session, current, manager)
+                .await?;
+        } else {
+            super::super::org_channel_service::fence_binding(db, session, current).await?;
+        }
         super::super::org_channel_service::live_doc(
             db,
             session,
