@@ -1890,12 +1890,11 @@ pub(crate) async fn verify_bot_with_adapter(
             .verify(&bot)
             .await?;
         let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: current.id,
-            status: current.status,
-            webhook_registered: current.webhook_registered,
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            current,
+            VerificationScope::CredentialsAndWebhook,
+            None,
+        )));
     }
     if bot.platform == "telegram" {
         let verified = channel_bot_service::verify_telegram_bot(

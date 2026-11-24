@@ -1671,19 +1671,8 @@ pub(crate) async fn audience_readiness(
     owner: &str,
     channel_id: &str,
 ) -> AppResult<crate::services::assistant_service_execution::readiness::AudienceReadiness> {
-    let row = load_channel(state, owner, channel_id).await?;
-    if let Some(org) = row.bot_owner_id.as_deref()
-        && !super::manages_bot_owner(state, owner, org).await?
-    {
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
-    crate::services::assistant_service_execution::readiness::audience_readiness(
-        &state.db,
-        &state.encryption_keys,
-        owner,
-        row.agent_id.as_deref(),
-    )
-    .await
+    crate::services::nyxbot_channel_setup_service::audience_readiness(state, owner, channel_id)
+        .await
 }
 
 pub(crate) async fn update_access(
@@ -1692,96 +1681,8 @@ pub(crate) async fn update_access(
     channel_id: &str,
     settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
 ) -> AppResult<Value> {
-    settings.validate()?;
-    let row = load_channel(state, owner, channel_id).await?;
-    if let Some(org) = row.bot_owner_id.as_deref()
-        && !super::manages_bot_owner(state, owner, org).await?
-    {
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
-    if settings.private_chats.as_deref() == Some("everyone")
-        || settings.private_chat_posts == Some(true)
-    {
-        crate::services::platform_bot_authority::require_personal_routes(
-            &state.db,
-            &row.channel_bot_id,
-        )
-        .await?;
-    }
-    // Read before mutation: diagnostics must not turn a committed change into a failure.
-    let mut audience =
-        if settings.private_chats.as_deref() == Some("everyone") && row.org_specialist.is_none() {
-            Some(
-                crate::services::assistant_service_execution::readiness::audience_readiness(
-                    &state.db,
-                    &state.encryption_keys,
-                    owner,
-                    row.agent_id.as_deref(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-    let applied =
-        crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
-            .await?;
-    audit(
-        state,
-        owner,
-        "nyxbot_channel_access_updated",
-        json!({"channel_agent_id":&row.id,
-        "private_chats":settings.private_chats,"private_chat_posts":settings.private_chat_posts,
-        "apply_to_existing":settings.apply_to_existing,"applied_count":applied}),
-    )
-    .await;
-    let mut result = json!({"channel_agent_id":row.id,
-        "guest_access_description": if row.org_specialist.is_some() {
-            crate::services::org_channel_service::management::ORG_GUEST_EXPLANATION
-        } else {
-            crate::services::org_channel_service::management::PERSONAL_GUEST_EXPLANATION
-        },
-        "private_chats":settings.private_chats.as_deref().or(row.private_chats.as_deref()).unwrap_or("owner"),
-        "private_chat_posts":settings.private_chat_posts.or(row.private_chat_posts).unwrap_or(false),"applied_count":applied});
-    if let Some(access) = settings
-        .private_chats
-        .as_deref()
-        .filter(|_| row.org_specialist.is_none())
-    {
-        let prepared = access != "everyone"
-            || super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None)
-                .await
-                .is_ok();
-        let readiness = if prepared {
-            crate::services::assistant_service_execution::guest_readiness(
-                &state.db,
-                &state.encryption_keys,
-                owner,
-                row.agent_id.as_deref(),
-                None,
-            )
-            .await
-            .ok()
-        } else {
-            None
-        };
-        let readiness = readiness.unwrap_or(
-            crate::services::assistant_service_execution::GuestReadiness {
-                status: "not_ready",
-                reason: Some("readiness_unavailable".into()),
-                fix: Some(
-                    "Access was saved. Refresh customer model readiness before relying on replies."
-                        .into(),
-                ),
-            },
-        );
-        result["guest_readiness"] = json!(&readiness);
-        if let Some(facts) = &mut audience {
-            facts.guest_readiness = readiness;
-            result["audience_readiness"] = json!(facts);
-        }
-    }
-    Ok(result)
+    crate::services::nyxbot_channel_setup_service::update_access(state, owner, channel_id, settings)
+        .await
 }
 
 /// Validate an automation destination with the same posting ACL as native tools.

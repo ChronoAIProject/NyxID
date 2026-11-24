@@ -130,13 +130,7 @@ pub(crate) async fn manages_bot_owner(
     owner: &str,
     bot_owner: &str,
 ) -> AppResult<bool> {
-    if owner == bot_owner {
-        return Ok(true);
-    }
-    Ok(matches!(
-        crate::services::org_service::resolve_owner_access(&state.db, owner, bot_owner).await?,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
-    ))
+    crate::services::nyxbot_channel_setup_service::manages_bot_owner(state, owner, bot_owner).await
 }
 
 /// A channel bot the owner may link: theirs or one of an org they
@@ -146,12 +140,7 @@ pub(crate) async fn accessible_bot(
     owner: &str,
     bot_id: &str,
 ) -> AppResult<ChannelBot> {
-    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
-    if manages_bot_owner(state, owner, &bot.user_id).await? {
-        Ok(bot)
-    } else {
-        Err(AppError::ChannelBotNotFound(bot_id.to_string()))
-    }
+    crate::services::nyxbot_channel_setup_service::accessible_bot(state, owner, bot_id).await
 }
 
 /// A bot named by id or by its label (case-insensitive) among the owner's
@@ -211,21 +200,7 @@ async fn org_access_with(
     row: &NyxbotChannel,
     checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
 ) -> AppResult<OrgAccess> {
-    if !crate::services::platform_bot_authority::permits_with(
-        &state.db,
-        &row.channel_bot_id,
-        checked,
-    )
-    .await?
-    {
-        return Ok(OrgAccess::Lost);
-    }
-    if let Some(org) = row.bot_owner_id.as_deref()
-        && !Box::pin(manages_bot_owner(state, &row.user_id, org)).await?
-    {
-        return Ok(OrgAccess::Lost);
-    }
-    crate::services::org_channel_service::transport_access(&state.db, row).await
+    crate::services::nyxbot_channel_setup_service::org_access_with(state, row, checked).await
 }
 
 /// Result of the bounded pre-#2288 restoration gate. `Unavailable` is a
@@ -730,24 +705,7 @@ pub(super) async fn load_channel(
     owner: &str,
     id: &str,
 ) -> AppResult<NyxbotChannel> {
-    if Uuid::parse_str(id).is_err() {
-        return Err(AppError::NotFound("Channel agent not found".into()));
-    }
-    let row = state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .find_one(doc! {"_id": id})
-        .await?
-        .ok_or_else(|| AppError::NotFound("Channel agent not found".into()))?;
-    if row.user_id != owner {
-        let binding = row
-            .org_specialist
-            .as_ref()
-            .ok_or_else(|| AppError::NotFound("Channel agent not found".into()))?;
-        crate::services::org_channel_service::require_admin(&state.db, owner, &binding.org_id)
-            .await?;
-    }
-    Ok(row)
+    crate::services::nyxbot_channel_setup_service::load_channel(state, owner, id).await
 }
 
 async fn active_for_bot(
@@ -881,6 +839,25 @@ async fn connect_inner(
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
     let bot: ChannelBot = accessible_bot(state, owner, bot_id).await?;
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) && !restoration {
+        let (row, link) = crate::services::nyxbot_channel_setup_service::connect_meta(
+            state,
+            owner,
+            source_conversation_id,
+            bot_id,
+            agent,
+            allow_existing,
+        )
+        .await?;
+        return Ok((
+            row,
+            LinkInstructions {
+                code: link.code,
+                url: link.url,
+                expires_at: link.expires_at,
+            },
+        ));
+    }
     let org_binding =
         crate::services::org_channel_service::link_target(&state.db, owner, &bot, agent).await?;
     crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
@@ -3169,60 +3146,7 @@ pub async fn link(
     channel_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<Value> {
-    crate::services::org_channel_service::require_target(&state.db, owner, agent).await?;
-    if agent.destroyed_at.is_some() {
-        return Err(AppError::Conflict("That agent was destroyed".into()));
-    }
-    let row = load_channel(state, owner, channel_id).await?;
-    let bot = accessible_bot(state, owner, &row.channel_bot_id).await?;
-    let binding =
-        crate::services::org_channel_service::link_target(&state.db, owner, &bot, agent).await?;
-    if binding.is_some() != row.org_specialist.is_some() {
-        return Err(AppError::Conflict("Disconnect and reconnect this bot to change between a personal and organization specialist".into()));
-    }
-    crate::services::platform_bot_authority::require_personal_routes(
-        &state.db,
-        &row.channel_bot_id,
-    )
-    .await?;
-    if row.agent_id.as_deref() == Some(agent.id.as_str())
-        || (row.agent_id.is_none() && agent.is_nyxbot())
-    {
-        return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": false}));
-    }
-    crate::services::channel_thread_follow_service::relink(
-        &state.db,
-        &row.user_id,
-        owner,
-        &row.id,
-        &agent.id,
-    )
-    .await?;
-    let open_group = state
-        .db
-        .collection::<bson::Document>(THREADS)
-        .find_one(doc! {
-            "channel_id":&row.id,"user_id":owner,"kind":{"$in":["group","channel"]},
-            "$or":[{"members":"everyone"},{"members":null,"owner_seen":true}]
-        })
-        .projection(doc! {"_id":1})
-        .await?
-        .is_some();
-    if row.org_specialist.is_none()
-        && (row.private_chats.as_deref() == Some("everyone") || open_group)
-    {
-        prepare_guest_model(state, owner, Some(&agent.id), None).await?;
-    }
-    audit(
-        state,
-        owner,
-        "nyxbot_channel_linked",
-        json!({
-            "channel_agent_id": &row.id, "agent_id": &agent.id,
-        }),
-    )
-    .await;
-    Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": true}))
+    crate::services::nyxbot_channel_setup_service::link(state, owner, channel_id, agent).await
 }
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
@@ -3235,36 +3159,13 @@ pub(super) async fn prepare_guest_model(
     agent_id: Option<&str>,
     conversation: Option<&str>,
 ) -> AppResult<()> {
-    let agent = requested_agent(state, owner, agent_id).await?;
-    let profile = if let Some(id) = conversation {
-        engine::get(&state.db, owner, id)
-            .await
-            .ok()
-            .map(|r| r.model)
-    } else {
-        None
-    };
-    let profile = match profile {
-        Some(profile) => profile,
-        None => {
-            crate::services::assistant_profile_routing::model_for(
-                &state.db,
-                crate::services::assistant_profile_routing::RouteRole::Channel,
-                &agent.model,
-            )
-            .await
-        }
-    };
-    crate::services::assistant_guest_model_setup::backoff::reset(
-        &state.db,
+    crate::services::nyxbot_channel_setup_service::prepare_guest_model(
+        state,
         owner,
-        &agent.id,
-        Some(&profile),
+        agent_id,
+        conversation,
     )
-    .await?;
-    crate::services::assistant_guest_model_setup::kick(state, owner, &agent.id, &profile, false)
-        .await?;
-    Ok(())
+    .await
 }
 
 fn org_restore_status_text(code: &str) -> &'static str {

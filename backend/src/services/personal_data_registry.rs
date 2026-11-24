@@ -1296,6 +1296,46 @@ pub static ENTRIES: &[Entry] = &[
         why: "channel_event_logs is lifecycle data owned through channel_conversations; cleanup removes the child only after that parent is removed.",
     },
     Entry {
+        collection: "channel_meta_controls",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_controls stores provider participant IDs under a bot_id parent, alongside shared platform suspension rows. Channel-bot erasure deletes participant controls by bot_id before removing the parent's credentials; platform-only holds contain no person or participant identity.",
+    },
+    Entry {
+        collection: "channel_meta_erasure_fences",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_erasure_fences retains only a retired bot UUID and erasure time, with no provider IDs, credentials or customer content. The durable tombstone prevents late outbound responses from repopulating an erased inbox.",
+    },
+    Entry {
+        collection: "channel_meta_grant_authority",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_grant_authority retains a keyed, domain-separated grant fingerprint and revocation times, never a raw provider subject or NyxID account ID. Keeping this fence prevents delayed OAuth sessions from reinstalling an erased or revoked grant.",
+    },
+    Entry {
+        collection: "channel_meta_oauth_sessions",
+        owner: OwnerSelector::Fields(&["owner_id", "actor_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_oauth_sessions stores short-lived consent state and encrypted candidate credentials, bound separately to the initiating actor and inbox owner. Local inventory removes sessions matching either identity; session expiry and provider erasure also remove retained credentials.",
+    },
+    Entry {
+        collection: "channel_meta_provider_requests",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_provider_requests retains signed-request hashes, opaque target bot/grant UUIDs and cleanup progress without raw provider subjects or credentials. Pending erasure obligations have no TTL; completed receipts expire after their documented retention period.",
+    },
+    Entry {
         collection: "channel_messages",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
@@ -3306,6 +3346,16 @@ enum OwnerIndexBoundedReason {
 
 #[cfg(test)]
 const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
+    (
+        "channel_meta_oauth_sessions",
+        "owner_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "channel_meta_oauth_sessions",
+        "actor_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
     (
         "user_services",
         "created_by.actor.person_id",

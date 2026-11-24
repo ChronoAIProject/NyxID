@@ -481,7 +481,8 @@ async fn ordinary_manual_patch_rejects_admin_demotion_during_provider_verify() {
     assert_eq!(
         channel_bot_service::decrypt_bot_token(&state.encryption_keys, &live)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         "manual-page-token"
     );
     assert_eq!(
@@ -1627,7 +1628,8 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
     assert_eq!(
         super::super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &fresh)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         "refreshed-token"
     );
     s.refresh(&fresh).await.unwrap();
@@ -1748,7 +1750,8 @@ async fn refresh_cannot_overwrite_a_grant_suspended_during_provider_io() {
     assert_eq!(
         super::super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &live)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         "fixture-token"
     );
 }
@@ -1915,7 +1918,8 @@ async fn meta_credential_patch_returns_conflict_when_the_live_generation_changes
     assert_eq!(
         channel_bot_service::decrypt_bot_token(&state.encryption_keys, &live)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         "fixture-token"
     );
     server.verify().await;
