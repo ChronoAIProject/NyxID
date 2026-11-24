@@ -1888,7 +1888,7 @@ async fn generated_artifact_publication_uses_retained_turn_grant_and_refuses_aft
     // The immutable source row is the authority, not the mutable artifact
     // watch or a caller-supplied grant. This also pins the generic writer's
     // refusal if a channel-derived source reaches this retained lineage.
-    db.collection::<Document>(MESSAGES)
+    db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
         .update_one(
             doc! {"user_id":&w.user_id,"conversation_id":&w.conversation_id,"turn_id":&w.turn_id},
             doc! {"$set":{"meta_grants":[bson::to_bson(&grant).unwrap()]}},
