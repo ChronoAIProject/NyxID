@@ -207,13 +207,14 @@ pub async fn renew(
             if super::super::assistant_learning_publication::binding(&proposal,proposal.publication.as_ref().ok_or_else(conflict)?,skills_revision) != binding {
                 return Err(conflict());
             }
-            fence_agent(&db,&proposal,session).await?;
-            touch_proposal(&db,&proposal,session).await?;
-            let saved = db.collection::<bson::Document>(CLAIMS).find_one_and_update(
-                doc! {"claim.proposal_id":&proposal.id,"owner_id":&chat.user_id,"agent_id":&proposal.agent_id},
-                doc! {"$inc":{"fence":1_i64}}).session(&mut *session).await?;
-            let origin = if let Some(saved) = saved {
-                let claim:AuthoredDraftClaim = bson::from_document(saved.get_document("claim").map_err(|_|conflict())?.clone()).map_err(|_|conflict())?;
+            if !review::renewal_eligible(&proposal,&original,skills_revision,Utc::now()) {return Err(conflict());}
+            if db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(
+                doc! {"_id":&proposal.agent_id,"user_id":&proposal.owner_id,"destroyed_at":bson::Bson::Null,"skills_revision":skills_revision},
+                doc! {"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+            if db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+                doc! {"_id":&proposal.id,"owner_id":&proposal.owner_id,"source":"authored","revision":proposal.revision},
+                doc! {"$inc":{"authoring_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+            let origin = if let Some(claim) = saved_origin(&db,session,&proposal).await? {
                 if claim.conversation_id != original.conversation_id || claim.api_key_id != original.api_key_id
                     || claim.creation_turn_id != original.creation_turn_id || claim.requested_turn_id != original.requested_turn_id
                     || bson::to_bson(&claim.meta_contexts).map_err(|_|conflict())? != bson::to_bson(&original.meta_contexts).map_err(|_|conflict())? {

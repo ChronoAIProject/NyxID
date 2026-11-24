@@ -7,6 +7,104 @@ use crate::{
     services::{assistant_nyxagent as engine, channel_meta_service as meta},
 };
 
+#[tokio::test]
+async fn expired_skill_review_renews_after_real_registry_write_refusal_and_restored_access() {
+    for meta_source in [true, false] {
+        let f = fixture("skill_renew_restored_registry_access").await;
+        let server = setup_ornn(&f).await;
+        let chat = if meta_source {
+            meta_turn(&f).await.1
+        } else {
+            f.chat.clone()
+        };
+        let first = draft_in_chat(&f, &chat).await.unwrap();
+        let db = &f.state.db;
+        let proposal = db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .find_one(doc! {"_id":first["proposal_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+        let card = cards
+            .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/skill-format/validate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/skills"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"code":"forbidden"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(finish(&f, card.clone(), true).await.is_err());
+        let failed = stored(&f, &proposal.id).await;
+        assert_eq!(failed.failure_code.as_deref(), Some("ornn_write_forbidden"));
+        assert!(!failed.publication.as_ref().unwrap().started);
+        db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&card.id},
+                doc! {"$set":{"expires_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        let preview = review::authored_preview_for_card(
+            &f.state,
+            &f.owner,
+            &proposal.agent_id,
+            &proposal.id,
+            &card.id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            preview["actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("renew"))
+        );
+        server.verify().await;
+        server.reset().await;
+        let skill = Uuid::new_v4().to_string();
+        mount_publication(&f, &server, &proposal, &skill, "POST").await;
+        let axum::Json(result)=crate::handlers::assistant_agent_learning::approve(
+            axum::extract::State(f.state.clone()),crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((proposal.agent_id.clone(),proposal.id.clone())),
+            axum::Json(serde_json::from_value(json!({"revision":proposal.revision,"agent_skills_revision":proposal.agent_skills_revision,"renewal_of":&card.id})).unwrap()),
+        ).await.unwrap();
+        let renewed = cards
+            .find_one(
+                doc! {"_id":result["acknowledgement"]["acknowledgement_id"].as_str().unwrap()},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(renewed.arguments_digest, card.arguments_digest);
+        assert_eq!(renewed.creation_turn_id, card.creation_turn_id);
+        assert_eq!(
+            bson::to_bson(&renewed.meta_contexts).unwrap(),
+            bson::to_bson(&card.meta_contexts).unwrap()
+        );
+        assert_eq!(finish(&f, renewed, true).await.unwrap().status, "used");
+        let pinned = stored(&f, &proposal.id).await;
+        assert_eq!(pinned.status, "pinned");
+        assert_eq!(
+            pinned.publication.as_ref().unwrap().operation_id,
+            proposal.publication.as_ref().unwrap().operation_id
+        );
+        server.verify().await;
+        db.drop().await.unwrap();
+    }
+}
+
 async fn settle(f: &Fixture, row: &crate::models::assistant_conversation::AssistantConversation) {
     engine::finish_turn(
         &f.state.db,
