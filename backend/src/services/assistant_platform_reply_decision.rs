@@ -6,8 +6,7 @@ use crate::{
     errors::AppResult,
     models::assistant_acknowledgement::AssistantAcknowledgement,
     services::{
-        api_key_mutation_service as transactions, assistant_acknowledgement_service as acks,
-        assistant_nyxagent as engine, audit_service,
+        assistant_acknowledgement_service as acks, assistant_nyxagent as engine, audit_service,
     },
 };
 
@@ -26,39 +25,36 @@ pub(crate) async fn decide_owner_reply(
     let since = engine::previous_user_message(db, owner, conversation_id, None)
         .await?
         .map(|message| message.created_at);
-    let mut session = db.client().start_session().await?;
-    let decision_db = db.clone();
-    let decision_owner = owner.to_owned();
-    let conversation_ids = vec![conversation_id.to_owned()];
-    let text = text.to_owned();
-    let decided = session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let result = async {
+    let context = (
+        db.clone(),
+        owner.to_owned(),
+        [conversation_id.to_owned()],
+        text.to_owned(),
+        grant.cloned(),
+        since,
+    );
+    let decided = super::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, owner, conversations, text, grant, since)| {
+            Box::pin(async move {
                 if let Some(grant) = grant {
-                    super::channel_meta_service::scopes::fence_reference(
-                        &decision_db,
-                        session,
-                        grant,
-                        true,
-                    )
-                    .await?;
+                    super::channel_meta_service::scopes::fence_reference(db, session, grant, true)
+                        .await?;
                 }
                 Box::pin(acks::decide_reply_in_session(
-                    &decision_db,
+                    db,
                     session,
-                    &decision_owner,
-                    &conversation_ids,
-                    &text,
-                    since,
+                    owner,
+                    conversations,
+                    text,
+                    *since,
                 ))
                 .await
-            }
-            .await;
-            transactions::transaction_result(result)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)?;
+            })
+        },
+    )
+    .await?;
     if let Some(decided) = &decided {
         acks::audit_decision(
             db,
