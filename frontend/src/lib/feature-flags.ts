@@ -54,6 +54,7 @@ export const FEATURE_FLAG = {
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   ORG_INSTRUCTION: "assistant:org-instruction-v1",
   EXECUTION_PERMISSIONS: "permissions:execution-v1",
+  CONNECTED_APPROVAL: "permissions:connected-approval-v1",
   HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",

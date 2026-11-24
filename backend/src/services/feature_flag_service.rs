@@ -527,6 +527,11 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    FeatureFlagDef {
+        key: super::execution_permission_dispatch::proposals::v2::connected::READINESS,
+        description: "Observe and retire explicitly bound connected model approval waits.",
+        default_enabled: false,
+    },
     OAUTH_REFRESH_CLIENT_AUTH_FLAG,
     INVITATION_CODE_FLAG,
     OAUTH_EXACT_REDIRECTS_FLAG,
@@ -597,6 +602,11 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    FeatureFlagDef {
+        key: super::execution_permission_dispatch::proposals::v2::connected::READINESS,
+        description: "Observe and retire explicitly bound connected model approval waits.",
+        default_enabled: false,
+    },
     OAUTH_REFRESH_CLIENT_AUTH_FLAG,
     INVITATION_CODE_FLAG,
     OAUTH_EXACT_REDIRECTS_FLAG,
@@ -3453,6 +3463,7 @@ mod tests {
         assert_eq!(
             shipped,
             vec![
+                "permissions:connected-approval-v1",
                 "auth:oauth-refresh-client-auth-v1",
                 "auth:invitation-code",
                 "auth:oauth-exact-redirects-v1",

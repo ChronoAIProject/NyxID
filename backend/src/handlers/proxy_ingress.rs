@@ -39,6 +39,30 @@ pub(crate) async fn approval_wait_budget(
     mut request: Request<Body>,
     next: axum::middleware::Next,
 ) -> AppResult<Response> {
+    use crate::services::execution_permission_dispatch::proposals::v2::connected;
+    if let Some(key) = connected::take_operation(request.headers_mut())? {
+        let path = request
+            .extensions()
+            .get::<OriginalUri>()
+            .map_or_else(|| request.uri().path(), |original| original.0.path());
+        if request.method() != Method::POST
+            || !(path.starts_with("/api/v1/llm/") || path.starts_with("/llm/"))
+        {
+            return Err(AppError::ValidationError(
+                "Connected approval requires a model request".into(),
+            ));
+        }
+        return connected::OPERATION
+            .scope(key, wait_budget(request, next))
+            .await;
+    }
+    wait_budget(request, next).await
+}
+
+async fn wait_budget(
+    mut request: Request<Body>,
+    next: axum::middleware::Next,
+) -> AppResult<Response> {
     use crate::services::approval_service::{CONNECTED_WAIT_BUDGET, WaitBudget};
     const HEADER: &str = "x-nyxid-approval-wait-seconds";
     let mut values = request.headers().get_all(HEADER).iter();
@@ -178,6 +202,48 @@ fn caller_identity<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn connected_approval_control_survives_nested_llm_routing_without_forwarding_header() {
+        use crate::services::execution_permission_dispatch::proposals::v2::connected;
+        use axum::{Router, middleware, routing::post};
+        use tower::ServiceExt;
+        let key = uuid::Uuid::new_v4().to_string();
+        let route = Router::new().nest(
+            "/api/v1",
+            Router::new().nest(
+                "/llm",
+                Router::new()
+                    .route(
+                        "/{provider}/v1/responses",
+                        post(|request: Request<Body>| async move {
+                            assert!(!request.headers().contains_key(connected::HEADER));
+                            connected::OPERATION.with(Clone::clone)
+                        }),
+                    )
+                    .layer(middleware::from_fn(approval_wait_budget)),
+            ),
+        );
+        let response = route
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/llm/openai/v1/responses")
+                    .header(connected::HEADER, format!("v1:{key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            key.as_bytes()
+        );
+    }
 
     #[tokio::test]
     async fn approval_wait_2874_validates_one_header_and_clamps_to_configured_timeout() {

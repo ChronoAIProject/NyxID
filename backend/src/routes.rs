@@ -393,6 +393,33 @@ macro_rules! exact_service_approval_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/approvals/connected-operations/capability",
+                "/api/v1/approvals/connected-operations/capability",
+                "handlers::connected_approvals::capability",
+                get(handlers::connected_approvals::capability),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval capability observation; no downstream request"
+                )
+            ),
+            (
+                "/approvals/connected-operations/{operation_key}/status",
+                "/api/v1/approvals/connected-operations/{operation_key}/status",
+                "handlers::connected_approvals::observe",
+                get(handlers::connected_approvals::observe),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval observation; no downstream request"
+                )
+            ),
+            (
+                "/approvals/connected-operations/{operation_key}/cancel",
+                "/api/v1/approvals/connected-operations/{operation_key}/cancel",
+                "handlers::connected_approvals::cancel",
+                post(handlers::connected_approvals::cancel).layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(1024)),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval retirement; no downstream request"
+                )
+            ),
+            (
                 "/approvals/exact-service/requests",
                 "/api/v1/approvals/exact-service/requests",
                 "handlers::exact_service_approvals::create_request",

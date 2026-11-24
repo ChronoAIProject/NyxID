@@ -4,6 +4,7 @@ use crate::models::execution_proposal::{
     ExecutionResult, PreparedAdapter, ProposalSource, ProposalV2, RetainedEffect,
 };
 pub(crate) mod blocking;
+pub(crate) mod connected;
 mod decision;
 mod delivery;
 mod readback;

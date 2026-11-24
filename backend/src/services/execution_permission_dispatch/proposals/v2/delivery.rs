@@ -28,6 +28,9 @@ pub(crate) fn attach_resume(auth: &mut crate::mw::auth::AuthUser, resume: Resume
         context.bind_generated_correlation(v);
     }
     context.descendant = old.descendant.clone();
+    if let Some(key) = old.connected_operation.get() {
+        let _ = context.connected_operation.set(key.clone());
+    }
     if let Some(machine) = old.machine.get() {
         let _ = context.machine.set(machine.clone());
     }

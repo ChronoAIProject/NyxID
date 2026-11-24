@@ -466,6 +466,12 @@ async fn llm_proxy_request_inner(
         &body_bytes,
         &headers,
     );
+    crate::services::execution_permission_dispatch::proposals::v2::connected::bind(
+        &state,
+        auth_user.execution_permission.as_ref(),
+        auth_user.assistant_chat.as_deref(),
+    )
+    .await?;
 
     let operation_path = if !auth_user.assistant_operation_scopes.is_empty()
         && provider_slug == "openai-codex"
@@ -1285,6 +1291,12 @@ async fn gateway_request_inner(
         &body_bytes,
         &headers,
     );
+    crate::services::execution_permission_dispatch::proposals::v2::connected::bind(
+        &state,
+        auth_user.execution_permission.as_ref(),
+        auth_user.assistant_chat.as_deref(),
+    )
+    .await?;
 
     // Parse body as JSON to extract model
     let body_json: serde_json::Value = if body_bytes.is_empty() {

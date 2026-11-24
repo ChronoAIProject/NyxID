@@ -597,6 +597,16 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
 }
 
 fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
+    // Retirement is bound to the original authenticated credential and receipt,
+    // and cannot approve or dispatch work or alter account policy.
+    if *method == Method::POST
+        && path
+            .strip_prefix("/api/v1/approvals/connected-operations/")
+            .and_then(|path| path.strip_suffix("/cancel"))
+            .is_some_and(|key| Uuid::parse_str(key).is_ok_and(|id| id.to_string() == key))
+    {
+        return false;
+    }
     // A restricted login credential can always revoke itself. The handler
     // requires the calling child identity and cannot revoke another credential.
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
@@ -747,6 +757,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
             // polling keeps its rule above; the handler requires exact API-key
             // identity for v2 and refuses delegated principals.
             | ["approvals", "requests", _, "status"]
+            | ["approvals", "connected-operations", ..]
             | ["nyxbot", "responses", _]
             | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
@@ -2493,6 +2504,30 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    #[test]
+    fn connected_approval_cleanup_is_original_credential_only_not_management_authority() {
+        let key = Uuid::new_v4();
+        let root = format!("/api/v1/approvals/connected-operations/{key}");
+        assert!(!api_key_management_write_requires_scope(
+            &Method::POST,
+            &format!("{root}/cancel")
+        ));
+        for suffix in ["status", "approve", "cancel/extra"] {
+            assert!(api_key_management_write_requires_scope(
+                &Method::POST,
+                &format!("{root}/{suffix}")
+            ));
+        }
+        assert!(api_key_management_write_requires_scope(
+            &Method::DELETE,
+            &format!("{root}/cancel")
+        ));
+        assert!(delegated_read_denied_path(&format!("{root}/status")));
+        assert!(delegated_read_denied_path(
+            "/api/v1/approvals/connected-operations/capability"
+        ));
+    }
 
     const DELEGATED_ALLOWED_MANAGEMENT_PATHS: &[&str] = &[
         "/api/v1/users/me",

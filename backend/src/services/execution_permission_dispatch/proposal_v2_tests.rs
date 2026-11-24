@@ -2,6 +2,9 @@ use super::super::proposals::{self, Decision, v2};
 use super::*;
 use crate::models::approval_request::ApprovalRequest;
 
+#[path = "proposal_connected_tests.rs"]
+mod connected_observation;
+
 async fn row(f: &Fixture) -> ApprovalRequest {
     let row = f
         .state

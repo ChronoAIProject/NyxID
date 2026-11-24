@@ -49,16 +49,59 @@ impl Drop for WaitGuard {
 }
 
 pub(crate) async fn abandon(db: &Database, id: &str, code: &str) -> AppResult<bool> {
+    abandon_matching(db, id, code, None).await
+}
+
+pub(in crate::services::execution_permission_dispatch) async fn abandon_observed(
+    db: &Database,
+    row: &ApprovalRequest,
+    snapshot: &authority::Snapshot,
+    code: &str,
+) -> AppResult<bool> {
+    abandon_matching(db, &row.id, code, Some((row, snapshot))).await
+}
+
+async fn abandon_matching(
+    db: &Database,
+    id: &str,
+    code: &str,
+    expected: Option<(&ApprovalRequest, &authority::Snapshot)>,
+) -> AppResult<bool> {
+    let mut filter = doc! {"_id":id,"execution_proposal.version":2,"execution_proposal.v2.background_allowed":{"$ne":true},
+    "execution_proposal.v2.state":{"$in":["pending","queued","preparing","waiting"]}};
+    if let Some((row, _)) = expected {
+        let p = proposal(row)?;
+        filter.insert("status", &row.status);
+        filter.insert("execution_proposal.v2.revision", p.revision);
+        filter.insert("execution_proposal.v2.state", &p.state);
+        filter.insert("expires_at", bson::DateTime::from_chrono(row.expires_at));
+        filter.insert(
+            "execution_proposal.v2.delivery_abandoned",
+            p.delivery_abandoned,
+        );
+        filter.insert(
+            "execution_proposal.v2.failure_code",
+            bson::to_bson(&p.failure_code).map_err(encoding)?,
+        );
+        filter.insert(
+            "execution_proposal.v2.claim_id",
+            bson::to_bson(&p.claim_id).map_err(encoding)?,
+        );
+        filter.insert("execution_proposal.v2.locator", &p.locator);
+    }
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run((db,id,code), |session,(db,id,code)| Box::pin(async move {
+    let authority = expected.map(|(_, snapshot)| snapshot);
+    session.start_transaction().and_run((db,code,&filter,authority), |session,(db,code,filter,authority)| Box::pin(async move {
         let result: AppResult<bool> = async {
             let Some(row) = db.collection::<ApprovalRequest>(REQUESTS).find_one_and_update(
-                doc! {"_id":*id,"execution_proposal.version":2,"execution_proposal.v2.background_allowed":{"$ne":true},
-                    "execution_proposal.v2.state":{"$in":["pending","queued","preparing","waiting"]}},
+                (*filter).clone(),
                 doc! {"$set":{"status":"expired","expires_at":bson::DateTime::now(),
                     "execution_proposal.v2.state":"not_sent","execution_proposal.v2.failure_code":*code},
                     "$unset":{"execution_proposal.v2.payload":"","execution_proposal.v2.result":""}},
             ).session(&mut *session).await? else { return Ok(false); };
+            if let Some(snapshot) = authority {
+                snapshot.fence(db, session).await?;
+            }
             super::super::lifecycle::retire_operations(db, session, std::slice::from_ref(&row.id)).await?;
             audit(db, session, &row.user_id, "execution_permission_wait_abandoned", &row.id).await?;
             Ok(true)
