@@ -424,12 +424,15 @@ Authored-skill renewal revalidates the original card, draft operation and saved
 initiating input in one transaction; an unrelated active turn cannot select the
 renewed review's source. Interrupted review recovery validates the saved source
 in its original home and binds any MCP activity to the retrying caller's chat.
-Before removing initiating history, grant cleanup scans original authored-draft
-claims in pages of 100. It removes exact unstarted proposals and their matching
-reserved publication targets, allowing a fresh draft afterward. First dispatch
+Each authored proposal retains its original review source through replacement
+of its reusable draft claim. Grant cleanup reads both claims and proposals in
+pages of 100 before removing initiating history. It removes unstarted proposals,
+their matching reserved publication targets, and queued repair notices tied to
+the grant. The owner can then request a fresh draft. First dispatch
 checks the original grant in the dispatch-marker transaction. A dispatched or
 uncertain operation keeps cleanup pending until reconciliation establishes its
-outcome. A verified publication and its attached skill retain their independent
+outcome. Cleanup removes the saved inbox source from a verified proposal.
+A verified publication and its attached skill retain their independent
 lifetime; only the original grant-bearing claim is removed. Mixed-grant or
 contradictory claim/operation evidence remains pending for repair. Final grant
 inventory checks these claims again before recording completion.
