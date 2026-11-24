@@ -141,7 +141,7 @@ export function ApprovalGrantsPage() {
             </p>
             {(grantModeKnownOff || hasDominantOrgPolicies) && (
               <Button asChild variant="outline" className="mt-2">
-                <Link to="/approvals/settings">{translateUi("Configure approval policies")}</Link>
+                <Link to="/settings" search={{ tab: "notifications" }}>{translateUi("Configure approval policies")}</Link>
               </Button>
             )}
           </div>

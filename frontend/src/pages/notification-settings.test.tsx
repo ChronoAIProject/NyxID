@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
-import { NotificationSettingsPage } from "./notification-settings";
+import { NotificationSettings } from "./notification-settings";
 const mocks = vi.hoisted(() => ({ save: vi.fn().mockResolvedValue({}) }));
 vi.mock("@/hooks/use-user-services", () => ({ useUserServices: () => ({ data: [] }) }));
 vi.mock("@/components/shared/approval-setup-wizard", () => ({ ApprovalSetupWizard: () => null }));
@@ -15,7 +15,7 @@ vi.mock("@/hooks/use-approvals", () => ({
 }));
 it("defaults Mentions in groups on for older settings and saves an explicit opt-out", async () => {
   const user = userEvent.setup();
-  render(<NotificationSettingsPage />);
+  render(<NotificationSettings />);
   const toggle = screen.getByRole("switch", { name: "Mentions in groups" });
   expect(toggle).toBeChecked();
   await user.click(toggle);
@@ -27,7 +27,7 @@ it("defaults Mentions in groups on for older settings and saves an explicit opt-
 it("preserves an omitted mention preference when saving another setting", async () => {
   mocks.save.mockClear();
   const user = userEvent.setup();
-  render(<NotificationSettingsPage />);
+  render(<NotificationSettings />);
   const timeout = screen.getByRole("spinbutton", { name: "Approval Timeout (seconds)" });
   await user.clear(timeout);
   await user.type(timeout, "60");

@@ -2,6 +2,7 @@ import { expect, test, type Page, type Locator } from "@playwright/test";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 import {
   billingAllowance,
+  billingBenefitPreview,
   billingCatalog,
   billingGrant,
   billingRow,
@@ -11,39 +12,6 @@ import {
   billingExpandedAllowances,
   billingExpandedRows,
 } from "../src/test/billing-fixture";
-
-function benefitPreview(
-  allowances = [
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "images",
-  ].map((metric) =>
-    billingAllowance(metric as Parameters<typeof billingAllowance>[0]),
-  ),
-  page = 1,
-) {
-  return {
-    summary: {
-      remaining: "2",
-      unreserved: "1.5",
-      held: "0.5",
-      pending_activation: "0",
-      pending_reclaim: "0",
-      expired_awaiting_cleanup: "0",
-      restricted: "0",
-      generated_at: "2026-10-01T00:00:00Z",
-    },
-    grants: [
-      { ...billingGrant({ expires_at: null }), available: "1.5", held: "0.5" },
-    ],
-    allowances,
-    total_grants: 1,
-    page,
-    per_page: 50,
-  };
-}
 
 async function billingApi(page: Page) {
   await mockDashboard(page);
@@ -78,7 +46,7 @@ async function billingApi(page: Page) {
     route.fulfill({ json: billingWallet() }),
   );
   await page.route("**/api/v1/billing/benefits?**", (route) =>
-    route.fulfill({ json: benefitPreview() }),
+    route.fulfill({ json: billingBenefitPreview() }),
   );
   await page.route("**/api/v1/billing/grants", (route) =>
     route.fulfill({
@@ -175,7 +143,7 @@ for (const width of [1440, 768, 390, 320]) {
       route.fulfill({ json: billingUsage(billingExpandedRows()) }),
     );
     await page.route("**/api/v1/billing/benefits?**", (route) =>
-      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+      route.fulfill({ json: billingBenefitPreview(billingExpandedAllowances()) }),
     );
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -815,7 +783,7 @@ for (const width of [1440, 390]) {
       const pageNumber = Number(
         new URL(route.request().url()).searchParams.get("page"),
       );
-      const data = benefitPreview();
+      const data = billingBenefitPreview();
       data.total_grants = 51;
       data.page = pageNumber;
       data.grants[0]!.id = `grant-${pageNumber}`;
@@ -855,7 +823,7 @@ test("singular benefit amounts and grant history read correctly on mobile", asyn
   await page.route("**/api/v1/billing/wallet", (route) =>
     route.fulfill({ json: { ...billingWallet(), available: "0" } }),
   );
-  const data = benefitPreview();
+  const data = billingBenefitPreview();
   data.summary.unreserved = "1";
   data.grants[0]!.available = "1";
   data.grants[0]!.amount = "1";
@@ -916,7 +884,7 @@ for (const theme of ["light", "dark"] as const) {
       }),
     );
     await page.route("**/api/v1/billing/benefits?**", (route) =>
-      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+      route.fulfill({ json: billingBenefitPreview(billingExpandedAllowances()) }),
     );
     await page.goto("/billing");
     const benefits = page.getByLabel("Current available benefits", {

@@ -64,7 +64,7 @@ export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: Building2, label: "Organizations", to: "/orgs", group: "navigation" },
   { icon: HardDrive, label: "Nodes", to: "/nodes", group: "navigation" },
   { icon: Radio, label: "Channel Bots", to: "/channel-bots", group: "navigation" },
-  { icon: Bell, label: "Notifications", to: "/approvals/settings", group: "navigation" },
+  { icon: Bell, label: "Notifications", to: "/settings", search: { tab: "notifications" }, group: "navigation" },
   { icon: ClipboardList, label: "Approval History", to: "/approvals/history", group: "navigation" },
   { icon: Lock, label: "Active Grants", to: "/approvals/grants", group: "navigation" },
   { icon: Code, label: "Developer Apps", to: "/developer/apps", group: "navigation" },

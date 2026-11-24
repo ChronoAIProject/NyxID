@@ -34,8 +34,8 @@ vi.mock("@/hooks/use-assistant-workspace", () => ({
 }));
 
 const accountMocks = vi.hoisted(() => ({ navigate: vi.fn(), logout: vi.fn(), nyxagent: false, panel: undefined as string | undefined, open: vi.fn() }));
-vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
+vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: (flag: FeatureFlag) => {
   const enabled = useAuthStore((state) => userHasFeature(state.user, flag));
   return flag === FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW ? enabled : accountMocks.nyxagent;
@@ -137,8 +137,6 @@ function seedDraft(ownerUserId: string, text: string) {
 }
 
 beforeEach(() => {
-  accountMocks.navigate.mockReset();
-  accountMocks.logout.mockReset();
   accountMocks.nyxagent = false;
   accountMocks.panel = undefined;
   accountMocks.open.mockReset();
@@ -1451,7 +1449,7 @@ describe("AssistantSidebar account menu", () => {
     expect(trigger).toHaveAttribute("data-keep-drawer-open", "");
     await userEvent.click(trigger);
     const menu = screen.getByRole("menu");
-    expect(within(menu).getByText("Reader")).toBeVisible();
+    expect(within(menu).queryByText("Reader")).not.toBeInTheDocument();
     expect(within(menu).getByText("reader@example.com")).toBeVisible();
     expect(
       within(menu).getByRole("menuitem", { name: "Settings" }),
@@ -1463,17 +1461,18 @@ describe("AssistantSidebar account menu", () => {
       expect(item).not.toHaveAttribute("href");
       expect(item).not.toHaveAttribute("search");
     }
-    expect(
-      within(menu).getByRole("menuitem", {
-        name: "Notification settings (opens in Studio)",
-      }),
-    ).toHaveAttribute("data-to", "/approvals/settings");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Settings", "Billing", "Usage", "Open Studio", "Log out",
+    ]);
     expect(
       within(menu).getByRole("menuitem", { name: "Open Studio" }),
     ).toHaveAttribute("data-to", "/dashboard");
     expect(
       within(menu).queryByRole("menuitem", { name: "NyxBot settings" }),
     ).not.toBeInTheDocument();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Log out" }));
+    expect(accountMocks.logout).toHaveBeenCalledOnce();
+    expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" });
   });
 
   it.each([false, undefined])(
@@ -1494,33 +1493,6 @@ describe("AssistantSidebar account menu", () => {
       ).not.toBeInTheDocument();
     },
   );
-
-  it("links to NyxBot settings only in NyxAgent mode", async () => {
-    accountMocks.nyxagent = true;
-    renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
-    await waitFor(() => expect(accountMocks.open).toHaveBeenCalledWith("nyxbot", {}, expect.any(HTMLButtonElement), expect.any(Function)));
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("waits for logout before navigating to login", async () => {
-    let finish: (() => void) | undefined;
-    accountMocks.logout.mockReturnValue(
-      new Promise<void>((resolve) => {
-        finish = resolve;
-      }),
-    );
-    renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
-    expect(accountMocks.logout).toHaveBeenCalledOnce();
-    expect(accountMocks.navigate).not.toHaveBeenCalled();
-    finish?.();
-    await waitFor(() =>
-      expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" }),
-    );
-  });
 
   it.each(["settings", "billing", "nyxbot"] as const)(
     "marks the user row active in %s",

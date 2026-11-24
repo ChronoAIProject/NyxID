@@ -75,8 +75,6 @@ vi.mock("@/hooks/use-assistant-onboarding", () => ({
   useAssistantOnboarding: () => ({ data: undefined }),
   useHideSuggestions: () => ({ mutate: () => undefined }),
   useShowSuggestions: () => ({ mutate: () => undefined }),
-  useIntroReplay: (select: (state: { pending: boolean; consume: () => void }) => unknown) =>
-    select({ pending: false, consume: () => undefined }),
 }));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
 vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));

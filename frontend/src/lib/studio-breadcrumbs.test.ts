@@ -3,6 +3,7 @@ import { router } from "@/router";
 import { buildStudioBreadcrumbs } from "./studio-breadcrumbs";
 
 const REDIRECTS = new Set([
+  "/approvals/settings",
   "/api-keys",
   "/connections",
   "/settings/devices/onboard",
@@ -170,6 +171,7 @@ describe("Studio breadcrumbs", () => {
     ["/integration-guide", "core", "Core SDK"],
     ["/integration-guide", "raw", "Raw API"],
     ["/billing", "billing", "Billing"],
+    ["/settings", "notifications", "Notifications"],
     ["/billing", "usage", "Usage"],
     ["/admin/usage", "dashboard", "Dashboard"],
     ["/admin/usage", "list", "List"],
