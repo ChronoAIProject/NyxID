@@ -520,6 +520,7 @@
   "This setup expired. Refresh its progress before continuing.": "This setup expired. Refresh its progress before continuing.",
   "This setup expired. Start again to create a new bot.": "This setup expired. Start again to create a new bot.",
   "This setup was started with the previous flow. Finish its Telegram approval, then complete the saved connection below": "This setup was started with the previous flow. Finish its Telegram approval, then complete the saved connection below",
+  "This sign-in could not be confirmed. Check the setup link and try again.": "This sign-in could not be confirmed. Check the setup link and try again.",
   "This will remove the routing for this conversation. Messages will no longer be relayed to the assigned agent.": "This will remove the routing for this conversation. Messages will no longer be relayed to the assigned agent.",
   "Thread: ": "Thread: ",
   "To connect an existing Telegram manager, enter its bot token here. NyxID keeps its bot creation webhook and adds conversation routing. You can then choose a public default agent or an exact chat route.": "To connect an existing Telegram manager, enter its bot token here. NyxID keeps its bot creation webhook and adds conversation routing. You can then choose a public default agent or an exact chat route.",

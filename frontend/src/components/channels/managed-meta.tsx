@@ -127,6 +127,7 @@ function MetaConnectForm({
       if (!mounted.current) return;
       if (!result) {
         popup.current.close();
+        setError(t("This sign-in could not be confirmed. Check the setup link and try again."));
         return;
       }
       popupSession.current = result.session_id;

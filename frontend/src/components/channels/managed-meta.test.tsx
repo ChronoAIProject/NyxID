@@ -112,7 +112,7 @@ it.each(["assets", "installing"] as const)("prevents a finish from the old %s se
   client.clear();
 });
 
-it.each([true, false])("uses the server pin after a concurrent tracked start (local start won: %s)", async (localWon) => {
+it.each(["local", "other", "unavailable"] as const)("uses the server pin after a concurrent tracked start (%s)", async (outcome) => {
   const first = "587da031-d973-493f-985a-9765d3c8bde0";
   const other = "2d2c5f73-d1e1-43a8-869b-b8493b472967";
   const local = "16a17d85-5828-4886-9827-0e9eb96070e0";
@@ -125,11 +125,17 @@ it.each([true, false])("uses the server pin after a concurrent tracked start (lo
     callback_url: null, last_error: null, delivery_status: null,
   };
   let pin = first;
-  vi.spyOn(api, "get").mockImplementation(async (path) =>
-    path === "/channel-connect-links/link" ? { ...row, connection_id: pin } : {
+  let unavailable = false;
+  vi.spyOn(api, "get").mockImplementation(async (path) => {
+    if (path === "/channel-connect-links/link") {
+      if (unavailable) throw new Error("Link status unavailable");
+      return { ...row, connection_id: pin };
+    }
+    return {
       session_id: path.split("/").at(-1), platform: "messenger",
       status: "pending", bot_id: null, assets: [],
-    });
+    };
+  });
   let finishStart!: () => void;
   vi.spyOn(api, "post").mockImplementation(async (path) => {
     if (path === "/channel-connect-links/preview") return row;
@@ -155,12 +161,17 @@ it.each([true, false])("uses the server pin after a concurrent tracked start (lo
   const storageKey = "meta-inbox:owner:messenger:personal:new:link";
   await waitFor(() => expect(sessionStorage.getItem(storageKey)).toBe(other));
   expect(start).toBeDisabled();
+  const localWon = outcome === "local";
   pin = localWon ? local : other;
+  unavailable = outcome === "unavailable";
   await act(async () => finishStart());
   await waitFor(() => expect(start).toBeEnabled());
   expect(popup.location.href).toBe(localWon ? url : "about:blank");
   expect(popup.close).toHaveBeenCalledTimes(localWon ? 0 : 1);
   expect(sessionStorage.getItem(storageKey)).toBe(pin);
+  if (unavailable) {
+    expect(screen.getByText("This sign-in could not be confirmed. Check the setup link and try again.")).toBeVisible();
+  }
   unmount();
   client.clear();
 });

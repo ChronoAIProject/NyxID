@@ -520,6 +520,7 @@
   "This setup expired. Refresh its progress before continuing.": "此设置已过期。继续前请刷新其进度。",
   "This setup expired. Start again to create a new bot.": "此设置已过期。请重新开始以创建新的机器人。",
   "This setup was started with the previous flow. Finish its Telegram approval, then complete the saved connection below": "此设置是通过旧流程开始的。请先完成其 Telegram 批准，然后完成下方已保存的连接",
+  "This sign-in could not be confirmed. Check the setup link and try again.": "无法确认此次登录。请检查设置链接并重试。",
   "This will remove the routing for this conversation. Messages will no longer be relayed to the assigned agent.": "这将删除此对话的路由。消息将不再转发给指定的智能体。",
   "Thread: ": "对话： ",
   "To connect an existing Telegram manager, enter its bot token here. NyxID keeps its bot creation webhook and adds conversation routing. You can then choose a public default agent or an exact chat route.": "如需连接现有的 Telegram 管理机器人，请在此输入其机器人令牌。NyxID 会保留其机器人创建 Webhook，并添加对话路由。然后你可以选择一个公开默认智能体或一个精确聊天路由。",
