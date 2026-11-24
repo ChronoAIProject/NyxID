@@ -126,6 +126,72 @@ fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
     }
 }
 
+/// Renew the saved review, even while another inbox is using its home. The
+/// original card, claim, proposal and source are checked in one transaction.
+pub async fn renew(
+    db: &Database,
+    chat: &ChatAuthority,
+    original_id: &str,
+    binding: &Value,
+) -> AppResult<AssistantAcknowledgement> {
+    acks::expire(db, &chat.user_id, &chat.conversation_id).await?;
+    let db = db.clone();
+    let chat = chat.clone();
+    let original_id = original_id.to_owned();
+    let binding = binding.clone();
+    let mut session = db.client().start_session().await?;
+    let (card, activity) = session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<_> = Box::pin(async {
+            let original = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&original_id,"user_id":&chat.user_id,
+                    "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,"tool_name":review::TOOL})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+            review::require_renewal_of(&original, &binding)?;
+            let reference = original.authored_skill.as_ref().ok_or_else(conflict)?;
+            let proposal = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&reference.proposal_id,"owner_id":&chat.user_id,"agent_id":&reference.agent_id,
+                    "source":"authored","revision":reference.revision})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+            let skills_revision = binding["skills_revision"].as_i64().ok_or_else(conflict)?;
+            if super::super::assistant_learning_publication::binding(&proposal,proposal.publication.as_ref().ok_or_else(conflict)?,skills_revision) != binding {
+                return Err(conflict());
+            }
+            fence_agent(&db,&proposal,session).await?;
+            touch_proposal(&db,&proposal,session).await?;
+            let saved = db.collection::<bson::Document>(CLAIMS).find_one_and_update(
+                doc! {"claim.proposal_id":&proposal.id,"owner_id":&chat.user_id,"agent_id":&proposal.agent_id},
+                doc! {"$inc":{"fence":1_i64}}).session(&mut *session).await?;
+            let origin = if let Some(saved) = saved {
+                let claim:AuthoredDraftClaim = bson::from_document(saved.get_document("claim").map_err(|_|conflict())?.clone()).map_err(|_|conflict())?;
+                if claim.conversation_id != original.conversation_id || claim.api_key_id != original.api_key_id
+                    || claim.creation_turn_id != original.creation_turn_id || claim.requested_turn_id != original.requested_turn_id
+                    || bson::to_bson(&claim.meta_contexts).map_err(|_|conflict())? != bson::to_bson(&original.meta_contexts).map_err(|_|conflict())? {
+                    return Err(conflict());
+                }
+                origin(&claim)
+            } else {
+                // Retained legacy cards still require their actual original
+                // input; absence of a claim does not borrow today's turn.
+                acks::RequestOrigin {
+                    initiating_input_id:None,meta_contexts:original.meta_contexts.clone(),
+                    invocation_id:original.invocation_id.clone(),creation_turn_id:original.creation_turn_id.clone(),
+                    requested_turn_id:original.requested_turn_id.clone(),voice_request_id:original.voice_request_id.clone(),
+                    trigger_run_id:original.trigger_run_id.clone(),routing:original.routing.clone(),
+                }
+            };
+            acks::request_in_session(&db,&chat,acks::Request {
+                kind:"action",service:None,tool:Some(review::TOOL),arguments:Some(&binding),
+                summary:"Publish this reviewed private Ornn skill and attach its exact pinned version to the agent.",platform:false,
+            },Some(&origin),chat.approval_options(),session).await
+        }).await;
+        mutations::transaction_result(result)
+    }).await.map_err(mutations::map_transaction_error)?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
+    Ok(card)
+}
+
 /// First dispatch and erasure contend on the original grant and proposal.
 /// Already-dispatched publication continues its independent reconciliation.
 pub(crate) async fn fence_proposal_in_session(
