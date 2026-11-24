@@ -4769,3 +4769,68 @@ async fn manual_delete_audit_is_captured_before_successful_remote_retry_changes_
     );
     server.verify().await;
 }
+
+#[tokio::test]
+async fn sweep_attributes_rejection_to_the_credential_that_made_the_provider_request() {
+    for stage in ["proposed-token", "subscription"] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        state.db.collection::<bson::Document>(BOTS).update_one(doc! {"_id":&bot.id},doc! {"$set":{
+            "meta_binding.expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::days(2))}}).await.unwrap();
+        Mock::given(method("GET"))
+            .and(path("/refresh_access_token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token":"token-b","expires_in":5184000})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let invalid = ResponseTemplate::new(400)
+            .set_body_json(json!({"error":{"code":190,"message":"expired"}}));
+        let identity = if stage == "proposed-token" {
+            invalid.clone()
+        } else {
+            ResponseTemplate::new(200).set_body_json(
+                json!({"user_id":"222","username":"professional","account_type":"Business"}),
+            )
+        };
+        Mock::given(method("GET"))
+            .and(path("/v25.0/me"))
+            .and(header("authorization", "Bearer token-b"))
+            .respond_with(identity)
+            .mount(&server)
+            .await;
+        if stage == "subscription" {
+            Mock::given(method("GET"))
+                .and(path("/v25.0/222/subscribed_apps"))
+                .and(header("authorization", "Bearer token-b"))
+                .respond_with(invalid)
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        sweep_service(&state, &service(&state, &server))
+            .await
+            .unwrap();
+        let current = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        let token =
+            super::super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &current)
+                .await
+                .unwrap();
+        let binding = current.meta_binding.as_ref().unwrap();
+        if stage == "proposed-token" {
+            assert_eq!(token.as_str(), "fixture-token");
+            assert!(!binding.grant_reconnect_required);
+            assert_eq!(binding.subscription, "active");
+        } else {
+            assert_eq!(token.as_str(), "token-b");
+            assert!(binding.grant_reconnect_required);
+            assert_eq!(binding.subscription, "reconnect_required");
+            assert!(binding.generation > bot.meta_binding.as_ref().unwrap().generation);
+        }
+        server.verify().await;
+    }
+}
