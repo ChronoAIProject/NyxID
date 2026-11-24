@@ -1731,24 +1731,24 @@ it("shows only the committed parts of a linked memory retry in the settled activ
     ...BASE, toolCalls: [original, first, part("duplicate receipt", 1, true), pending, unrelated],
   }} />);
   fireEvent.click(screen.getByRole("button", { name: /actions/ }));
-  expect(screen.getByText("Memory recovery saved 1 of 2 parts. The remaining saves are unconfirmed.")).toBeVisible();
+  expect(screen.getByText("Confirmed saves linked by NyxBot to this failure (1 of 2).")).toBeVisible();
   expect(screen.getByText("Memory save unconfirmed")).toBeVisible();
   expect(screen.getByText(/Validation: the note exceeds 500 characters/)).toBeVisible();
 
   rerender(<ChatMessageBubble message={{
     ...BASE, toolCalls: [original, first, pending, part("second", 2, true), unrelated],
   }} />);
-  expect(screen.getByText("Memory recovery saved all 2 parts.")).toBeVisible();
-  expect(screen.getByRole("button", { name: /actions/ })).not.toHaveTextContent("failed");
+  expect(screen.getByText("Confirmed saves linked by NyxBot to this failure (2 of 2).")).toBeVisible();
+  expect(screen.getByRole("button", { name: /actions/ })).toHaveTextContent("1 failed");
 
   rerender(<ChatMessageBubble message={{ ...BASE, toolCalls: [original, part("retry", 1, true, 1)] }} />);
-  expect(screen.getByText("Memory saved after retry.")).toBeVisible();
+  expect(screen.getByText("Confirmed saves linked by NyxBot to this failure (1 of 1).")).toBeVisible();
 
   rerender(<ChatMessageBubble message={{
     ...BASE, activityTotal: 43, toolCalls: [first, pending, unrelated],
   }} />);
-  expect(screen.getByText("Recent activity confirms 1 of 2 memory recovery parts.")).toBeVisible();
-  expect(screen.queryByText("Memory recovery saved all 2 parts.")).toBeNull();
+  expect(screen.getByText("Recent activity shows 1 of 2 confirmed saves linked by NyxBot to an earlier failure.")).toBeVisible();
+  expect(screen.queryByText("Confirmed saves linked by NyxBot to this failure (2 of 2).")).toBeNull();
   expect(screen.getByText("Memory save unconfirmed")).toBeVisible();
 });
 

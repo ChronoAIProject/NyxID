@@ -30,7 +30,7 @@ export function withAssistantTrace(message: string, traceId: string | null): str
     : message;
 }
 
-/** Toasts carry the explanation; the inline notice retains the support ID. */
+/** Remove a support ID from a message before using it as a summary. */
 export function assistantErrorSummary(message: string): string {
   return message.replace(/\nTrace ID: [a-zA-Z0-9_-]{8,128}$/, "");
 }

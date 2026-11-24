@@ -111,6 +111,14 @@ struct ActivityDecisionResponse {
 }
 
 #[derive(Serialize)]
+struct MemoryRecoveryResponse {
+    failed_activity_id: String,
+    part: u8,
+    total: u8,
+    committed: bool,
+}
+
+#[derive(Serialize)]
 pub struct ActivityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<ActivityDecisionResponse>,
@@ -123,7 +131,7 @@ pub struct ActivityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<crate::models::assistant_conversation::ToolFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    memory_recovery: Option<crate::models::assistant_conversation::MemoryRecovery>,
+    memory_recovery: Option<MemoryRecoveryResponse>,
 }
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
@@ -140,7 +148,12 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             started_at: row.started_at,
             ended_at: row.ended_at,
             failure: row.failure,
-            memory_recovery: row.memory_recovery,
+            memory_recovery: row.memory_recovery.map(|part| MemoryRecoveryResponse {
+                failed_activity_id: part.failed_activity_id,
+                part: part.part,
+                total: part.total,
+                committed: part.committed,
+            }),
         }
     }
 }

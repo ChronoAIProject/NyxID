@@ -896,6 +896,8 @@ pub(crate) fn description(name: &str) -> &'static str {
             Use part:1,total:1 for one note. For a split use one write per part, starting at 1, with the same total \
             on each call. A split requires a failed new note. Retrying a replacement must use the original replace_id and one part. \
             Use the same agent and link only writes meant to recover the original fact. \
+            Retry an approved call with the same arguments and its acknowledgement_id. If the receipt has \
+            recovery_status:unlinked_after_approval, report that save independently. \
             Report which parts were saved and any unresolved parts. Inspect current notes before repeating an unconfirmed write."
         }
         "forget" => "Delete one of your memory notes by id.",

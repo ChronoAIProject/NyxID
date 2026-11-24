@@ -291,7 +291,6 @@ pub struct TurnActivity {
 
 /// Content-free linkage between a rejected memory write and one recovery part.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct MemoryRecovery {
     pub failed_activity_id: String,
     pub part: u8,

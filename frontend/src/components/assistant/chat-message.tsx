@@ -346,13 +346,8 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
     }
   }
   const failed = steps.filter((step) => step.status === "error").length
-    + tools.filter((tool) => {
-      const recovery = memoryRecoveries.get(tool.id);
-      const part = tool.memoryRecovery;
-      return activityPresentationStatus(activityDecisionPresentation(tool.decision)?.status ?? tool.status, tool.failure?.kind) === "error"
-        && !(tool.name === "nyxid__remember" && recovery && recovery.saved.size === recovery.total)
-        && !(part && memoryRecoveries.get(part.failed_activity_id)?.saved.has(part.part));
-    }).length;
+    + tools.filter((tool) => !(settled && tool.name === "nyxid__remember" && tool.memoryRecovery?.committed)
+      && activityPresentationStatus(activityDecisionPresentation(tool.decision)?.status ?? tool.status, tool.failure?.kind) === "error").length;
   const onTool = new Map<string, NyxAgentAcknowledgement[]>();
   const loose: NyxAgentAcknowledgement[] = [];
   for (const row of decisions) {
@@ -472,16 +467,15 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                 ) : null}
                 {recovery ? (
                   <span className="break-words pl-5">
-                    {recovery.saved.size < recovery.total
-                      ? translateUi("Memory recovery saved {{saved}} of {{total}} parts. The remaining saves are unconfirmed.", { saved: recovery.saved.size, total: recovery.total })
-                      : recovery.total === 1
-                        ? translateUi("Memory saved after retry.")
-                        : translateUi("Memory recovery saved all {{total}} parts.", { total: recovery.total })}
+                    {translateUi("Confirmed saves linked by NyxBot to this failure ({{saved}} of {{total}}).", {
+                      saved: recovery.saved.size,
+                      total: recovery.total,
+                    })}
                   </span>
                 ) : null}
                 {retainedRecovery?.firstRetainedId === tool.id ? (
                   <span className="break-words pl-5">
-                    {translateUi("Recent activity confirms {{saved}} of {{total}} memory recovery parts.", {
+                    {translateUi("Recent activity shows {{saved}} of {{total}} confirmed saves linked by NyxBot to an earlier failure.", {
                       saved: retainedRecovery.saved.size,
                       total: retainedRecovery.total,
                     })}

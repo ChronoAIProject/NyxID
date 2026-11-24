@@ -58,6 +58,31 @@ async fn assert_reason(state: &AppState, auth: &McpAuthContext, args: Value, rea
     );
 }
 
+#[test]
+fn remember_rejection_reference_does_not_count_as_continuation_progress() {
+    let response = |reason, id| {
+        native_team_tool_result(
+            None,
+            "nyxid__remember",
+            &json!({"details":{"reason":reason,"failed_activity_id":id}}),
+            true,
+        )
+    };
+    let first = response("note_too_long", "one");
+    let repeated = response("note_too_long", "two");
+    let different = response("note_empty", "three");
+    let digest = |response: &Response| {
+        response
+            .extensions()
+            .get::<ToolResultDigest>()
+            .unwrap()
+            .0
+            .clone()
+    };
+    assert_eq!(digest(&first), digest(&repeated));
+    assert_ne!(digest(&first), digest(&different));
+}
+
 #[tokio::test]
 async fn remember_safe_reasons_reach_mcp_and_persisted_activity() {
     let f = orchestrator_fixture("remember_safe_reasons").await;
@@ -260,7 +285,10 @@ async fn remember_recovery_links_only_its_parts_and_survives_settlement() {
 
     let rejected = result(&call(&f.state, &auth, part(" ", 2, 2)).await);
     assert_eq!(rejected["details"]["reason"], "note_empty");
-    assert_eq!(rejected["recovery"]["committed"], false);
+    assert!(
+        rejected["recovery"].is_null(),
+        "validation runs before reserving a part"
+    );
     let saved = result(&call(&f.state, &auth, part("Second fact", 2, 2)).await);
     assert_eq!(saved["recovery"]["committed"], true);
 
@@ -311,7 +339,6 @@ async fn remember_recovery_links_only_its_parts_and_survives_settlement() {
         receipts,
         [
             json!({"failed_activity_id":original,"part":1,"total":2,"committed":true}),
-            json!({"failed_activity_id":original,"part":2,"total":2,"committed":false}),
             json!({"failed_activity_id":original,"part":2,"total":2,"committed":true}),
         ]
     );
@@ -324,6 +351,115 @@ async fn remember_recovery_links_only_its_parts_and_survives_settlement() {
         3
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn remember_recovery_claims_only_after_confirmation() {
+    use crate::{
+        models::{assistant_settings::AccessMode, trigger_schedule::ConfirmationPolicy},
+        services::{
+            assistant_acknowledgement_service as acks, assistant_nyxagent as engine,
+            assistant_settings_service,
+        },
+    };
+
+    for continuation in [false, true] {
+        let f = orchestrator_fixture("remember_recovery_approval").await;
+        let mut auth = if continuation {
+            super::machine_mcp_tests::trigger_auth(&f, Some(ConfirmationPolicy::Changes)).await
+        } else {
+            assistant_settings_service::update(
+                &f.state.db,
+                &f.owner,
+                assistant_settings_service::Update {
+                    access_mode: Some(AccessMode::AskEveryTime),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            super::machine_mcp_tests::authenticated_machine_chat(&f).await
+        };
+        let failed = result(&call(&f.state, &auth, json!({"text":"x".repeat(501)})).await);
+        let original = failed["details"]["failed_activity_id"].as_str().unwrap();
+        let mut args = json!({
+            "text":"A business fact",
+            "recovery":{"failed_activity_id":original,"part":1,"total":1}
+        });
+        let mut invalid = args.clone();
+        invalid["recovery"]["part"] = json!(2);
+        assert_eq!(
+            result(&call(&f.state, &auth, invalid).await)["error"],
+            "memory_recovery_unavailable"
+        );
+        let mut unrelated = args.clone();
+        unrelated["recovery"]["failed_activity_id"] = json!(uuid::Uuid::new_v4());
+        assert_eq!(
+            result(&call(&f.state, &auth, unrelated).await)["error"],
+            "memory_recovery_unavailable"
+        );
+        let mut forged = args.clone();
+        forged["recovery"]["committed"] = json!(true);
+        assert_eq!(
+            result(&call(&f.state, &auth, forged).await)["details"]["reason"],
+            "invalid_note"
+        );
+        assert!(
+            acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let card = result(&call(&f.state, &auth, args.clone()).await);
+        assert_eq!(card["error"], "acknowledgement_required", "{card}");
+        let id = card["acknowledgement_id"].as_str().unwrap();
+        let pending = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+        assert!(
+            pending
+                .active_turn
+                .unwrap()
+                .activities
+                .iter()
+                .all(|activity| { activity.memory_recovery.is_none() })
+        );
+
+        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+            .await
+            .unwrap();
+        if continuation {
+            // Model the live continuation snapshot after the original turn left
+            // the active slot, retaining the trigger policy on the same thread.
+            let next = uuid::Uuid::new_v4().to_string();
+            f.state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .update_one(
+                    doc! {"_id":&f.row.id},
+                    doc! {"$set":{"active_turn.turn_id":&next,"active_turn.activities":[]}},
+                )
+                .await
+                .unwrap();
+            auth.chat.as_mut().unwrap().turn_id = Some(next);
+        }
+        args["acknowledgement_id"] = json!(id);
+        let save = result(&call(&f.state, &auth, args.clone()).await);
+        assert!(save["remembered"].is_string(), "{save}");
+        if continuation {
+            assert_eq!(save["recovery_status"], "unlinked_after_approval");
+            assert!(save["recovery"].is_null());
+        } else {
+            assert_eq!(save["recovery"]["committed"], true);
+        }
+        let replay = call(&f.state, &auth, args).await;
+        assert_eq!(replay["result"]["isError"], true, "{replay}");
+        let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        assert_eq!(agent.memory.len(), 1);
+        f.state.db.drop().await.unwrap();
+    }
 }
 
 #[tokio::test]

@@ -2641,9 +2641,8 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
     )
 }
 
-/// Schedule creation has no client-generated object ID. Approval handles and
-/// the universal-tool wrapper are transport, not a different creation. Keep the
-/// old digest as a lookup candidate for replies written by older replicas.
+/// Approval handles, memory recovery links and the universal-tool wrapper do
+/// not change what the tool writes. Keep the exact digest for older replicas.
 fn chat_retry_digest(params: &serde_json::Value) -> String {
     let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
         let arguments = params["arguments"]["arguments_json"]
@@ -5027,6 +5026,21 @@ fn native_team_tool_result(
     is_error: bool,
 ) -> Response {
     let mut response = tool_result(request_id, &value.to_string(), is_error);
+    if name == "nyxid__remember" && value["details"]["failed_activity_id"].is_string() {
+        // The reference identifies this activity, so identical rejections
+        // still count as the same result for continuation progress.
+        let mut stable = value.clone();
+        stable["details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_activity_id");
+        response
+            .extensions_mut()
+            .insert(result_digest(&serde_json::json!({
+                "content": [{"type":"text","text":stable.to_string()}],
+                "isError": is_error,
+            })));
+    }
     // Only a trusted native remember diagnostic may enrich persisted activity.
     // Never interpret arbitrary downstream result text as safe UI metadata.
     if name == "nyxid__remember"
@@ -5123,22 +5137,8 @@ async fn handle_account_tool(
                 true,
             );
         };
-        let (value, is_error) = if name == "nyxid__remember" {
-            Box::pin(crate::services::assistant_memory_recovery::run(
-                state,
-                chat,
-                args,
-                |args| async move {
-                    Box::pin(super::assistant_team::execute_tool(
-                        state, chat, name, &args,
-                    ))
-                    .await
-                },
-            ))
-            .await
-        } else {
-            Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await
-        };
+        let (value, is_error) =
+            Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
         if name == "nyxid__list_schedules" && !is_error {
             let content = vec![serde_json::json!({"type":"text","text":value.to_string()})];
             let (content, digest) =
