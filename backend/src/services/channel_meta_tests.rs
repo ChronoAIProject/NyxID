@@ -2564,3 +2564,118 @@ async fn ordinary_delivery_handler_fences_org_admin_demotion_for_suspend_and_res
         ));
     }
 }
+
+#[tokio::test]
+async fn ownerless_scoped_metadata_erases_only_without_an_unattributed_saved_reply_and_never_acknowledges_a_blocked_request()
+ {
+    use crate::services::channel_text_delivery as journal;
+    for has_parentless_receipt in [false, true] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        let source = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &source, "channel_bot_id": &bot.id,
+            "platform_message_id": "legacy-scoped-provider-id"})
+            .await
+            .unwrap();
+        let logical_key = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "a".repeat(64));
+        if has_parentless_receipt {
+            let plan = journal::begin(
+                &state.db,
+                &logical_key,
+                &bot.user_id,
+                &source,
+                "legacy-hash",
+                1,
+            )
+            .await
+            .unwrap();
+            state.db.collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .update_one(doc! {"_id": &plan.id}, doc! {"$set": {
+                    "parts.0.platform_message_id": "legacy-saved-provider-id", "parts.0.state": "sent",
+                }}).await.unwrap();
+        }
+        let service = service(&state, &server);
+        let signed = provider_request(json!(900), Utc::now().timestamp());
+        let request = accept_provider_request(&service, "instagram", &signed, true)
+            .await
+            .unwrap();
+        // Signed revocation independently proves remote grant retirement, so
+        // this regression exercises local erasure without a provider DELETE.
+        accept_provider_request(&service, "instagram", &signed, false)
+            .await
+            .unwrap();
+        provider::reconcile_with_service(&state, &service)
+            .await
+            .unwrap();
+        let id = request["confirmation_code"].as_str().unwrap();
+        let status = request_status(&state.db, "instagram", id).await.unwrap();
+        if has_parentless_receipt {
+            assert_eq!(status["status"], "pending");
+            let retained = journal::load(&state.db, &logical_key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(retained.channel_bot_id.is_none());
+            assert_eq!(
+                retained.parts[0].platform_message_id.as_deref(),
+                Some("legacy-saved-provider-id")
+            );
+            assert!(
+                !channel_bot_service::get_bot(&state.db, &bot.id)
+                    .await
+                    .unwrap()
+                    .is_active
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                    .count_documents(doc! {"_id": &source})
+                    .await
+                    .unwrap(),
+                1
+            );
+            let pending = state
+                .db
+                .collection::<bson::Document>(provider::REQUESTS)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!pending.contains_key("completed_at") && !pending.contains_key("expires_at"));
+            assert!(
+                state
+                    .db
+                    .collection::<bson::Document>("channel_meta_erasure_fences")
+                    .find_one(doc! {"_id": &bot.id, "local_data_erased_at": {"$exists": true}})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert_eq!(status["status"], "completed");
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                    .count_documents(doc! {"channel_bot_id": &bot.id})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(
+                state
+                    .db
+                    .collection::<ChannelBot>(BOTS)
+                    .find_one(doc! {"_id": &bot.id})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
