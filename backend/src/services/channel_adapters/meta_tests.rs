@@ -1379,7 +1379,7 @@ async fn saved_meta_reply_journals_erase_legacy_sources_and_fence_late_creation_
                     )
                     .await
                     .unwrap();
-                crate::services::personal_erasure_service::channel::erase_provider_inbox(
+                crate::services::personal_erasure_service::erase_provider_inbox(
                     &state,
                     &bot.id,
                     &bot.meta_binding.as_ref().unwrap().grant_id,
@@ -1421,7 +1421,7 @@ async fn saved_meta_reply_journals_erase_legacy_sources_and_fence_late_creation_
                 .is_active
         );
         // Erasure retries after source deletion remain idempotent.
-        crate::services::personal_erasure_service::channel::erase_provider_inbox(
+        crate::services::personal_erasure_service::erase_provider_inbox(
             &state,
             &bot.id,
             &bot.meta_binding.as_ref().unwrap().grant_id,

@@ -392,13 +392,11 @@ impl MetaService<'_> {
         if let Err(error) =
             super::channel_adapters::meta_managed::require_enrollment(self.db, actor, platform)
                 .await
-        {
-            if existing
+            && existing
                 .as_ref()
                 .is_none_or(|bot| bot.platform != platform || !bot.is_active)
-            {
-                return Err(error);
-            }
+        {
+            return Err(error);
         }
         self.live_actor(actor, owner).await?;
         if label.trim().is_empty() || label.len() > 128 {
@@ -596,10 +594,9 @@ impl MetaService<'_> {
         if let Err(error) =
             super::channel_adapters::meta_managed::require_enrollment(self.db, actor, platform)
                 .await
+            && session.reconnect_bot_id.is_none()
         {
-            if session.reconnect_bot_id.is_none() {
-                return Err(error);
-            }
+            return Err(error);
         }
 
         self.live_actor(actor, &session.owner_id).await?;
@@ -908,10 +905,9 @@ impl MetaService<'_> {
         if let Err(error) =
             super::channel_adapters::meta_managed::require_enrollment(self.db, actor, &s.platform)
                 .await
+            && s.reconnect_bot_id.is_none()
         {
-            if s.reconnect_bot_id.is_none() {
-                return Err(error);
-            }
+            return Err(error);
         }
         if s.status == "completed" {
             if s.selected_asset_id.as_deref() != Some(asset_id) {
@@ -1656,14 +1652,13 @@ pub(crate) async fn sweep_service(
         let Some((bot,lease))=claim_due(service.db).await? else {return Ok(());};
         let result=if !bot.is_active {
             let result = service.disconnect(&bot).await;
-            if result.is_ok() && bot.credential_source != "platform" {
-                if let Ok(live) = super::channel_bot_service::get_bot(service.db, &bot.id).await {
-                    if live.meta_binding.as_ref().is_some_and(|binding| binding.subscription == "removed") {
-                        let grant_id = live.meta_binding.as_ref().map(|binding| binding.grant_id.as_str()).unwrap_or_default();
-                        if let Err(error) = super::personal_erasure_service::erase_provider_inbox(state, &bot.id, grant_id).await {
-                            tracing::warn!(bot_id=%bot.id,error_code=error.error_code(),"Manual Meta purge remains pending");
-                        }
-                    }
+            if result.is_ok() && bot.credential_source != "platform"
+                && let Ok(live) = super::channel_bot_service::get_bot(service.db, &bot.id).await
+                && live.meta_binding.as_ref().is_some_and(|binding| binding.subscription == "removed")
+            {
+                let grant_id = live.meta_binding.as_ref().map(|binding| binding.grant_id.as_str()).unwrap_or_default();
+                if let Err(error) = super::personal_erasure_service::erase_provider_inbox(state, &bot.id, grant_id).await {
+                    tracing::warn!(bot_id=%bot.id,error_code=error.error_code(),"Manual Meta purge remains pending");
                 }
             }
             result

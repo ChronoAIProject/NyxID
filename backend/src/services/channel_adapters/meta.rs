@@ -556,14 +556,13 @@ fn parse_event(inbox: Inbox, bot_id: &str, asset: &str, event: &Value) -> Option
     {
         return None;
     }
-    if let Some(quoted) = message.get("reply_to") {
-        if quoted.get("story").is_some()
+    if let Some(quoted) = message.get("reply_to")
+        && (quoted.get("story").is_some()
             || quoted["mid"]
                 .as_str()
-                .is_none_or(|id| !crate::services::channel_delivery_service::valid_message_id(id))
-        {
-            return None;
-        }
+                .is_none_or(|id| !crate::services::channel_delivery_service::valid_message_id(id)))
+    {
+        return None;
     }
     let mid = message["mid"]
         .as_str()

@@ -1357,8 +1357,10 @@ impl AccountTools<'_> {
                         self.http,
                         adapter.as_ref(),
                         &bot.id,
-                        user,
-                        owner,
+                        channel_bot_service::UpdateBotAuthority {
+                            actor_id: user,
+                            owner_id: owner,
+                        },
                         channel_bot_service::UpdateBotParams {
                             x_events: None,
                             label: args["label"].as_str(),

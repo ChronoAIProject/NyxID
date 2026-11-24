@@ -52,6 +52,13 @@ pub enum SecretPatch<'a> {
     Set(&'a str),
 }
 
+/// Keep the human actor separate from the bot's personal or organization owner.
+#[derive(Clone, Copy)]
+pub struct UpdateBotAuthority<'a> {
+    pub actor_id: &'a str,
+    pub owner_id: &'a str,
+}
+
 pub struct UpdateBotParams<'a> {
     pub x_events: Option<&'a [crate::models::channel_bot::XChannelEvent]>,
     pub bot_token: Option<&'a str>,
@@ -1234,8 +1241,10 @@ pub fn update_bot<'a>(
         http_client,
         adapter,
         bot_id,
-        user_id,
-        user_id,
+        UpdateBotAuthority {
+            actor_id: user_id,
+            owner_id: user_id,
+        },
         params,
     )
 }
@@ -1250,8 +1259,7 @@ pub fn update_bot_as_actor<'a>(
     http_client: &'a reqwest::Client,
     adapter: &'a dyn PlatformAdapter,
     bot_id: &'a str,
-    actor_id: &'a str,
-    owner_id: &'a str,
+    authority: UpdateBotAuthority<'a>,
     params: UpdateBotParams<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ChannelBot>> + Send + 'a>> {
     // Bound the caller's future size across nested lifecycle/ingress work.
@@ -1262,8 +1270,7 @@ pub fn update_bot_as_actor<'a>(
         http_client,
         adapter,
         bot_id,
-        actor_id,
-        owner_id,
+        authority,
         params,
     ))
 }
@@ -1274,8 +1281,7 @@ async fn update_bot_serialized(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
-    actor_id: &str,
-    owner_id: &str,
+    authority: UpdateBotAuthority<'_>,
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
     if params.x_events.is_some() {
@@ -1288,8 +1294,7 @@ async fn update_bot_serialized(
                 http_client,
                 adapter,
                 bot_id,
-                actor_id,
-                owner_id,
+                authority,
                 params,
             ),
         )
@@ -1305,8 +1310,7 @@ async fn update_bot_serialized(
             http_client,
             adapter,
             bot_id,
-            actor_id,
-            owner_id,
+            authority,
             params,
         ),
     )
@@ -1319,10 +1323,10 @@ async fn update_bot_inner(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
-    actor_id: &str,
-    owner_id: &str,
+    authority: UpdateBotAuthority<'_>,
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
+    let UpdateBotAuthority { actor_id, owner_id } = authority;
     let bot = get_bot_for_user(db, bot_id, owner_id).await?;
     if bot.credential_source == "telegram_manager" && !params.fields().0.is_empty() {
         return Err(AppError::ValidationError(
@@ -1447,13 +1451,11 @@ async fn update_bot_inner(
 
     let meta_rotation = is_meta && !fields.0.is_empty();
     if meta_rotation {
-        if meta_token_replacement {
-            if let Some(token) = params.bot_token {
-                set_doc.insert(
-                    "meta_binding.token_fingerprint",
-                    super::channel_adapters::meta::token_fingerprint(token),
-                );
-            }
+        if meta_token_replacement && let Some(token) = params.bot_token {
+            set_doc.insert(
+                "meta_binding.token_fingerprint",
+                super::channel_adapters::meta::token_fingerprint(token),
+            );
         }
         let binding = bot.meta_binding.as_ref().ok_or_else(|| {
             AppError::Conflict("Meta inbox is missing credential authority".into())

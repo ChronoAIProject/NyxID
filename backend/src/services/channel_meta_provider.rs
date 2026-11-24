@@ -36,7 +36,7 @@ pub(crate) fn verify_signed_request(
     if at > Utc::now() + Duration::seconds(60) || at < Utc::now() - Duration::days(1) {
         return Err(invalid());
     }
-    Ok((subject.into(), at))
+    Ok((subject, at))
 }
 
 fn grant_identity(platform: &str, app: &str, subject: &str) -> AppResult<String> {

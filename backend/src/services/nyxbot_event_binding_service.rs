@@ -198,8 +198,12 @@ pub(crate) async fn create(
             "destination_reply_anchor_required".into(),
         ));
     }
-    let provider =
-        crate::handlers::nyxbot::create_gateway_agent_key(state, owner, &agent.name).await?;
+    let provider = super::nyxbot_channel_connection_service::create_gateway_agent_key(
+        state,
+        owner,
+        &agent.name,
+    )
+    .await?;
     let provider_key = Zeroizing::new(provider.full_key);
     let producer_secret = Zeroizing::new({
         let mut bytes = [0u8; 32];

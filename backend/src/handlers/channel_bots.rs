@@ -1496,8 +1496,10 @@ pub async fn update_bot(
         &state.http_client,
         adapter.as_ref(),
         &bot_id,
-        &actor,
-        &owner_id,
+        channel_bot_service::UpdateBotAuthority {
+            actor_id: &actor,
+            owner_id: &owner_id,
+        },
         crate::services::channel_bot_service::UpdateBotParams {
             x_events: body.x_events.as_deref(),
             bot_token: body.bot_token.as_deref().map(str::trim),

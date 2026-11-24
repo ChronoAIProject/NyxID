@@ -442,8 +442,10 @@ async fn ordinary_manual_patch_rejects_admin_demotion_during_provider_verify() {
         &state.http_client,
         &patch_adapter,
         &created.id,
-        &fixture_bot.user_id,
-        &org,
+        channel_bot_service::UpdateBotAuthority {
+            actor_id: &fixture_bot.user_id,
+            owner_id: &org,
+        },
         UpdateBotParams {
             x_events: None,
             bot_token: Some("replacement-page-token"),
@@ -539,8 +541,10 @@ async fn manual_token_replacement_repairs_grant_but_preserves_operator_hold() {
         &state.http_client,
         &replacement_adapter,
         &bot.id,
-        &bot.user_id,
-        &bot.user_id,
+        channel_bot_service::UpdateBotAuthority {
+            actor_id: &bot.user_id,
+            owner_id: &bot.user_id,
+        },
         UpdateBotParams {
             x_events: None,
             bot_token: Some("replacement-token"),
@@ -606,8 +610,10 @@ async fn manual_signing_secret_patch_does_not_repair_failed_grant() {
         &state.http_client,
         &signing_adapter,
         &bot.id,
-        &bot.user_id,
-        &bot.user_id,
+        channel_bot_service::UpdateBotAuthority {
+            actor_id: &bot.user_id,
+            owner_id: &bot.user_id,
+        },
         UpdateBotParams {
             x_events: None,
             bot_token: None,
