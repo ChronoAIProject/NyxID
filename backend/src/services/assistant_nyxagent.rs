@@ -2449,6 +2449,22 @@ impl OwnerTurnClaim {
     }
 }
 
+fn turn_meta_grants(turn: &ActiveTurn) -> Vec<crate::models::channel_meta::GrantRef> {
+    let mut grants = Vec::new();
+    for context in turn
+        .channel_context
+        .iter()
+        .chain(turn.events.iter().flat_map(|event| &event.channel_contexts))
+    {
+        if let Some(grant) = &context.meta_grant
+            && !grants.contains(grant)
+        {
+            grants.push(grant.clone());
+        }
+    }
+    grants
+}
+
 /// Shared owner admission. Platform callers join binding and receipt fences in
 /// the same transaction, then pass the complete server-authored origin here.
 #[allow(clippy::too_many_arguments)]
@@ -2478,6 +2494,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             "Invocation confirmation continuation is already queued".into(),
         ));
     }
+    let direct_meta = start
+        .channel_context
+        .as_ref()
+        .is_some_and(|context| context.meta_grant.is_some());
     let id = ids.conversation_id.clone();
     let turn_id = ids.turn_id.clone();
     let voice_request_id = voice_request_id.map(str::to_owned);
@@ -2524,11 +2544,18 @@ pub(crate) async fn begin_owner_turn_in_session(
             agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
             id: id.clone(),
             user_id: user_id.into(),
-            title: start
-                .title
-                .clone()
-                .unwrap_or_else(|| super::assistant_title_service::provisional(&start.text)),
-            title_source: if start.title.is_some() || start.guest || start.channel.is_some() {
+            title: start.title.clone().unwrap_or_else(|| {
+                if direct_meta {
+                    "New chat".to_owned()
+                } else {
+                    super::assistant_title_service::provisional(&start.text)
+                }
+            }),
+            title_source: if start.title.is_some()
+                || start.guest
+                || start.channel.is_some()
+                || direct_meta
+            {
                 crate::models::assistant_conversation::TitleSource::User
             } else {
                 crate::models::assistant_conversation::TitleSource::Provisional
@@ -2840,6 +2867,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.pending_events = remaining;
         selected
     } else if start.invocation_id.is_some()
+        || direct_meta
         || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
@@ -3137,6 +3165,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
+        let lost_grants = turn_meta_grants(&lost_turn);
+        for grant in &lost_grants {
+            super::channel_meta_service::scopes::fence_reference(db, session, grant, false).await?;
+        }
         let mut lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
         lost_metadata.work = Some(super::assistant_real_work::evidence(
             &row,
@@ -3243,10 +3275,24 @@ pub(crate) async fn begin_owner_turn_in_session(
             ),
         )
         .await?;
-        db.collection::<AssistantMessage>(MESSAGES)
-            .insert_one(message)
-            .session(&mut *session)
-            .await?;
+        if lost_grants.is_empty() {
+            db.collection::<AssistantMessage>(MESSAGES)
+                .insert_one(message)
+                .session(&mut *session)
+                .await?;
+        } else {
+            let mut source = bson::to_document(&message)
+                .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?;
+            source.insert(
+                "meta_grants",
+                bson::to_bson(&lost_grants)
+                    .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
+            );
+            db.collection::<bson::Document>(MESSAGES)
+                .insert_one(source)
+                .session(&mut *session)
+                .await?;
+        }
         row.nyxagent_session_id = None;
         row.nyxagent_instruction_binding = None;
         row.nyxagent_last_response_id = None;
@@ -3780,18 +3826,11 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         }
     }
-    let admitted_meta_grants: Vec<_> = row
+    let admitted_meta_grants = row
         .active_turn
         .as_ref()
-        .into_iter()
-        .flat_map(|turn| {
-            turn.channel_context
-                .iter()
-                .chain(turn.events.iter().flat_map(|event| &event.channel_contexts))
-        })
-        .filter_map(|source| source.meta_grant.as_ref())
-        .cloned()
-        .collect();
+        .map(turn_meta_grants)
+        .unwrap_or_default();
     for grant in &admitted_meta_grants {
         super::channel_meta_service::scopes::fence_reference(db, session, grant, true).await?;
     }
@@ -5223,9 +5262,7 @@ artifact_recovery_target: None,
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
-                let meta_grants:Vec<_>=current.active_turn.as_ref().into_iter().flat_map(|turn|
-                    turn.channel_context.iter().chain(turn.events.iter().flat_map(|event|&event.channel_contexts)))
-                    .filter_map(|context|context.meta_grant.clone()).fold(Vec::new(),|mut grants,grant| {if !grants.contains(&grant) {grants.push(grant);}grants});
+                let meta_grants = current.active_turn.as_ref().map(turn_meta_grants).unwrap_or_default();
                 for grant in &meta_grants {super::channel_meta_service::scopes::fence_reference(&db,session,grant,false).await?;}
                 let error = if current
                     .active_turn

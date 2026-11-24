@@ -724,12 +724,19 @@ pub(crate) async fn bind_thread_conversation(
     thread: &crate::models::nyxbot_channel::NyxbotThread,
     home: Option<&str>,
 ) -> AppResult<String> {
-    let filter = doc! {
+    let mut filter = doc! {
         "_id": &thread.id, "channel_id": &thread.channel_id, "partition": &thread.partition,
-        "last_message_id": &thread.last_message_id, "last_relay_message_id": &thread.last_relay_message_id,
         "meta_grant.bot_id": &grant.bot_id, "meta_grant.grant_id": &grant.grant_id,
         "meta_grant.generation": grant.generation,
     };
+    let observed = doc! {"last_message_id": &thread.last_message_id, "last_relay_message_id": &thread.last_relay_message_id};
+    // A newer message from this grant may have already bound the same home.
+    // Guest reservation only adopts an existing nonempty ID in that case.
+    let already_bound = match home {
+        Some(id) => doc! {"conversation_id": id},
+        None => doc! {"conversation_id":{"$type":"string","$ne":""}},
+    };
+    filter.insert("$or", vec![observed, already_bound]);
     let conversation = match home {
         Some(id) => doc! { "$literal": id },
         None => {
