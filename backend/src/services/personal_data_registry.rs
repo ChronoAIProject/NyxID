@@ -1309,7 +1309,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "channel_meta_erasure_fences retains only a retired bot UUID and erasure/completion times, with no provider IDs, credentials or customer content. The durable tombstone prevents late outbound responses from repopulating an erased inbox.",
+        why: "channel_meta_erasure_fences retains the retired bot/grant UUIDs, keyed grant fingerprint, platform, creation/authorization/cleanup times and an opaque personal-erasure job reference. Existing transfer records and that job supply exact owner scope after account retirement; no raw provider subject, asset, credential, participant ID or customer content is copied. This bookkeeping preserves independent signed deletion obligations and prevents late outbound persistence; only verified provider cleanup writes provider completion.",
     },
     Entry {
         collection: "channel_meta_grant_authority",

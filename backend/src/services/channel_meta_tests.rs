@@ -1207,8 +1207,470 @@ fn provider_request(subject: serde_json::Value, issued: i64) -> String {
 }
 
 #[tokio::test]
-async fn signed_deletion_finishes_after_account_erasure_purges_the_inbox_first_and_replays() {
+async fn transferred_inbox_account_erasure_preserves_former_history_until_independent_signed_deletion()
+ {
+    use crate::services::{
+        channel_routing_service as routes, key_service, ownership_transfer_service as transfer,
+    };
+    for callback_first in [true, false] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        state
+            .db
+            .collection::<bson::Document>(BOTS)
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{"credential_source":"platform"}},
+            )
+            .await
+            .unwrap();
+        let descriptor = adapter("instagram")
+            .unwrap()
+            .platform_credentials()
+            .unwrap();
+        let rotated = [(
+            "client_secret".into(),
+            Some(Zeroizing::new("replacement-login-secret".into())),
+        )]
+        .into_iter()
+        .collect();
+        super::super::role_service::seed_system_roles(&state.db)
+            .await
+            .unwrap();
+        let roles = super::super::role_service::get_platform_role_ids(&state.db)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&bot.user_id},
+                doc! {"$set":{"role_ids":[roles.admin]}},
+            )
+            .await
+            .unwrap();
+        let recipient = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &recipient,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let key = key_service::create_api_key(
+            &state.db,
+            &bot.user_id,
+            "Historical route",
+            "read proxy",
+            crate::services::api_key_validation::NewKeyExpiry::Default,
+            None,
+            Some(&[]),
+            Some(&[]),
+            Some(false),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            Some("generic"),
+            Some("https://callbacks.example.test/previous"),
+        )
+        .await
+        .unwrap();
+        let route = routes::create_conversation(
+            &state.db,
+            &bot.user_id,
+            Some(&bot.id),
+            "instagram",
+            "*",
+            "private",
+            None,
+            &key.id,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let source = uuid::Uuid::new_v4().to_string();
+        let messages = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+        messages
+            .insert_one(doc! {"_id":&source,"user_id":&bot.user_id,"channel_bot_id":&bot.id})
+            .await
+            .unwrap();
+        let former = super::super::channel_text_delivery::begin(
+            &state.db,
+            "legacy-noncanonical-former",
+            &bot.user_id,
+            &source,
+            "former-provider-receipt",
+            1,
+        )
+        .await
+        .unwrap();
+        let mut sibling = bot.clone();
+        sibling.id = uuid::Uuid::new_v4().to_string();
+        sibling.platform_bot_id = "444".into();
+        sibling.app_id = Some("112".into());
+        sibling.meta_binding.as_mut().unwrap().app_id = "112".into();
+        sibling.meta_binding.as_mut().unwrap().grant_id = uuid::Uuid::new_v4().to_string();
+        sibling.meta_binding.as_mut().unwrap().grant_subject_id = "901".into();
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .insert_one(&sibling)
+            .await
+            .unwrap();
+        let sibling_plan = super::super::channel_text_delivery::begin_bound(
+            &state.db,
+            "retained-sibling",
+            &sibling,
+            "sibling-source",
+            "sibling-receipt",
+            1,
+        )
+        .await
+        .unwrap();
+        let s = service(&state, &server);
+        let signed = provider_request(json!(900), Utc::now().timestamp());
+        // Deauthorization has no authority to erase any former-owner history.
+        accept_provider_request(&s, "instagram", &signed, false)
+            .await
+            .unwrap();
+        let preview = transfer::preview(
+            &state.db,
+            &bot.user_id,
+            transfer::ResourceKind::ChannelBot,
+            &bot.id,
+            &recipient,
+            5,
+        )
+        .await
+        .unwrap();
+        transfer::transfer_with_keys(
+            &state.db,
+            Some(&state.encryption_keys),
+            transfer::TransferCommand {
+                actor: &bot.user_id,
+                api_key_id: None,
+                first_party_human: true,
+                kind: transfer::ResourceKind::ChannelBot,
+                resource_id: &bot.id,
+                destination: &recipient,
+                request_id: &uuid::Uuid::new_v4().to_string(),
+                expected_version: &preview.version,
+                capacity: 5,
+            },
+        )
+        .await
+        .unwrap();
+        // Missing attribution must not block deletion of this journal's own account.
+        let personal_key = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "a".repeat(64));
+        let own = super::super::channel_text_delivery::begin(
+            &state.db,
+            &personal_key,
+            &recipient,
+            "expired-personal-source",
+            "personal-receipt",
+            1,
+        )
+        .await
+        .unwrap();
+        let mut accepted = None;
+        if callback_first {
+            accepted = Some(
+                accept_provider_request(&s, "instagram", &signed, true)
+                    .await
+                    .unwrap(),
+            );
+        }
+        super::super::durable_wake_tests::resume_after(
+            "meta_account_before_retirement",
+            async {
+                erase_personal_owner(&state, &recipient).await;
+            },
+            async {
+                assert!(matches!(
+                    super::super::platform_credential_service::update(
+                        &state.db,
+                        &state.encryption_keys,
+                        &descriptor,
+                        &bot.user_id,
+                        &rotated,
+                        false
+                    )
+                    .await,
+                    Err(AppError::Conflict(_))
+                ));
+            },
+        )
+        .await;
+        assert!(
+            messages
+                .find_one(doc! {"_id":&source,"user_id":&bot.user_id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let retained_route = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id":&route.id,"user_id":&bot.user_id,"retired_by_transfer":true})
+            .await
+            .unwrap();
+        assert!(retained_route.is_some());
+        let plans = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
+        assert!(
+            plans
+                .find_one(doc! {"_id":&own.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            plans
+                .find_one(doc! {"_id":&former.id,"channel_bot_id":&bot.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            plans
+                .find_one(doc! {"_id":&sibling_plan.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .db
+                .collection::<bson::Document>("channel_meta_erasure_fences")
+                .find_one(doc! {"_id":&bot.id,"local_data_erased_at":{"$exists":true}})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Exact attribution now lives on the original receipt and survives TTL.
+        messages.delete_one(doc! {"_id":&source}).await.unwrap();
+        if !callback_first {
+            provider::reconcile_with_service(&state, &s).await.unwrap();
+            assert!(
+                plans
+                    .find_one(doc! {"_id":&former.id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            // The revocation is fully processed. The first deletion has not
+            // arrived, but its retained verifier still cannot be rotated.
+            assert!(matches!(
+                super::super::platform_credential_service::update(
+                    &state.db,
+                    &state.encryption_keys,
+                    &descriptor,
+                    &bot.user_id,
+                    &rotated,
+                    false
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+            accepted = Some(
+                accept_provider_request(&s, "instagram", &signed, true)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let accepted = accepted.unwrap();
+        let code = accepted["confirmation_code"].as_str().unwrap();
+        provider::reconcile_with_service(&state, &s).await.unwrap();
+        assert_eq!(
+            request_status(&state.db, "instagram", code).await.unwrap()["status"],
+            "completed"
+        );
+        assert!(
+            plans
+                .find_one(doc! {"_id":&former.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            plans
+                .find_one(doc! {"_id":&sibling_plan.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .find_one(doc! {"_id":&sibling.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let replay = accept_provider_request(&s, "instagram", &signed, true)
+            .await
+            .unwrap();
+        assert_eq!(replay["confirmation_code"], accepted["confirmation_code"]);
+        state.db.collection::<bson::Document>(provider::REQUESTS).update_one(doc! {"_id":code},doc! {"$set":{
+            "status":"pending","next_attempt_at":bson::DateTime::now(),"targets":[{"bot_id":&bot.id,"grant_id":&bot.meta_binding.as_ref().unwrap().grant_id}]}}).await.unwrap();
+        provider::reconcile_with_service(&state, &s).await.unwrap();
+        assert_eq!(
+            request_status(&state.db, "instagram", code).await.unwrap()["status"],
+            "completed"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        super::super::platform_credential_service::update(
+            &state.db,
+            &state.encryption_keys,
+            &descriptor,
+            &bot.user_id,
+            &rotated,
+            false,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+async fn erase_personal_owner(state: &crate::AppState, owner: &str) {
     use crate::services::personal_erasure_service as personal;
+    let mut accepted_personal = false;
+    for _ in 0..64 {
+        match personal::accept(&state.db, owner, owner, None).await {
+            Ok(_) => {
+                accepted_personal = true;
+                break;
+            }
+            Err(AppError::ErasurePreparing) => {
+                personal::prepare_one_for_test(&state.db, &state.encryption_keys)
+                    .await
+                    .unwrap();
+            }
+            Err(error) => panic!("account acceptance failed: {error:?}"),
+        }
+    }
+    assert!(accepted_personal);
+    // Fully run ordinary personal erasure before processing any provider job.
+    for _ in 0..640 {
+        if state
+            .db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":owner})
+            .await
+            .unwrap()
+            .is_none()
+        {
+            break;
+        }
+        state
+            .db
+            .collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+            .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+            .await
+            .unwrap();
+        personal::process_one(state).await.unwrap();
+    }
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn manual_account_erasure_never_invents_an_empty_managed_subject_or_blocks_app_rotation() {
+    let (state, _, server, mut bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+    bot.credential_source = "user".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    service(&state, &server).disconnect(&bot).await.unwrap();
+    let unknown = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "a".repeat(64));
+    let receipt = super::super::channel_text_delivery::begin(
+        &state.db,
+        &unknown,
+        &bot.user_id,
+        "expired-manual-source",
+        "personal-owned-receipt",
+        1,
+    )
+    .await
+    .unwrap();
+    erase_personal_owner(&state, &bot.user_id).await;
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("channel_meta_grant_authority")
+            .count_documents(doc! {"platform":"instagram"})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"_id":&bot.id,"retired_grant":{"$exists":true}})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .find_one(doc! {"_id":&receipt.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let descriptor = adapter("instagram")
+        .unwrap()
+        .platform_credentials()
+        .unwrap();
+    let fields = [(
+        "client_secret".into(),
+        Some(Zeroizing::new("replacement-login-secret".into())),
+    )]
+    .into_iter()
+    .collect();
+    super::super::platform_credential_service::update(
+        &state.db,
+        &state.encryption_keys,
+        &descriptor,
+        "operator",
+        &fields,
+        false,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn signed_deletion_finishes_after_account_erasure_purges_the_inbox_first_and_replays() {
     let (state, _, server, bot) = fixture("instagram").await;
     configure(&state, &bot).await;
     let s = service(&state, &server);
@@ -1244,51 +1706,7 @@ async fn signed_deletion_finishes_after_account_erasure_purges_the_inbox_first_a
     )
     .await
     .unwrap();
-    let mut accepted_personal = false;
-    for _ in 0..64 {
-        match personal::accept(&state.db, &bot.user_id, &bot.user_id, None).await {
-            Ok(_) => {
-                accepted_personal = true;
-                break;
-            }
-            Err(AppError::ErasurePreparing) => {
-                personal::prepare_one_for_test(&state.db, &state.encryption_keys)
-                    .await
-                    .unwrap();
-            }
-            Err(error) => panic!("account acceptance failed: {error:?}"),
-        }
-    }
-    assert!(accepted_personal);
-    // Fully run ordinary personal erasure before processing any provider job.
-    for _ in 0..640 {
-        if state
-            .db
-            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-            .find_one(doc! {"_id":&bot.user_id})
-            .await
-            .unwrap()
-            .is_none()
-        {
-            break;
-        }
-        state
-            .db
-            .collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
-            .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
-            .await
-            .unwrap();
-        personal::process_one(&state).await.unwrap();
-    }
-    assert!(
-        state
-            .db
-            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-            .find_one(doc! {"_id":&bot.user_id})
-            .await
-            .unwrap()
-            .is_none()
-    );
+    erase_personal_owner(&state, &bot.user_id).await;
     assert!(
         state
             .db
@@ -1302,7 +1720,7 @@ async fn signed_deletion_finishes_after_account_erasure_purges_the_inbox_first_a
         state
             .db
             .collection::<bson::Document>("channel_meta_erasure_fences")
-            .find_one(doc! {"_id":&bot.id,"local_data_erased_at":{"$type":"date"}})
+            .find_one(doc! {"_id":&bot.id,"retired_grant.grant_id":&bot.meta_binding.as_ref().unwrap().grant_id,"local_data_erased_at":{"$exists":false}})
             .await
             .unwrap()
             .is_some()

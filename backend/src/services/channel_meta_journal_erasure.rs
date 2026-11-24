@@ -43,11 +43,15 @@ const BATCH: i64 = 100;
 
 /// Plan ownership follows the bot, not the person who linked an organization
 /// bot to a personal specialist. Conversation ownership is resolved separately.
-async fn bot_owners(db: &Database, bot: &ChannelBot) -> AppResult<BTreeSet<String>> {
-    let mut owners = BTreeSet::from([bot.user_id.clone()]);
+async fn bot_owners(
+    db: &Database,
+    bot: &str,
+    current: Option<&str>,
+) -> AppResult<BTreeSet<String>> {
+    let mut owners: BTreeSet<String> = current.into_iter().map(str::to_owned).collect();
     let mut transfers = db
         .collection::<Document>(crate::models::ownership_transfer::COLLECTION_NAME)
-        .find(doc! {"resource_kind": "channel_bot", "resource_id": &bot.id})
+        .find(doc! {"resource_kind": "channel_bot", "resource_id": bot})
         .projection(doc! {"previous_owner_user_id": 1, "new_owner_user_id": 1})
         .await?;
     while let Some(transfer) = transfers.try_next().await? {
@@ -106,8 +110,66 @@ impl Evidence {
 }
 
 pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<()> {
+    erase_attributed(
+        db,
+        &bot.id,
+        Some(&bot.user_id),
+        &bot.platform,
+        bot.created_at,
+        true,
+    )
+    .await
+}
+
+/// Preserve exact attribution on the original journal before its TTL sources
+/// can disappear. Account erasure does not delete a former owner's receipt.
+pub(crate) async fn attribute_legacy(db: &Database, bot: &ChannelBot) -> AppResult<()> {
+    erase_attributed(
+        db,
+        &bot.id,
+        Some(&bot.user_id),
+        &bot.platform,
+        bot.created_at,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn erase_retired_legacy(
+    db: &Database,
+    bot_id: &str,
+    grant: &crate::models::channel_meta::RetiredGrant,
+) -> AppResult<()> {
+    let account = db
+        .collection::<Document>(crate::models::personal_erasure::COLLECTION_NAME)
+        .find_one(doc! {"_id": &grant.account_erasure_id})
+        .projection(doc! {"user_id":1})
+        .await?
+        .ok_or_else(|| attribution_required(bot_id))?;
+    let owner = account
+        .get_str("user_id")
+        .map_err(|_| attribution_required(bot_id))?;
+    erase_attributed(
+        db,
+        bot_id,
+        Some(owner),
+        &grant.platform,
+        grant.bot_created_at,
+        true,
+    )
+    .await
+}
+
+async fn erase_attributed(
+    db: &Database,
+    bot_id: &str,
+    owner: Option<&str>,
+    platform: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+    erase: bool,
+) -> AppResult<()> {
     let plans = db.collection::<LegacyPlan>(crate::models::channel_text_delivery::COLLECTION_NAME);
-    let owners = bot_owners(db, bot).await?;
+    let owners = bot_owners(db, bot_id, owner).await?;
     let owners: Vec<_> = owners.into_iter().collect();
     let mut after = None;
     loop {
@@ -175,13 +237,11 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
                     // retain this unrelated historical plan without guessing.
                     continue;
                 }
-                match saved_target(db, plan, &owners, &bot.platform).await? {
+                match saved_target(db, plan, &owners, platform).await? {
                     SavedTarget::Proven(target) => evidence.prove(target),
                     SavedTarget::Absent
                         if evidence.parent.is_none()
-                            && plan
-                                .created_at
-                                .is_some_and(|created| created < bot.created_at) =>
+                            && plan.created_at.is_some_and(|created| created < created_at) =>
                     {
                         // Only absent evidence can exclude older history. An
                         // exact but inconsistent/incomplete handoff stays pending.
@@ -192,7 +252,7 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
                 }
             }
             match evidence.target() {
-                Some(Target::Bot(id)) if id == bot.id => remove.push(doc! {
+                Some(Target::Bot(id)) if id == bot_id => remove.push(doc! {
                     "_id": &plan.id, "user_id": &plan.user_id,
                     "source_id": &plan.source_id, "logical_key": &plan.logical_key,
                 }),
@@ -201,12 +261,17 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
             }
         }
         if !remove.is_empty() {
-            plans
-                .delete_many(doc! {"channel_bot_id": null, "$or": remove})
-                .await?;
+            let exact = doc! {"channel_bot_id": null, "$or": remove};
+            if erase {
+                plans.delete_many(exact).await?;
+            } else {
+                plans
+                    .update_many(exact, doc! {"$set":{"channel_bot_id":bot_id}})
+                    .await?;
+            }
         }
-        if unresolved {
-            return Err(attribution_required(&bot.id));
+        if unresolved && erase {
+            return Err(attribution_required(bot_id));
         }
     }
 }
@@ -260,23 +325,23 @@ async fn saved_target(
             continue;
         };
         for saved in targets.iter().filter_map(|target| target.as_document()) {
+            let Ok(origin) = saved.get_document("origin") else {
+                continue;
+            };
+            let Ok(origin) = bson::from_document::<
+                crate::models::assistant_conversation::ChannelOrigin,
+            >(origin.clone()) else {
+                continue;
+            };
+            if super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key {
+                continue;
+            }
             if saved
                 .get_document("source")
                 .and_then(|v| v.get_str("turn_id"))
                 != Ok(turn)
             {
-                continue;
-            }
-            let Ok(origin) = saved.get_document("origin") else {
                 return Ok(SavedTarget::Incomplete);
-            };
-            let Ok(origin) = bson::from_document::<
-                crate::models::assistant_conversation::ChannelOrigin,
-            >(origin.clone()) else {
-                return Ok(SavedTarget::Incomplete);
-            };
-            if super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key {
-                continue;
             }
             let Ok(person) = reply.get_str("user_id") else {
                 return Ok(SavedTarget::Incomplete);
@@ -931,6 +996,103 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn exact_predating_destination_with_missing_or_mismatched_nested_turn_stays_pending() {
+        for nested in [None, Some("different-turn")] {
+            let (state, _, _server, mut bot) = fixture("instagram").await;
+            stop_for_erasure(&state, &mut bot).await;
+            let channel = uuid::Uuid::new_v4().to_string();
+            state
+                .db
+                .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+                .insert_one(parent(&bot.user_id, &bot.id, &channel, "instagram"))
+                .await
+                .unwrap();
+            let origin = ChannelOrigin {
+                org_execution: None,
+                native_event_id: None,
+                thread: None,
+                nyxbot_channel_id: channel,
+                partition: "private-owner".into(),
+                platform: "instagram".into(),
+            };
+            let turn = uuid::Uuid::new_v4().to_string();
+            let key = channel_supplemental_delivery::saved_key(&turn, &origin);
+            let receipt = channel_text_delivery::begin(
+                &state.db,
+                &key,
+                &bot.user_id,
+                "expired-source",
+                "historical",
+                1,
+            )
+            .await
+            .unwrap();
+            state.db.collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .update_one(doc! {"_id":&receipt.id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(bot.created_at-chrono::Duration::days(1)),
+                    "parts.0.platform_message_id":"retained-provider-id"}}).await.unwrap();
+            let mut target = saved(&turn, &origin);
+            target.get_document_mut("source").unwrap().remove("turn_id");
+            if let Some(nested) = nested {
+                target
+                    .get_document_mut("source")
+                    .unwrap()
+                    .insert("turn_id", nested);
+            }
+            let message = uuid::Uuid::new_v4().to_string();
+            state
+                .db
+                .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+                .insert_one(
+                    doc! {"_id":&message,"user_id":&bot.user_id,"turn_id":&turn,"role":"assistant",
+                    "handoff_delivery":{"targets":[target]}},
+                )
+                .await
+                .unwrap();
+            let grant = &bot.meta_binding.as_ref().unwrap().grant_id;
+            assert!(matches!(
+                super::super::personal_erasure_service::erase_provider_inbox(
+                    &state, &bot.id, grant
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+            assert!(
+                channel_text_delivery::load(&state.db, &key)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                state
+                    .db
+                    .collection::<Document>("channel_meta_erasure_fences")
+                    .find_one(doc! {"_id":&bot.id,"local_data_erased_at":{"$exists":true}})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            state
+                .db
+                .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&message},
+                    doc! {"$set":{"handoff_delivery.targets.0.source.turn_id":&turn}},
+                )
+                .await
+                .unwrap();
+            super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+                .await
+                .unwrap();
+            assert!(
+                channel_text_delivery::load(&state.db, &key)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     async fn stop_for_erasure(state: &crate::AppState, bot: &mut ChannelBot) {

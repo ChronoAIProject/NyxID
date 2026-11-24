@@ -2843,15 +2843,10 @@ pub(crate) async fn erase_personal_bot(
         }
         .disconnect(&bot)
         .await?;
-        // Finish the shared scoped purge while the bot and its attribution
-        // still exist. Its completion proof survives account inventory removal
-        // and lets any earlier signed deletion request finish on replay.
-        let grant = bot
-            .meta_binding
-            .as_ref()
-            .map(|binding| binding.grant_id.as_str())
-            .unwrap_or_default();
-        super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant).await?;
+        // Personal erasure retires only the departing owner's authority. A
+        // signed provider request independently authorizes any wider purge.
+        super::channel_meta_journal_erasure::attribute_legacy(db, &bot).await?;
+        super::channel_meta_service::provider::retire_account_inbox(db, owner, bot_id).await?;
         return Ok(());
     }
     super::channel_retry_ingress::with_lifecycle(db, true, bot_id, async {

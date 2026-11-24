@@ -1703,6 +1703,20 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
                 .build(),
         )
         .await?;
+    db.collection::<bson::Document>("channel_meta_grant_authority")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"app_id":1,"identity":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>("channel_meta_erasure_fences")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"retired_grant.identity":1,"retired_grant.authorized_at":1})
+                .build(),
+        )
+        .await?;
     db.collection::<bson::Document>(provider::REQUESTS)
         .create_indexes([
             IndexModel::builder()

@@ -299,11 +299,37 @@ for historical or recovered metadata. This also erases precisely attributable
 legacy rows whose stored timestamps precede the current bot record. Canonical
 older plans also try the indexed exact saved handoff before a date comparison
 can exclude genuinely unproven pre-bot history. Erasing one inbox preserves sibling inbox plans.
-Personal account erasure uses this same inbox purge after confirmed remote
-cleanup, while exact attribution is still available. It records the completion
-proof before removing the bot, so an earlier accepted signed deletion can finish
-and replay after the account is gone. Scoped organization guest-default migration
-records are removed before that proof; sibling inbox records are retained.
+Personal account erasure removes the departing owner's rows through the existing
+owner inventory and retires that owner's bot authority. Former owners' retained
+routes and message history survive. Exact legacy journal joins are backfilled
+on the original receipt's optional bot parent before TTL sources disappear;
+account cleanup never guesses an inbox for an unproven journal. Independently
+signed provider deletion is the authority for a wider captured-grant purge.
+
+Account retirement and signed request capture serialize through the keyed grant
+fence before the bot disappears. `channel_meta_erasure_fences` then retains only
+the bot/grant UUIDs, keyed grant identity, platform, original creation/authorization
+times and an opaque reference to the existing personal-erasure job. That job has
+no terminal TTL and retains the opaque account UUID; existing ownership-transfer
+records retain prior opaque owners. These existing records resolve the exact
+journal owner after account removal. No raw provider subject, asset, credential,
+participant ID, former-owner content or copied receipt/source list is retained
+in this context. The context remains until independently verified provider
+cleanup completes; the purge then removes it and writes provider completion.
+Personal cleanup alone never writes that provider completion proof. Pending
+requests and a first late signed deletion use the same captured grant and cutoff,
+including crash/retry after bot removal. Former-owner and sibling records remain
+outside ordinary personal deletion, and successor grants remain outside the
+captured provider obligation.
+
+A manual installation with an empty login subject creates no managed grant
+authority or retired managed subject. Its explicit owner-driven Delete/purge
+remains available before account closure; ordinary account erasure still follows
+personal ownership. Managed retired grants retain their login verification
+capability: changing/deleting their application ID or login secret is refused
+until captured retired scope has completed provider cleanup. This check is
+platform/application scoped, uses indexed bounded reads and does not block
+unrelated webhook-field updates.
 A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire

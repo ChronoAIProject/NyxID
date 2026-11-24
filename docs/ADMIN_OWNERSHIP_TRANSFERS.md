@@ -135,11 +135,20 @@ Blockers appear in the preview and are enforced again on commit.
 
 ## Channel bots
 
-Embedded-credential Telegram, Discord, Lark, Feishu, Slack, and WhatsApp bots can
-be transferred. The encrypted bot credentials and webhook configuration stay on
+Embedded-credential Telegram, Discord, Lark, Feishu, Slack, WhatsApp, Messenger
+and Instagram bots can be transferred. The encrypted bot credentials and webhook configuration stay on
 the same bot; only its owner changes. This does not revoke token copies or change
 the account's ownership at the external platform. Rotate credentials at the
 provider when a handover requires that separation.
+
+For Messenger and Instagram, transfer retires delivery authority and records
+`reconnect_required`. The destination must select Reconnect and complete fresh
+Facebook or Instagram consent for that inbox. Verify refuses the transferred
+grant until reauthorization succeeds. Customer access remains closed during
+handover; review the assignment and exposure before explicitly resuming it.
+Retired routes and historical records retain their original owners. A recipient's
+personal-account erasure preserves that former-owner history; independently
+verified provider deletion retains its captured grant scope.
 
 Every existing route, including disabled routes, is permanently retired by
 setting `retired_by_transfer`. Its owner, assigned agent, conversation identifiers,

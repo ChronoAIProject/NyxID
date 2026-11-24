@@ -3,6 +3,20 @@ use serde::{Deserialize, Serialize};
 
 pub const SESSIONS: &str = "channel_meta_oauth_sessions";
 
+/// Minimal context for independently signed deletion after account retirement.
+/// No account, asset, subject, credential or participant identifier is copied.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RetiredGrant {
+    pub grant_id: String,
+    pub identity: String,
+    pub platform: String,
+    pub account_erasure_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub bot_created_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub authorized_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthSession {
     #[serde(rename = "_id")]

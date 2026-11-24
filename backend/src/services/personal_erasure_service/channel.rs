@@ -18,17 +18,34 @@ pub(crate) async fn erase_provider_inbox(
         )
         .find_one(doc! {"_id":bot_id})
         .await?;
+    let mut retired_context = None;
     if retired.is_none() {
-        let completed = state
+        let proof = state
             .db
             .collection::<Document>("channel_meta_erasure_fences")
-            .find_one(doc! {"_id": bot_id, "local_data_erased_at": {"$type": "date"}})
+            .find_one(doc! {"_id":bot_id})
             .await?;
-        return if completed.is_some() {
-            Ok(())
-        } else {
-            Err(AppError::Conflict("Retired inbox attribution is unavailable; restore verified erasure metadata before completing cleanup".into()))
-        };
+        if let Some(proof) = &proof {
+            if proof.get_datetime("local_data_erased_at").is_ok()
+                && proof
+                    .get_str("completed_grant_id")
+                    .map_or(true, |id| id == grant_id)
+            {
+                return Ok(());
+            }
+            if let Ok(context) = proof.get_document("retired_grant") {
+                let context: crate::models::channel_meta::RetiredGrant =
+                    bson::from_document(context.clone()).map_err(|_| {
+                        AppError::Conflict("Retired inbox attribution is incomplete".into())
+                    })?;
+                if context.grant_id == grant_id {
+                    retired_context = Some(context);
+                }
+            }
+        }
+        if retired_context.is_none() {
+            return Err(AppError::Conflict("Retired inbox attribution is unavailable; restore verified erasure metadata before completing cleanup".into()));
+        }
     }
     if retired.as_ref().is_some_and(|bot| {
         bot.is_active
@@ -60,13 +77,14 @@ pub(crate) async fn erase_provider_inbox(
             doc! {"$inc": {"meta_observation_revision": 1_i64}},
         )
         .await?;
-    super::super::channel_meta_journal_erasure::erase_legacy(
-        &state.db,
-        retired
-            .as_ref()
-            .ok_or_else(|| AppError::Conflict("Retired inbox attribution is unavailable".into()))?,
-    )
-    .await?;
+    if let Some(bot) = &retired {
+        super::super::channel_meta_journal_erasure::erase_legacy(&state.db, bot).await?;
+    } else if let Some(context) = &retired_context {
+        super::super::channel_meta_journal_erasure::erase_retired_legacy(
+            &state.db, bot_id, context,
+        )
+        .await?;
+    }
     let channels: Vec<crate::models::nyxbot_channel::NyxbotChannel> = state
         .db
         .collection("nyxbot_channels")
@@ -178,7 +196,8 @@ pub(crate) async fn erase_provider_inbox(
         .collection::<Document>("channel_meta_erasure_fences")
         .update_one(
             doc! {"_id": bot_id},
-            doc! {"$set": {"local_data_erased_at": bson::DateTime::now()}},
+            doc! {"$set": {"local_data_erased_at": bson::DateTime::now(),"completed_grant_id":grant_id},
+                "$unset":{"retired_grant":""}},
         )
         .await?;
     let deleted = bots
