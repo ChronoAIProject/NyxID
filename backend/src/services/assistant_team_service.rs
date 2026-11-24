@@ -869,6 +869,7 @@ async fn create_thread_with_kind(
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        meta_grant: None,
         title_language: None,
         automation_v2: false,
         artifact_head: None,

@@ -1523,6 +1523,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        meta_grant: None,
         title_language: None,
         automation_v2: false,
         artifact_head: None,

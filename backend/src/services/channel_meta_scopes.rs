@@ -59,10 +59,26 @@ pub(crate) async fn ensure_current(
     .upsert(true)
     .session(&mut *tx)
     .await?;
-    rows.find_one(doc! {"bot_id":&bot.id,"grant_id":&binding.grant_id})
+    let mut raw = db
+        .collection::<Document>(GRANT_SCOPES)
+        .find_one(doc! {"bot_id":&bot.id,"grant_id":&binding.grant_id})
         .session(&mut *tx)
         .await?
-        .ok_or_else(super::grants::incomplete)
+        .ok_or_else(super::grants::incomplete)?;
+    // Terminal scopes intentionally omit attribution metadata. They are
+    // readable through exact proof, and cannot re-enter mutable writer paths.
+    if raw.get_str("status") == Ok("completed") {
+        return Err(super::grants::incomplete());
+    }
+    // Chronology is evaluated separately from target identity. Preserve a
+    // malformed stored date for repair; it must not abort sibling capture.
+    if raw
+        .get("authorized_at")
+        .is_some_and(|value| !matches!(value, bson::Bson::DateTime(_) | bson::Bson::Null))
+    {
+        raw.remove("authorized_at");
+    }
+    bson::from_document(raw).map_err(|_| super::grants::incomplete())
 }
 
 /// Both subject fences and the bot CAS belong to the reconnect transaction.
@@ -119,6 +135,7 @@ pub(crate) async fn fence_current(
     tx: &mut ClientSession,
     bot: &ChannelBot,
 ) -> AppResult<GrantRef> {
+    super::super::erasure_admission::fence_in_session(db, &bot.user_id, tx).await?;
     let binding = bot
         .meta_binding
         .as_ref()
@@ -179,8 +196,6 @@ pub(crate) async fn mark_complete(
         .session(&mut *tx)
         .await?
     else {
-        // Older exact whole-inbox completion can predate scope records. It
-        // cannot certify a different/missing scope or overwrite corrupt proof.
         let prior = db
             .collection::<Document>("channel_meta_erasure_fences")
             .find_one(doc! {"_id":bot})
@@ -193,19 +208,47 @@ pub(crate) async fn mark_complete(
             Err(super::grants::incomplete())
         };
     };
-    if super::grants::completed(&row, grant)? {
-        return Ok(());
-    }
-    if row.get_str("status") == Ok("completed") {
-        return Err(super::grants::incomplete());
-    }
-    let changed=rows.update_one(doc! {"_id":row.get("_id").cloned(),"bot_id":bot,"grant_id":grant,
-        "local_data_erased_at":{"$exists":false},"completed_grant_id":{"$exists":false}},
-        doc! {"$set":{"status":"completed","outstanding":false,"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":grant},
-            "$unset":{"identity":"","platform":"","app_id":"","from_generation":"","to_generation":"",
-                "legacy_history":"","binding_fingerprint":"","authorized_at":"","bot_created_at":"","created_at":"",
-                "sealed_at":"","erasure_cutoff":"","attribution_pending":""},
-            "$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+    let complete = super::grants::completed(&row, grant)?;
+    let mut filter = doc! {"_id":row.get("_id").cloned(),"bot_id":bot,"grant_id":grant};
+    let at = if complete {
+        filter.insert(
+            "local_data_erased_at",
+            row.get("local_data_erased_at").cloned(),
+        );
+        filter.insert("completed_grant_id", grant);
+        *row.get_datetime("local_data_erased_at")
+            .map_err(|_| super::grants::incomplete())?
+    } else {
+        filter.insert("local_data_erased_at", doc! {"$exists":false});
+        filter.insert("completed_grant_id", doc! {"$exists":false});
+        if row.get_str("status") == Ok("completed") {
+            // This predecessor shape was published atomically with exact
+            // whole-inbox proof. An absent/malformed/foreign fence cannot
+            // upgrade it or overwrite any contradictory scope evidence.
+            let historical = *row
+                .get_datetime("completed_at")
+                .map_err(|_| super::grants::incomplete())?;
+            filter.insert("completed_at", historical);
+            let prior = db
+                .collection::<Document>("channel_meta_erasure_fences")
+                .find_one(doc! {"_id":bot})
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(super::grants::incomplete)?;
+            if !super::grants::completed(&prior, grant)? {
+                return Err(super::grants::incomplete());
+            }
+            *prior
+                .get_datetime("local_data_erased_at")
+                .map_err(|_| super::grants::incomplete())?
+        } else {
+            bson::DateTime::now()
+        }
+    };
+    let changed=rows.update_one(filter,doc! {"$set":{"status":"completed","outstanding":false,"local_data_erased_at":at,"completed_grant_id":grant},
+        "$unset":{"identity":"","platform":"","app_id":"","from_generation":"","to_generation":"","legacy_history":"",
+            "binding_fingerprint":"","authorized_at":"","bot_created_at":"","created_at":"","sealed_at":"","erasure_cutoff":"",
+            "attribution_pending":"","completed_at":"","erasure_requested":""},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
     if changed.matched_count != 1 {
         return Err(super::grants::incomplete());
     }
@@ -315,6 +358,7 @@ pub(crate) async fn fence_reference(
             .session(&mut *tx)
             .await?
             .ok_or_else(super::grants::incomplete)?;
+        super::super::erasure_admission::fence_in_session(db, &live.user_id, tx).await?;
         ensure_current(db, tx, &live, false).await?;
     }
     let scope = db
@@ -352,27 +396,58 @@ pub(crate) async fn source_in_session(
     else {
         return Ok(None);
     };
-    if !super::meta::is_meta(row.get_str("platform").unwrap_or_default()) {
+    source_document_in_session(db, tx, &row).await
+}
+
+pub(crate) async fn source_document_in_session(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &Document,
+) -> AppResult<Option<GrantRef>> {
+    let platform = row.get_str("platform").unwrap_or_default();
+    if !super::meta::is_meta(platform) {
         return Ok(None);
     }
-    if let Some(value) = row.get("meta_grant") {
-        return bson::from_bson(value.clone())
-            .map(Some)
-            .map_err(|_| super::grants::incomplete());
+    if row.get_str("direction") != Ok("inbound") {
+        return Err(super::grants::incomplete());
     }
     let bot = row
         .get_str("channel_bot_id")
         .map_err(|_| super::grants::incomplete())?;
-    let authority = row
+    let raw = row
         .get_document("meta_authority")
         .map_err(|_| super::grants::incomplete())?;
-    let generation = authority
-        .get_i64("generation")
-        .map_err(|_| super::grants::incomplete())?;
-    let mut filter = doc! {"bot_id":bot,"from_generation":{"$lte":generation},
-    "$or":[{"to_generation":null},{"to_generation":{"$gte":generation}}]};
-    if let Some(value) = authority.get("grant_id") {
-        let grant = value.as_str().ok_or_else(super::grants::incomplete)?;
+    let authority: crate::models::channel_message::MetaMessageAuthority =
+        bson::from_document(raw.clone()).map_err(|_| super::grants::incomplete())?;
+    let chat = super::meta::conversation(platform, bot, &authority.asset_id, &authority.sender_id);
+    if authority.asset_id.is_empty()
+        || authority.sender_id.is_empty()
+        || authority.binding.len() != 64
+        || row.get_str("platform_conversation_id") != Ok(chat.as_str())
+    {
+        return Err(super::grants::incomplete());
+    }
+    let stamped: Option<GrantRef> = row
+        .get("meta_grant")
+        .map(|value| bson::from_bson(value.clone()).map_err(|_| super::grants::incomplete()))
+        .transpose()?;
+    if let Some(stamped) = &stamped
+        && (stamped.bot_id != bot
+            || stamped.generation != authority.generation
+            || authority
+                .grant_id
+                .as_ref()
+                .is_some_and(|grant| grant != &stamped.grant_id))
+    {
+        return Err(super::grants::incomplete());
+    }
+    let mut filter = doc! {"bot_id":bot,"from_generation":{"$lte":authority.generation},
+    "$or":[{"to_generation":null},{"to_generation":{"$gte":authority.generation}}]};
+    if let Some(grant) = authority
+        .grant_id
+        .as_deref()
+        .or_else(|| stamped.as_ref().map(|grant| grant.grant_id.as_str()))
+    {
         filter.insert("grant_id", grant);
     }
     let mut rows = db
@@ -381,7 +456,7 @@ pub(crate) async fn source_in_session(
         .limit(2)
         .session(&mut *tx)
         .await?;
-    let first = rows
+    let scope = rows
         .next(&mut *tx)
         .await
         .transpose()?
@@ -389,11 +464,22 @@ pub(crate) async fn source_in_session(
     if rows.next(&mut *tx).await.transpose()?.is_some() {
         return Err(super::grants::incomplete());
     }
-    Ok(Some(GrantRef {
+    if authority.grant_id.is_none()
+        && (scope.from_generation <= 0 || scope.binding_fingerprint != authority.binding)
+    {
+        // A lazily initialized zero lower bound alone cannot prove a prior
+        // installation. Keep ambiguous historical provenance repairable.
+        return Err(super::grants::incomplete());
+    }
+    let proven = GrantRef {
         bot_id: bot.into(),
-        grant_id: first.grant_id,
-        generation,
-    }))
+        grant_id: scope.grant_id,
+        generation: authority.generation,
+    };
+    if stamped.as_ref().is_some_and(|stamped| stamped != &proven) {
+        return Err(super::grants::incomplete());
+    }
+    Ok(Some(proven))
 }
 
 pub(crate) async fn update_record(
@@ -412,6 +498,18 @@ pub(crate) async fn update_record(
             |tx, &(db, grant, fresh, collection, filter, update)| {
                 Box::pin(async move {
                     fence_reference(db, tx, grant, fresh).await?;
+                    if let Some(record) = db
+                        .collection::<Document>(collection)
+                        .find_one(filter.clone())
+                        .projection(doc! {"user_id":1})
+                        .session(&mut *tx)
+                        .await?
+                    {
+                        let owner = record
+                            .get_str("user_id")
+                            .map_err(|_| super::grants::incomplete())?;
+                        super::super::erasure_admission::fence_in_session(db, owner, tx).await?;
+                    }
                     Ok(db
                         .collection::<Document>(collection)
                         .update_one(filter.clone(), update.clone())
@@ -493,6 +591,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(super::super::grants::completed(&completed, &grant).unwrap());
+        assert!(
+            crate::services::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, &bot),
+                |tx, &(db, bot)| Box::pin(ensure_current(db, tx, bot, false))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            crate::services::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, &bot),
+                |tx, &(db, bot)| Box::pin(fence_current(db, tx, bot))
+            )
+            .await
+            .is_err()
+        );
+        let still_terminal = rows
+            .find_one(doc! {"_id":&scope.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!still_terminal.contains_key("identity"));
+
         for field in [
             "identity",
             "app_id",
@@ -513,4 +636,123 @@ mod tests {
             .is_err()
         );
     }
+}
+
+/// The exact event keeps provenance after its inbound source reaches its TTL.
+pub(crate) async fn event_reference(db: &Database, event: &str) -> AppResult<Option<GrantRef>> {
+    let row = db
+        .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .find_one(doc! {"_id":event})
+        .projection(doc! {"meta_grant":1})
+        .await?
+        .ok_or_else(super::grants::incomplete)?;
+    row.get("meta_grant")
+        .map(|value| bson::from_bson(value.clone()).map_err(|_| super::grants::incomplete()))
+        .transpose()
+}
+
+/// Keep the chat/settings identity while rotating only its internal execution
+/// session when consent changes. Explicit per-chat specialist/settings survive.
+pub(crate) async fn record_thread(
+    db: &Database,
+    bot: &str,
+    source: &str,
+    partition: Document,
+    update: Vec<Document>,
+) -> AppResult<crate::models::nyxbot_channel::NyxbotThread> {
+    super::super::transaction_service::run_db_only(db,&(db,bot,source,&partition,&update),|tx,&(db,bot,source,partition,update)| {
+        Box::pin(async move {
+            let grant=source_in_session(db,tx,source).await?.ok_or_else(super::grants::incomplete)?;
+            if grant.bot_id!=bot {return Err(super::grants::incomplete());}
+            fence_reference(db,tx,&grant,true).await?;
+            let mut update=update.clone();
+            update.push(doc! {"$set":{
+                "conversation_id":{"$cond":[{"$ne":[{"$ifNull":["$meta_grant.grant_id",null]},&grant.grant_id]},null,"$conversation_id"]},
+                "meta_grant":{"$literal":bson::to_bson(&grant).map_err(|_|super::grants::incomplete())?},
+            }});
+            db.collection::<crate::models::nyxbot_channel::NyxbotThread>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                .find_one_and_update(partition.clone(),update).upsert(true).return_document(mongodb::options::ReturnDocument::After)
+                .session(tx).await?.ok_or_else(super::grants::incomplete)
+        })
+    }).await
+}
+
+/// Every authorized whole-inbox purge closes its exact grant writer fence
+/// before its first inventory read, including recovered manual Delete retries.
+pub(crate) async fn claim_purge(db: &Database, bot: &str, grant: &str) -> AppResult<()> {
+    super::super::transaction_service::run_db_only(db,&(db,bot,grant),|tx,&(db,bot,grant)| {
+        Box::pin(async move {
+            if let Some(scope)=db.collection::<Document>(GRANT_SCOPES).find_one(doc! {"bot_id":bot,"grant_id":grant}).session(&mut *tx).await?
+                && scope.get_str("status")==Ok("completed") {
+                mark_complete(db,tx,bot,grant).await?;
+                return Ok(());
+            }
+            if let Some(parent)=db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":bot}).session(&mut *tx).await? {
+                if parent.meta_binding.as_ref().is_none_or(|binding|binding.grant_id!=grant) {return Err(super::grants::incomplete());}
+                ensure_current(db,tx,&parent,false).await?;
+                let mut exact=doc! {"_id":bot,"meta_binding.generation":parent.meta_binding.as_ref().map(|binding|binding.generation)};
+                exact.extend(super::grants::grant_filter(grant));
+                if db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).update_one(exact,doc! {"$inc":{"meta_observation_revision":1_i64}}).session(&mut *tx).await?.matched_count!=1 {return Err(super::grants::incomplete());}
+            }
+            // A retired draft without a scope never admits scoped writes.
+            if let Some(scope)=db.collection::<Document>(GRANT_SCOPES).find_one(doc! {"bot_id":bot,"grant_id":grant}).session(&mut *tx).await? {
+                if super::grants::completed(&scope,grant)? {return Ok(());}
+                let changed=db.collection::<Document>(GRANT_SCOPES).update_one(doc! {"_id":scope.get("_id").cloned(),"bot_id":bot,"grant_id":grant,"status":{"$ne":"completed"}},
+                    doc! {"$set":{"erasure_requested":true},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+                if changed.matched_count!=1 {return Err(super::grants::incomplete());}
+            }
+            Ok(())
+        })
+    }).await
+}
+
+/// A still-present matching parent is authoritative for current chronology.
+/// Preserve stored evidence when it is incomplete, but do not use a stale
+/// scope timestamp to claim deletion while the live parent needs repair.
+pub(crate) async fn synchronize_chronology(
+    db: &Database,
+    tx: &mut ClientSession,
+    scope: &Document,
+) -> AppResult<Document> {
+    if scope.get_str("status") == Ok("completed") {
+        return Ok(scope.clone());
+    }
+    let bot = scope
+        .get_str("bot_id")
+        .map_err(|_| super::grants::incomplete())?;
+    let grant = scope
+        .get_str("grant_id")
+        .map_err(|_| super::grants::incomplete())?;
+    let mut filter = doc! {"_id":bot};
+    filter.extend(super::grants::grant_filter(grant));
+    let Some(parent) = db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one_and_update(filter, doc! {"$inc":{"meta_chronology_revision":1_i64}})
+        .return_document(mongodb::options::ReturnDocument::After)
+        .session(&mut *tx)
+        .await?
+    else {
+        return Ok(scope.clone());
+    };
+    let binding = parent
+        .get_document("meta_binding")
+        .map_err(|_| super::grants::incomplete())?;
+    let mut result = scope.clone();
+    if let Ok(at) = binding.get_datetime("authorized_at") {
+        let changed = db
+            .collection::<Document>(GRANT_SCOPES)
+            .update_one(
+                doc! {"_id":scope.get("_id").cloned(),"bot_id":bot,"grant_id":grant},
+                doc! {"$set":{"authorized_at":at},"$inc":{"revision":1_i64}},
+            )
+            .session(&mut *tx)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(super::grants::incomplete());
+        }
+        result.insert("authorized_at", *at);
+    } else {
+        result.insert("authorized_at", bson::Bson::Null);
+    }
+    Ok(result)
 }

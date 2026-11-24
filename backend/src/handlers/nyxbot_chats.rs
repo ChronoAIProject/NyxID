@@ -328,6 +328,24 @@ pub(super) async fn record_chat_with_relay(
             "partition":{"$ne":partition}
         }
     });
+    if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+        let source = relay_message_id
+            .or(last_message_id)
+            .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?;
+        return crate::services::channel_meta_service::scopes::record_thread(
+            &state.db,
+            &row.channel_bot_id,
+            source,
+            doc! {"channel_id":&row.id,"partition":partition},
+            crate::services::nyxbot_chat_settings_service::record_update(
+                row,
+                facts.kind == "private" && facts.thread_id.is_none(),
+                set,
+                now,
+            ),
+        )
+        .await;
+    }
     crate::services::nyxbot_thread_mutation::record(
         &state.db,
         doc! {"channel_id":&row.id,"partition":partition},

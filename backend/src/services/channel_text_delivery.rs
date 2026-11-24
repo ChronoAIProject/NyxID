@@ -159,12 +159,10 @@ async fn begin_versioned(
                         return Err(AppError::Conflict("Inbox ownership changed".into()));
                     }
                     super::channel_meta_service::scopes::fence_current(db,tx,bot).await?;
-                    if db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME).find_one(doc! {
+                    let source=db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME).find_one(doc! {
                         "_id":&record.source_id,"channel_bot_id":&bot.id,"user_id":&record.user_id,"platform":&bot.platform,"direction":"inbound"
-                    }).session(&mut *tx).await?.is_none() {
-                        return Err(AppError::Conflict("Saved reply source attribution is unavailable".into()));
-                    }
-                    let original=super::channel_meta_service::scopes::source_in_session(db,tx,&record.source_id).await?;
+                    }).session(&mut *tx).await?.ok_or_else(||AppError::Conflict("Saved reply source attribution is unavailable".into()))?;
+                    let original=super::channel_meta_service::scopes::source_document_in_session(db,tx,&source).await?;
                     if original.as_ref()!=record.meta_grant.as_ref() {
                         return Err(AppError::Conflict("Saved reply belongs to another inbox grant".into()));
                     }
@@ -186,8 +184,7 @@ async fn begin_versioned(
                     // A historical plan may join this grant only through its
                     // exact admitted source, never through the current bot alone.
                     if stored.meta_grant.is_none() {
-                        let proven=super::channel_meta_service::scopes::source_in_session(db,tx,&stored.source_id).await?;
-                        if stored.id != record.id && proven.as_ref()!=record.meta_grant.as_ref() {
+                        if stored.id != record.id && original.as_ref()!=record.meta_grant.as_ref() {
                             return Err(AppError::Conflict("Multipart grant attribution needs repair".into()));
                         }
                         db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(

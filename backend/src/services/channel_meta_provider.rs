@@ -101,6 +101,22 @@ async fn retire_account_inbox_in_session(
         return Err(conflict());
     };
     let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
+    if let Some(proof) = db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .find_one(doc! {"_id":id})
+        .session(&mut *tx)
+        .await?
+        && super::grants::completed(&proof, &binding.grant_id)?
+    {
+        super::scopes::mark_complete(db, tx, id, &binding.grant_id).await?;
+        super::grants::clear_completed_retired(db, tx, &proof).await?;
+        let changed=db.collection::<ChannelBot>(BOTS).delete_one(doc! {"_id":id,"user_id":owner,"is_active":false,
+            "meta_binding.grant_id":&binding.grant_id,"meta_binding.generation":binding.generation,"meta_binding.subscription":"removed"}).session(&mut *tx).await?;
+        if changed.deleted_count != 1 {
+            return Err(conflict());
+        }
+        return Ok(());
+    }
     let scope = super::scopes::ensure_current(db, tx, &bot, false).await?;
     if binding.grant_subject_id.is_empty() {
         // No provider subject can claim this manual installation. Account
@@ -614,7 +630,8 @@ pub(super) async fn capture_scopes(
                 .sort(doc! {"_id":1}).limit(SCOPE_BATCH).session(&mut *tx).await?;
             let rows:Vec<bson::Document>=cursor.stream(&mut *tx).try_collect().await?;
             let mut targets=Vec::new();
-            for row in &rows {
+            for stored in &rows {
+                let row=super::scopes::synchronize_chronology(db,tx,stored).await?;
                 if row.get_datetime("authorized_at").is_ok_and(|at|at>=&cutoff) {continue;}
                 let bot=row.get_str("bot_id").map_err(|_|super::grants::incomplete())?;
                 let grant=row.get_str("grant_id").map_err(|_|super::grants::incomplete())?;
@@ -747,27 +764,41 @@ async fn reconcile_target(
     cutoff: Option<&bson::DateTime>,
     scope_id: Option<&str>,
 ) -> AppResult<()> {
+    if !erase && cutoff.is_none() {
+        return Err(super::grants::incomplete());
+    }
     // Earlier queued jobs may omit scope_id. Resolve the captured bot/grant
     // before deciding whether any whole-inbox eraser is authorized.
     let mut scope_filter = doc! {"bot_id":bot_id,"grant_id":grant_id};
     if let Some(id) = scope_id {
         scope_filter.insert("_id", id);
     }
-    let scope = state
+    let mut scope = state
         .db
         .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
         .find_one(scope_filter)
         .await?;
+    if let Some(row) = scope.as_ref() {
+        scope = Some(
+            super::super::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, row),
+                |tx, &(db, row)| Box::pin(super::scopes::synchronize_chronology(db, tx, row)),
+            )
+            .await?,
+        );
+    }
     if scope_id.is_some() && scope.is_none() {
         return Err(super::grants::incomplete());
     }
     if let Some(row) = &scope {
         if row.get_str("status") == Ok("completed") {
-            return if super::grants::completed(row, grant_id)? {
-                Ok(())
-            } else {
-                Err(super::grants::incomplete())
-            };
+            return super::super::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, bot_id, grant_id),
+                |tx, &(db, bot, grant)| Box::pin(super::scopes::mark_complete(db, tx, bot, grant)),
+            )
+            .await;
         }
         if let Some(cutoff) = cutoff {
             let authorized = row
