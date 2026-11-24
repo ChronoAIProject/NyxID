@@ -1,0 +1,108 @@
+{
+  "device": "emulator-5572 Android 14 API34, 1080x2400 420dpi",
+  "provider": "temporary dev.nyxid.voicetest/.Provider; synthetic no-network service",
+  "host": "dev.nyxid.voicechecks; native shell from QA8, isolated manifest and development fixture bundle",
+  "supportedLocales": [
+    "en-US",
+    "zh-CN",
+    "ja-JP"
+  ],
+  "emptyAndNeverCallbackRecovery": true,
+  "manualSelectionPersisted": "ja-JP",
+  "initialSilenceDurationMs": 15043,
+  "initialServiceStarts": 3,
+  "syntheticResultInsertedOnce": "QA recognized after pause",
+  "stopPreventsFurtherRestart": true,
+  "sources": {
+    "src/features/assistant/useComposerDictation.ts": "39d38fefeecf141a0e260868c012530120b919acdc22e791877e827657c6e556",
+    "src/features/assistant/voice/DictationLanguagePicker.tsx": "bd25a19a8dc9c5e568400faac984a38fd0e580894833dc55b2afb89c40698c5c",
+    "src/features/assistant/voice/recognitionLocales.ts": "5bef3ea7aeebc502ed8d36357e485592ed13338788632535c5cc3ca18fd27577",
+    "src/features/assistant/voice/useDictationLanguage.ts": "753045479cd26954f0a427a266221bda32ba6c190e869e00eab0cf294128bc4f"
+  },
+  "hookEvents": [
+    {
+      "phase": "permission",
+      "error": null,
+      "draft": "",
+      "at": 1795509535468
+    },
+    {
+      "phase": "connecting",
+      "error": null,
+      "draft": "",
+      "at": 1795509535473
+    },
+    {
+      "phase": "listening",
+      "error": null,
+      "draft": "",
+      "at": 1795509535510
+    },
+    {
+      "phase": "idle",
+      "error": "No speech was detected. Try again.",
+      "draft": "",
+      "at": 1795509550553
+    },
+    {
+      "phase": "permission",
+      "error": null,
+      "draft": "",
+      "at": 1795509557370
+    },
+    {
+      "phase": "connecting",
+      "error": null,
+      "draft": "",
+      "at": 1795509557374
+    },
+    {
+      "phase": "listening",
+      "error": null,
+      "draft": "",
+      "at": 1795509557396
+    },
+    {
+      "phase": "idle",
+      "error": null,
+      "draft": "|QA recognized after pause",
+      "at": 1795509566761
+    },
+    {
+      "phase": "permission",
+      "error": null,
+      "draft": "|QA recognized after pause",
+      "at": 1795509573302
+    },
+    {
+      "phase": "connecting",
+      "error": null,
+      "draft": "|QA recognized after pause",
+      "at": 1795509573309
+    },
+    {
+      "phase": "listening",
+      "error": null,
+      "draft": "|QA recognized after pause",
+      "at": 1795509573341
+    },
+    {
+      "phase": "stopping",
+      "error": null,
+      "draft": "|QA recognized after pause",
+      "at": 1795509580518
+    },
+    {
+      "phase": "stopping",
+      "error": "No speech was detected. Try again.",
+      "draft": "|QA recognized after pause",
+      "at": 1795509580530
+    },
+    {
+      "phase": "idle",
+      "error": "No speech was detected. Try again.",
+      "draft": "|QA recognized after pause",
+      "at": 1795509580538
+    }
+  ]
+}

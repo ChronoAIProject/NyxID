@@ -11,6 +11,7 @@ import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { deviceLanguages } from "../../i18n/deviceLanguages";
 import { languageLabel } from "./voice/dictationLanguage";
 import { volumeLevel } from "./voice/dictationLevel";
+import { recognitionLocales } from "./voice/recognitionLocales";
 import { resolveDictationLanguage } from "./voice/resolveDictationLanguage";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
@@ -32,6 +33,10 @@ const START_TIMEOUT_MS = 8000;
 const STOP_TIMEOUT_MS = 8000;
 /** How long a new attempt waits for an aborted one's `end`. */
 const RELEASE_TIMEOUT_MS = 1500;
+/** Some Android services ignore silence intent extras and stop after ~4s.
+ * Restart only before any speech, inside one bounded user recording. */
+const ANDROID_INITIAL_SILENCE_MS = 15_000;
+const MAX_SILENCE_RESTARTS = 3;
 
 function permissionDeniedMessage() {
   return Platform.OS === "android"
@@ -145,12 +150,7 @@ function release(owner: AudioOwner, endCapture: () => void) {
 async function recognitionLanguage() {
   const chosen = await savedDictationLanguage();
   const preferred = deviceLanguages();
-  const discovery = await Promise.resolve()
-    .then(() => Recognizer.getSupportedLocales({}))
-    .catch(() => ({
-      locales: [] as string[],
-      installedLocales: [] as string[],
-    }));
+  const discovery = await recognitionLocales(Recognizer, Platform.OS);
   const locales = discovery?.locales ?? [];
   const installedLocales = discovery?.installedLocales ?? [];
   const lang = resolveDictationLanguage(
@@ -161,7 +161,8 @@ async function recognitionLanguage() {
   );
   return {
     lang,
-    canChooseLanguage: locales.length > 0,
+    service: discovery.service,
+    canChooseLanguage: locales.length > 0 || Platform.OS === "android",
     unsupported:
       locales.length > 0 && !lang && (Platform.OS !== "android" || !!chosen),
     selected: chosen ?? lang ?? preferred[0],
@@ -280,9 +281,13 @@ export function useComposerDictation({
     let interimText = "";
     let failure: string | undefined;
     let nativeStartedAt = 0;
+    let lastNativeStartedAt = 0;
     let receivedResult = false;
+    let heardSpeech = false;
+    let silenceRestarts = 0;
     let serverRetried = false;
     let recovering: Promise<boolean> | undefined;
+    let restartSilent: (() => void) | undefined;
     let retryWithServer: (() => void) | undefined;
     let subscriptions: { remove(): void }[] = [];
     let releaseStatus: (() => void) | undefined;
@@ -292,6 +297,8 @@ export function useComposerDictation({
     };
     let permissionTimer: ReturnType<typeof setTimeout> | undefined;
     let startTimer: ReturnType<typeof setTimeout> | undefined;
+    let nativeEndTimer: ReturnType<typeof setTimeout> | undefined;
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined;
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
       [finalText.trim(), interimText.trim()].filter(Boolean).join(" ");
@@ -303,6 +310,14 @@ export function useComposerDictation({
       getAuthEpoch() === epoch &&
       current.current.enabled &&
       current.current.focused;
+    const canRestartSilence = () =>
+      Platform.OS === "android" &&
+      continuous &&
+      !stopping &&
+      !heardSpeech &&
+      !spoken() &&
+      silenceRestarts < MAX_SILENCE_RESTARTS &&
+      Date.now() - nativeStartedAt < ANDROID_INITIAL_SILENCE_MS;
     const detach = () => {
       for (const subscription of subscriptions) subscription.remove();
       subscriptions = [];
@@ -310,6 +325,8 @@ export function useComposerDictation({
       clearTimeout(permissionTimer);
       clearTimeout(startTimer);
       clearTimeout(stopTimer);
+      clearTimeout(silenceTimer);
+      clearTimeout(nativeEndTimer);
     };
     const cancel = () => {
       controller.abort();
@@ -317,6 +334,9 @@ export function useComposerDictation({
       if (native) {
         native = false;
         release(audioOwner!, endCapture);
+      } else if (audioOwner) {
+        deactivate(audioOwner);
+        endCapture();
       }
     };
     /**
@@ -493,12 +513,16 @@ export function useComposerDictation({
           listening = true;
           setPhase("listening");
         }),
+        Recognizer.addListener("speechstart", () => {
+          if (valid()) heardSpeech = true;
+        }),
         Recognizer.addListener("result", (event) => {
           if (!valid()) return;
           // Each final segment is appended (the recognizer supplies spacing);
           // the interim tail is replaced until it settles.
           receivedResult = true;
           const transcript = event.results[0]?.transcript ?? "";
+          heardSpeech ||= !!transcript.trim();
           if (event.isFinal) {
             finalText += transcript;
             interimText = "";
@@ -512,7 +536,22 @@ export function useComposerDictation({
           if (valid()) failure ??= NO_SPEECH;
         }),
         Recognizer.addListener("error", (event) => {
-          if (!valid() || recovering) return;
+          if (!valid() || !native || recovering) return;
+          if (
+            (event.error === "no-speech" || event.error === "speech-timeout") &&
+            canRestartSilence()
+          ) {
+            failure = NO_SPEECH;
+            clearTimeout(nativeEndTimer);
+            nativeEndTimer = setTimeout(() => {
+              if (!valid() || !native) return;
+              native = false;
+              release(audioOwner!, endCapture);
+              failure = START_FAILED;
+              settle();
+            }, RELEASE_TIMEOUT_MS);
+            return;
+          }
           if (!["service-not-allowed", "not-allowed"].includes(event.error)) {
             const message =
               event.error === "language-not-supported" &&
@@ -579,8 +618,35 @@ export function useComposerDictation({
           recovering = classify();
         }),
         Recognizer.addListener("end", () => {
-          if (!valid()) return;
+          if (!valid() || !native) return;
           native = false;
+          clearTimeout(nativeEndTimer);
+          if (
+            !recovering &&
+            (!failure || failure === NO_SPEECH) &&
+            canRestartSilence()
+          ) {
+            silenceRestarts++;
+            failure = undefined;
+            listening = false;
+            // Native end is the release boundary. Back off briefly, keeping
+            // this attempt cancellable and its locale/draft ownership intact.
+            silenceTimer = setTimeout(
+              () => {
+                if (!valid()) return;
+                if (
+                  Date.now() - nativeStartedAt >=
+                  ANDROID_INITIAL_SILENCE_MS
+                ) {
+                  failure = NO_SPEECH;
+                  deactivate(audioOwner!);
+                  settle();
+                } else restartSilent?.();
+              },
+              Math.max(250, 5000 - (Date.now() - lastNativeStartedAt)),
+            );
+            return;
+          }
           const finish = (retry: boolean) => {
             recovering = undefined;
             if (!valid()) return;
@@ -598,10 +664,10 @@ export function useComposerDictation({
       native = true;
       audioOwner = claimVoiceAudioSession();
       nativeStartedAt = Date.now();
-      const beginNative = (onDevice: boolean) => {
+      const beginNative = (onDevice: boolean, silentRestart = false) => {
         native = true;
         listening = false;
-        setPhase("connecting");
+        if (!silentRestart) setPhase("connecting");
         clearTimeout(startTimer);
         startTimer = setTimeout(() => {
           if (!valid()) return;
@@ -610,16 +676,46 @@ export function useComposerDictation({
           setPhase("idle");
           setError(START_FAILED);
         }, START_TIMEOUT_MS);
+        lastNativeStartedAt = Date.now();
         Recognizer.start({
           lang,
+          ...(Platform.OS === "android"
+            ? {
+                androidRecognitionServicePackage: recognition.service,
+                androidIntentOptions: {
+                  EXTRA_PREFER_OFFLINE: onDevice,
+                  ...(continuous
+                    ? {
+                        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS:
+                          ANDROID_INITIAL_SILENCE_MS,
+                        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
+                        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
+                      }
+                    : {}),
+                },
+              }
+            : {}),
           interimResults: true,
           continuous,
           addsPunctuation: true,
           maxAlternatives: 1,
           iosTaskHint: "dictation",
-          requiresOnDeviceRecognition: onDevice,
+          // expo's Android requiresOnDevice flag selects a separate system
+          // service ahead of the explicit package. Keep discovery/start on the
+          // chosen provider, asking it to prefer offline instead.
+          requiresOnDeviceRecognition:
+            Platform.OS === "android" && recognition.service ? false : onDevice,
           volumeChangeEventOptions: { enabled: true, intervalMillis: 90 },
         });
+      };
+      restartSilent = () => {
+        try {
+          beginNative(recognition.onDevice, true);
+        } catch {
+          failure = START_FAILED;
+          deactivate(audioOwner!);
+          settle();
+        }
       };
       retryWithServer = () => {
         try {
