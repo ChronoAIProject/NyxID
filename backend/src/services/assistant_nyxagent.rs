@@ -2685,6 +2685,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         .is_some_and(|o| o.org_execution.is_some())
     {
         row.reply_channel = start.reply_channel.clone();
+        row.reply_channel_meta_grant = start
+            .channel_context
+            .as_ref()
+            .and_then(|context| context.meta_grant.clone());
     } else if start.origin == TurnOrigin::User
         && row
             .reply_channel
@@ -2692,6 +2696,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .is_some_and(|o| o.org_execution.is_some())
     {
         row.reply_channel = None;
+        row.reply_channel_meta_grant = None;
     }
     // Org channel authority binds the next turn's guest/member lane. A new
     // conversation starts with guest_turn=false, so project the authenticated

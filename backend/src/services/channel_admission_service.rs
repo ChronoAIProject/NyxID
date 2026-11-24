@@ -100,7 +100,10 @@ async fn admit_fenced(
                             .find_one(doc! {"_id":&message.channel_bot_id}).session(&mut *session).await?
                             .ok_or_else(||mongodb::error::Error::custom("Meta admission parent is unavailable"))?;
                         if authority.grant_id.as_ref().is_some_and(|grant|live.meta_binding.as_ref().is_none_or(|binding|&binding.grant_id != grant)) {return Ok(false);}
-                        meta_grant = Some(super::channel_meta_service::scopes::fence_current(db,session,&live).await.map_err(mongodb::error::Error::custom)?);
+                        // Preserve MongoDB's transient transaction label when Pages share the administrator fence.
+                        meta_grant = Some(super::api_key_mutation_service::transaction_result(
+                            super::channel_meta_service::scopes::fence_current(db, session, &live).await
+                        )?);
                         let chat = message.platform_conversation_id.as_deref().unwrap_or_default();
                         let control = db.collection::<Document>(super::channel_adapters::meta::CONTROLS).update_one(
                             doc! {"identity_key":format!("{}:{chat}",message.channel_bot_id.as_deref().unwrap_or_default()),
@@ -145,7 +148,7 @@ async fn admit_fenced(
         // committed state are atomic, including an uncertain transaction result.
         let _ = EventDedupStore::release(db, claim).await;
     }
-    Ok(result?)
+    result.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 pub(crate) async fn store(
