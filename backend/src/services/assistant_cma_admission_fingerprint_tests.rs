@@ -589,7 +589,7 @@ async fn catalog_drift_target_mismatch_and_expired_recovery_remain_closed() {
 #[tokio::test]
 async fn catalog_endpoint_repair_never_rebinds_retained_pre_move_creation() {
     let f = Fixture::new().await;
-    crate::test_utils::connect_catalog_fixture_services(&f.db,&f.owner).await.unwrap();
+    crate::services::unified_key_service::auto_provision_no_auth_services(&f.db,&f.owner).await.unwrap();
     let connection = f.db.collection::<crate::models::user_service::UserService>("user_services").find_one(doc! {"user_id":&f.owner,"catalog_service_id":&f.catalog.id}).await.unwrap().unwrap();
     let body = br#"{"machine_included":false}"#;
     let key = "pre-domain-move-retained-request";
@@ -622,7 +622,7 @@ async fn catalog_endpoint_repair_never_rebinds_retained_pre_move_creation() {
 async fn endpoint_only_repair_keeps_current_catalog_creation_recoverable() {
     let f = Fixture::new().await;
     f.observations().await;
-    crate::test_utils::connect_catalog_fixture_services(&f.db,&f.owner).await.unwrap();
+    crate::services::unified_key_service::auto_provision_no_auth_services(&f.db,&f.owner).await.unwrap();
     let connection = f.db.collection::<crate::models::user_service::UserService>("user_services").find_one(doc! {"user_id":&f.owner,"catalog_service_id":&f.catalog.id}).await.unwrap().unwrap();
     let body = br#"{"machine_included":false}"#;
     let key = "current-catalog-repair-recovery";

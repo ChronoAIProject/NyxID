@@ -442,7 +442,6 @@ pub(crate) async fn check_request(
         &admission.offering,
         &operation,
         false,
-        live.api_key_id.as_deref(),
     )
     .await?
     {

@@ -53,18 +53,19 @@ member scope, and `admin_only` gates. A personal grant never grants another owne
 connection. Admin role alone does not bypass the platform-key execution ACL. Restricted checks
 fetch active memberships once and batch-check person/org activity, then intersect
 owner IDs in memory; query count is independent of allowlist size. Catalog and key
-listings, MCP discovery and callable-service loading, and LLM status/gateway checks
-share request-scoped `OwnerGrants` across all service/owner checks. Inventory,
-login, onboarding and grant listing never create or reconcile connections.
-Provider eligibility uses the already-loaded catalog/status provider batch or one
-provider batch shared across each listing.
+listings, auto-provisioning and reconciliation, MCP discovery and callable-service
+loading, and LLM status/gateway checks share request-scoped `OwnerGrants` across all
+service/owner checks. Key listing shares that snapshot with org row traversal and,
+for human/delegated callers, provisioning. API-key inventory reads never provision
+or reconcile rows. Provider eligibility uses the already-loaded catalog/status provider
+batch or one provider batch shared across the other listing/provisioning paths.
 `available_with_grants` performs no database calls. Owner validation uses a single
 `$in` query. No membership or provider eligibility data is cached across requests.
 
 An absent platform configuration preserves the legacy public/internal/master-key
 predicate, including its provider exclusion. Explicit disabled or restricted config
 takes precedence over that implicit legacy grant. Existing private consent-backed
-master credential authorization remains live; automatic connection records require explicit opt-in before execution.
+master credentials and no-auth auto-connections retain their existing behavior.
 
 All credential resolvers authorize against the live catalog and owner before
 decryption: streamlined and legacy proxy, HTTP and WebSocket, LLM gateway, MCP,
@@ -92,26 +93,32 @@ only their own credentials. This is intentional hardening at both HTTP/WS and MC
 routing boundaries, including legacy rows without platform configuration. Agent credential overrides retain their existing behavior and
 final credential classification; they do not bypass a revoked connection grant.
 
-### Explicit personal and organization connections
+### Personal and org provisioning
 
-NyxBot Plugins and Studio AI Services use the same personal
-`POST /api/v1/catalog/{slug}/connect` action. Eligible no-auth HTTP and available
-platform services create a transactional endpoint/connection pair with source
-`catalog_opt_in`. Retrying Connect adopts a legacy automatic row in place and
-preserves an existing disabled connection. Enable and Disable address the exact
-connection ID, including separate explicit siblings. Tombstoned connections can
-be reconnected without violating source uniqueness or leaving orphan endpoints.
-Personal Connect does not accept `org_id`; existing explicit organization setup
-retains its authorization and scoped administrator checks.
+Public platform services auto-provision one personal row per active person when
+no active or user-disabled connection to that catalog service already exists.
+They never create org-owned auto-connected rows, even when the person is an active
+Member/Admin with `can_proxy()`. Restricted services provision a personal row only
+when the person is in `allowed_owner_ids`, and an org row only when that org is in
+`allowed_owner_ids` and is reached through an active `can_proxy()` membership.
+Human grant inventory, human and delegated key listing, Agent Key login delivery (login options), and
+device-code approval/onboarding for the acting person's own account invoke this
+shared provisioning. The 0.19.0 guarantee remains: org-targeted device
+approval/onboarding resolves existing org services and never provisions rows for
+the target org as a side effect of targeting. Legacy no-auth provisioning remains
+personal-only during the org walk. Org views badge eligible rows
+`auto_connected=true`; removing an org grant removes the automatic org rows and
+orphan endpoints on the next owner reconciliation. Stale automatic rows are
+removed with orphan endpoint cleanup, allowing re-provisioning after a grant
+returns. JWT/API-key authentication itself never provisions rows.
 
-Catalog browsing, key and grant inventory, login, device approval/onboarding and
-authentication never create connections. Purely automatic rows are visible as
-available to Connect and cannot execute until that action. App consent only makes
-the previously eligible private no-auth HTTP class discoverable; unrelated private
-catalog rows remain hidden. Live owner, organization and platform grants still
-govern every use, and losing a grant suspends an explicit connection without
-erasing its identity or disabled state. Catalog-owned endpoint URL/spec updates
-are projected live and persisted by catalog/startup maintenance, never by inventory.
+Active connections and inactive non-auto `UserService` rows whose endpoint still
+exists block provisioning for both personal and org owners. These disabled rows
+retain the user's choice and can be enabled on their original slug. Deleted
+tombstones (inactive non-auto rows whose endpoint is gone) do not block a
+replacement, and the partial active slug index lets the new auto-connected row
+reuse the catalog slug instead of receiving a `-2` suffix. Inactive automatic rows
+are reconciled away before provisioning.
 
 The startup sweep `cleanup_public_org_auto_provisions` removes pre-fix public
 platform rows owned by organizations, along with orphan endpoints. It deletes
@@ -123,11 +130,11 @@ counts without failing startup. The sweep is idempotent and leaves personal rows
 restricted org rows, and explicit (`source != auto_provision`) org platform
 bindings untouched. Those explicit
 public bindings continue to resolve under the existing execution ACL: public
-audience permits any active authenticated owner. Personal opt-in does not narrow
-explicit public execution access. Authentication's
-`allow_auto_connected_services` union includes active same-owner opted-in catalog
-rows and explicit platform bindings, excluding legacy automatic rows.
-Saved API-key allowlists and agent bindings are
+audience permits any active authenticated owner. The personal-only automatic
+provisioning rule does not narrow explicit public execution access. Authentication's
+`allow_auto_connected_services` union includes active same-owner automatic rows
+and explicit platform bindings; it does not require public org automatic rows.
+As with listing reconciliation, saved API-key allowlists and agent bindings are
 not rewritten: deleted service UUIDs cannot resolve or grant access to a replacement.
 Automatic rows never create credentials; startup defensively deletes any orphan
 credential attached to a malformed legacy row.

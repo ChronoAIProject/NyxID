@@ -429,6 +429,7 @@ pub async fn options(
 }
 
 pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOptions> {
+    super::unified_key_service::auto_provision_no_auth_services(db, actor).await?;
     let mut owners = vec![actor.to_string()];
     let mut orgs = Vec::new();
     for membership in org_service::list_memberships_for_member(db, actor, false).await? {

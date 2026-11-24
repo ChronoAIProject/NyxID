@@ -447,13 +447,8 @@ async fn org_owned_and_personal_keys_use_inventory_membership_and_effective_scop
         );
     }
     let discovered = discover(&f, &key).await;
-    let slugs: std::collections::HashSet<&str> = discovered["services"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["slug"].as_str().unwrap())
-        .collect();
-    assert_eq!(slugs, ["viewer", "autoplatform"].into_iter().collect());
+    assert_eq!(discovered["services"].as_array().unwrap().len(), 1);
+    assert_eq!(discovered["services"][0]["slug"], "viewer");
     // The same org with an org-owned key acts directly as owner, not as the
     // human's Viewer membership, and cannot inherit the human's other orgs.
     f.owner = services[2].user_id.clone();
@@ -496,54 +491,6 @@ async fn auto_connected_expansion_applies_without_provisioning() {
             doc! {"_id": &instance.id},
             doc! {"$set": {"source": "auto_provision"}},
         )
-        .await
-        .unwrap();
-    let prior_key = f
-        .key(KeySpec {
-            allowed: Some(&[]),
-            allow_auto_connected: true,
-            ..Default::default()
-        })
-        .await;
-    assert_eq!(
-        get(
-            &f,
-            "/api/v1/catalog/auto-instance/endpoints",
-            &headers(&prior_key.full_key, false)
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND,
-    );
-    f.state
-        .db
-        .collection::<Document>(CATALOG)
-        .update_one(
-            doc! {"_id": &catalog.id},
-            doc! {"$set": {"requires_user_credential": false}},
-        )
-        .await
-        .unwrap();
-    f.state
-        .db
-        .collection::<Document>(CATALOG)
-        .update_one(
-            doc! {"_id": &catalog.id},
-            doc! {"$set": {"openapi_spec_url": null}},
-        )
-        .await
-        .unwrap();
-    f.state
-        .db
-        .collection::<Document>(crate::models::service_endpoint::COLLECTION_NAME)
-        .insert_one(doc! {
-            "_id": Uuid::new_v4().to_string(), "service_id": &catalog.id,
-            "name": "status", "method": "GET", "path": "/status", "is_active": true,
-            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-        })
-        .await
-        .unwrap();
-    crate::test_utils::connect_catalog_fixture_services(&f.state.db, &f.owner)
         .await
         .unwrap();
     for enabled in [false, true] {

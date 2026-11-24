@@ -149,8 +149,3 @@ test("unknown execution proposal versions also refuse mobile decisions while leg
   assert.equal(getChallengeActionState(detail).canDecide, false);
   assert.match(getChallengeActionState(detail).reason ?? "", /web app/);
 });
-
-test("the adapter preserves the request's frozen policy duration", () => {
-  const detail=mapBackendRequestToChallenge({...fixture,grant_expiry_days:2});
-  assert.equal(detail.grant_expiry_days,2);
-});

@@ -371,14 +371,15 @@ test("uncached notification deep links push the same detail route without a shee
   env.unmount();
 });
 
-test("inline approval decisions preserve id and mode and leave duration to the server", async () => {
-  const grant = challenge("grant-request", { approval_mode: "grant", grant_expiry_days: 2 });
+test("inline approval decisions preserve id, mode, duration and the existing server path", async () => {
+  const grant = challenge("grant-request", { approval_mode: "grant" });
   const env = setup({ pending: [grant] });
   await env.overview().props.onDecide(grant, "APPROVE");
   await env.harness.settle();
   assert.deepEqual(env.calls.find((c) => c.method === "submitDecision")?.args, [
     "grant-request",
     "APPROVE",
+    7 * 86400,
   ]);
   assert.equal(env.toast().action.label, "View grants");
   env.toast().action.onPress();
@@ -388,7 +389,7 @@ test("inline approval decisions preserve id and mode and leave duration to the s
   await env.harness.settle();
   assert.deepEqual(
     env.calls.filter((c) => c.method === "submitDecision").at(-1)?.args,
-    ["single-request", "DENY"],
+    ["single-request", "DENY", undefined],
   );
   assert.equal(env.toast().message, "Denied");
   assert.equal(env.toast().action, undefined);

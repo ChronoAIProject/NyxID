@@ -556,22 +556,3 @@ export function useUpdateExternalApiKey() {
     },
   });
 }
-
-/** Explicit human consent, shared by Studio and NyxBot. Retrying never enables a disabled row. */
-export function useConnectCatalogService() {
-  const client = useQueryClient();
-  const identity = useAuthStore((state) => state.user?.id);
-  return useMutation({
-    mutationFn: async ({ slug, orgId }: { slug: string; orgId?: string }) => {
-      const authorityGuard = () => {
-        if (!identity || useAuthStore.getState().user?.id !== identity)
-          throw new Error("Account changed before connecting service");
-      };
-      authorityGuard();
-      return api.post<{ connection_id: string; is_active: boolean }>(`/catalog/${encodeURIComponent(slug)}/connect`, { org_id: orgId }, { authorityGuard });
-    },
-    onSuccess: async () => {
-      await Promise.all([client.invalidateQueries({ queryKey: ["keys"] }), client.invalidateQueries({ queryKey: ["user-services"] }), client.invalidateQueries({ queryKey: ["catalog"] }), client.invalidateQueries({ queryKey: ["assistant-grant-catalog"] })]);
-    },
-  });
-}

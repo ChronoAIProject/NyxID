@@ -17,7 +17,7 @@ const mobileRoot = resolve("../mobile/src");
  * The account screen, PrimaryButton, mobileApi and HTTP request helper are real.
  * Native Alert is captured at the OS boundary; no confirmation copy is mocked.
  */
-function harness(platform: "ios" | "android") {
+function harness() {
   const alerts: { title: string; message: string; buttons: NativeButton[] }[] = [];
   const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
     error: "validation_error", error_code: 1000, message: "Fixture denial after request capture",
@@ -26,7 +26,7 @@ function harness(platform: "ios" | "android") {
   const deviceStorage = new Map<string, string>();
   const box = ({ children }: NativeProps) => <div>{children}</div>;
   const native = {
-    Platform: { OS: platform },
+    Platform: { OS: "ios" },
     Alert: { alert: (title: string, message: string, buttons: NativeButton[]) => alerts.push({ title, message, buttons }) },
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
     AppState: { currentState: "active", addEventListener: () => ({ remove: () => undefined }) },
@@ -146,14 +146,14 @@ function harness(platform: "ios" | "android") {
   return { alerts, transport, client };
 }
 
-describe.each(["ios", "android"] as const)("actual mobile account deletion confirmation on %s", (platform) => {
+describe("actual mobile account deletion confirmation", () => {
   const open = async () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete Account" }));
     return screen.getByRole("dialog");
   };
 
   it("discloses every managed Machine, paused workspace and retained record before confirmation", async () => {
-    const { transport, client } = harness(platform);
+    const { transport, client } = harness();
     const message = (await open()).textContent ?? "";
     expect(message).toMatch(/all (?:of your )?managed Machines/i);
     expect(message).toMatch(/paused \/workspace disks/i);
@@ -172,7 +172,7 @@ describe.each(["ios", "android"] as const)("actual mobile account deletion confi
   });
 
   it("keeps cancellation free of account deletion effects", async () => {
-    const { transport, client } = harness(platform);
+    const { transport, client } = harness();
     await open();
     await userEvent.click(screen.getByRole("button", { name: "Keep my account" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -184,7 +184,7 @@ describe.each(["ios", "android"] as const)("actual mobile account deletion confi
   });
 
   it("sends the accepted policy through the real mobile HTTP helper only on explicit confirmation", async () => {
-    const { transport, client } = harness(platform);
+    const { transport, client } = harness();
     await open();
     expect(transport).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Delete Account permanently" }));

@@ -438,7 +438,6 @@ async fn check_http_projected_inner(
             &chat.user_id,
             connection,
             &target.service,
-            auth.api_key_id.as_deref(),
         )
         .await?;
         if id

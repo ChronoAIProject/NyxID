@@ -3532,6 +3532,10 @@ pub async fn grant_services(
         Some(access) => crate::services::mcp_service::ServiceScope::Organization { access },
         None => crate::services::mcp_service::ServiceScope::Unrestricted,
     };
+    // Preserve the old human /keys inventory's personal/restricted-org provisioning.
+    // Grant writers themselves remain read-only until the normal grant transaction.
+    crate::services::unified_key_service::auto_provision_no_auth_services(&state.db, &actor)
+        .await?;
     let services =
         team::grant_catalog(&state.db, &state.node_ws_manager, &actor, scope, &[]).await?;
     // Presentation metadata only: one ID-bounded batch, only on this human GET.

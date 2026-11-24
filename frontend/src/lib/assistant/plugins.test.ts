@@ -109,14 +109,14 @@ describe("deriveConnectorItems", () => {
     expect(added).toEqual([]);
   });
 
-  it("offers an automatic catalog row for explicit opt-in", () => {
+  it("hides an automatic catalog connection from both sections", () => {
     const { added, available } = deriveConnectorItems(
       [makeKey({ auto_connected: true })],
       [makeEntry({})],
     );
 
     expect(added).toEqual([]);
-    expect(available.map((item) => item.connectSlug)).toEqual(["openai"]);
+    expect(available).toEqual([]);
   });
 
   it("counts and manages only manual connections when a service also has automatic ones", () => {
@@ -135,16 +135,15 @@ describe("deriveConnectorItems", () => {
     expect(available).toEqual([]);
   });
 
-  it("exposes explicit platform rows and groups all saved connections", () => {
+  it("hides platform-bound manual rows, including custom and mixed services", () => {
     const { added, available } = deriveConnectorItems([
       makeKey({ id: "platform", credential_binding: "platform", auto_connected: false }),
       makeKey({ id: "custom-platform", credential_binding: "platform", catalog_service_slug: null }),
       makeKey({ id: "personal", credential_binding: "user", is_active: false }),
     ], [makeEntry({})]);
-    expect(added).toHaveLength(2);
-    expect(added[0]?.manageKeyIds).toEqual(["platform", "personal"]);
-    expect(added[0]?.disabled).toBe(false);
-    expect(added[1]?.manageKeyIds).toEqual(["custom-platform"]);
+    expect(added).toHaveLength(1);
+    expect(added[0]?.manageKeyIds).toEqual(["personal"]);
+    expect(added[0]?.disabled).toBe(true);
     expect(available).toEqual([]);
   });
 
@@ -156,7 +155,7 @@ describe("deriveConnectorItems", () => {
     ], [makeEntry({ inference }), makeEntry({ slug: "chrono-llm", name: "Chrono LLM" }), makeEntry({ slug: "hidden", platform_key: { available: true } as CatalogEntry["platform_key"] }), makeEntry({ slug: "github" })]);
     expect(added[0]?.manageKeyIds).toEqual(["my-model"]);
     expect(models.map((item) => item.connectSlug)).toEqual(["openai", "chrono-llm"]);
-    expect(available.map((item) => item.connectSlug)).toEqual(["hidden", "github"]);
+    expect(available.map((item) => item.connectSlug)).toEqual(["github"]);
   });
 
   it("keeps a disabled connection in Added, flagged, rather than offering Connect", () => {

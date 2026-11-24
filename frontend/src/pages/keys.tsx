@@ -1,4 +1,3 @@
-import { CatalogConnectionAction } from "@/components/shared/catalog-connection-action";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import {
@@ -117,9 +116,7 @@ function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
     <TeachingEmptyState
       icon={MagicKeyIcon}
       title={translateUi("No AI services yet")}
-      description={translateUi(
-        "Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your AI agents can call it through NyxID without ever seeing the raw key.",
-      )}
+      description={translateUi("Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your AI agents can call it through NyxID without ever seeing the raw key.")}
       primaryCta={{ label: "Add your first service", onClick: onAdd }}
     />
   );
@@ -154,15 +151,7 @@ function ExternalServicesTab({
   // future change, the `credential_source` field on KeyInfo will take
   // precedence and this call becomes a no-op.
   const { data: userServices } = useUserServices();
-  const catalogQuery = useCatalog({ includeAll: true });
-  const catalog = catalogQuery.data;
-  const availableCatalog = (catalog ?? []).filter(
-    (entry) =>
-      entry.offering_kind !== "tool" &&
-      entry.service_type === "http" &&
-      (entry.platform_key?.available ||
-        (!entry.requires_credential && !entry.requires_gateway_url)),
-  );
+  const { data: catalog } = useCatalog({ includeAll: true });
 
   const sourceById = useMemo(() => {
     const map = new Map<string, CredentialSource>();
@@ -190,92 +179,51 @@ function ExternalServicesTab({
     );
   }
 
+  if (!agentOrder.groupId && !(keys ?? agentOrder.inventory)?.length)
+    return <ServicesEmptyState onAdd={onAdd} />;
+
   return (
     <>
       {error && (
         <ErrorBanner
-          message={translateUi(
-            "Failed to refresh services. Your edits are kept.",
-          )}
+          message={translateUi("Failed to refresh services. Your edits are kept.")}
           onRetry={refetch}
         />
       )}
-      {!agentOrder.groupId && !(keys ?? agentOrder.inventory)?.length && (
-        <ServicesEmptyState onAdd={onAdd} />
-      )}
-      {agentOrder.groupId || (keys ?? agentOrder.inventory)?.length ? (
-        <GroupedServiceCards
-          agentOrder={agentOrder}
-          keys={joinSources(keys ?? agentOrder.inventory)}
-          catalog={catalog}
-          actions={(compact) => (
-            <AddCtaButton
-              label={translateUi("Connect Service")}
-              onClick={onAdd}
-              compact={compact}
-              compactLabel={translateUi("Connect")}
-            />
-          )}
-          renderTable={
-            viewMode === "table"
-              ? (filteredKeys) => (
-                  <div className="overflow-hidden rounded-xl border border-border bg-card">
-                    <ServiceConnectionTable
-                      connections={filteredKeys}
-                      serviceName={translateUi("All services")}
-                      renderActions={(key) => (
-                        <ConnectionReconnect
-                          connection={key}
-                          onReconnect={onReconnect}
-                        />
-                      )}
-                    />
-                  </div>
-                )
-              : undefined
-          }
-          renderConnectionActions={(keyInfo) => (
-            <ConnectionReconnect
-              connection={keyInfo}
-              onReconnect={onReconnect}
-            />
-          )}
-        />
-      ) : null}
-      {!agentOrder.groupId && (
-        <section
-          className="space-y-3"
-          aria-label={translateUi("Available services")}
-        >
-          <h2 className="type-section-title">
-            {translateUi("Available services")}
-          </h2>
-          {catalogQuery.error && (
-            <ErrorBanner
-              message={translateUi(
-                "Failed to load services. Please try again.",
-              )}
-              onRetry={() => void catalogQuery.refetch()}
-            />
-          )}
-          {catalogQuery.isLoading ? (
-            <LoadingSkeleton />
-          ) : (
-            availableCatalog.map((entry) => (
-              <div
-                key={entry.slug}
-                className="space-y-3 rounded-lg border border-border p-4"
-              >
-                <h3 className="type-card-title">{entry.name}</h3>
-                <CatalogConnectionAction
-                  slug={entry.slug}
-                  catalogEntry={entry}
-                />
-              </div>
-            ))
-          )}
-        </section>
-      )}
+      <GroupedServiceCards
+        agentOrder={agentOrder}
+        keys={joinSources(keys ?? agentOrder.inventory)}
+        catalog={catalog}
+        actions={(compact) => (
+          <AddCtaButton
+            label={translateUi("Connect Service")}
+            onClick={onAdd}
+            compact={compact}
+            compactLabel={translateUi("Connect")}
+          />
+        )}
+        renderTable={
+          viewMode === "table"
+            ? (filteredKeys) => (
+                <div className="overflow-hidden rounded-xl border border-border bg-card">
+                  <ServiceConnectionTable
+                    connections={filteredKeys}
+                    serviceName={translateUi("All services")}
+                    renderActions={(key) => (
+                      <ConnectionReconnect
+                        connection={key}
+                        onReconnect={onReconnect}
+                      />
+                    )}
+                  />
+                </div>
+              )
+            : undefined
+        }
+        renderConnectionActions={(keyInfo) => (
+          <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
+        )}
+      />
     </>
   );
 }
@@ -305,30 +253,20 @@ function NyxIdApiKeysTab({
               <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
-              <h3 className="type-card-title text-foreground">
-                {translateUi("Set up an isolated AI agent")}
-              </h3>
-              <p className="max-w-2xl text-14 text-muted-foreground">
-                {translateUi(
-                  "Create or select an Agent Key, choose allowed services, add credential bindings only when needed, then copy a verification command that proves the key is scoped.",
-                )}
-              </p>
+              <h3 className="type-card-title text-foreground">{translateUi("Set up an isolated AI agent")}</h3>
+              <p className="max-w-2xl text-14 text-muted-foreground">{translateUi("Create or select an Agent Key, choose allowed services, add credential bindings only when needed, then copy a verification command that proves the key is scoped.")}</p>
             </div>
           </div>
           <Button className="shrink-0" onClick={onSetupAgent}>
             <ButtonIcon>
               <Terminal className="h-3 w-3" />
-            </ButtonIcon>
-            {translateUi("Start Setup")}
-          </Button>
+            </ButtonIcon>{translateUi("Start Setup")}</Button>
         </CardContent>
       </Card>
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="type-card-title text-foreground">
-            {translateUi("Agent Keys")}
-          </h3>
+          <h3 className="type-card-title text-foreground">{translateUi("Agent Keys")}</h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>
@@ -357,21 +295,12 @@ function AddButton({
 }) {
   useUiTranslation();
   if (tab === "services") {
-    return (
-      <AddCtaButton
-        label={translateUi("Connect Service")}
-        onClick={onAddService}
-      />
-    );
+    return <AddCtaButton label={translateUi("Connect Service")} onClick={onAddService} />;
   }
   if (tab === "pools") {
-    return (
-      <AddCtaButton label={translateUi("Create Pool")} onClick={onCreatePool} />
-    );
+    return <AddCtaButton label={translateUi("Create Pool")} onClick={onCreatePool} />;
   }
-  return (
-    <AddCtaButton label={translateUi("Create API Key")} onClick={onCreateKey} />
-  );
+  return <AddCtaButton label={translateUi("Create API Key")} onClick={onCreateKey} />;
 }
 
 const RoutingPreview = import.meta.env.DEV
@@ -499,15 +428,11 @@ export function KeysPage() {
     <div className="shell-page-stack">
       <PageHeader
         title={translateUi("Services & Credentials")}
-        description={translateUi(
-          "Manage your AI service credentials and agent keys.",
-        )}
+        description={translateUi("Manage your AI service credentials and agent keys.")}
         actions={
           import.meta.env.DEV && !previewActive ? (
             <Button variant="outline" asChild>
-              <Link to="/keys" search={{ view: "routing" }}>
-                {translateUi("Routing preview")}
-              </Link>
+              <Link to="/keys" search={{ view: "routing" }}>{translateUi("Routing preview")}</Link>
             </Button>
           ) : undefined
         }
@@ -520,12 +445,8 @@ export function KeysPage() {
       >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
-            <TabsTrigger value="services">
-              {translateUi("External Services")}
-            </TabsTrigger>
-            <TabsTrigger value="pools">
-              {translateUi("Service Pools")}
-            </TabsTrigger>
+            <TabsTrigger value="services">{translateUi("External Services")}</TabsTrigger>
+            <TabsTrigger value="pools">{translateUi("Service Pools")}</TabsTrigger>
             <TabsTrigger value="nyxid">{translateUi("Agent Keys")}</TabsTrigger>
           </TabsList>
           <div className="flex flex-wrap items-center justify-between gap-3 sm:pb-1">

@@ -18,10 +18,8 @@ use std::{collections::HashMap, time::Duration};
 const PAGE_SIZE: i64 = 100;
 
 pub(crate) fn owned(connection: &UserService) -> bool {
-    matches!(
-        connection.source.as_deref(),
-        Some(AUTO_PROVISION_SOURCE | crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
-    ) && connection.deleted_at.is_none()
+    connection.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
+        && connection.deleted_at.is_none()
         && connection.service_type == "http"
         && connection.node_id.is_none()
         && connection.api_key_id.is_none()
@@ -229,7 +227,7 @@ pub(crate) async fn reconcile(
     let mut after = String::new();
     let mut changed = 0;
     loop {
-        let mut filter = doc! {"source":{"$in":[AUTO_PROVISION_SOURCE,crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE]},"deleted_at":null,"node_id":null,"api_key_id":null,"service_type":{"$in":["http",null]},"_id":{"$gt":&after}};
+        let mut filter = doc! {"source":AUTO_PROVISION_SOURCE,"deleted_at":null,"node_id":null,"api_key_id":null,"service_type":{"$in":["http",null]},"_id":{"$gt":&after}};
         if let Some(owner) = owner {
             filter.insert("user_id", owner);
         }
@@ -259,6 +257,18 @@ pub(crate) async fn reconcile(
         }
         after.clone_from(&last.id);
         tokio::task::yield_now().await;
+    }
+}
+
+/// Repair is maintenance, never a prerequisite for listing, login or approval.
+/// Live target resolution remains authoritative when a stored repair fails.
+pub(crate) async fn reconcile_owner(db: &Database, owner: &str) {
+    if reconcile(db, Some(owner), None).await.is_err() {
+        tracing::warn!(
+            code = "catalog_endpoint_reconciliation_failed",
+            scope = "owner",
+            "Catalog endpoint reconciliation failed; continuing provisioning"
+        );
     }
 }
 

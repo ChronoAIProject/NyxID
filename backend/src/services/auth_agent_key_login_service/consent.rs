@@ -29,7 +29,7 @@ pub struct EffectiveService {
 }
 
 pub(super) fn auto_connected(service: &UserService) -> bool {
-    service.source.as_deref() == Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
+    service.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
         || service.credential_binding.as_deref() == Some("platform")
 }
 
@@ -176,23 +176,22 @@ pub(super) async fn connection(
         false
     };
     let no_auth = !platform && credential_id.is_none() && service.auth_method == "none";
-    let catalog_ready = if service.source.as_deref()
-        == Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
-    {
-        match crate::services::proxy_service::verify_auto_provision_eligibility(
-            db,
-            service,
-            &service.user_id,
-        )
-        .await
-        {
-            Ok(()) => true,
-            Err(AppError::NotFound(_)) => false,
-            Err(error) => return Err(error),
-        }
-    } else {
-        true
-    };
+    let catalog_ready =
+        if service.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE) {
+            match crate::services::proxy_service::verify_auto_provision_eligibility(
+                db,
+                service,
+                &service.user_id,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(AppError::NotFound(_)) => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            true
+        };
     let mut output = EffectiveService {
         id: service.id.clone(),
         owner_id: service.user_id.clone(),

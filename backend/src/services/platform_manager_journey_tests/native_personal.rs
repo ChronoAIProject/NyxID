@@ -575,9 +575,12 @@ fn discord_browser_consent_saved_personal_reply_history_continuation_and_logout_
                 .insert_one(upstream)
                 .await
                 .unwrap();
-            crate::test_utils::connect_catalog_fixture_services(&j.state.db, &j.personal)
-                .await
-                .unwrap();
+            crate::services::unified_key_service::auto_provision_no_auth_services(
+                &j.state.db,
+                &j.personal,
+            )
+            .await
+            .unwrap();
             let session = "1234567890abcdef1234567890abcdef";
             let completed = json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{session}_abcdef1234567890abcdef1234567890"),"conversation":{"id":format!("conv_{session}")},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Continued from the browser"}]}]}});
             Mock::given(method("POST"))

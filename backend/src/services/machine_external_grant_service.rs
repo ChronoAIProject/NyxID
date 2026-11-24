@@ -528,7 +528,7 @@ async fn key_selection(
                 continue;
             }
             let automatic = if key.allow_auto_connected_services {
-                db.collection::<UserService>(SERVICES).find_one(doc! {"_id":service,"user_id":&key.user_id,"is_active":true,"deleted_at":bson::Bson::Null,"source":{"$ne":"auto_provision"},"$or":[{"source":crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE},{"credential_binding":"platform"}]}).session(&mut *session).await?.is_some()
+                db.collection::<UserService>(SERVICES).find_one(doc! {"_id":service,"user_id":&key.user_id,"is_active":true,"deleted_at":bson::Bson::Null,"$or":[{"source":"auto_provision"},{"credential_binding":"platform"}]}).session(&mut *session).await?.is_some()
             } else {
                 false
             };

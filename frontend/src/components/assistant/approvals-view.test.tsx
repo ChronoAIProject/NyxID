@@ -17,11 +17,6 @@ vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost },
 }));
 
-// The Rules tab links to notification settings; the page is rendered without a router here.
-vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
-}));
-
 function request(
   overrides: Partial<ApprovalRequestItem> = {},
 ): ApprovalRequestItem {
@@ -158,31 +153,6 @@ describe("ApprovalsView", () => {
         { approved: true },
       );
     });
-  });
-
-  it("lands on Rules when nothing is pending and nothing is set up", async () => {
-    mockGet.mockImplementation((url: string) => {
-      if (url.startsWith("/notifications/settings")) {
-        return Promise.resolve({
-          grant_expiry_days: 7,
-          approval_timeout_secs: 300,
-          approval_required: true,
-          global_approval_mode: "writes_only",
-          telegram_connected: false,
-          telegram_enabled: false,
-          push_enabled: false,
-          push_device_count: 0,
-        });
-      }
-      if (url.startsWith("/approvals/service-configs")) return Promise.resolve({ configs: [] });
-      if (url.startsWith("/user-services")) return Promise.resolve({ services: [] });
-      return Promise.resolve(listResponse([]));
-    });
-    render(<ApprovalsView />, { wrapper: createWrapper() });
-    expect(await screen.findByText("No protections yet")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Rules" })).toHaveAttribute("aria-selected", "true");
-    await userEvent.setup().click(screen.getByRole("tab", { name: /Pending/ }));
-    expect(await screen.findByText("Nothing waiting on you")).toBeInTheDocument();
   });
 
   it("shows the empty state when nothing is pending", async () => {

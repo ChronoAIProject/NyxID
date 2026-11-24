@@ -769,7 +769,7 @@ pub async fn active_auto_connected_service_ids(
     use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME};
     let rows: Vec<bson::Document> = db
         .collection::<bson::Document>(COLLECTION_NAME)
-        .find(doc! { "user_id": owner_id, "source":{"$ne":AUTO_PROVISION_SOURCE}, "$or": [{ "source": crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE }, { "credential_binding": "platform" }], "is_active": true, "deleted_at":null })
+        .find(doc! { "user_id": owner_id, "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }], "is_active": true })
         .projection(doc! { "_id": 1 })
         .await?
         .try_collect()
@@ -3373,26 +3373,11 @@ mod auto_connected_scope_tests {
             .unwrap();
         let manual_id = Uuid::new_v4().to_string();
         let platform_id = Uuid::new_v4().to_string();
-        let catalog = crate::test_utils::test_auto_connected_catalog_service();
-        db.collection::<crate::models::downstream_service::DownstreamService>(
-            crate::models::downstream_service::COLLECTION_NAME,
-        )
-        .insert_one(&catalog)
-        .await
-        .unwrap();
-        let mut platform = test_user_service(
-            &platform_id,
-            &owner,
-            "platform",
-            "ep",
-            Some(&catalog.id),
-            None,
-        );
+        let mut platform = test_user_service(&platform_id, &owner, "platform", "ep", None, None);
         platform.source = Some(AUTO_PROVISION_SOURCE.into());
         let mut inactive = platform.clone();
         inactive.id = Uuid::new_v4().to_string();
         inactive.is_active = false;
-        inactive.catalog_service_id = Some(Uuid::new_v4().to_string());
         let mut foreign = platform.clone();
         foreign.id = Uuid::new_v4().to_string();
         foreign.user_id = other;
@@ -3426,20 +3411,6 @@ mod auto_connected_scope_tests {
         .unwrap();
         assert!(created.allow_auto_connected_services);
         let (_, key, _) = validate_api_key(&db, &created.full_key).await.unwrap();
-        assert_eq!(
-            effective_allowed_service_ids(&db, &key).await.unwrap(),
-            vec![manual_id.clone()],
-            "automatic rows grant no service scope before explicit opt-in",
-        );
-        crate::test_utils::connect_catalog_fixture_services(&db, &owner)
-            .await
-            .unwrap();
-        platform = db
-            .collection::<crate::models::user_service::UserService>(SERVICES)
-            .find_one(doc! {"_id": &platform_id})
-            .await
-            .unwrap()
-            .unwrap();
         let mut expected = vec![manual_id.clone(), platform_id.clone()];
         expected.sort();
         assert_eq!(
@@ -3448,7 +3419,7 @@ mod auto_connected_scope_tests {
         );
         assert_eq!(key.allowed_service_ids, vec![manual_id.clone()]);
 
-        // A replacement explicit connection is included by the live broad scope.
+        // Reconciliation changes the row identity; the durable grant follows it.
         db.collection::<bson::Document>(SERVICES)
             .delete_one(doc! { "_id": &platform_id })
             .await

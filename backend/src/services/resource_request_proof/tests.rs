@@ -169,9 +169,6 @@ impl Fixture {
             .insert_one(service)
             .await
             .unwrap();
-        crate::test_utils::connect_catalog_fixture_services(&db, &subject)
-            .await
-            .unwrap();
         let key = key_service::create_api_key(
             &db,
             &subject,
@@ -704,99 +701,4 @@ async fn changed_connection_and_new_approval_requirements_refuse_reads() {
             .await
             .is_err()
     );
-}
-
-#[tokio::test]
-async fn key_limited_policy_fences_proof_issuance_and_every_live_revalidation() {
-    let f = Fixture::new().await;
-    let other = key_service::create_api_key(
-        &f.state.db,
-        &f.subject,
-        "other",
-        "proxy",
-        None,
-        None,
-        Some(std::slice::from_ref(&f.connection)),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    for effect in ["deny", "require_approval"] {
-        let configs = f
-            .state
-            .db
-            .collection::<Document>(crate::models::service_approval_config::COLLECTION_NAME);
-        let issuer = f.issuer().await;
-        let (token, descriptor) = f.signed().await;
-        configs.insert_one(doc! {"_id":Uuid::new_v4().to_string(),"user_id":&f.subject,"service_id":&f.catalog,"service_name":"proof",
-            "approval_required":false,"rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":[&f.key.id]}],
-            "created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()}).await.unwrap();
-        assert!(
-            authority::load(
-                &f.state.db,
-                &f.subject,
-                &f.key.id,
-                None,
-                &f.connection,
-                &f.catalog,
-                &f.catalog,
-                "GET",
-                "/api/v1/agents"
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            issuer
-                .attach(&mut request("GET", "/api/v1/agents?limit=1"))
-                .await
-                .is_err()
-        );
-        assert!(
-            introspect(&f.state, &f.client, &f.catalog, &token, descriptor.clone())
-                .await
-                .is_err()
-        );
-        // The same account's unrelated key rule cannot affect this live turn key.
-        configs
-            .update_many(doc! {}, doc! {"$set":{"rules.0.api_key_ids":[&other.id]}})
-            .await
-            .unwrap();
-        f.signed().await;
-        assert!(
-            issuer
-                .attach(&mut request("GET", "/api/v1/agents?limit=1"))
-                .await
-                .is_ok()
-        );
-        assert!(
-            introspect(&f.state, &f.client, &f.catalog, &token, descriptor.clone())
-                .await
-                .is_ok()
-        );
-        configs
-            .update_many(doc! {}, doc! {"$set":{"rules.0.api_key_ids":[]}})
-            .await
-            .unwrap();
-        assert!(
-            issuer
-                .attach(&mut request("GET", "/api/v1/agents?limit=1"))
-                .await
-                .is_err()
-        );
-        assert!(
-            introspect(&f.state, &f.client, &f.catalog, &token, descriptor)
-                .await
-                .is_err()
-        );
-        configs.delete_many(doc! {}).await.unwrap();
-    }
-    crate::test_utils::drop_test_database(&f.state.db).await;
 }

@@ -137,7 +137,6 @@ pub async fn policy(
         &catalog.id,
         &operation,
         false,
-        auth.api_key_id.as_deref(),
     )
     .await?
     {

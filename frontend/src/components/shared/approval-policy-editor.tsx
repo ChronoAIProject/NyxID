@@ -13,7 +13,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { approvalVerbLabels, approvalVerbs } from "@/lib/approval-policies";
+import {
+  approvalVerbLabels,
+  approvalVerbs,
+} from "@/lib/approval-policies";
 import type {
   ApprovalEffect,
   ApprovalMode,
@@ -40,12 +43,6 @@ const effectLabels: Record<ApprovalEffect, string> = {
 };
 
 interface ApprovalPolicyEditorProps {
-  readonly exact?: boolean;
-  readonly apiKeys?: readonly { readonly id: string; readonly name: string }[];
-  readonly onSaveExact?: (
-    rules: readonly ApprovalRule[],
-    defaultEffect: ApprovalEffect | null,
-  ) => void;
   readonly approvalMode: ApprovalMode;
   readonly defaultEffect: ApprovalEffect | null;
   readonly disabled?: boolean;
@@ -57,9 +54,6 @@ interface ApprovalPolicyEditorProps {
 }
 
 export function ApprovalPolicyEditor({
-  exact = false,
-  apiKeys = [],
-  onSaveExact,
   approvalMode,
   defaultEffect,
   disabled = false,
@@ -70,9 +64,7 @@ export function ApprovalPolicyEditor({
   const defaultId = useId();
   const [draftRules, setDraftRules] = useState<readonly ApprovalRule[]>(rules);
   const [draftDefaultEffect, setDraftDefaultEffect] =
-    useState<ApprovalEffect | null>(
-      exact ? defaultEffect : (defaultEffect ?? "auto_allow"),
-    );
+    useState<ApprovalEffect>(defaultEffect ?? "auto_allow");
 
   function updateRule(index: number, update: Partial<ApprovalRule>) {
     setDraftRules((current) =>
@@ -82,13 +74,6 @@ export function ApprovalPolicyEditor({
     );
   }
 
-  function removeKey(index: number, key: string) {
-    const remaining = (draftRules[index]?.api_key_ids ?? []).filter(
-      (id) => id !== key,
-    );
-    if (remaining.length === 0) removeRule(index);
-    else updateRule(index, { api_key_ids: remaining });
-  }
   function toggleMethod(index: number, method: string, checked: boolean) {
     const current = draftRules[index];
     if (!current) return;
@@ -126,15 +111,6 @@ export function ApprovalPolicyEditor({
     ]);
   }
 
-  function moveRule(index: number, direction: number) {
-    setDraftRules((current) => {
-      const next = [...current];
-      const target = index + direction;
-      if (target < 0 || target >= next.length) return current;
-      [next[index], next[target]] = [next[target]!, next[index]!];
-      return next;
-    });
-  }
   function removeRule(index: number) {
     setDraftRules((current) => current.filter((_, idx) => idx !== index));
   }
@@ -144,39 +120,24 @@ export function ApprovalPolicyEditor({
       <div className="flex flex-wrap items-center gap-2">
         <Label htmlFor={defaultId}>{translateUi("Default")}</Label>
         <Select
-          value={draftDefaultEffect ?? "legacy"}
+          value={draftDefaultEffect}
           onValueChange={(value) =>
-            setDraftDefaultEffect(
-              value === "legacy" ? null : (value as ApprovalEffect),
-            )
+            setDraftDefaultEffect(value as ApprovalEffect)
           }
         >
           <SelectTrigger id={defaultId} className="h-8 w-[190px]">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {exact && (
-              <SelectItem value="legacy">
-                {translateUi("Keep legacy fallback")}
-              </SelectItem>
-            )}
-            <SelectItem value="auto_allow">
-              {translateUi("Auto allow unmatched")}
-            </SelectItem>
-            <SelectItem value="require_approval">
-              {translateUi("Require approval unmatched")}
-            </SelectItem>
-            <SelectItem value="deny">
-              {translateUi("Deny unmatched")}
-            </SelectItem>
+            <SelectItem value="auto_allow">{translateUi("Auto allow unmatched")}</SelectItem>
+            <SelectItem value="require_approval">{translateUi("Require approval unmatched")}</SelectItem>
+            <SelectItem value="deny">{translateUi("Deny unmatched")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       {draftRules.length === 0 ? (
-        <div className="rounded-lg bg-overlay px-3 py-2 text-13 text-muted-foreground">
-          {translateUi("No advanced rules configured.")}
-        </div>
+        <div className="rounded-lg bg-overlay px-3 py-2 text-13 text-muted-foreground">{translateUi("No advanced rules configured.")}</div>
       ) : (
         <div className="space-y-3">
           {draftRules.map((rule, index) => (
@@ -185,9 +146,7 @@ export function ApprovalPolicyEditor({
               className="space-y-3 rounded-lg border border-border p-3"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="type-row-title">
-                  {translateUi("Rule ")}
-                  {index + 1}
+                <span className="type-row-title">{translateUi("Rule ")}{index + 1}
                 </span>
                 <Button
                   variant="ghost"
@@ -200,78 +159,8 @@ export function ApprovalPolicyEditor({
                 </Button>
               </div>
 
-              {exact && (
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      disabled={disabled || index === 0}
-                      onClick={() => moveRule(index, -1)}
-                    >
-                      {translateUi("Move rule up")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      disabled={disabled || index === draftRules.length - 1}
-                      onClick={() => moveRule(index, 1)}
-                    >
-                      {translateUi("Move rule down")}
-                    </Button>
-                  </div>
-                  <p className="type-secondary text-text-tertiary">
-                    {translateUi("Applies to")}:{" "}
-                    {(rule.api_key_ids?.length ?? 0)
-                      ? rule
-                          .api_key_ids!.map(
-                            (id) =>
-                              apiKeys.find((key) => key.id === id)?.name ??
-                              translateUi("Deleted key"),
-                          )
-                          .join(", ")
-                      : translateUi("All keys")}
-                  </p>
-                  {(rule.api_key_ids ?? [])
-                    .filter((id) => !apiKeys.some((key) => key.id === id))
-                    .map((id) => (
-                      <Button
-                        key={id}
-                        variant="outline"
-                        disabled={disabled}
-                        onClick={() => removeKey(index, id)}
-                      >
-                        {translateUi("Remove deleted key")}
-                      </Button>
-                    ))}
-                  {apiKeys.map((key) => (
-                    <Label key={key.id} className="flex items-center gap-2">
-                      <Checkbox
-                        checked={rule.api_key_ids?.includes(key.id) ?? false}
-                        disabled={
-                          disabled ||
-                          (!rule.api_key_ids?.includes(key.id) &&
-                            (rule.api_key_ids?.length ?? 0) >= 20)
-                        }
-                        onCheckedChange={(checked) =>
-                          checked
-                            ? updateRule(index, {
-                                api_key_ids: [
-                                  ...(rule.api_key_ids ?? []),
-                                  key.id,
-                                ],
-                              })
-                            : removeKey(index, key.id)
-                        }
-                      />
-                      {key.name}
-                    </Label>
-                  ))}
-                </div>
-              )}
               <div className="space-y-2">
-                <span className="text-13 text-muted-foreground">
-                  {translateUi("Methods")}
-                  {exact && `: ${rule.methods.join(", ") || "*"}`}
-                </span>
+                <span className="text-13 text-muted-foreground">{translateUi("Methods")}</span>
                 <div className="flex flex-wrap gap-2">
                   {approvalMethods.map((method) => (
                     <Label
@@ -292,9 +181,7 @@ export function ApprovalPolicyEditor({
               </div>
 
               <div className="space-y-2">
-                <Label className="text-muted-foreground">
-                  {translateUi("Resource pattern")}
-                </Label>
+                <Label className="text-muted-foreground">{translateUi("Resource pattern")}</Label>
                 <Input
                   value={rule.resource_pattern}
                   onChange={(event) =>
@@ -354,12 +241,8 @@ export function ApprovalPolicyEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="per_request">
-                        {translateUi("Per request")}
-                      </SelectItem>
-                      <SelectItem value="grant">
-                        {translateUi("Time-based grant")}
-                      </SelectItem>
+                      <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
+                      <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                     </SelectContent>
                   </Select>
                 )}
@@ -378,21 +261,13 @@ export function ApprovalPolicyEditor({
         >
           <ButtonIcon>
             <Plus className="h-3.5 w-3.5" />
-          </ButtonIcon>
-          {translateUi("Add Rule")}
-        </Button>
+          </ButtonIcon>{translateUi("Add Rule")}</Button>
         <Button
           variant="primary"
           className="h-8 text-14"
-          onClick={() =>
-            onSaveExact
-              ? onSaveExact(draftRules, draftDefaultEffect)
-              : onSave(draftRules, draftDefaultEffect ?? "auto_allow")
-          }
+          onClick={() => onSave(draftRules, draftDefaultEffect)}
           disabled={disabled}
-        >
-          {translateUi("Save Rules")}
-        </Button>
+        >{translateUi("Save Rules")}</Button>
       </div>
     </div>
   );

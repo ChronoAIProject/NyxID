@@ -311,26 +311,25 @@ actions remain separate capabilities.
   app login against HTTP fixtures, preserving the absolute `return_to` and its
   assistant conversation query through profile restoration.
 
-## Catalog domain changes and explicitly connected services
+## Catalog domain changes and auto-connected services
 
-Catalog-owned HTTP connections, including explicit `catalog_opt_in` rows, follow
-the live catalog destination during proxy resolution. Inventory projects that URL
-and inherited OpenAPI spec without writing. Catalog URL/spec edits and startup
-schedule bounded maintenance that repairs the stored endpoint while retaining
-connection and endpoint IDs. It does not rewrite custom, user-credential,
-gateway-provider or node destinations. Batches read connection, endpoint and
-catalog metadata and transact only mismatches; consistent pages perform no writes.
-Admin edits do not wait for the background pass, which has a five-minute limit.
-Repairs emit identifier/changed-field audit metadata only. Optional provider tokens
-retain their stronger fence: inheritance waits until the stored endpoint agrees
-with the current catalog, and a previously captured old target remains invalid.
+NyxID-owned, auto-provisioned HTTP connections follow the current catalog target
+at proxy resolution. Reconciliation also updates the stored endpoint and inherited
+OpenAPI URL, keeping connection and endpoint IDs unchanged. This applies to all
+catalog services, including CMA and cmaeg; it does not rewrite explicit/custom,
+user-credential, gateway-provider or node destinations. Reconciliation runs during
+normal auto-provisioning (key listing, login and device approval), catalog URL/spec
+updates, and startup. Matching proxy snapshots add no database reads. Reconciliation
+batches connection, endpoint and catalog reads, and starts transactions only for
+mismatches; consistent pages perform no writes. Per-owner repair failures are
+logged without failing listing/login/approval. Admin updates return without waiting
+for repair: catalog updates and startup schedule bounded background passes with a
+five-minute limit. Live resolution already follows the catalog while repair runs.
+Repairs emit only identifier/changed-field audit metadata.
 
-Key/grant listing, login and device approval never provision or repair connections.
-NyxBot and Studio require an explicit Connect before a catalog-only or legacy
-automatic row can execute. Existing explicit connections remain usable under live
-ACLs; separate siblings retain their own enabled state. NyxBot's server-selected
-cmaeg carrier keeps its own catalog binding. Ordinary opted-in CMA/cmaeg connections
-follow catalog moves without deleting or recreating connection identities.
+NyxBot's cmaeg transport already resolves its target directly from the catalog;
+ordinary cmaeg proxy connections now follow catalog moves too. No user needs to
+delete or reconnect an auto-connected service.
 
 CMA still checks that the resolved connection targets the current catalog
 deployment at admission and immediately before sending. A mismatched explicit

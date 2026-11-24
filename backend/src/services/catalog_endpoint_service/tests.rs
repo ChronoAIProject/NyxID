@@ -38,7 +38,7 @@ impl Fixture {
             .await
             .unwrap();
         // Provision through the real pipeline, then model a catalog migration.
-        crate::test_utils::connect_catalog_fixture_services(&db, &owner)
+        unified_key_service::auto_provision_no_auth_services(&db, &owner)
             .await
             .unwrap();
         let connection = db
@@ -105,7 +105,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn opted_in_cma_reads_live_target_and_maintenance_repairs_same_endpoint() {
+async fn stale_auto_cma_resolves_live_then_lists_repaired_target_and_spec_same_ids() {
     let f = Fixture::new("cma").await;
     let resolution = f.resolve().await;
     assert_eq!(resolution.target.base_url, f.catalog.base_url);
@@ -135,13 +135,7 @@ async fn opted_in_cma_reads_live_target_and_maintenance_repairs_same_endpoint() 
         bson::to_document(&f.connection).unwrap(),
         "no connection/key/identity version changes"
     );
-    assert_eq!(
-        f.endpoint().await.url,
-        f.endpoint.url,
-        "inventory performs no repair writes"
-    );
-    assert_eq!(reconcile(&f.db, None, None).await.unwrap(), 1);
-    assert_eq!(f.endpoint().await.url, f.catalog.base_url);
+    assert_eq!(reconcile(&f.db, None, None).await.unwrap(), 0);
     let audits: Vec<Document> =
         f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
             .find(doc! {"event_type":"catalog_endpoint_reconciled"})

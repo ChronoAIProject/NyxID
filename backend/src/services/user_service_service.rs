@@ -107,9 +107,7 @@ pub fn ensure_service_fields_editable(
         // Owners may disable/delete a connection normally. This is not auto-provisioned.
         return Ok(());
     }
-    if (service.credential_binding.as_deref() == Some("platform")
-        || service.source.as_deref()
-            == Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE))
+    if service.credential_binding.as_deref() == Some("platform")
         && service.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
     {
         if let Some((field, _)) = routing_fields.iter().find(|(_, present)| *present) {
@@ -154,7 +152,7 @@ mod access_policy_tests {
     }
 }
 
-/// Return endpoint IDs whose targets are managed by the catalog or voice binding.
+/// Return endpoint ids whose target URL is owned by platform auto-provisioning.
 /// The URL remains stored normally for proxy resolution; callers use this set
 /// only when constructing user-facing endpoint responses.
 pub async fn auto_connected_endpoint_ids(
@@ -165,7 +163,7 @@ pub async fn auto_connected_endpoint_ids(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
-            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .with_options(
             FindOptions::builder()
@@ -202,7 +200,7 @@ pub async fn ensure_user_managed_endpoint(
         .count_documents(doc! {
             "user_id": user_id,
             "endpoint_id": endpoint_id,
-            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .await?;
     if count > 0 {
@@ -994,7 +992,6 @@ pub async fn user_service_ids_for_catalog(
 /// owned by individual people and an admin should be able to route an
 /// org service through their personal node without re-registering it.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
 pub async fn create_user_service(
     db: &mongodb::Database,
     user_id: &str,
@@ -1418,8 +1415,7 @@ pub async fn update_user_service_with_keys(
     } else {
         service_history::collection::<UserService>(db, COLLECTION_NAME)
             .update_one(prepared.filter, prepared.update)
-            .await
-            .map_err(map_connection_write_error)?
+            .await?
             .matched_count
             > 0
     };
@@ -1481,7 +1477,7 @@ impl PreparedServiceUpdate {
             Box::pin(async move { transaction_result(edit.apply_route(db, tx).await) })
         })
         .await
-        .map_err(map_connection_write_error)
+        .map_err(map_transaction_error)
     }
 
     async fn apply_route(&self, db: &Database, tx: &mut Transaction) -> AppResult<bool> {
@@ -1528,44 +1524,6 @@ pub(crate) async fn set_service_route(
     Ok(())
 }
 
-/// Enabling retains identity, but requires live backing resources and a free
-/// route slug. Deleted rows are never revived by a stale Enable request.
-pub(crate) async fn validate_connection_enable(
-    db: &Database,
-    service: &UserService,
-) -> AppResult<()> {
-    if service.deleted_at.is_some() {
-        return Err(AppError::NotFound("User service not found".into()));
-    }
-    let endpoint = db
-        .collection::<Document>(crate::models::user_endpoint::COLLECTION_NAME)
-        .find_one(doc! {"_id":&service.endpoint_id,"user_id":&service.user_id,"deleted_at":null})
-        .await?;
-    if endpoint.is_none() {
-        return Err(AppError::BadRequest(
-            "Reconnect this service before enabling it".into(),
-        ));
-    }
-    if service_history::collection::<UserService>(db,COLLECTION_NAME).find_one(doc! {"_id":{"$ne":&service.id},"user_id":&service.user_id,"slug":&service.slug,"is_active":true,"deleted_at":null}).await?.is_some() { return Err(AppError::Conflict("Another active connection uses this slug".into())); }
-    crate::services::proxy_service::verify_auto_provision_eligibility(db, service, &service.user_id)
-        .await
-}
-
-pub(crate) fn map_connection_write_error(error: mongodb::error::Error) -> AppError {
-    let duplicate = match error.kind.as_ref() {
-        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) => {
-            write.code == 11000
-        }
-        mongodb::error::ErrorKind::Command(command) => command.code == 11000,
-        _ => false,
-    };
-    if duplicate {
-        AppError::Conflict("Another active connection uses this slug".into())
-    } else {
-        map_transaction_error(error)
-    }
-}
-
 async fn validate_direct_route(db: &Database, current: &UserService) -> AppResult<()> {
     if current.service_type == "ssh" {
         return Ok(());
@@ -1602,9 +1560,6 @@ async fn prepare_service_update(
     admin_only: Option<bool>,
 ) -> AppResult<PreparedServiceUpdate> {
     let current = get_user_service(db, user_id, service_id).await?;
-    if is_active == Some(true) {
-        validate_connection_enable(db, &current).await?;
-    }
     super::ifttt_oauth_service::validate_key_route(
         db,
         current.api_key_id.as_deref(),
@@ -1980,18 +1935,7 @@ pub async fn validate_update_inputs(
     new_endpoint_url: Option<&str>,
     new_openapi_spec_url: Option<&str>,
 ) -> AppResult<()> {
-    ensure_service_fields_editable(
-        current,
-        &[
-            ("auth_method", auth_method.is_some()),
-            ("auth_key_name", auth_key_name.is_some()),
-            ("node_id", node_id.is_some()),
-            ("identity", identity.is_some()),
-            ("credential", credential.is_some()),
-            ("endpoint_url", new_endpoint_url.is_some()),
-            ("openapi_spec_url", new_openapi_spec_url.is_some()),
-        ],
-    )?;
+    ensure_user_managed_service(current)?;
 
     super::ifttt_oauth_service::validate_key_route(
         db,

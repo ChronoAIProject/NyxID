@@ -661,39 +661,3 @@ pub struct ToolTopicResponse {
     pub slug: String,
     pub label: String,
 }
-
-#[derive(Debug, Deserialize)]
-pub struct ConnectCatalogRequest {
-    pub org_id: Option<String>,
-}
-#[derive(Debug, Serialize)]
-pub struct ConnectCatalogResponse {
-    pub connection_id: String,
-    pub is_active: bool,
-}
-
-pub async fn connect_catalog_service(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(slug): Path<String>,
-    Json(body): Json<ConnectCatalogRequest>,
-) -> AppResult<Json<ConnectCatalogResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    if body.org_id.is_some() {
-        return Err(AppError::ValidationError(
-            "Catalog opt-in is a personal connection action".into(),
-        ));
-    }
-    let actor = auth.user_id.to_string();
-    let row = crate::services::unified_key_service::connect_catalog_service(
-        &state.db,
-        &actor,
-        body.org_id.as_deref().unwrap_or(&actor),
-        &slug,
-    )
-    .await?;
-    Ok(Json(ConnectCatalogResponse {
-        connection_id: row.id,
-        is_active: row.is_active,
-    }))
-}

@@ -20,7 +20,6 @@ pub async fn require_stream_policy(
     actor: &str,
     connection: &crate::models::user_service::UserService,
     service: &crate::models::downstream_service::DownstreamService,
-    api_key_id: Option<&str>,
 ) -> AppResult<()> {
     use crate::models::service_approval_config::{ApprovalEffect, ServiceApprovalConfig};
     let refused = || {
@@ -38,24 +37,19 @@ pub async fn require_stream_policy(
         .await?
         .try_collect()
         .await?;
-    // Shared agents have a personal specialist owner and a person actor;
-    // the same caller key selects both principals' personal protections.
-    if configs
-        .iter()
-        .filter(|config| !config.disabled)
-        .any(|config| {
-            config.rules.iter().any(|rule| {
-                super::approval_policy::rule_applies_to_key(rule, api_key_id)
-                    && rule.effect != ApprovalEffect::AutoAllow
-            }) || config
+    if configs.iter().any(|config| {
+        config
+            .rules
+            .iter()
+            .any(|rule| rule.effect != ApprovalEffect::AutoAllow)
+            || config
                 .default_effect
                 .as_ref()
                 .is_some_and(|effect| *effect != ApprovalEffect::AutoAllow)
-                || config.default_effect.is_none()
-                    && config.rules.is_empty()
-                    && config.approval_required
-        })
-    {
+            || config.default_effect.is_none()
+                && config.rules.is_empty()
+                && config.approval_required
+    }) {
         return Err(refused());
     }
     // A global approval requirement applies to all later writes as well. Use
@@ -68,13 +62,7 @@ pub async fn require_stream_policy(
             principal,
             &connection.id,
             &descriptor,
-            matches!(
-                connection.source.as_deref(),
-                Some(
-                    "auto_provision" | crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE
-                )
-            ),
-            api_key_id,
+            connection.source.as_deref() == Some("auto_provision"),
         )
         .await?;
         if policy.required || policy.effect != ApprovalEffect::AutoAllow {
