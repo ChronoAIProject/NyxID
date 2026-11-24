@@ -5545,3 +5545,350 @@ async fn durable_wake_recovery_obeys_hourly_budget_and_consecutive_event_guard()
         state.db.drop().await.unwrap();
     }).await;
 }
+
+async fn enable_gallery(state: &AppState, enabled: bool) {
+    use crate::services::feature_flag_service::{self, FlagTarget};
+
+    feature_flag_service::set_platform_override(
+        &state.db,
+        feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+        &FlagTarget::Global,
+        enabled,
+        "test",
+    )
+    .await
+    .unwrap();
+}
+
+async fn queue_gallery(state: &AppState) -> AssistantConversation {
+    use crate::{
+        models::catalog_skill_revision::SkillReference,
+        services::{agent_skill_service, assistant_skill_templates as gallery, audit_service},
+    };
+
+    let slug = "research-paper-writing-rigor";
+    let template = gallery::get(slug).unwrap();
+    let id = gallery::conversation_id(OWNER, slug, &Uuid::new_v4().simple().to_string()).unwrap();
+    gallery::prepare(
+        &state.db,
+        &state.encryption_keys,
+        &audit_service::AuditActor::from_auth_user(&test_auth_user(OWNER)),
+        &id,
+        slug,
+        template,
+        agent_skill_service::Preview {
+            reference: SkillReference {
+                source: "ornn".into(),
+                skill_id: template.skill_id.clone(),
+                name: slug.into(),
+                version: template.version.clone(),
+                sha256: template.sha256.clone(),
+                dependencies: Vec::new(),
+                disabled: false,
+            },
+            description: "Research writing".into(),
+            size_bytes: 1,
+            skill_md: None,
+            author: None,
+        },
+    )
+    .await
+    .unwrap();
+    engine::get(&state.db, OWNER, &id).await.unwrap()
+}
+
+#[tokio::test]
+async fn gallery_opens_at_autonomous_quota_and_returns_to_ordinary_chat() {
+    use crate::services::{
+        assistant_skill_templates as gallery, coordination_service::RateWindowStore,
+    };
+
+    let (state, calls, server) = setup("gallery_quota").await;
+    enable_gallery(&state, true).await;
+    let row = queue_gallery(&state).await;
+    let owner_message = engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: Vec::new(),
+        agent_id: None,
+        conversation_id: Some(row.id.clone()),
+        text: "A real owner message".into(),
+        model: None,
+        access_mode: None,
+    };
+    assert!(matches!(
+        engine::begin_turn(&state.db, OWNER, &owner_message, &state.encryption_keys).await,
+        Err(AppError::AssistantTurnActive)
+    ));
+    for _ in 0..team::EVENT_TURNS_PER_HOUR {
+        assert!(
+            RateWindowStore::admit(
+                &state.db,
+                "assistant_event_turns",
+                OWNER,
+                team::EVENT_TURNS_PER_HOUR,
+                Duration::from_secs(3600),
+            )
+            .await
+            .unwrap()
+            .allowed
+        );
+    }
+    let used = event_budget_used(&state).await;
+    let ordinary_event = team::event("message", "Background event".into(), None);
+    engine::push_events(&state.db, OWNER, &row.id, vec![ordinary_event.clone()])
+        .await
+        .unwrap();
+    wake(&state, OWNER, &row.id).await;
+
+    let settled = idle_row(&state, &row.id).await;
+    assert_eq!(event_budget_used(&state).await, used);
+    assert_eq!(settled.pending_events.len(), 1);
+    assert_eq!(settled.pending_events[0].id, ordinary_event.id);
+    assert_eq!(
+        settled.gallery_skill.as_ref().unwrap().state,
+        crate::models::assistant_conversation::GallerySkillState::Admitted
+    );
+    let messages = transcript(&state, &row.id).await;
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|message| message.role != "user"));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.role == "event" && message.text.contains(gallery::NOTICE))
+    );
+    assert_eq!(calls.lock().await.len(), 1);
+    assert!(
+        calls.lock().await[0]
+            .body
+            .to_string()
+            .contains("The owner started a gallery workflow")
+    );
+
+    user_turn(&state, Some(&row.id), None, "A real owner message").await;
+    assert_eq!(calls.lock().await.len(), 2);
+    assert!(
+        !calls.lock().await[1]
+            .body
+            .to_string()
+            .contains("The owner started a gallery workflow")
+    );
+    assert!(
+        transcript(&state, &row.id)
+            .await
+            .iter()
+            .any(|message| { message.role == "user" && message.text == "A real owner message" })
+    );
+    server.abort();
+    crate::test_utils::drop_test_database(&state.db).await;
+}
+
+#[tokio::test]
+async fn gallery_pin_changes_are_fenced_before_and_after_claim() {
+    use crate::{
+        models::assistant_conversation::GallerySkillState,
+        services::assistant_skill_templates as gallery,
+    };
+
+    let (state, calls, server) = setup("gallery_pin_fences").await;
+    enable_gallery(&state, true).await;
+    let agents = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    for mutation in [
+        doc! {"$set": {"skills.0.version": "99.0"}},
+        doc! {"$set": {"skills.0.disabled": true}},
+        doc! {"$set": {"skills": []}},
+    ] {
+        let row = queue_gallery(&state).await;
+        agents
+            .update_one(doc! {"_id": &row.agent_id}, mutation)
+            .await
+            .unwrap();
+        wake(&state, OWNER, &row.id).await;
+        let drained = idle_row(&state, &row.id).await;
+        assert!(drained.pending_events.is_empty());
+        assert_eq!(
+            drained.gallery_skill.unwrap().state,
+            GallerySkillState::Unavailable
+        );
+        assert!(transcript(&state, &row.id).await.is_empty());
+        assert!(calls.lock().await.is_empty());
+        agents
+            .update_one(doc! {"_id": &row.agent_id}, doc! {"$set": {"skills": []}})
+            .await
+            .unwrap();
+    }
+
+    let row = queue_gallery(&state).await;
+    let pause = crate::test_utils::install_admission_pause(&state.db);
+    let waking = {
+        let state = state.clone();
+        let id = row.id.clone();
+        tokio::spawn(async move { wake(&state, OWNER, &id).await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .unwrap();
+    let claimed = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    let turn = claimed.active_turn.as_ref().unwrap();
+    let pin = &claimed.gallery_skill.as_ref().unwrap().reference;
+    agents
+        .update_one(
+            doc! {"_id": &row.agent_id},
+            doc! {"$set": {"skills.0.sha256": "different"}},
+        )
+        .await
+        .unwrap();
+    let agent = team::agent_for_conversation(&state.db, &claimed)
+        .await
+        .unwrap();
+    assert!(matches!(
+        gallery::verify_opening_pin(&state.db, &row.id, &turn.turn_id, &agent, &pin.skill_id).await,
+        Err(AppError::SkillRead(_))
+    ));
+    pause.resume.notify_one();
+    waking.await.unwrap();
+    let settled = idle_row(&state, &row.id).await;
+    assert!(settled.pending_events.is_empty());
+    assert!(calls.lock().await.is_empty());
+    assert!(
+        transcript(&state, &row.id)
+            .await
+            .iter()
+            .any(|message| message.error_code.as_deref() == Some("gallery_skill_unavailable"))
+    );
+    server.abort();
+    crate::test_utils::drop_test_database(&state.db).await;
+}
+
+#[tokio::test]
+async fn gallery_cancel_and_claim_have_one_winner() {
+    use crate::{
+        models::assistant_conversation::GallerySkillState,
+        services::assistant_skill_templates as gallery,
+    };
+
+    let (state, _, server) = setup("gallery_cancel_race").await;
+    for _ in 0..3 {
+        let row = queue_gallery(&state).await;
+        let (admission, cancellation) = tokio::join!(
+            engine::begin_turn(
+                &state.db,
+                OWNER,
+                event_turn(&row.id),
+                &state.encryption_keys
+            ),
+            gallery::cancel_queued(&state.db, &row),
+        );
+        let cancelled = cancellation.unwrap();
+        assert_eq!(admission.is_ok(), !cancelled);
+        let row = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+        assert!(row.pending_events.is_empty());
+        assert_eq!(row.active_turn.is_none(), cancelled);
+        assert_eq!(
+            row.gallery_skill.unwrap().state,
+            if cancelled {
+                GallerySkillState::Cancelled
+            } else {
+                GallerySkillState::Admitted
+            },
+        );
+    }
+    server.abort();
+    crate::test_utils::drop_test_database(&state.db).await;
+}
+
+#[tokio::test]
+async fn gallery_route_requires_first_party_human_flag_and_bounded_input() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let (state, _, server) = setup("gallery_route_guards").await;
+    enable_gallery(&state, false).await;
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(OWNER).unwrap(),
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(state.clone());
+    let request = |slug: &str, token: Option<&str>, body: Value| {
+        let mut request = Request::post(format!(
+            "/api/v1/assistant/nyxagent/skill-templates/{slug}/start"
+        ))
+        .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        app.clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+    };
+    let slug = "research-paper-writing-rigor";
+    let valid = json!({"setup_id": "a".repeat(32)});
+    assert_eq!(
+        request(slug, None, valid.clone()).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(slug, Some(&token), valid.clone())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    enable_gallery(&state, true).await;
+    assert_eq!(
+        request("not-curated", Some(&token), valid.clone())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(slug, Some(&token), json!({"setup_id":"bad"}))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            slug,
+            Some(&token),
+            json!({"setup_id":"a".repeat(32),"text":"extra"})
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let mut delegated = test_auth_user(OWNER);
+    delegated.oauth_client_id = Some(Uuid::new_v4().to_string());
+    assert!(matches!(
+        super::super::agent_skills::start_template(
+            State(state.clone()), delegated, Path(slug.into()),
+            Json(serde_json::from_value(valid).unwrap()),
+        ).await,
+        Err(error) if error.is_forbidden()
+    ));
+    assert_eq!(
+        state
+            .db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    crate::test_utils::drop_test_database(&state.db).await;
+}

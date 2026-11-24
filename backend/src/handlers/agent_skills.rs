@@ -764,6 +764,69 @@ pub async fn get(
     crate::services::assistant_nyxagent::require_enabled(&state.db, &owner).await?;
     Ok(Json(team::agent(&state.db, &owner, &id).await?.into()))
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryStart {
+    setup_id: String,
+}
+
+#[derive(Serialize)]
+pub struct GalleryStarted {
+    id: String,
+}
+
+pub async fn start_template(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(slug): Path<String>,
+    Json(body): Json<GalleryStart>,
+) -> AppResult<Json<GalleryStarted>> {
+    use crate::services::{assistant_nyxagent as engine, assistant_skill_templates as gallery};
+
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let template = gallery::get(&slug)?;
+    let id = gallery::conversation_id(&owner, &slug, &body.setup_id)?;
+    match engine::get(&state.db, &owner, &id).await {
+        Ok(_) => {}
+        Err(AppError::NotFound(_)) => {
+            let reader = Reader {
+                state: &state,
+                person: &owner,
+                thread_key: None,
+                scopes: None,
+                chat: None,
+            };
+            let preview = skills::preview(&reader, &template.skill_id, &template.version).await?;
+            let actor = crate::services::audit_service::AuditActor::from_auth_user(&auth);
+            let prepared = gallery::prepare(
+                &state.db,
+                &state.encryption_keys,
+                &actor,
+                &id,
+                &slug,
+                template,
+                preview,
+            )
+            .await;
+            if let Err(error) = prepared
+                && engine::get(&state.db, &owner, &id).await.is_err()
+            {
+                return Err(error);
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    let launch_id = id.clone();
+    let background = state.clone();
+    state.shutdown.spawn(async move {
+        super::assistant_team::wake(&background, &owner, &launch_id).await;
+    });
+    Ok(Json(GalleryStarted { id }))
+}
+
 pub async fn set(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -1226,6 +1289,21 @@ pub(crate) async fn dispatch(
             crate::services::org_agent_service::require_use(db, &chat.user_id, &agent).await?;
             if agent.destroyed_at.is_some() {
                 return Err(AppError::Forbidden("Agent is destroyed".into()));
+            }
+            if agent.is_nyxbot()
+                && let Some(turn_id) = chat.turn_id.as_deref()
+            {
+                let skill = arg(args, "skill");
+                Box::pin(
+                    crate::services::assistant_skill_templates::verify_opening_pin(
+                        db,
+                        &chat.conversation_id,
+                        turn_id,
+                        &agent,
+                        skill,
+                    ),
+                )
+                .await?;
             }
             let reader = Reader {
                 state,

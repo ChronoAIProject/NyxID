@@ -2469,6 +2469,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            gallery_skill: None,
             title_language: None,
             automation_v2: false,
             artifact_head: None,
@@ -2648,6 +2649,12 @@ pub(crate) async fn begin_owner_turn_in_session(
     .await?;
     row.shared_agent_thread = authority.is_shared();
 
+    use super::assistant_skill_templates as gallery;
+    use crate::models::assistant_conversation::GallerySkillState;
+    let gallery_opening = gallery::queued_opening(&row);
+    if start.origin != TurnOrigin::Event && gallery_opening {
+        return Err(AppError::AssistantTurnActive);
+    }
     if live_turn(&row, now).is_some() {
         return Err(AppError::AssistantTurnActive);
     }
@@ -2778,7 +2785,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if let Some(work) = automation_work.as_ref()
+    let events = if gallery_opening {
+        // The explicit start opens exactly one workflow. Ordinary events
+        // stay queued for their own metered autonomous turn.
+        let (opening, remaining) = std::mem::take(&mut row.pending_events)
+            .into_iter()
+            .partition(|event| event.kind == gallery::EVENT);
+        row.pending_events = remaining;
+        opening
+    } else if let Some(work) = automation_work.as_ref()
         && start.trigger.is_some()
     {
         let (selected, rest) = std::mem::take(&mut row.pending_events)
@@ -2875,6 +2890,33 @@ pub(crate) async fn begin_owner_turn_in_session(
         return Ok(OwnerTurnAdmission::Drained);
     }
     let mut events = events;
+    if events.iter().any(|event| event.kind == gallery::EVENT) {
+        let admitted = gallery::admit(db, session, &row, start.origin).await?;
+        if let Some(launch) = row.gallery_skill.as_mut() {
+            launch.state = if admitted {
+                GallerySkillState::Admitted
+            } else {
+                GallerySkillState::Unavailable
+            };
+        }
+        if !admitted {
+            events.retain(|event| event.kind != gallery::EVENT);
+            if events.is_empty() && start.origin == TurnOrigin::Event {
+                collection
+                    .update_one(
+                        owner_filter(user_id, &id)?,
+                        doc! {"$set": {
+                            "gallery_skill.state": "unavailable",
+                            "pending_events": bson::to_bson(&row.pending_events)
+                                .map_err(|_| AppError::Internal("Invalid events".into()))?
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     super::assistant_wake_service::materialize(db, user_id, &mut events, session).await?;
     let with_nyxbot = start.origin == TurnOrigin::Group
         && !row.shared_agent_thread
@@ -3653,8 +3695,19 @@ pub(crate) async fn begin_owner_turn_in_session(
         .as_ref()
         .is_none_or(|t| t.automation_work.is_none())
     {
+        // The server-launched gallery turn follows the user's live
+        // permissions cohort, including when woken on a different replica.
+        let gallery_start = gallery::opening_turn(&row).map(|_| {
+            let mut start = start.clone();
+            start.execution_enrollment = true;
+            start
+        });
         Box::pin(super::execution_permission_dispatch::tasks::admit(
-            db, session, &mut row, start, ids,
+            db,
+            session,
+            &mut row,
+            gallery_start.as_ref().unwrap_or(start),
+            ids,
         ))
         .await?;
     }
@@ -4155,6 +4208,8 @@ pub(crate) async fn claim_turn(
                     .await?;
                     if start.origin == TurnOrigin::Event
                         && let OwnerTurnAdmission::Started(claim) = &admission
+                        && super::assistant_skill_templates::opening_turn(&claim.conversation)
+                            .is_none()
                         && claim
                             .conversation
                             .active_turn
@@ -8259,6 +8314,10 @@ impl TurnError {
     pub fn new(code: &str) -> Self {
         let upstream_code = diagnostic_code(code).map(Into::into);
         let (code, message) = match code {
+            "gallery_skill_unavailable" => (
+                "gallery_skill_unavailable",
+                "The pinned skill changed before NyxBot could start it.",
+            ),
             "assistant_start_unavailable" => (
                 "assistant_start_unavailable",
                 "The assistant could not start because a dependency is temporarily unavailable. Nothing was done. Please try again shortly.",

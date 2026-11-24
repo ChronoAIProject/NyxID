@@ -3,7 +3,7 @@ import { appLanguageReady } from "./i18n";
 import "./lib/platform-personal-handoff";
 import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
-import { StrictMode, useState, useEffect } from "react";
+import { StrictMode, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
@@ -15,6 +15,7 @@ import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { announceAssistantAccount } from "./lib/assistant/account-session";
+import { discardUnrelatedSkillSetup, endSkillSetupSsoOnAuthBack, pendingSkillSetupLanding, skillSetupReturn } from "./lib/assistant/skill-template-handoff";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
@@ -75,6 +76,8 @@ function isLoginApprovalPage() {
 
 function Root() {
   const [ready, setReady] = useState(false);
+  const initialHref = useRef(window.location.href);
+  const checkedInitialReturn = useRef(false);
   const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
     () =>
@@ -84,6 +87,7 @@ function Root() {
     [],
   );
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const socialProvider = useAuthStore((s) => s.user?.social_provider);
   const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
@@ -104,6 +108,16 @@ function Root() {
   const { data: publicConfig } = usePublicConfig({
     enabled: telemetryMightInit && !agentKeyLogin,
   });
+
+  useEffect(() => {
+    const [navigation] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
+    if (navigation?.type === "back_forward") endSkillSetupSsoOnAuthBack();
+    function onPageShow(event: PageTransitionEvent) {
+      if (event.persisted) endSkillSetupSsoOnAuthBack();
+    }
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
 
   useEffect(() => {
     useAuthStore
@@ -142,9 +156,23 @@ function Root() {
   // - Unauthenticated user on protected route → login
   useEffect(() => {
     if (!ready) return;
+    const initialReturn = !checkedInitialReturn.current && window.location.href === initialHref.current;
+    checkedInitialReturn.current = true;
     const path = window.location.pathname;
-    if (isAuthenticated && path === "/") {
-      router.navigate({ to: "/assistant" });
+    if (isAuthenticated && (path === "/" || path === "/assistant")) {
+      const setup = initialReturn && !window.location.search && !window.location.hash ? pendingSkillSetupLanding() : undefined;
+      if (!setup) discardUnrelatedSkillSetup(path, window.location.search);
+      if (path === "/" || setup) void router.navigate({ to: "/assistant", search: setup, replace: Boolean(setup) });
+    } else if (isAuthenticated && (path === "/register" || path === "/login")) {
+      const params = new URLSearchParams(window.location.search);
+      const confirmation = params.get("confirm_name");
+      if (path === "/register" && socialProvider && (confirmation === "provider" || confirmation === "empty")) return;
+      const returnTo = params.get("return_to") ?? undefined;
+      const setup = skillSetupReturn(returnTo);
+      if (setup) void router.navigate({ to: "/assistant", search: setup, replace: true });
+      else discardUnrelatedSkillSetup(path, window.location.search);
+    } else if (isAuthenticated) {
+      discardUnrelatedSkillSetup(path, window.location.search);
     } else if (!isAuthenticated) {
       // Send unauthenticated users on a real protected route to login,
       // but let a genuinely-unmatched path fall through to the router's
@@ -167,7 +195,7 @@ function Root() {
         });
       }
     }
-  }, [ready, isAuthenticated]);
+  }, [ready, isAuthenticated, socialProvider, telemetryAccountId]);
 
   // Only block rendering on auth for protected routes.
   // Public routes (landing, login, register, etc.) render immediately.

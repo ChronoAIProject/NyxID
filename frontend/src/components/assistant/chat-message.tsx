@@ -1169,6 +1169,7 @@ export function ChatMessageList({
   emptyDescription,
   footer,
   notice,
+  introduction,
   projectionVersion,
   renderMessage,
   feedbackEnabled = false,
@@ -1179,6 +1180,7 @@ export function ChatMessageList({
   readonly emptyDescription?: ReactNode;
   readonly footer?: ReactNode;
   readonly notice?: ReactNode;
+  readonly introduction?: ReactNode;
   readonly projectionVersion?: string | number;
   readonly renderMessage?: (message: ChatMessage) => ReactNode;
   readonly feedbackEnabled?: boolean;
@@ -1436,6 +1438,7 @@ export function ChatMessageList({
           className="mx-auto flex min-h-full w-full max-w-[var(--chat-content-width,758px)] flex-col gap-4 pt-6"
           style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
         >
+          {introduction}
           {notice ? (
             <div
               role="status"
@@ -1444,7 +1447,7 @@ export function ChatMessageList({
               <div className={BANNER_ROW}>{notice}</div>
             </div>
           ) : null}
-          {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
+          {!messages.length && !introduction ? <EmptyState>{emptyDescription}</EmptyState> : null}
           {/* One element tree in both modes, so crossing the threshold never
               remounts a row (or restarts a streaming reply's reveal). */}
           <div

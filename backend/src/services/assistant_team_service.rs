@@ -30,7 +30,7 @@ use crate::{
         },
         assistant_conversation::{
             AccessMode, AgentEvent, AgentRole, AssistantConversation,
-            COLLECTION_NAME as CONVERSATIONS,
+            COLLECTION_NAME as CONVERSATIONS, GallerySkillLaunch,
         },
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
     },
@@ -781,6 +781,38 @@ pub(crate) async fn create_thread_for_with_access(
         snapshot,
         learning_epoch,
         None,
+        None,
+    ))
+    .await
+}
+
+struct GalleryThread<'a> {
+    id: &'a str,
+    launch: GallerySkillLaunch,
+}
+
+/// Create a private template thread and its single durable opening event.
+pub(crate) async fn create_gallery_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    agent: &AssistantAgent,
+    id: &str,
+    title: &str,
+    launch: GallerySkillLaunch,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    Box::pin(create_thread_with_kind(
+        db,
+        keys,
+        &agent.user_id,
+        agent,
+        title,
+        false,
+        session,
+        None,
+        None,
+        None,
+        Some(GalleryThread { id, launch }),
     ))
     .await
 }
@@ -794,7 +826,7 @@ pub(crate) async fn create_automation_thread(
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
     create_thread_with_kind(
-        db, keys, actor, agent, title, true, session, None, None, None,
+        db, keys, actor, agent, title, true, session, None, None, None, None,
     )
     .await
 }
@@ -818,6 +850,7 @@ pub(crate) async fn create_collaboration_thread(
         None,
         None,
         Some(binding),
+        None,
     ))
     .await
 }
@@ -865,10 +898,12 @@ async fn create_thread_with_kind(
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     learning_epoch: Option<i64>,
     collaboration: Option<crate::models::assistant_group_collaboration::ExecutionBinding>,
+    gallery: Option<GalleryThread<'_>>,
 ) -> AppResult<AssistantConversation> {
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        gallery_skill: gallery.as_ref().map(|gallery| gallery.launch.clone()),
         title_language: None,
         automation_v2: false,
         artifact_head: None,
@@ -882,10 +917,13 @@ async fn create_thread_with_kind(
         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
-        id: format!("nyxa-{}", Uuid::new_v4().simple()),
+        id: gallery.as_ref().map_or_else(
+            || format!("nyxa-{}", Uuid::new_v4().simple()),
+            |gallery| gallery.id.to_owned(),
+        ),
         user_id: actor.to_owned(),
         title: super::assistant_title_service::provisional(title),
-        title_source: if automation_thread {
+        title_source: if automation_thread || gallery.is_some() {
             crate::models::assistant_conversation::TitleSource::User
         } else {
             crate::models::assistant_conversation::TitleSource::Provisional
@@ -915,7 +953,14 @@ async fn create_thread_with_kind(
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
         report_to: None,
-        pending_events: Vec::new(),
+        pending_events: gallery
+            .as_ref()
+            .map(|_| {
+                use super::assistant_skill_templates as templates;
+                event(templates::EVENT, templates::NOTICE.into(), None).bound_to(None)
+            })
+            .into_iter()
+            .collect(),
         event_streak: 0,
         channel: None,
         group_id: None,
@@ -960,6 +1005,7 @@ async fn create_thread_with_kind(
         .session(&mut *session)
         .await?;
     if row.collaboration.is_none()
+        && gallery.is_none()
         && !automation_thread
         && row.platform_thread.is_none()
         && actor == agent.user_id
@@ -1065,6 +1111,7 @@ pub async fn home_thread_for(
                 session,
                 None,
                 learning_epoch,
+                None,
                 None,
             )
             .await;
@@ -1618,6 +1665,7 @@ async fn create_specialist_inner(
                     &agent.name,
                     false,
                     session,
+                    None,
                     None,
                     None,
                     None,

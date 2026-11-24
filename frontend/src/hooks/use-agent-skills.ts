@@ -12,14 +12,29 @@ import {
   skillImproveSchema,
 } from "@/schemas/agent-skills";
 const base = "/assistant/nyxagent";
+
+function agentSkillsPath(id: string) {
+  return `${base}/agents/${encodeURIComponent(id)}/skills`;
+}
+
+async function readAgentSkills(id: string) {
+  return agentSkillsSchema.parse(
+    await assistantJson(agentSkillsPath(id)),
+  );
+}
+
+function writeAgentSkills(
+  id: string,
+  selection: { expected_revision: number; skills: AgentSkill[] },
+) {
+  return assistantJson(agentSkillsPath(id), { method: "PUT", body: selection });
+}
+
 export function useAgentSkills(id: string) {
   const owner = useAuthStore((s) => s.user?.id);
   return useQuery({
     queryKey: ["agent-skills", owner, id],
-    queryFn: async () =>
-      agentSkillsSchema.parse(
-        await assistantJson(`${base}/agents/${encodeURIComponent(id)}/skills`),
-      ),
+    queryFn: () => readAgentSkills(id),
     enabled: Boolean(owner && id),
     retry: false,
   });
@@ -28,14 +43,8 @@ export function useSetAgentSkills(id: string) {
   const client = useQueryClient();
   const owner = useAuthStore((s) => s.user?.id);
   return useMutation({
-    mutationFn: (selection: {
-      expected_revision: number;
-      skills: AgentSkill[];
-    }) =>
-      assistantJson(`${base}/agents/${encodeURIComponent(id)}/skills`, {
-        method: "PUT",
-        body: selection,
-      }),
+    mutationFn: (selection: { expected_revision: number; skills: AgentSkill[] }) =>
+      writeAgentSkills(id, selection),
     onSuccess: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: ["agent-skills", owner, id] }),
@@ -45,6 +54,7 @@ export function useSetAgentSkills(id: string) {
       ]),
   });
 }
+
 export function useSetSkillPreload(agentId: string, skillId: string) {
   const client = useQueryClient();
   const owner = useAuthStore((s) => s.user?.id);

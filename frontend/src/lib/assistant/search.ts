@@ -1,4 +1,6 @@
 import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel-search";
+import { findSkillTemplate, type SkillTemplate } from "./skill-templates";
+import { isSkillSetupId } from "./skill-template-handoff";
 
 /**
  * The `/assistant` search contract, in one place: the router validates with
@@ -19,6 +21,7 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  *   and Back closes it; an inaccessible or destroyed agent shows an explicit
  *   no-access state instead of falling back to NyxBot.
  * - `mock` preserves the dev-only HTTP fixture boundary across router writes.
+ * - `skill` opens a gallery launch, and `template` presents the overview while history loads.
  *
  * `draft` is accepted as a boolean and as the string "true": the router's
  * search parser hands back a real boolean for its own round-tripped links,
@@ -44,6 +47,9 @@ export interface AssistantSearch extends AccountPanelSearch {
   readonly connection?: string;
   readonly g?: string;
   readonly mock?: 1;
+  readonly skill?: SkillTemplate["slug"];
+  readonly skillSetup?: string;
+  readonly template?: SkillTemplate["slug"];
 }
 
 function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
@@ -53,7 +59,15 @@ function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
 function parseChatSearch(
   search: Record<string, unknown>,
 ): Omit<AssistantSearch, keyof AccountPanelSearch> {
+  const hasOtherTarget = ["c", "draft", "agent", "g", "card", "proposal", "details", "connection", "panel"]
+    .some((key) => search[key] !== undefined);
+  const template = hasOtherTarget ? undefined : findSkillTemplate(search.skill);
+  const launchedTemplate = typeof search.c === "string" && /^nyxa-[0-9a-f]{32}$/.test(search.c)
+    ? findSkillTemplate(search.template) : undefined;
   return {
+    ...(launchedTemplate ? { template: launchedTemplate.slug } : {}),
+    ...(template ? { skill: template.slug } : {}),
+    ...(template && isSkillSetupId(search.skillSetup) ? { skillSetup: search.skillSetup } : {}),
     ...(typeof search.c === "string" ? { c: search.c } : {}),
     ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
       ? { card: search.card }

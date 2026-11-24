@@ -203,3 +203,60 @@ instructions, so an existing conversation's upstream context resets once.
 Later parts of #2331 add skill cards in chat (suggest or start a skill) and a
 live step checklist under the same flag; this part ships the card and the
 checklist components and shows the card in the Find skills preview.
+
+## Public gallery
+
+`/testing` lists curated Ornn skills. A title links to
+`/testing?skill=<template-slug>`, which shows that template first. **Try
+this** opens a setup dialog over the gallery at
+`/testing/welcome?skill=<template-slug>`. The dialog shows the selected
+skill and the three setup steps. Guests can choose **Log in** or **Create
+an account**. Signed-in visitors choose **Open NyxBot**. An optional
+`code` from the gallery is carried to the existing registration flow.
+
+Continuing records the visitor's intent to start the skill and builds a
+same-origin return URL at `/assistant?skill=<template-slug>&skillSetup=<id>`.
+A host-only cookie and a same-tab session record must agree. Both expire
+after 30 minutes and are cleared before launch. A plain SSO landing on
+`/` or `/assistant` can recover the same-tab selection after the visitor
+starts a provider from the NyxID sign-in form. Other return destinations
+retain precedence. A shared deep link opens the preview with an explicit
+**Start skill** action.
+
+The browser sends a structured launch to
+`POST /api/v1/assistant/nyxagent/skill-templates/{slug}/start`. NyxID
+verifies the Ornn GUID, version, SHA-256, and dependency closure. It
+attaches the exact enabled pin, creates a private thread, and queues one
+`gallery_skill_started` event in the same transaction. This explicit
+start uses regular turn capacity and billing. It has its own opening turn
+outside the hourly quota for autonomous background events. An account-bound setup ID lets
+the browser recover the same thread after a refresh or lost response.
+
+The chat shows the overview and starting template above the transcript.
+NyxBot reads the verified skill and begins by asking for any missing
+inputs. The composer starts empty. The standard turn history shows the
+server notice and NyxBot's response. The owner can cancel while the
+opening event is queued or stop the active turn.
+
+The shared gallery allowlist lives in `shared/nyxbot-skill-templates.json`.
+The localized starting templates live in
+`frontend/src/lib/assistant/skill-templates.ts`. The gallery works with
+`assistant:skill-runs` off and includes curated input prompts and expected
+output for skills without a supported outline. With that flag enabled,
+a supported outline from the verified package appears in the chat.
+
+### Preview with hosted sign-in
+
+From `frontend/`, start the local app on a loopback address.
+
+```sh
+NYXID_TEMPLATE_PREVIEW=1 BACKEND_URL=https://api.nyxid.ai FRONTEND_URL=https://nyxid.ai \
+  npm run dev -- --host 127.0.0.1 --port 4739 --strictPort
+```
+
+Open `http://nyxbot-preview.localhost:4739/testing`, select **Try this**,
+then choose **Log in** or **Create an account**. Choose a provider and open
+its sign-in tab. The provider returns to NyxID’s hosted device verification
+page. Matching the displayed code and approving the browser delivers a
+session to the original local tab. The selected skill starts in a private NyxBot chat. The preview uses
+the signed-in person’s live skills and chat account.

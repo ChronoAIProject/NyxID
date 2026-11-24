@@ -9,6 +9,12 @@ export const NyxbotOnboardingPage = lazy(() =>
 export const LandingPage = lazy(() =>
   import("@/pages/landing").then((m) => ({ default: m.LandingPage })),
 );
+export const TestingPage = lazy(() =>
+  import("@/pages/testing").then((m) => ({ default: m.TestingPage })),
+);
+export const SkillTemplateWelcomePage = lazy(() =>
+  import("@/pages/skill-template-welcome").then((m) => ({ default: m.SkillTemplateWelcomePage })),
+);
 export const AiSetupPage = lazy(() =>
   import("@/pages/ai-setup").then((m) => ({ default: m.AiSetupPage })),
 );

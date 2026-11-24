@@ -94,6 +94,8 @@ import { isLegacyConversationId } from "@/lib/assistant/conversation-ids";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { findSkillTemplate } from "@/lib/assistant/skill-templates";
+import { SkillTemplateOverview } from "./skill-template-overview";
 import {
   useAssistantOnboarding,
   useHideSuggestions,
@@ -214,8 +216,8 @@ export function ChannelUserEntry({
   );
 }
 
-export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) {
-  useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
+export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, introduction, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly introduction?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) {
+  useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} introduction={introduction} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
 
 export function AssistantChatPage() {
   useUiTranslation();
@@ -970,6 +972,28 @@ function NyxAgentThreadPage() {
   }, [home, chat.isStreaming]);
 
   const conversation = chat.conversation;
+  const gallery = conversation?.gallery_skill;
+  const template = findSkillTemplate(gallery?.slug ?? (chat.isLoading && !conversation ? search.template : undefined));
+  const galleryQueued = gallery?.state === "queued";
+  const [cancellingGallery, setCancellingGallery] = useState(false);
+  const launchStatus = galleryQueued ? translateUi("Waiting for NyxBot to start the skill…")
+    : gallery?.state === "cancelled" ? translateUi("Skill start cancelled.")
+    : gallery?.state === "unavailable" ? translateUi("The pinned skill changed before NyxBot could start it.")
+    : undefined;
+
+  async function stopGallery() {
+    const scope = errorScope;
+    setRequestError(undefined);
+    setCancellingGallery(true);
+    try {
+      await chat.stop();
+      await chat.refreshHistory();
+    } catch {
+      setRequestError({ scope, message: "Could not stop NyxBot. Try again shortly." });
+    } finally {
+      setCancellingGallery(false);
+    }
+  }
   // Threads carry the agent's handle; its display name lives on the agent list.
   const headerNamed = headerAgent ? withDisplayName(headerAgent, agents.data?.agents) : undefined;
   const agentName = headerNamed ? agentTitle(headerNamed) : "NyxBot";
@@ -1098,7 +1122,7 @@ function NyxAgentThreadPage() {
           </>
         ) : undefined}
       />
-      {conversation && !chat.isStreaming ? (
+      {conversation && !chat.isStreaming && !galleryQueued ? (
         <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
       ) : null}
       {headerAgent?.kind === "nyxbot" ? <NyxAgentRequestLinks
@@ -1236,7 +1260,7 @@ function NyxAgentThreadPage() {
               showSuggestions.mutate();
             }}
           />
-        ) : chat.isLoading && !chat.session.messages.length ? (
+        ) : chat.isLoading && !chat.session.messages.length && !template ? (
           <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading conversation...")}</div>
         ) : (
           <CardLanguageContext.Provider value={cardLanguage}>
@@ -1250,6 +1274,20 @@ function NyxAgentThreadPage() {
             ) : null}
             <NyxAgentThreadMessageList
               session={voiceSession}
+              introduction={template ? (
+                <div className="space-y-3">
+                  <SkillTemplateOverview template={template} />
+                  {launchStatus ? (
+                    <div className="flex flex-wrap items-center gap-3">
+                      <p role="status" className="type-body text-muted-foreground">{launchStatus}</p>
+                      {galleryQueued ? (
+                        <Button type="button" variant="outline" size="sm" disabled={cancellingGallery}
+                          onClick={() => void stopGallery()}>{translateUi("Cancel skill start")}</Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : undefined}
               renderMessage={(message) => {
                 if (message.voiceGroup) return (
                   <NyxAgentAssistantEntry
@@ -1485,14 +1523,14 @@ function NyxAgentThreadPage() {
             }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
-            disabled={destroyed}
+            disabled={destroyed || galleryQueued || Boolean(template && !conversation)}
             ownerUserId={user?.id ?? null}
             draftKey={
               selectedId
                 ? `conv:${selectedId}`
-                : headerAgent?.kind === "specialist"
+                : (headerAgent?.kind === "specialist"
                   ? `screen:nyxagent:agent:${headerAgent.id}`
-                  : "screen:nyxagent:assistant"
+                  : "screen:nyxagent:assistant")
             }
             focusRequest={focusRequest}
             agentOverride={agentOverride}

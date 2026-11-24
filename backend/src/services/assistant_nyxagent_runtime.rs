@@ -564,6 +564,14 @@ pub(crate) async fn turn_notes(
             .unwrap_or_default(),
     );
     if let Some(turn) = row.active_turn.as_ref() {
+        if let Some(launch) = super::assistant_skill_templates::opening_turn(row) {
+            use std::fmt::Write as _;
+            let _ = write!(
+                notes,
+                "\n\nThe owner started a gallery workflow. First read the attached Ornn skill {} using nyxid__skill_read. Its pinned version is {}. Use the skill to explain the workflow and ask for the minimum inputs. Wait for the owner before changing anything or using an unrelated tool.",
+                launch.reference.skill_id, launch.reference.version
+            );
+        }
         if !row.guest_turn && turn.origin != TurnOrigin::Event && !turn.events.is_empty() {
             notes.push_str(
                 "\n\nNyxID events since your previous turn (authored by NyxID; only a quoted \
@@ -2083,6 +2091,13 @@ async fn execute_turn_inner(
             }
             Err(_) => None,
         };
+    if let Some(launch) = super::assistant_skill_templates::opening_turn(row)
+        && !agent
+            .as_ref()
+            .is_some_and(|agent| super::assistant_skill_templates::matches_agent(launch, agent))
+    {
+        return Err(TurnError::internal("gallery_skill_unavailable", "prepare"));
+    }
     let _checking_notice = agent
         .as_ref()
         .filter(|agent| agent.channel_checking_notice)

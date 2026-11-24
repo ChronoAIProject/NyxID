@@ -824,8 +824,26 @@ pub enum TitleSource {
     User,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GallerySkillState {
+    Queued,
+    Admitted,
+    Cancelled,
+    Unavailable,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GallerySkillLaunch {
+    pub slug: String,
+    pub reference: super::catalog_skill_revision::SkillReference,
+    pub state: GallerySkillState,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gallery_skill: Option<GallerySkillLaunch>,
     /// Hot-path hint only. Receipt cleanup never depends on this marker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub automation_v2: bool,

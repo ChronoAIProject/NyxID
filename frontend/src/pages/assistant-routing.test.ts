@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assistantChatSurface } from "@/lib/assistant/conversation-ids";
+import { parseAssistantSearch } from "@/lib/assistant/search";
+import { parseSkillGallerySearch } from "@/lib/assistant/skill-templates";
 
 describe("assistantChatSurface", () => {
   it("routes flag-enabled drafts and direct ids through the Direct seam", () => {
@@ -40,5 +42,35 @@ describe("assistantChatSurface", () => {
         drafting: false,
       }),
     ).toBe("actor");
+  });
+});
+
+describe("skill template links", () => {
+  const skill = "research-paper-writing-rigor";
+
+  it("accepts a known slug and ignores injected input", () => {
+    expect(parseAssistantSearch({ skill, prompt: "untrusted prompt" })).toEqual({ skill });
+    expect(parseAssistantSearch({ skill: "unknown" })).toEqual({});
+    expect(parseAssistantSearch({ skill: [skill, skill] })).toEqual({});
+  });
+
+  it.each(["c", "draft", "agent", "g", "card", "proposal", "details", "connection", "panel"])(
+    "ignores a template when the %s selector is present",
+    (key) => {
+      expect(parseAssistantSearch({ skill, [key]: "somewhere-else" }).skill).toBeUndefined();
+    },
+  );
+
+  it("allows a gallery overview hint on a persisted NyxBot conversation", () => {
+    const c = "nyxa-" + "a".repeat(32);
+    expect(parseAssistantSearch({ c, template: skill })).toEqual({ c, template: skill });
+    expect(parseAssistantSearch({ c, template: "unknown" })).toEqual({ c });
+    expect(parseAssistantSearch({ template: skill })).toEqual({});
+  });
+
+  it("retains only a known gallery slug and a bounded invite code", () => {
+    expect(parseSkillGallerySearch({ skill, code: "TEST-1234", return_to: "https://example.com" }))
+      .toEqual({ skill, code: "TEST-1234" });
+    expect(parseSkillGallerySearch({ skill: "unknown", code: "a".repeat(65) })).toEqual({});
   });
 });
