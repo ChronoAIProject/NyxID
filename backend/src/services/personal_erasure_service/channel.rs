@@ -18,6 +18,32 @@ pub(crate) async fn erase_provider_inbox(
         )
         .find_one(doc! {"_id":bot_id})
         .await?;
+    if super::super::channel_meta_service::scopes::has_history(&state.db, bot_id).await? {
+        if super::super::channel_meta_service::grants::completion_for(&state.db, bot_id, grant_id)
+            .await?
+        {
+            return Ok(());
+        }
+        let captured = retired
+            .as_ref()
+            .filter(|bot| {
+                bot.meta_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.grant_id == grant_id)
+            })
+            .ok_or_else(super::super::channel_meta_service::grants::incomplete)?;
+        if super::super::channel_meta_service::grants::manual_purge_authorized(&state.db, captured)
+            .await?
+        {
+            if super::super::channel_meta_service::scope_erasure::manual_pass(state, captured)
+                .await?
+            {
+                return Ok(());
+            }
+            return Err(AppError::Conflict("This inbox grant is still being erased; retry Delete after its cleanup worker finishes".into()));
+        }
+        return Err(super::super::channel_meta_service::grants::incomplete());
+    }
     let mut retired_context = None;
     if retired.is_none() {
         let proof = state

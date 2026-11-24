@@ -925,6 +925,15 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
         .unwrap();
     assert_eq!(managed.id, bot.id);
     assert_eq!(managed.credential_source, "platform");
+    assert_eq!(
+        settings
+            .find_one(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("channel_bot_registration_revision"),
+        Ok(before + 1)
+    );
     let producer_id = source.get_str("_id").unwrap();
     assert_eq!(
         managed
@@ -949,10 +958,12 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
             .get_bool("complete")
             .unwrap()
     );
+    let mut migration_keys = crate::test_utils::test_encryption_keys();
+    migration_keys.set_contextual_record_writes(true);
     assert!(
         platform_credential_service::migrate_storage_snapshot(
             &state.db,
-            &state.encryption_keys,
+            &migration_keys,
             &prepared
         )
         .await
@@ -966,15 +977,6 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
             .fingerprint()
             .unwrap(),
         pin
-    );
-    assert_eq!(
-        settings
-            .find_one(id)
-            .await
-            .unwrap()
-            .unwrap()
-            .get_i64("channel_bot_registration_revision"),
-        Ok(before + 1)
     );
 }
 
@@ -6744,6 +6746,38 @@ async fn accepted_subject_cutoff_closes_overflow_verify_refresh_reconnect_and_ca
     assert!(!untouched.meta_binding.as_ref().unwrap().erasure_requested);
     assert!(s.verify(&untouched).await.is_err());
     assert!(s.refresh(&untouched).await.is_err());
+    let adapter = adapter("instagram").unwrap();
+    assert!(
+        super::super::channel_bot_service::update_bot_as_actor(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &untouched.id,
+            super::super::channel_bot_service::UpdateBotAuthority {
+                actor_id: &untouched.user_id,
+                owner_id: &untouched.user_id
+            },
+            super::super::channel_bot_service::UpdateBotParams {
+                x_events: None,
+                bot_token: Some("replacement-fixture-token"),
+                label: None,
+                verification_token: None,
+                encrypt_key: super::super::channel_bot_service::SecretPatch::Unchanged,
+                app_id: None,
+                app_secret: None
+            }
+        )
+        .await
+        .is_err()
+    );
+    let after_patch = super::super::channel_bot_service::get_bot(&state.db, &untouched.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_patch.meta_binding.as_ref().unwrap().token_fingerprint,
+        untouched.meta_binding.as_ref().unwrap().token_fingerprint
+    );
     assert!(
         s.start(
             &bot.user_id,
@@ -6893,6 +6927,539 @@ async fn reconnect_start_recovers_deauthorization_but_refuses_pending_deletion()
         .is_err()
     );
     assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+async fn admit_page_message(
+    state: &crate::AppState,
+    adapter: &MetaAdapter,
+    bot: &ChannelBot,
+    key: &str,
+    mid: &str,
+    token: &str,
+) -> crate::models::channel_message::ChannelMessage {
+    adapter
+        .prove_control(&state.db, &state.http_client, bot, "333", token)
+        .await
+        .unwrap();
+    let event = json!({"sender":{"id":"333"},"recipient":{"id":"222"},"timestamp":Utc::now().timestamp_millis(),
+        "message":{"mid":mid,"text":"A local customer question"}});
+    let inbound = meta::parse_event(Inbox::Messenger, &bot.id, "222", &event).unwrap();
+    let mut message = super::super::channel_relay_service::inbound_metadata(
+        &bot.id,
+        "scoped-route",
+        &bot.user_id,
+        "messenger",
+        &inbound,
+        key,
+        &uuid::Uuid::new_v4().to_string(),
+    );
+    message.meta_authority = Some(meta::authority(bot, &inbound, 1800).unwrap());
+    assert!(
+        super::super::channel_admission_service::store(&state.db, message.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    message
+}
+
+async fn send_page_reply(
+    state: &crate::AppState,
+    adapter: &MetaAdapter,
+    bot: &ChannelBot,
+    original: &crate::models::channel_message::ChannelMessage,
+    token: &str,
+) -> AppResult<(
+    crate::models::channel_message::ChannelMessage,
+    super::super::channel_platform::SendOutcome,
+)> {
+    let reply = super::super::channel_platform::OutboundReply {
+        text: Some("Local fixture reply".into()),
+        attachments: Vec::new(),
+        reply_to_platform_message_id: None,
+        metadata: None,
+    };
+    super::super::channel_reply_delivery::send_parts(
+        &state.db,
+        &state.http_client,
+        adapter,
+        bot,
+        original,
+        original.agent_api_key_id.as_deref().unwrap(),
+        original.platform_conversation_id.as_deref().unwrap(),
+        &BotCredentials::from(token),
+        vec![reply],
+    )
+    .await
+}
+
+async fn reconsent_transferred_page(
+    state: &crate::AppState,
+    server: &MockServer,
+    a: &ChannelBot,
+) -> ChannelBot {
+    use crate::services::ownership_transfer_service as transfer;
+    let recipient = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &recipient,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &state.db,
+        "channels:messenger",
+        &FlagTarget::User(recipient.clone()),
+        true,
+        &a.user_id,
+    )
+    .await
+    .unwrap();
+    let preview = transfer::preview(
+        &state.db,
+        &a.user_id,
+        transfer::ResourceKind::ChannelBot,
+        &a.id,
+        &recipient,
+        5,
+    )
+    .await
+    .unwrap();
+    transfer::transfer_with_keys(
+        &state.db,
+        Some(&state.encryption_keys),
+        transfer::TransferCommand {
+            actor: &a.user_id,
+            api_key_id: None,
+            first_party_human: true,
+            kind: transfer::ResourceKind::ChannelBot,
+            resource_id: &a.id,
+            destination: &recipient,
+            request_id: &uuid::Uuid::new_v4().to_string(),
+            expected_version: &preview.version,
+            capacity: 5,
+        },
+    )
+    .await
+    .unwrap();
+    page_grant(server, "901", "page-token-b").await;
+    let service = service(state, server);
+    let start = service
+        .start(
+            &recipient,
+            &recipient,
+            "messenger",
+            "Transferred Page",
+            Some(&a.id),
+        )
+        .await
+        .unwrap();
+    service
+        .exchange(
+            &recipient,
+            "messenger",
+            &state_value(&start),
+            Some("b-consent"),
+        )
+        .await
+        .unwrap();
+    service
+        .finish(&recipient, &start.session_id, "222", true)
+        .await
+        .unwrap()
+}
+
+async fn drain_provider_request(state: &crate::AppState, service: &MetaService<'_>, code: &str) {
+    for _ in 0..160 {
+        if state
+            .db
+            .collection::<bson::Document>(provider::REQUESTS)
+            .find_one(doc! {"_id":code,"status":"completed"})
+            .await
+            .unwrap()
+            .is_some()
+        {
+            return;
+        }
+        state
+            .db
+            .collection::<bson::Document>(provider::REQUESTS)
+            .update_one(
+                doc! {"_id":code,"status":"pending"},
+                vec![doc! {"$set":{"next_attempt_at":"$$NOW"}}],
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+            .update_many(
+                doc! {"request_id":code,"status":"pending"},
+                vec![doc! {"$set":{"retry_at":"$$NOW"}}],
+            )
+            .await
+            .unwrap();
+        provider::reconcile_with_service(state, service)
+            .await
+            .unwrap();
+    }
+    let pending = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::PROVIDER_TARGETS)
+        .find_one(doc! {"request_id":code,"status":"pending"})
+        .await
+        .unwrap();
+    panic!(
+        "provider pages did not finish; last numeric error: {:?}",
+        pending.and_then(|row| row.get_i64("last_error_code").ok())
+    );
+}
+
+async fn scoped_reply_fixture() -> (crate::AppState, MetaAdapter, MockServer, ChannelBot, String) {
+    let (state, adapter, server, mut a) = fixture("messenger").await;
+    configure_transfer(&state, &a).await;
+    a.credential_source = "platform".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&a.id}, &a)
+        .await
+        .unwrap();
+    let key = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&key,"user_id":&a.user_id,"is_active":true})
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v25.0/222/thread_owner"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":[{"thread_owner":{"app_id":"111"}}]})),
+        )
+        .mount(&server)
+        .await;
+    for (token, id) in [
+        ("fixture-token", "actual-a-reply"),
+        ("page-token-b", "actual-b-reply"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/v25.0/222/messages"))
+            .and(header("authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id":id})))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .and(header("authorization", "Bearer page-token-b"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .mount(&server)
+        .await;
+    (state, adapter, server, a, key)
+}
+
+#[tokio::test]
+async fn transferred_page_signed_deletions_page_original_grants_in_both_orders_and_preserve_actual_replies()
+ {
+    use crate::models::channel_meta::GRANT_SCOPES;
+    for a_first in [true, false] {
+        let (state, adapter, server, a, key) = scoped_reply_fixture().await;
+        let a_message =
+            admit_page_message(&state, &adapter, &a, &key, "mid.a.actual", "fixture-token").await;
+        let (a_reply, _) = send_page_reply(&state, &adapter, &a, &a_message, "fixture-token")
+            .await
+            .unwrap();
+        let a_plan = crate::services::channel_text_delivery::begin_bound(
+            &state.db,
+            "actual-plan-a",
+            &a,
+            &a_message.id,
+            "a-hash",
+            1,
+        )
+        .await
+        .unwrap();
+        // More than ten pages of immutable A receipts, without provider I/O
+        // in capture/reconnect or any content-copying attribution registry.
+        let extra: Vec<_> = (0..1001)
+            .map(|number| {
+                let mut row = bson::to_document(&a_plan).unwrap();
+                row.insert("_id", uuid::Uuid::new_v4().to_string());
+                row.insert("logical_key", format!("a-page-{number}"));
+                row
+            })
+            .collect();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .insert_many(extra)
+            .await
+            .unwrap();
+        let b = reconsent_transferred_page(&state, &server, &a).await;
+        let b_key = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&b_key,"user_id":&b.user_id,"is_active":true})
+            .await
+            .unwrap();
+        let b_message =
+            admit_page_message(&state, &adapter, &b, &b_key, "mid.b.actual", "page-token-b").await;
+        let (b_reply, _) = send_page_reply(&state, &adapter, &b, &b_message, "page-token-b")
+            .await
+            .unwrap();
+        let channel = uuid::Uuid::new_v4().to_string();
+        state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc! {
+            "_id":&channel,"channel_bot_id":&b.id,"user_id":&b.user_id,"status":"active","agent_id":"kept-specialist",
+            "private_chats":"everyone","owner_sender_ids":["333"]}).await.unwrap();
+        let thread=scopes::record_thread(&state.db,&b.id,&b_message.id,doc! {"channel_id":&channel,"partition":"shared-private"},
+            vec![doc! {"$set":{"_id":uuid::Uuid::new_v4().to_string(),"channel_id":&channel,"user_id":&b.user_id,"partition":"shared-private",
+                "last_message_id":&b_message.id,"last_relay_message_id":&b_message.id,"agent_id":"explicit-chat-specialist","members":"owner",
+                "created_at":"$$NOW","updated_at":"$$NOW"}}]).await.unwrap();
+        let service = service(&state, &server);
+        let signed_a = provider_request(json!(900), Utc::now().timestamp());
+        let signed_b = provider_request(json!(901), Utc::now().timestamp());
+        let first = accept_provider_request(
+            &service,
+            "messenger",
+            if a_first { &signed_a } else { &signed_b },
+            true,
+        )
+        .await
+        .unwrap();
+        provider::reconcile_with_service(&state, &service)
+            .await
+            .unwrap();
+        if a_first {
+            // B continues ordinary admission and bound reply while A's pages
+            // are pending, for the very same provider participant and bot ID.
+            let next = admit_page_message(
+                &state,
+                &adapter,
+                &b,
+                &b_key,
+                "mid.b.during-a",
+                "page-token-b",
+            )
+            .await;
+            send_page_reply(&state, &adapter, &b, &next, "page-token-b")
+                .await
+                .unwrap();
+        }
+        drain_provider_request(
+            &state,
+            &service,
+            first["confirmation_code"].as_str().unwrap(),
+        )
+        .await;
+        let rows = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+        if a_first {
+            assert!(
+                rows.find_one(doc! {"_id":&a_message.id})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                rows.find_one(doc! {"_id":&a_reply.id})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                rows.find_one(doc! {"_id":&b_message.id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                rows.find_one(doc! {"_id":&b_reply.id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let live = crate::services::channel_bot_service::get_bot(&state.db, &b.id)
+                .await
+                .unwrap();
+            assert!(live.is_active && live.meta_binding.as_ref().unwrap().subscription == "active");
+            let kept = state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id":&thread.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(kept.get_str("last_message_id"), Ok(b_message.id.as_str()));
+            assert_eq!(kept.get_str("agent_id"), Ok("explicit-chat-specialist"));
+        } else {
+            assert!(
+                rows.find_one(doc! {"_id":&a_message.id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                rows.find_one(doc! {"_id":&a_reply.id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                rows.find_one(doc! {"_id":&b_message.id})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                state
+                    .db
+                    .collection::<ChannelBot>(BOTS)
+                    .find_one(doc! {"_id":&b.id})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let second = accept_provider_request(
+            &service,
+            "messenger",
+            if a_first { &signed_b } else { &signed_a },
+            true,
+        )
+        .await
+        .unwrap();
+        drain_provider_request(
+            &state,
+            &service,
+            second["confirmation_code"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rows.count_documents(doc! {"channel_bot_id":&a.id})
+                .await
+                .unwrap(),
+            0
+        );
+        for grant in [
+            &a.meta_binding.as_ref().unwrap().grant_id,
+            &b.meta_binding.as_ref().unwrap().grant_id,
+        ] {
+            let proof = state
+                .db
+                .collection::<bson::Document>(GRANT_SCOPES)
+                .find_one(doc! {"bot_id":&a.id,"grant_id":grant})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(grants::completed(&proof, grant).unwrap());
+            assert!(!proof.contains_key("identity") && !proof.contains_key("purge"));
+        }
+        let replay = accept_provider_request(&service, "messenger", &signed_a, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            replay["confirmation_code"],
+            if a_first {
+                first["confirmation_code"].clone()
+            } else {
+                second["confirmation_code"].clone()
+            }
+        );
+        server.verify().await;
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn erasing_a_claimed_grant_excludes_its_paused_provider_acknowledgement_and_keeps_b_serving()
+{
+    let (state, adapter, server, a, key) = scoped_reply_fixture().await;
+    let original =
+        admit_page_message(&state, &adapter, &a, &key, "mid.a.paused", "fixture-token").await;
+    super::super::durable_wake_tests::resume_after(
+        "meta_reply_provider_confirmed",
+        async {
+            assert!(
+                send_page_reply(&state, &adapter, &a, &original, "fixture-token")
+                    .await
+                    .is_err()
+            );
+        },
+        async {
+            let b = reconsent_transferred_page(&state, &server, &a).await;
+            let accepted = accept_provider_request(
+                &service(&state, &server),
+                "messenger",
+                &provider_request(json!(900), Utc::now().timestamp()),
+                true,
+            )
+            .await
+            .unwrap();
+            let code = accepted["confirmation_code"].as_str().unwrap();
+            // Spawn the independent B request so A's task-local pause applies to
+            // A's already issued HTTP attempt only.
+            let b_state = state.clone();
+            let base = server.uri();
+            let b_clone = b.clone();
+            tokio::spawn(async move {
+                let mut adapter = MetaAdapter::new(Inbox::Messenger);
+                adapter.graph_base = base;
+                let key = uuid::Uuid::new_v4().to_string();
+                b_state
+                    .db
+                    .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                    .insert_one(doc! {"_id":&key,"user_id":&b_clone.user_id,"is_active":true})
+                    .await
+                    .unwrap();
+                let inbound = admit_page_message(
+                    &b_state,
+                    &adapter,
+                    &b_clone,
+                    &key,
+                    "mid.b.paused-a",
+                    "page-token-b",
+                )
+                .await;
+                send_page_reply(&b_state, &adapter, &b_clone, &inbound, "page-token-b")
+                    .await
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+            drain_provider_request(&state, &service(&state, &server), code).await;
+            let live = crate::services::channel_bot_service::get_bot(&state.db, &b.id)
+                .await
+                .unwrap();
+            assert!(
+                live.is_active
+                    && live.meta_binding.as_ref().unwrap().grant_id
+                        == b.meta_binding.as_ref().unwrap().grant_id
+            );
+        },
+    )
+    .await;
+    assert_eq!(state.db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .count_documents(doc! {"meta_grant.bot_id":&a.id,"meta_grant.grant_id":&a.meta_binding.as_ref().unwrap().grant_id}).await.unwrap(),0);
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"direction":"outbound","platform_message_id":"actual-b-reply"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    server.verify().await;
     state.db.drop().await.unwrap();
 }
 

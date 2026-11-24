@@ -182,6 +182,92 @@ async fn erase_attributed(
     erase: bool,
     cache: &Arc<TokenExchangeCache>,
 ) -> AppResult<()> {
+    let mode = if erase {
+        AttributionMode::Erase
+    } else {
+        AttributionMode::Preserve
+    };
+    let mut after = None;
+    while let Some(last) = attributed_page(
+        db,
+        (bot_id, owner, platform, created_at, mode),
+        after.as_deref(),
+        cache,
+    )
+    .await?
+    {
+        after = Some(last);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttributionMode {
+    Erase,
+    Preserve,
+    RequireAttribution,
+}
+
+/// A scoped provider worker persists the returned cursor on its grant scope.
+/// Unknown receipt destinations remain repairable; personal retirement retains
+/// its existing non-destructive, best-effort attribution semantics.
+pub(crate) async fn attribute_scope_page(
+    db: &Database,
+    scope: &Document,
+    after: Option<&str>,
+    cache: &Arc<TokenExchangeCache>,
+) -> AppResult<Option<String>> {
+    let bot_id = scope
+        .get_str("bot_id")
+        .map_err(|_| attribution_required("unknown"))?;
+    let owner = db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":bot_id})
+        .projection(doc! {"user_id":1})
+        .await?;
+    let owner = if owner.is_some() {
+        owner
+    } else {
+        db.collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"channel_bot_id":bot_id})
+            .projection(doc! {"user_id":1})
+            .await?
+    };
+    let platform = scope
+        .get_str("platform")
+        .map_err(|_| attribution_required(bot_id))?;
+    let created = scope
+        .get_datetime("bot_created_at")
+        .map_err(|_| attribution_required(bot_id))?
+        .to_chrono();
+    attributed_page(
+        db,
+        (
+            bot_id,
+            owner.as_ref().and_then(|row| row.get_str("user_id").ok()),
+            platform,
+            created,
+            AttributionMode::RequireAttribution,
+        ),
+        after,
+        cache,
+    )
+    .await
+}
+
+async fn attributed_page(
+    db: &Database,
+    (bot_id, owner, platform, created_at, mode): (
+        &str,
+        Option<&str>,
+        &str,
+        chrono::DateTime<chrono::Utc>,
+        AttributionMode,
+    ),
+    after: Option<&str>,
+    cache: &Arc<TokenExchangeCache>,
+) -> AppResult<Option<String>> {
+    let erase = mode == AttributionMode::Erase;
     let platforms: BTreeSet<String> = super::channel_adapters::registered_adapters(cache)
         .into_iter()
         .map(|adapter| adapter.platform_id().to_owned())
@@ -189,38 +275,35 @@ async fn erase_attributed(
     let plans = db.collection::<LegacyPlan>(crate::models::channel_text_delivery::COLLECTION_NAME);
     let owners = bot_owners(db, bot_id, owner).await?;
     let owners: Vec<_> = owners.into_iter().collect();
-    let mut after = None;
-    loop {
-        // Retained owner/source evidence also covers historical noncanonical
-        // keys. Only expired-source recovery assumes the saved-result format.
-        // New parented plans need neither source nor channel-history scans.
-        let mut filter = doc! {"channel_bot_id": null, "user_id": {"$in": &owners}};
-        if let Some(id) = &after {
-            filter.insert("_id", doc! {"$gt": id});
-        }
-        let batch: Vec<_> = plans
-            .find(filter)
-            .projection(attribution_fields())
-            .sort(doc! {"_id": 1})
-            .limit(BATCH)
-            .await?
-            .try_collect()
-            .await?;
-        let Some(last) = batch.last() else {
-            return Ok(());
-        };
-        after = Some(last.id.clone());
-        let sources: Vec<_> = batch.iter().map(|plan| plan.source_id.clone()).collect();
-        let messages: Vec<Document> = db
-            .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
-            .find(doc! {"_id": {"$in": &sources}})
-            .projection(doc! {"user_id": 1, "channel_bot_id": 1})
-            .await?
-            .try_collect()
-            .await?;
-        // Group multipart receipts on the server. Both branches have a
-        // supporting index, including the historical ownerless scoped case.
-        let receipts: Vec<Document> = db
+    // Retained owner/source evidence also covers historical noncanonical
+    // keys. Only expired-source recovery assumes the saved-result format.
+    // New parented plans need neither source nor channel-history scans.
+    let mut filter = doc! {"channel_bot_id": null, "user_id": {"$in": &owners}};
+    if let Some(id) = after {
+        filter.insert("_id", doc! {"$gt": id});
+    }
+    let batch: Vec<_> = plans
+        .find(filter)
+        .projection(attribution_fields())
+        .sort(doc! {"_id": 1})
+        .limit(BATCH)
+        .await?
+        .try_collect()
+        .await?;
+    let Some(last) = batch.last() else {
+        return Ok(None);
+    };
+    let sources: Vec<_> = batch.iter().map(|plan| plan.source_id.clone()).collect();
+    let messages: Vec<Document> = db
+        .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find(doc! {"_id": {"$in": &sources}})
+        .projection(doc! {"user_id": 1, "channel_bot_id": 1})
+        .await?
+        .try_collect()
+        .await?;
+    // Group multipart receipts on the server. Both branches have a
+    // supporting index, including the historical ownerless scoped case.
+    let receipts: Vec<Document> = db
             .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
             .aggregate([
                 doc! {"$match": {"inbound_message_id": {"$in": &sources}, "$or": [
@@ -232,120 +315,118 @@ async fn erase_attributed(
             ])
             .max_time(std::time::Duration::from_secs(5))
             .await?.try_collect().await?;
-        // Native saved plans use the hashed gateway event ID as their source.
-        // Personal conversation deletion may remove the handoff while this
-        // independent delivery origin and channel parent remain available.
-        let native: Vec<Document> = db
-            .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
-            .find(doc! {"_id":{"$in":&sources}})
-            .projection(
-                doc! {"user_id":1,"channel_id":1,"delivery.transport":1,"delivery.origin":1},
-            )
-            .max_time(std::time::Duration::from_secs(5))
+    // Native saved plans use the hashed gateway event ID as their source.
+    // Personal conversation deletion may remove the handoff while this
+    // independent delivery origin and channel parent remain available.
+    let native: Vec<Document> = db
+        .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":&sources}})
+        .projection(doc! {"user_id":1,"channel_id":1,"delivery.transport":1,"delivery.origin":1})
+        .max_time(std::time::Duration::from_secs(5))
+        .await?
+        .try_collect()
+        .await?;
+    let native_channels: Vec<_> = native
+        .iter()
+        .filter_map(|event| event.get_str("channel_id").ok())
+        .collect();
+    let parents: Vec<Document> = if native_channels.is_empty() {
+        Vec::new()
+    } else {
+        db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .find(doc! {"_id":{"$in":native_channels}})
+            .projection(doc! {"user_id":1,"channel_bot_id":1,"platform":1})
             .await?
             .try_collect()
-            .await?;
-        let native_channels: Vec<_> = native
+            .await?
+    };
+    let mut remove = Vec::new();
+    let mut attribute = std::collections::BTreeMap::<String, Vec<Document>>::new();
+    let mut unresolved = false;
+    for plan in &batch {
+        let mut evidence = Evidence::default();
+        for message in messages
             .iter()
-            .filter_map(|event| event.get_str("channel_id").ok())
-            .collect();
-        let parents: Vec<Document> = if native_channels.is_empty() {
-            Vec::new()
-        } else {
-            db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-                .find(doc! {"_id":{"$in":native_channels}})
-                .projection(doc! {"user_id":1,"channel_bot_id":1,"platform":1})
-                .await?
-                .try_collect()
-                .await?
-        };
-        let mut remove = Vec::new();
-        let mut attribute = std::collections::BTreeMap::<String, Vec<Document>>::new();
-        let mut unresolved = false;
-        for plan in &batch {
-            let mut evidence = Evidence::default();
-            for message in messages
-                .iter()
-                .filter(|row| row.get_str("_id") == Ok(plan.source_id.as_str()))
-            {
-                evidence.observe(message, &plan.user_id, "_id");
+            .filter(|row| row.get_str("_id") == Ok(plan.source_id.as_str()))
+        {
+            evidence.observe(message, &plan.user_id, "_id");
+        }
+        for receipt in receipts
+            .iter()
+            .filter(|row| row.get_str("inbound_message_id") == Ok(plan.source_id.as_str()))
+        {
+            evidence.observe(receipt, &plan.user_id, "inbound_message_id");
+        }
+        for event in native
+            .iter()
+            .filter(|event| event.get_str("_id") == Ok(plan.source_id.as_str()))
+        {
+            match native_target(event, &parents, plan, bot_id, platform, &platforms) {
+                Ok(Some(target)) => evidence.prove(target),
+                Ok(None) => {}
+                Err(()) => evidence.conflicting = true,
             }
-            for receipt in receipts
-                .iter()
-                .filter(|row| row.get_str("inbound_message_id") == Ok(plan.source_id.as_str()))
-            {
-                evidence.observe(receipt, &plan.user_id, "inbound_message_id");
+        }
+        if evidence.proven.is_none() && !evidence.conflicting {
+            let canonical = plan.logical_key.starts_with("saved-result:");
+            if !canonical && evidence.parent.is_none() {
+                // No exact join and no supported Meta saved-result key:
+                // retain this unrelated historical plan without guessing.
+                continue;
             }
-            for event in native
-                .iter()
-                .filter(|event| event.get_str("_id") == Ok(plan.source_id.as_str()))
-            {
-                match native_target(event, &parents, plan, bot_id, platform, &platforms) {
-                    Ok(Some(target)) => evidence.prove(target),
-                    Ok(None) => {}
-                    Err(()) => evidence.conflicting = true,
-                }
-            }
-            if evidence.proven.is_none() && !evidence.conflicting {
-                let canonical = plan.logical_key.starts_with("saved-result:");
-                if !canonical && evidence.parent.is_none() {
-                    // No exact join and no supported Meta saved-result key:
-                    // retain this unrelated historical plan without guessing.
+            match saved_target(db, plan, &owners, platform, &platforms).await? {
+                SavedTarget::Proven(target) => evidence.prove(target),
+                SavedTarget::Absent
+                    if evidence.parent.is_none()
+                        && plan.created_at.is_some_and(|created| created < created_at) =>
+                {
+                    // Only absent evidence can exclude older history. An
+                    // exact but inconsistent/incomplete handoff stays pending.
                     continue;
                 }
-                match saved_target(db, plan, &owners, platform, &platforms).await? {
-                    SavedTarget::Proven(target) => evidence.prove(target),
-                    SavedTarget::Absent
-                        if evidence.parent.is_none()
-                            && plan.created_at.is_some_and(|created| created < created_at) =>
-                    {
-                        // Only absent evidence can exclude older history. An
-                        // exact but inconsistent/incomplete handoff stays pending.
-                        continue;
-                    }
-                    SavedTarget::Incomplete => evidence.conflicting = true,
-                    SavedTarget::Absent => {}
-                }
+                SavedTarget::Incomplete => evidence.conflicting = true,
+                SavedTarget::Absent => {}
             }
-            match evidence.target() {
-                Some(Target::Bot(id)) if id == bot_id => remove.push(doc! {
+        }
+        match evidence.target() {
+            Some(Target::Bot(id)) if id == bot_id => remove.push(doc! {
+                "_id": &plan.id, "user_id": &plan.user_id,
+                "source_id": &plan.source_id, "logical_key": &plan.logical_key,
+            }),
+            Some(Target::Bot(id)) => {
+                // Preserve positive sibling proof before its finite-lived
+                // source disappears, on the original journal itself.
+                attribute.entry(id).or_default().push(doc! {
                     "_id": &plan.id, "user_id": &plan.user_id,
                     "source_id": &plan.source_id, "logical_key": &plan.logical_key,
-                }),
-                Some(Target::Bot(id)) => {
-                    // Preserve positive sibling proof before its finite-lived
-                    // source disappears, on the original journal itself.
-                    attribute.entry(id).or_default().push(doc! {
-                        "_id": &plan.id, "user_id": &plan.user_id,
-                        "source_id": &plan.source_id, "logical_key": &plan.logical_key,
-                    });
-                }
-                Some(_) => {} // Positive sibling/other-platform proof; retain it.
-                None => unresolved = true,
+                });
             }
-        }
-        for (parent, exact) in attribute {
-            plans
-                .update_many(
-                    doc! {"channel_bot_id":null,"$or":exact},
-                    doc! {"$set":{"channel_bot_id":parent}},
-                )
-                .await?;
-        }
-        if !remove.is_empty() {
-            let exact = doc! {"channel_bot_id": null, "$or": remove};
-            if erase {
-                plans.delete_many(exact).await?;
-            } else {
-                plans
-                    .update_many(exact, doc! {"$set":{"channel_bot_id":bot_id}})
-                    .await?;
-            }
-        }
-        if unresolved && erase {
-            return Err(attribution_required(bot_id));
+            Some(_) => {} // Positive sibling/other-platform proof; retain it.
+            None => unresolved = true,
         }
     }
+    for (parent, exact) in attribute {
+        plans
+            .update_many(
+                doc! {"channel_bot_id":null,"$or":exact},
+                doc! {"$set":{"channel_bot_id":parent}},
+            )
+            .await?;
+    }
+    if !remove.is_empty() {
+        let exact = doc! {"channel_bot_id": null, "$or": remove};
+        if erase {
+            plans.delete_many(exact).await?;
+        } else {
+            plans
+                .update_many(exact, doc! {"$set":{"channel_bot_id":bot_id}})
+                .await?;
+        }
+    }
+    if unresolved && mode != AttributionMode::Preserve {
+        return Err(attribution_required(bot_id));
+    }
+    Ok(Some(last.id.clone()))
 }
 
 fn native_target(

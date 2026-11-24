@@ -125,14 +125,16 @@ pub(crate) async fn settle(
     request: &str,
     claim: &str,
     target: &Document,
-    error: Option<u32>,
+    result: Result<bool, u32>,
 ) -> AppResult<()> {
-    super::super::transaction_service::run_db_only(db,&(db,request,claim,target,error),|tx,&(db,request,claim,target,error)| {
+    super::super::transaction_service::run_db_only(db,&(db,request,claim,target,result),|tx,&(db,request,claim,target,result)| {
         Box::pin(async move {
             if db.collection::<Document>(REQUESTS).update_one(doc! {"_id":request,"status":"pending","claim_id":claim},
                 doc! {"$inc":{"target_revision":1_i64}}).session(&mut *tx).await?.matched_count!=1 {return Err(grants::incomplete());}
-            let update=if let Some(code)=error {
+            let update=if let Err(code)=result {
                 doc! {"$set":{"retry_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(15)),"last_error_code":code}}
+            } else if !result.unwrap_or(false) {
+                doc! {"$set":{"retry_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::seconds(1))},"$unset":{"last_error_code":""}}
             } else {doc! {"$set":{"status":"completed","completed_at":bson::DateTime::now()},"$unset":{"retry_at":"","last_error_code":""}}};
             let changed=db.collection::<Document>(PROVIDER_TARGETS).update_one(doc! {
                 "_id":target.get("_id").cloned(),"request_id":request,"bot_id":target.get("bot_id").cloned(),
@@ -338,7 +340,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        settle(&db, &id, "claim", &first, None).await.unwrap();
+        settle(&db, &id, "claim", &first, Ok(true)).await.unwrap();
         let completed_at = *rows
             .find_one(doc! {"_id":first.get("_id").cloned()})
             .await
@@ -375,7 +377,7 @@ mod tests {
         .unwrap();
         let due = due(&db, &id, bson::DateTime::now()).await.unwrap();
         assert_eq!(due.len(), 1);
-        settle(&db, &id, "next", &due[0], None).await.unwrap();
+        settle(&db, &id, "next", &due[0], Ok(true)).await.unwrap();
         let current = jobs.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
         finish_or_reschedule(&db, &current, "next").await.unwrap();
         let done = jobs.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
