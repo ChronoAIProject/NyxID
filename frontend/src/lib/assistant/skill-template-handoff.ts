@@ -135,7 +135,7 @@ export function pendingSkillSetupLanding(): SkillSetupSearch | undefined {
 /** A different authenticated destination takes precedence over an old setup. */
 export function discardUnrelatedSkillSetup(path: string, search: string) {
   const pending = readPending();
-  if (!pending?.ssoStarted) return;
+  if (!pending) return;
   const params = new URLSearchParams(search);
   const setup = path === "/assistant" ? skillSetupReturn(`${path}${search}`) :
     path === "/login" || path === "/register" ? skillSetupReturn(params.get("return_to") ?? undefined) : undefined;

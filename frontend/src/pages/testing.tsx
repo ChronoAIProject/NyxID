@@ -1,4 +1,4 @@
-import { Link, useSearch } from "@tanstack/react-router";
+import { Link, Outlet, useSearch } from "@tanstack/react-router";
 import { ArrowRight, BookOpenCheck, ClipboardCheck, Megaphone, PieChart } from "lucide-react";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { Button } from "@/components/ui/button";
@@ -61,7 +61,7 @@ export function TestingPage() {
                     <p className="mt-2 max-w-xl text-15 text-muted-foreground">{template.description()}</p>
                   </div>
                   <Button asChild variant={index === 0 ? "primary" : "default"}>
-                    <Link to="/testing/welcome" search={{ ...search, code }} aria-label={actionName}>
+                    <Link to="/testing/welcome" search={{ ...search, code }} state={{ skillTemplateGalleryOrigin: true }} data-try-template={template.slug} aria-label={actionName}>
                       {t("Try this")} <ArrowRight aria-hidden="true" />
                     </Link>
                   </Button>
@@ -71,6 +71,7 @@ export function TestingPage() {
           })}
         </ul>
       </main>
+      <Outlet />
     </div>
   );
 }

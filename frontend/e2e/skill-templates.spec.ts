@@ -1,5 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { composerInput, sendButton } from "./helpers";
+
+// OAuth fixtures perform several full navigations through the dev module graph.
+test.describe.configure({ timeout: 90_000 });
 const research = {
   slug: "research-paper-writing-rigor",
   skillId: "a22344ff-4cf3-4ea7-a22e-2f0f98792c10",
@@ -43,6 +46,7 @@ const pin = {
 async function fixture(page: Page, options: {
   signedIn?: boolean;
   callbackPath?: string;
+  confirmName?: boolean;
   unavailable?: boolean;
   conflict?: boolean;
   badPreview?: boolean;
@@ -54,6 +58,7 @@ async function fixture(page: Page, options: {
   profileGate?: Promise<void>;
 } = {}) {
   let signedIn = options.signedIn ?? true;
+  let displayName = "Owner";
   let revision = 2;
   let conflict = options.conflict;
   let badPreview = options.badPreview;
@@ -106,10 +111,12 @@ async function fixture(page: Page, options: {
     const ok = (json: unknown) => route.fulfill({ json });
     if (path === "/users/me") await options.profileGate;
     if (path === "/users/me" && signedIn) {
+      if (request.method() === "PUT") displayName = request.postDataJSON().display_name;
       return ok({
         id: owner,
         email: "owner@example.com",
-        display_name: "Owner",
+        display_name: displayName,
+        social_provider: options.confirmName ? "google" : null,
         capabilities: { enabled_features: options.unavailable ? [] : ["assistant:nyxagent-engine"] },
       });
     }
@@ -122,7 +129,10 @@ async function fixture(page: Page, options: {
     if (path === "/auth/social/google") {
       socialRequests.push(url);
       signedIn = true;
-      const destination = options.callbackPath ?? url.searchParams.get("return_to")!;
+      const returnTo = url.searchParams.get("return_to") ?? "/";
+      const destination = options.confirmName
+        ? `/register?${new URLSearchParams({ confirm_name: "provider", return_to: returnTo })}`
+        : options.callbackPath ?? returnTo;
       return route.fulfill({ status: 302, headers: { location: destination } });
     }
     if (path === "/assistant/nyxagent/skills/catalog") {
@@ -206,9 +216,90 @@ async function fixture(page: Page, options: {
 
 async function openWelcome(page: Page, title = "Strengthen a research paper") {
   await page.getByRole("link", { name: `Try this · ${title}` }).click();
-  await expect(page.getByRole("heading", { name: "Awesome, let’s get you started." })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Selected template" }).getByRole("heading")).toHaveText(title);
+  const dialog = page.getByRole("dialog", { name: "Awesome, let’s get you started." });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("region", { name: "Selected template" }).getByRole("heading")).toHaveText(title);
 }
+
+test("the gallery stays mounted and the modal supports focus, escape, Back, Forward and deep links", async ({ page }) => {
+  const state = await fixture(page, { signedIn: false });
+  await page.goto("/testing");
+  const opener = page.getByRole("link", { name: "Try this · Strengthen a research paper" });
+  await opener.focus();
+  await opener.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Awesome, let’s get you started." });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Awesome, let’s get you started." })).toBeFocused();
+  await expect(page.locator('[aria-hidden="true"] main')).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Create an account" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Create an account" })).toBeFocused();
+  const url = page.url();
+  await page.keyboard.press("Escape");
+  await expect(page).toHaveURL(/\/testing$/);
+  await expect(dialog).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  await page.goForward();
+  await expect(dialog).toBeVisible();
+  await page.goBack();
+  await expect(opener).toBeFocused();
+
+  const direct = await page.context().newPage();
+  await fixture(direct, { signedIn: false });
+  await direct.goto(url);
+  const directDialog = direct.getByRole("dialog", { name: "Awesome, let’s get you started." });
+  await expect(directDialog).toBeVisible();
+  await direct.reload();
+  await expect(directDialog).toBeVisible();
+  await directDialog.getByRole("button", { name: "Close" }).click();
+  await expect(direct).toHaveURL(new RegExp(`/testing\\?skill=${research.slug}$`));
+  await expect(direct.getByRole("link", { name: "Try this · Strengthen a research paper" })).toBeFocused();
+  expect(state.writes).toEqual([]);
+  expect(state.turns).toEqual([]);
+});
+
+test("new social accounts confirm their display name before the selected skill attaches", async ({ page }) => {
+  const state = await fixture(page, { signedIn: false, confirmName: true });
+  await page.goto("/testing?code=TEST-1234");
+  await openWelcome(page);
+  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByRole("button", { name: "Continue with Google" }).click();
+  await expect(page.getByRole("heading", { name: "Choose your NyxID display name" })).toBeVisible({ timeout: 15_000 });
+  expect(state.writes).toEqual([]);
+  await page.getByRole("textbox", { name: "Display name" }).fill("New owner");
+  await page.getByRole("button", { name: "Save and continue" }).click();
+  await expect(composerInput(page)).toContainText(research.slug, { timeout: 15_000 });
+  expect(state.writes[0]?.skills.at(-1)?.skill_id).toBe(research.skillId);
+  expect(state.turns).toEqual([]);
+});
+
+test("leaving a template setup for ordinary login opens the regular NyxBot home", async ({ page }) => {
+  const state = await fixture(page, { signedIn: false, callbackPath: "/" });
+  await page.goto("/testing");
+  await openWelcome(page);
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page).toHaveURL(/\/testing$/);
+  expect((await page.context().cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(0);
+  await openWelcome(page);
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await expect(page).toHaveURL(/\/login\?return_to=/);
+  await page.goBack();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.goto("/login");
+  await page.getByRole("button", { name: "Continue with Google" }).click();
+  await expect(page).toHaveURL(/\/assistant$/);
+  await expect(composerInput(page)).toBeVisible({ timeout: 15_000 });
+  expect(state.previewRequests).toEqual([]);
+  expect(state.writes).toEqual([]);
+  expect(state.turns).toEqual([]);
+  await composerInput(page).fill("A regular NyxBot chat");
+  await sendButton(page).click();
+  await expect.poll(() => state.turns[0]?.text).toBe("A regular NyxBot chat");
+});
 
 for (const [label, path, callbackPath] of [
   ["Create an account", "/register", undefined],
@@ -249,19 +340,19 @@ for (const [label, path, callbackPath] of [
     const editedStarter = `Use ${research.slug} to review my draft.`;
     await composerInput(page).fill(editedStarter);
     await page.reload();
-    await expect(composerInput(page)).toHaveText(editedStarter);
+    await expect(composerInput(page)).toHaveText(editedStarter, { timeout: 15_000 });
     expect(state.writes).toHaveLength(1);
     expect(state.turns).toEqual([]);
 
     await sendButton(page).click();
     await expect(page).toHaveURL(new RegExp(`/assistant\\?c=${threadId}$`));
-    await expect(page.getByText("Please share your draft.")).toBeVisible();
+    await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
     expect(state.turns).toEqual([{
       agent_id: agentId,
       text: editedStarter,
     }]);
     await page.reload();
-    await expect(page.getByText("Please share your draft.")).toBeVisible();
+    await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
     expect(state.writes).toHaveLength(1);
     expect(state.turns).toHaveLength(1);
   });
@@ -281,9 +372,9 @@ test("two tabs preserve separate selections and neither can claim the other tab�
   expect((await context.cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(2);
 
   await page.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(composerInput(page)).toContainText(research.slug);
+  await expect(composerInput(page)).toContainText(research.slug, { timeout: 15_000 });
   await otherTab.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(composerInput(otherTab)).toContainText(claims.slug);
+  await expect(composerInput(otherTab)).toContainText(claims.slug, { timeout: 15_000 });
   expect(first.writes[0]?.skills.at(-1)?.skill_id).toBe(research.skillId);
   expect(second.writes[0]?.skills.at(-1)?.skill_id).toBe(claims.skillId);
   expect(first.turns).toEqual([]);

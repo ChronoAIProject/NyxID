@@ -59,6 +59,7 @@ import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { parseSkillGallerySearch } from "@/lib/assistant/skill-templates";
+import { discardUnrelatedSkillSetup } from "@/lib/assistant/skill-template-handoff";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
@@ -188,6 +189,7 @@ const authLayout = createRoute({
   id: "auth",
   getParentRoute: () => rootRoute,
   beforeLoad: ({ location }) => {
+    discardUnrelatedSkillSetup(location.pathname, location.searchStr);
     const { isAuthenticated, isLoading, user } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
       const params = new URLSearchParams(location.searchStr);
@@ -245,8 +247,8 @@ const testingRoute = createRoute({
 });
 
 const skillTemplateWelcomeRoute = createRoute({
-  path: "/testing/welcome",
-  getParentRoute: () => rootRoute,
+  path: "welcome",
+  getParentRoute: () => testingRoute,
   validateSearch: parseSkillGallerySearch,
   component: SkillTemplateWelcomePage,
 });
@@ -1323,8 +1325,7 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
-  testingRoute,
-  skillTemplateWelcomeRoute,
+  testingRoute.addChildren([skillTemplateWelcomeRoute]),
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,

@@ -208,10 +208,10 @@ checklist components and shows the card in the Find skills preview.
 
 `/testing` lists curated Ornn skills. A title links to
 `/testing?skill=<template-slug>`, which shows that template first. **Try
-this** opens the public welcome page at
-`/testing/welcome?skill=<template-slug>`. The page shows the selected skill
-and the three setup steps. Guests can choose **Log in** or **Create an
-account**. Signed-in visitors choose **Open NyxBot**. An optional
+this** opens a setup dialog over the gallery at
+`/testing/welcome?skill=<template-slug>`. The dialog shows the selected
+skill and the three setup steps. Guests can choose **Log in** or **Create
+an account**. Signed-in visitors choose **Open NyxBot**. An optional
 `code` from the gallery is carried to the existing registration flow.
 
 Each action records the visitor's intent to attach the skill, then builds a
