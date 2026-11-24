@@ -173,16 +173,112 @@ fn sign(bot: &ChannelBot, evidence: &mut CredentialContinuity) -> AppResult<()> 
     Ok(())
 }
 
+fn fresh() -> CredentialContinuity {
+    CredentialContinuity {
+        version: 1,
+        generations: FIELDS
+            .iter()
+            .map(|name| (name.to_string(), uuid::Uuid::new_v4().to_string()))
+            .collect(),
+        pins: BTreeMap::new(),
+        shared_producers: BTreeMap::new(),
+        authentication: String::new(),
+    }
+}
+
+pub(super) fn initialize(bot: &mut ChannelBot) -> AppResult<()> {
+    let mut evidence = fresh();
+    sign(bot, &mut evidence)?;
+    bot.credential_continuity = Some(evidence);
+    Ok(())
+}
+
 /// Prepared rows can still be updated with compatible legacy envelopes after writer rollback.
-pub(super) fn replacement(
+pub(super) async fn update_credentials(
+    db: &mongodb::Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
     bot: &ChannelBot,
+    mut filter: Document,
+    mut set: Document,
+    mut unset: Document,
+) -> AppResult<bool> {
+    let rows = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let touches_secret = FIELDS
+        .iter()
+        .any(|f| set.contains_key(*f) || unset.contains_key(*f));
+    let mut snapshot = None;
+    if touches_secret {
+        filter.extend(physical_filter(bot)?);
+        // Either BSON byte representation is valid. Fence the raw document used to
+        // build the successor, including siblings on a first legacy promotion.
+        for field in FIELDS {
+            filter.remove(field);
+        }
+        let Some(raw) = rows.find_one(filter.clone()).await? else {
+            return Ok(false);
+        };
+        let current = super::channel_bot_record::decode(&raw)?;
+        if bson::to_document(&current).map_err(|_| invalid())?
+            != bson::to_document(bot).map_err(|_| invalid())?
+        {
+            return Ok(false);
+        }
+        filter = super::record_storage::exact_document_predicate(&raw);
+        let evidence = match verified(bot)? {
+            Some(previous) => Some(previous.clone()),
+            None if keys.contextual_record_writes() => {
+                let entry = super::platform_entry_credentials::EntryCredentialSnapshot::load(
+                    db, adapter, bot,
+                )
+                .await?;
+                let evidence = capture(&entry, None)?;
+                snapshot = Some(entry);
+                Some(evidence)
+            }
+            None => None,
+        };
+        if let Some(evidence) = evidence {
+            replacement(keys, bot, evidence, &mut set, &mut unset)?;
+        }
+    }
+    let mut update = doc! {"$set":set};
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
+    if let Some(entry) = snapshot {
+        let db = super::transaction_service::durable_database(db);
+        return super::transaction_service::run_db_only(
+            &db,
+            &(&db, rows, entry, filter, update),
+            |tx, (db, rows, entry, filter, update)| {
+                Box::pin(async move {
+                    let changed = rows
+                        .update_one(filter.clone(), update.clone())
+                        .session(&mut *tx)
+                        .await?
+                        .matched_count
+                        == 1;
+                    if changed && !entry.fence_sources_for_rewrap(db, tx).await? {
+                        return Err(invalid());
+                    }
+                    Ok(changed)
+                })
+            },
+        )
+        .await;
+    }
+    Ok(rows.update_one(filter, update).await?.matched_count == 1)
+}
+
+fn replacement(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    bot: &ChannelBot,
+    mut evidence: CredentialContinuity,
     set: &mut Document,
     unset: &mut Document,
 ) -> AppResult<()> {
-    let Some(previous) = verified(bot)? else {
-        return Ok(());
-    };
-    let mut evidence = previous.clone();
+    let mut versions = bot.secret_context_versions.clone();
     let mut target = bson::to_document(bot).map_err(|_| invalid())?;
     for field in FIELDS {
         if !set.contains_key(field) && !unset.contains_key(field) {
@@ -196,10 +292,20 @@ pub(super) fn replacement(
         evidence
             .generations
             .insert(field.into(), uuid::Uuid::new_v4().to_string());
-        if let Ok(versions) = target.get_document_mut("secret_context_versions") {
+        if keys.contextual_record_writes() && set.contains_key(field) {
+            versions.insert(field.to_owned(), 3);
+        } else {
             versions.remove(field);
         }
-        unset.insert(format!("secret_context_versions.{field}"), "");
+    }
+    if versions != bot.secret_context_versions {
+        let value = bson::to_bson(&versions).map_err(|_| invalid())?;
+        target.insert("secret_context_versions", value.clone());
+        if versions.is_empty() {
+            unset.insert("secret_context_versions", "");
+        } else {
+            set.insert("secret_context_versions", value);
+        }
     }
     let updated = bson::from_document(target).map_err(|_| invalid())?;
     sign(&updated, &mut evidence)?;
@@ -220,16 +326,7 @@ pub(super) fn capture(
     let mut evidence = match verified(bot)? {
         Some(previous) => previous.clone(),
         None => {
-            let mut evidence = CredentialContinuity {
-                version: 1,
-                generations: FIELDS
-                    .iter()
-                    .map(|name| (name.to_string(), uuid::Uuid::new_v4().to_string()))
-                    .collect(),
-                pins: BTreeMap::new(),
-                shared_producers: BTreeMap::new(),
-                authentication: String::new(),
-            };
+            let mut evidence = fresh();
             for name in [TOKEN, APP] {
                 if super::channel_registration::stored_secret(bot, name)?.is_some() {
                     evidence.pins.insert(
@@ -275,8 +372,7 @@ pub(super) fn capture(
     Ok(evidence)
 }
 
-/// Run inside the exact-source write transaction. The registry keeps channel_bots
-/// pending until all business writers and owner transfer can seal contextual rows.
+/// Publish the captured identities with the rewrapped envelopes under the exact source fence.
 pub(super) async fn publish_rewrap(
     db: &mongodb::Database,
     keys: &crate::crypto::aes::EncryptionKeys,
@@ -307,15 +403,7 @@ pub(super) async fn publish_rewrap(
         target.extend(set.clone());
         let updated: ChannelBot = bson::from_document(target).map_err(|_| invalid())?;
         for name in FIELDS {
-            if name == TOKEN
-                && bot.bot_token_encrypted.is_empty()
-                && matches!(
-                    bot.credential_source.as_str(),
-                    "connection" | "telegram_manager"
-                )
-                && !bot.secret_context_versions.contains_key(name)
-                && !set.contains_key(name)
-            {
+            if super::channel_bot_record::external_token(&bot, name) && !set.contains_key(name) {
                 continue;
             }
             let before = super::channel_registration::open_secret(keys, &bot, name).await?;
@@ -355,7 +443,7 @@ pub(super) async fn transfer(
     destination: &str,
     keys: Option<&crate::crypto::aes::EncryptionKeys>,
 ) -> AppResult<Document> {
-    let mut evidence = verified(bot)?.cloned().ok_or_else(invalid)?;
+    let mut evidence = verified(bot)?.cloned();
     let keys = keys.ok_or_else(|| {
         AppError::Conflict("Credential encryption is required for this transfer".into())
     })?;
@@ -368,20 +456,7 @@ pub(super) async fn transfer(
     let mut set = Document::new();
     let mut versions = Document::new();
     for name in FIELDS {
-        evidence
-            .generations
-            .insert(name.into(), uuid::Uuid::new_v4().to_string());
-        if name == TOKEN
-            && bot.bot_token_encrypted.is_empty()
-            && matches!(
-                bot.credential_source.as_str(),
-                "connection" | "telegram_manager"
-            )
-            && !bot.secret_context_versions.contains_key(name)
-        {
-            continue;
-        }
-        if let Some(plain) = super::channel_registration::open_secret(keys, bot, name).await? {
+        if let Some(plain) = super::channel_bot_record::plaintext(keys, bot, name).await? {
             let encrypted = crate::crypto::record_field::encrypt(
                 keys,
                 "channel_bots",
@@ -403,17 +478,26 @@ pub(super) async fn transfer(
             }
         }
     }
-    set.insert("secret_context_versions", versions);
-    target.extend(set.clone());
-    evidence.pins.clear();
-    sign(
-        &bson::from_document(target).map_err(|_| invalid())?,
-        &mut evidence,
-    )?;
-    set.insert(
-        "credential_continuity",
-        bson::to_bson(&evidence).map_err(|_| invalid())?,
-    );
+    // A transfer retires every old generation, including currently absent fields.
+    if keys.contextual_record_writes() || evidence.is_some() {
+        let mut next = fresh();
+        if let Some(previous) = evidence.take() {
+            next.version = previous.version;
+            next.shared_producers = previous.shared_producers;
+        }
+        set.insert("secret_context_versions", versions);
+        target.extend(set.clone());
+        sign(
+            &bson::from_document(target).map_err(|_| invalid())?,
+            &mut next,
+        )?;
+        set.insert(
+            "credential_continuity",
+            bson::to_bson(&next).map_err(|_| invalid())?,
+        );
+    } else if !bot.secret_context_versions.is_empty() {
+        set.insert("secret_context_versions", versions);
+    }
     Ok(set)
 }
 

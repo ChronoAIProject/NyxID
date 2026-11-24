@@ -121,7 +121,7 @@ impl TelegramNewService<'_> {
                 ));
             }
             let secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
-            let bot = ChannelBot {
+            let mut bot = ChannelBot {
                 manager_instance: None,
                 diagnostics: Default::default(),
                 x_events: None,
@@ -143,9 +143,25 @@ impl TelegramNewService<'_> {
                 credential_continuity: None,
                 secret_context_versions: Default::default(),
                 registration_pin_encrypted: None,
-                webhook_secret_encrypted: Some(self.keys.encrypt(secret.as_bytes()).await?),
+                webhook_secret_encrypted: Some(
+                    super::channel_bot_record::encrypt(
+                        self.keys,
+                        id,
+                        &request.owner_user_id,
+                        "webhook_secret_encrypted",
+                        &secret,
+                    )
+                    .await?,
+                ),
                 managed_setup: None,
-                bot_token_encrypted: self.keys.encrypt(token.as_bytes()).await?,
+                bot_token_encrypted: super::channel_bot_record::encrypt(
+                    self.keys,
+                    id,
+                    &request.owner_user_id,
+                    "bot_token_encrypted",
+                    &token,
+                )
+                .await?,
                 platform_bot_id: verified_id.to_string(),
                 platform_bot_username: username,
                 webhook_registered: false,
@@ -160,6 +176,7 @@ impl TelegramNewService<'_> {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };
+            super::channel_bot_record::mark_new(&mut bot, self.keys)?;
             self.check_owner(actor, &request.owner_user_id).await?;
             super::channel_bot_service::insert_approved_telegram_bot(
                 self.db,

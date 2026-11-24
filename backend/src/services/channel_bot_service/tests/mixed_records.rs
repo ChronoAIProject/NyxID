@@ -1,4 +1,4 @@
-//! Compiled unchanged into the two server test binaries. Fixtures use only local test keys.
+//! Exercised across independent base and candidate server test binaries. Fixtures use only local test keys.
 use super::*;
 use crate::services::{
     channel_adapters,
@@ -105,7 +105,6 @@ async fn create(
         .await
         .unwrap()
         .unwrap();
-    assert!(!row.contains_key("secret_context_versions"));
     let expected = doc! {TOKEN:"app:test-secret",APP:"test-secret",VERIFY:"verify",ENCRYPT:"enc"};
     doc! {"row":row,"expected":expected}
 }
@@ -149,7 +148,6 @@ async fn mutate(
         .unwrap()
         .unwrap();
     if row.contains_key("credential_continuity") {
-        assert!(bot.secret_context_versions.is_empty());
         assert_ne!(
             fixture
                 .get_document("pins")
@@ -158,8 +156,24 @@ async fn mutate(
                 .unwrap(),
             CredentialSnapshot::local(&bot).fingerprint().unwrap()
         );
-    } else {
-        assert!(!updated.contains_key("secret_context_versions"));
+    }
+    let old: ChannelBot = bson::from_document(row.clone()).unwrap();
+    for field in FIELDS {
+        let replaced = replace && [TOKEN, APP, VERIFY, ENCRYPT].contains(&field);
+        let cleared = !replace && field == ENCRYPT;
+        let version = if replaced || cleared {
+            (replaced && keys.contextual_record_writes()).then_some(3)
+        } else {
+            old.secret_context_versions.get(field).copied()
+        };
+        assert_eq!(
+            bot.secret_context_versions.get(field).copied(),
+            version,
+            "{field}"
+        );
+        if !replaced && !cleared {
+            assert_eq!(row.get(field), updated.get(field), "{field}");
+        }
     }
     if replace {
         for field in [TOKEN, APP, VERIFY, ENCRYPT] {
@@ -178,40 +192,6 @@ async fn mutate(
         expected.remove(ENCRYPT);
     }
     fixture.insert("row", updated);
-    fixture.insert("pins", fingerprints(db, adapter, &bot).await);
-}
-
-async fn contextual_fixture(
-    db: &mongodb::Database,
-    keys: &EncryptionKeys,
-    adapter: &RecordingAdapter,
-    fixture: &mut Document,
-) {
-    let expected = fixture.get_document("expected").unwrap().clone();
-    let row = fixture.get_document_mut("row").unwrap();
-    let id = row.get_str("_id").unwrap().to_owned();
-    let owner = row.get_str("user_id").unwrap().to_owned();
-    let mut versions = Document::new();
-    for (field, value) in expected {
-        let path = [field.as_str()];
-        let context =
-            crate::crypto::record_field::RecordContext::new(COLLECTION_NAME, &id, &owner, &path)
-                .unwrap();
-        let bytes = keys
-            .encrypt_record(value.as_str().unwrap().as_bytes(), &context)
-            .await
-            .unwrap();
-        row.insert(
-            &field,
-            Binary {
-                subtype: BinarySubtype::Generic,
-                bytes,
-            },
-        );
-        versions.insert(field, 3);
-    }
-    row.insert("secret_context_versions", versions);
-    let bot = bson::from_document(row.clone()).unwrap();
     fixture.insert("pins", fingerprints(db, adapter, &bot).await);
 }
 
@@ -350,10 +330,7 @@ async fn channel_bot_mixed_records() {
     let adapter = RecordingAdapter {
         seen_tokens: Default::default(),
     };
-    let mut bundle: Document = if matches!(
-        step.as_str(),
-        "roundtrip" | "write" | "contextual-fixture"
-    ) {
+    let mut bundle: Document = if matches!(step.as_str(), "roundtrip" | "write") {
         let manual = create(&db, &cfg, &keys, &adapter).await;
         let managed =
             crate::handlers::channel_managed_tests::mixed_managed_records(keys.clone()).await;
@@ -363,12 +340,20 @@ async fn channel_bot_mixed_records() {
         for kind in ["manual", "managed", "repair", "telegram-new"] {
             let fixture = bundle.get_document_mut(kind).unwrap();
             let row = fixture.get_document("row").unwrap();
-            assert!(!row.contains_key("secret_context_versions"));
+            let expected = fixture.get_document("expected").unwrap();
+            if keys.contextual_record_writes() {
+                let versions = row.get_document("secret_context_versions").unwrap();
+                assert_eq!(versions.len(), expected.len());
+                for field in expected.keys() {
+                    assert_eq!(versions.get_i32(field), Ok(3));
+                }
+                assert!(row.contains_key("credential_continuity"));
+            } else {
+                assert!(!row.contains_key("secret_context_versions"));
+                assert!(!row.contains_key("credential_continuity"));
+            }
             let bot = bson::from_document(row.clone()).unwrap();
             fixture.insert("pins", fingerprints(&db, &adapter, &bot).await);
-            if step == "contextual-fixture" || step == "roundtrip" {
-                contextual_fixture(&db, &keys, &adapter, fixture).await;
-            }
         }
         bundle
     } else {
@@ -392,21 +377,30 @@ async fn channel_bot_mixed_records() {
             let rows = db.collection::<Document>(COLLECTION_NAME);
             let raw = fixture.get_document("row").unwrap().clone();
             rows.insert_one(&raw).await.unwrap();
-            let bot = bson::from_document(raw).unwrap();
-            let bot = crate::services::channel_credential_continuity::rewrap_fixture(
-                &db,
-                &keys,
-                &bot,
-                &[APP, VERIFY],
-            )
-            .await;
-            let bot = crate::services::channel_credential_continuity::rewrap_fixture(
-                &db,
-                &keys,
-                &bot,
-                &[TOKEN, APP, VERIFY, ENCRYPT],
-            )
-            .await;
+            // Rewrap the base envelopes twice, first with a transitional primary.
+            let mut staging = cfg.clone();
+            staging.encryption_key_previous = staging.encryption_key.replace("22".repeat(32));
+            let staged = EncryptionKeys::from_config(&staging);
+            assert!(
+                crate::services::channel_bot_record::migrate(&db, &staged, &raw)
+                    .await
+                    .unwrap()
+            );
+            let lookup = doc! {"_id":raw.get_str("_id").unwrap()};
+            let middle = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+            let mut final_config = cfg.clone();
+            final_config.encryption_key_previous = staging.encryption_key;
+            let final_keys = EncryptionKeys::from_config(&final_config);
+            assert!(
+                crate::services::channel_bot_record::migrate(&db, &final_keys, &middle)
+                    .await
+                    .unwrap()
+            );
+            let live = rows.find_one(lookup).await.unwrap().unwrap();
+            crate::services::channel_bot_record::verify(&keys, &live)
+                .await
+                .unwrap();
+            let bot = bson::from_document(live).unwrap();
             assert_eq!(
                 fingerprints(&db, &adapter, &bot).await,
                 *fixture.get_document("pins").unwrap()
@@ -424,7 +418,7 @@ async fn channel_bot_mixed_records() {
                 .unwrap();
             mutate(&db, &keys, &adapter, fixture, step == "replace").await;
         }
-        "write" | "contextual-fixture" => {}
+        "write" => {}
         "read" | "reject" | "roundtrip" | "swap-fields" | "swap-owner" | "swap-id"
         | "swap-collection" | "swap-version" => {
             for kind in ["manual", "managed", "repair", "telegram-new"] {
@@ -442,4 +436,65 @@ async fn channel_bot_mixed_records() {
         _ => panic!("unexpected fixture operation"),
     }
     std::fs::write(file.unwrap(), bson::to_vec(&bundle).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn first_contextual_webhook_install_has_one_winner_and_retains_unrelated_pins() {
+    let db = crate::test_utils::connect_transaction_test_database("bot_webhook_race").await;
+    let cfg = crate::test_utils::test_app_config();
+    let keys = EncryptionKeys::from_config(&cfg);
+    let mut legacy_keys = EncryptionKeys::from_config(&cfg);
+    legacy_keys.set_contextual_record_writes(false);
+    let adapter = RecordingAdapter {
+        seen_tokens: Default::default(),
+    };
+    let fixture = create(&db, &cfg, &legacy_keys, &adapter).await;
+    let row = fixture.get_document("row").unwrap();
+    let bot = bson::from_document::<ChannelBot>(row.clone()).unwrap();
+    let original_pins = fingerprints(&db, &adapter, &bot).await;
+    let install = |value: &'static str| {
+        let (keys, bot, db, adapter) = (&keys, &bot, &db, &adapter);
+        async move {
+            let bytes = crate::services::channel_bot_record::encrypt(
+                keys,
+                &bot.id,
+                &bot.user_id,
+                WEBHOOK,
+                value,
+            )
+            .await
+            .unwrap();
+            crate::services::channel_credential_continuity::update_credentials(db,keys,adapter,bot,
+                doc!{"_id":&bot.id,"user_id":&bot.user_id,"is_active":true},
+                doc!{WEBHOOK:Binary{subtype:BinarySubtype::Generic,bytes},"webhook_secret_hash":hex::encode(Sha256::digest(value.as_bytes()))},doc!{}).await.unwrap()
+        }
+    };
+    let (left, right) = tokio::join!(install("left"), install("right"));
+    assert_ne!(left, right);
+    let winner = get_bot(&db, &bot.id).await.unwrap();
+    assert_eq!(winner.secret_context_versions.len(), 1);
+    assert_eq!(winner.secret_context_versions.get(WEBHOOK), Some(&3));
+    let plain = crate::services::channel_bot_record::plaintext(&keys, &winner, WEBHOOK)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        plain.as_slice()
+            == if left {
+                b"left".as_slice()
+            } else {
+                b"right".as_slice()
+            }
+    );
+    let current_pins = fingerprints(&db, &adapter, &winner).await;
+    assert_eq!(
+        current_pins.get_str("aurinko_app_secret"),
+        original_pins.get_str("aurinko_app_secret")
+    );
+    for purpose in ["verification", "entry"] {
+        assert_ne!(
+            current_pins.get_str(purpose),
+            original_pins.get_str(purpose)
+        );
+    }
 }

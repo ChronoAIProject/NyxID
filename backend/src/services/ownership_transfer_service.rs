@@ -763,17 +763,6 @@ pub async fn transfer_with_keys(
         }
         // SSH CA authority is platform/service-bound and does not change owner.
         Some((source, set))
-    } else if let Some(source) = db
-        .collection::<Document>(BOTS)
-        .find_one(
-            doc! {"_id":&resource_id,"is_active":true,"credential_continuity":{"$ne":bson::Bson::Null}},
-        )
-        .await?
-    {
-        let bot: ChannelBot = bson::from_document(source.clone())
-            .map_err(|_| AppError::Conflict("Transfer source changed".into()))?;
-        let set = super::channel_credential_continuity::transfer(&bot, &destination, keys).await?;
-        Some((source, set))
     } else {
         None
     };
@@ -962,6 +951,17 @@ pub async fn transfer_with_keys(
                     "user_id"
                 }
             };
+            let credential_rebind = if kind == ResourceKind::ChannelBot {
+                let source = db.collection::<Document>(BOTS)
+                    .find_one(doc! {"_id":&resource_id, "user_id":&reviewed.previous_owner_user_id, "is_active":true})
+                    .session(&mut **transaction).await?
+                    .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
+                let bot = super::channel_bot_record::decode(&source)?;
+                let set = super::channel_credential_continuity::transfer(&bot, &destination, keys).await?;
+                Some((source, set))
+            } else {
+                credential_rebind
+            };
             let mut set = doc! { "updated_at": now };
             set.insert(owner_field, &destination);
             if let Some((_, rebound)) = &credential_rebind {
@@ -981,7 +981,6 @@ pub async fn transfer_with_keys(
                 }
                 ResourceKind::ChannelBot => {
                     resource_filter.insert("user_id", &reviewed.previous_owner_user_id);
-                    if credential_rebind.is_none() {resource_filter.insert("credential_continuity",bson::Bson::Null);}
                 }
             }
             if let Some((source, _)) = &credential_rebind {

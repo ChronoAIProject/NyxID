@@ -37,7 +37,7 @@ async fn owner_transfer(
 ) -> crate::errors::AppResult<crate::models::ownership_transfer::OwnershipTransfer> {
     transfer_with_keys(
         &f.db,
-        None,
+        Some(&test_utils::test_encryption_keys()),
         TransferCommand {
             actor,
             api_key_id: key,
@@ -475,7 +475,7 @@ async fn move_resource(
 async fn insert_bot(f: &Fixture) -> ChannelBot {
     let id = Uuid::new_v4().to_string();
     let doc = doc! { "_id": id, "user_id": &f.owner, "platform": "telegram", "label": "Team bot",
-    "credential_source": "user", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1,2,3] },
+    "credential_source": "user", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: test_utils::test_encryption_keys().encrypt(b"transfer-token").await.unwrap() },
     "platform_bot_id": "remote-bot", "platform_bot_username": "team_bot", "webhook_registered": true,
     "webhook_secret_hash": "original-secret-hash", "status": "active", "is_active": true,
     "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() };
@@ -1551,7 +1551,15 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
             .unwrap();
     assert_eq!(saved.user_id, f.destination);
     assert_eq!(saved.ownership_version, 1);
-    assert_eq!(saved.bot_token_encrypted, bot.bot_token_encrypted);
+    assert_ne!(saved.bot_token_encrypted, bot.bot_token_encrypted);
+    let keys = test_utils::test_encryption_keys();
+    assert_eq!(
+        &**super::channel_registration::open_secret(&keys, &saved, "bot_token_encrypted")
+            .await
+            .unwrap()
+            .unwrap(),
+        b"transfer-token"
+    );
     assert_eq!(saved.webhook_secret_hash, bot.webhook_secret_hash);
     assert!(require_current_bot(&f.db, &bot).await.is_err());
     assert!(
@@ -2073,10 +2081,11 @@ async fn concurrent_registration_and_transfer_share_destination_capacity() {
     .await
     .unwrap();
     let request = Uuid::new_v4().to_string();
+    let keys = test_utils::test_encryption_keys();
     let (moved, registered) = tokio::join!(
         transfer_with_keys(
             &f.db,
-            None,
+            Some(&keys),
             TransferCommand {
                 actor: &f.admin,
                 api_key_id: None,
@@ -2569,5 +2578,125 @@ async fn catalog_master_transfer_rebinds_staged_and_strict_material() {
             assert!(records::bytes(&keys, &wrong_owner).await.is_err());
         }
         f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn channel_transfer_rebinds_all_fields_and_aborts_route_retirement_on_a_damaged_secret() {
+    use sha2::{Digest, Sha256};
+    let f = fixture("bot_transfer_fields").await;
+    let bot = insert_bot(&f).await;
+    let keys = test_utils::test_encryption_keys();
+    let rows = f.db.collection::<Document>(BOTS);
+    let lookup = doc! {"_id":&bot.id};
+    let mut set =
+        doc! {"webhook_secret_hash":hex::encode(Sha256::digest(b"webhook_secret_encrypted"))};
+    for &field in super::channel_bot_record::FIELDS {
+        set.insert(
+            field,
+            bson::to_bson(&keys.encrypt(field.as_bytes()).await.unwrap()).unwrap(),
+        );
+    }
+    rows.update_one(lookup.clone(), doc! {"$set":set})
+        .await
+        .unwrap();
+    let route = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    let routes = f.db.collection::<Document>(CONVERSATIONS);
+    routes.insert_one(doc! {"_id":&route,"channel_bot_id":&bot.id,"user_id":&f.owner,"platform":"telegram","platform_conversation_id":"chat","platform_conversation_type":"private","is_active":true,"created_at":now,"updated_at":now}).await.unwrap();
+    let canonical = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+    rows.update_one(
+        lookup.clone(),
+        doc! {"$set":{"lark_encrypt_key_encrypted":[7]}},
+    )
+    .await
+    .unwrap();
+    let broken = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+    let kind = ResourceKind::ChannelBot;
+    let reviewed = preview(&f.db, &f.admin, kind, &bot.id, &f.destination, 5)
+        .await
+        .unwrap();
+    assert!(
+        move_resource(
+            &f,
+            kind,
+            &bot.id,
+            &f.destination,
+            &reviewed.version,
+            &Uuid::new_v4().to_string()
+        )
+        .await
+        .is_err()
+    );
+    assert!(rows.find_one(lookup.clone()).await.unwrap().unwrap() == broken);
+    assert!(
+        routes
+            .find_one(doc! {"_id":&route,"is_active":true})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    rows.replace_one(lookup.clone(), &canonical).await.unwrap();
+    for destination in [&f.destination, &f.owner] {
+        let before = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+        let review = preview(&f.db, &f.admin, kind, &bot.id, destination, 5)
+            .await
+            .unwrap();
+        move_resource(
+            &f,
+            kind,
+            &bot.id,
+            destination,
+            &review.version,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        let after = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+        super::channel_bot_record::verify(&keys, &after)
+            .await
+            .unwrap();
+        let source = super::channel_bot_record::decode(&before).unwrap();
+        let restored = super::channel_bot_record::decode(&after).unwrap();
+        assert_eq!(&restored.user_id, destination);
+        assert!(require_current_bot(&f.db, &source).await.is_err());
+        for &field in super::channel_bot_record::FIELDS {
+            assert_eq!(restored.secret_context_versions.get(field), Some(&3));
+            assert_eq!(
+                &**super::channel_registration::open_secret(&keys, &restored, field)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                field.as_bytes()
+            );
+            let ciphertext = super::channel_registration::stored_secret(&restored, field)
+                .unwrap()
+                .unwrap();
+            assert!(
+                crate::crypto::record_field::decrypt(
+                    &keys,
+                    BOTS,
+                    &source.id,
+                    &source.user_id,
+                    field,
+                    Some(3),
+                    ciphertext
+                )
+                .await
+                .is_err()
+            );
+            if let Some(previous) = &source.credential_continuity {
+                assert_ne!(
+                    restored.credential_continuity.as_ref().unwrap().generations[field],
+                    previous.generations[field]
+                );
+            }
+        }
+        assert!(
+            !super::channel_bot_record::migrate(&f.db, &keys, &before)
+                .await
+                .unwrap()
+        );
+        assert!(rows.find_one(lookup.clone()).await.unwrap().unwrap() == after);
     }
 }
