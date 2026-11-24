@@ -103,3 +103,5 @@ pub(crate) struct GrantScope {
     #[serde(default)]
     pub erasure_requested: bool,
 }
+
+pub const PROVIDER_TARGETS: &str = "channel_meta_provider_targets";

@@ -1336,6 +1336,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "channel_meta_oauth_sessions stores short-lived consent state and encrypted candidate credentials, bound separately to the initiating actor and inbox owner. Local inventory removes sessions matching either identity; session expiry and provider erasure also remove retained credentials.",
     },
     Entry {
+        collection: "channel_meta_provider_targets",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_provider_targets is a child of the signed provider request, uniquely keyed by request/bot/grant UUIDs, with optional scope UUID, retry state and typed completion time. It contains no raw subject, owner identifiers or copied source/content. Pending proof has no TTL; after parent completion, bounded cleanup assigns the parent's 90-day proof expiry before enabling parent TTL.",
+    },
+    Entry {
         collection: "channel_meta_provider_requests",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),

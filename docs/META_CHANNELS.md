@@ -350,11 +350,17 @@ that erasure authority.
 
 Signed callback confirmation records the keyed subject and cutoff with a
 durable scope cursor. Historical reconnects are captured in indexed pages of
-100 scopes by the existing request worker. Initial compatibility capture holds
-at most 200 targets (100 current and 100 distinct retired); later discovery
-holds at most one page of 100 targets. Current-installation and retained-draft compatibility
+100 scopes by the existing request worker. Current and retired compatibility capture share one
+initial cap of 100 targets; later discovery also publishes at most 100 targets.
+Earlier larger arrays transfer in bounded pages. Current-installation and retained-draft compatibility
 capture is capped; an overflow uses indexed, restartable pages before the
-request can complete. The request retains no raw subject. Every fresh grant
+request can complete. The request retains no raw subject. Independently retryable children in
+`channel_meta_provider_targets` retain only request/bot/grant UUIDs, an optional
+scope UUID, retry state and typed completion time. Array handoff is idempotent
+and atomic. Discovery continues while another child awaits repair or remote
+cleanup, and completion requires exhausted discovery and no pending child.
+Pending child proof has no TTL. After completion, bounded pages assign the
+parent request's 90-day proof expiry before enabling the parent TTL. Every fresh grant
 write shares the subject fence, so asynchronous capture does not permit writes
 under an already accepted revocation. Erasure has its own cutoff: a later
 deauthorization cannot enlarge an earlier deletion instruction.

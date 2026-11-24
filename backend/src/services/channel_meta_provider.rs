@@ -371,7 +371,7 @@ pub async fn accept_provider_request(
                 }
                 let mut cursor = db.collection::<bson::Document>(BOTS).find(doc! {
                     "platform":platform,"meta_binding.app_id":app,"meta_binding.grant_subject_id":subject,
-                }).limit(101).session(&mut *tx).await?;
+                }).sort(doc! {"_id":1}).limit(101).session(&mut *tx).await?;
                 let bots: Vec<bson::Document> = cursor.stream(&mut *tx).try_collect().await?;
                 let mut compatibility_pending=bots.len()>100 || session_overflow;
                 let mut targets = Vec::new();
@@ -402,7 +402,7 @@ pub async fn accept_provider_request(
                 if *erase {
                     let mut retired = db.collection::<bson::Document>("channel_meta_erasure_fences")
                         .find(doc! {"retired_grant.identity":&identity})
-                        .projection(doc! {"retired_grant":1,"local_data_erased_at":1,"completed_grant_id":1}).limit(101).session(&mut *tx).await?;
+                        .projection(doc! {"retired_grant":1,"local_data_erased_at":1,"completed_grant_id":1}).sort(doc! {"_id":1}).limit(101).session(&mut *tx).await?;
                     let mut count=0;
                     while let Some(row) = retired.stream(&mut *tx).try_next().await? {
                         count+=1;
@@ -413,6 +413,7 @@ pub async fn accept_provider_request(
                         if retired.get_datetime("authorized_at").is_ok_and(|at|at >= &cutoff) { continue; }
                         if super::grants::completed(&row,grant).unwrap_or(false) { continue; }
                         if seen.insert((id.to_owned(),grant.to_owned())) {
+                            if targets.len()==100 {compatibility_pending=true;break;}
                             targets.push(doc! {"bot_id":id,"grant_id":grant});
                         }
                     }
@@ -467,6 +468,9 @@ pub(crate) async fn reconcile_with_service(
                 "Meta provider request reconciliation deferred"
             );
         }
+    }
+    for _ in 0..2 {
+        super::targets::expire_completed_receipts(service.db).await?;
     }
     Ok(())
 }
@@ -664,95 +668,59 @@ async fn reconcile_job(
     job: &bson::Document,
     claim: &str,
 ) -> AppResult<()> {
-    let job = capture_scopes(&state.db, job, claim).await?;
-    let job_id = job.get_str("_id").map_err(|_| invalid())?;
+    // Move each observed array page atomically. New and earlier request formats
+    // both recover if a process stops between discovery and this handoff.
+    let mut job = job.clone();
+    for _ in 0..2 {
+        job = super::targets::transfer_page(&state.db, &job, claim).await?;
+    }
+    if job.get_array("targets").is_ok_and(Vec::is_empty) {
+        job = capture_scopes(&state.db, &job, claim).await?;
+        job = super::targets::transfer_page(&state.db, &job, claim).await?;
+    }
+    let id = job.get_str("_id").map_err(|_| invalid())?;
     let erase = job.get_bool("erase").map_err(|_| invalid())?;
-    let requests = state.db.collection::<bson::Document>(REQUESTS);
-    let claimed = doc! {"_id": job_id, "status": "pending", "claim_id": claim};
-    let now = bson::DateTime::now();
-    let retry_at = bson::DateTime::from_chrono(Utc::now() + Duration::minutes(15));
-    let mut next_attempt = retry_at;
-    let mut attempted = 0;
-    for target in job.get_array("targets").map_err(|_| invalid())? {
-        let target = target.as_document().ok_or_else(invalid)?;
-        if let Ok(later) = target.get_datetime("retry_at")
-            && later > &now
-        {
-            next_attempt = next_attempt.min(*later);
-            continue;
-        }
-        if attempted == 8 {
-            next_attempt = now;
-            break;
-        }
-        attempted += 1;
-        let bot_id = target.get_str("bot_id").map_err(|_| invalid())?;
-        let grant_id = target.get_str("grant_id").map_err(|_| invalid())?;
-        let identity = doc! {"bot_id": bot_id, "grant_id": grant_id};
-        let mut filter = claimed.clone();
-        filter.insert("targets", doc! {"$elemMatch": &identity});
-        let update = match reconcile_target(
+    for target in super::targets::due(&state.db, id, bson::DateTime::now()).await? {
+        let bot = target.get_str("bot_id").map_err(|_| invalid())?;
+        let grant = target.get_str("grant_id").map_err(|_| invalid())?;
+        let result = reconcile_target(
             state,
             service,
             erase,
-            bot_id,
-            grant_id,
+            bot,
+            grant,
             job.get_datetime("signed_cutoff").ok(),
             target.get_str("scope_id").ok(),
         )
-        .await
-        {
-            Ok(()) => doc! {"$pull": {"targets": identity}},
-            Err(error) => {
-                tracing::warn!(
-                    error_code = error.error_code(),
-                    "Meta inbox cleanup deferred"
-                );
-                doc! {"$set": {"targets.$.retry_at": retry_at}}
-            }
-        };
-        if requests.update_one(filter, update).await?.matched_count == 0 {
-            return Ok(());
+        .await;
+        if let Err(error) = &result {
+            tracing::warn!(
+                error_code = error.error_code(),
+                "Meta inbox cleanup deferred"
+            );
         }
-    }
-    if let Some(current) = requests.find_one(claimed.clone()).await?
-        && current.get_array("targets").is_ok_and(Vec::is_empty)
-    {
-        let captured = capture_scopes(&state.db, &current, claim).await?;
-        if captured
-            .get_array("targets")
-            .is_ok_and(|targets| !targets.is_empty())
-            || captured
-                .get_document("scope_capture")
-                .is_ok_and(|capture| capture.get_bool("done") == Ok(false))
-            || captured.get_bool("compatibility_pending") == Ok(true)
-        {
-            next_attempt = now;
-        }
-    }
-    let mut empty = claimed.clone();
-    empty.insert("targets", doc! {"$size": 0});
-    empty.insert("scope_capture.done", doc! {"$ne":false});
-    empty.insert("compatibility_pending", doc! {"$ne":true});
-    let completed = requests
-        .update_one(
-            empty,
-            doc! {
-                "$set": {"status": "completed", "completed_at": bson::DateTime::now(),
-                    "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::days(90))},
-                "$unset": {"targets": "", "claim_id": "", "next_attempt_at": "", "scope_capture":"", "compatibility_pending":""}
-            },
+        super::targets::settle(
+            &state.db,
+            id,
+            claim,
+            &target,
+            result.err().map(|error| error.error_code()),
         )
         .await?;
-    if completed.matched_count == 0 {
-        requests
-            .update_one(
-                claimed,
-                doc! {"$set": {"next_attempt_at": next_attempt}, "$unset": {"claim_id": ""}},
-            )
-            .await?;
     }
-    Ok(())
+    // A deferred child never blocks a later discovery page. Cursor and its
+    // array handoff commit together; transfer to children is idempotent.
+    if let Some(current) = state
+        .db
+        .collection::<bson::Document>(REQUESTS)
+        .find_one(doc! {"_id":id,"status":"pending","claim_id":claim})
+        .await?
+        && current.get_array("targets").is_ok_and(Vec::is_empty)
+    {
+        job = capture_scopes(&state.db, &current, claim).await?;
+        job = super::targets::transfer_page(&state.db, &job, claim).await?;
+    }
+    super::targets::finish_or_reschedule(&state.db, &job, claim).await
 }
 
 async fn reconcile_target(

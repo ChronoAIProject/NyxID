@@ -551,7 +551,7 @@ async fn require_drained_meta_app(
         (
             super::channel_meta_service::provider::REQUESTS,
             doc! {
-                "platform": platform, "app_id": app, "status": "pending", "targets.0": {"$exists": true},
+                "platform": platform, "app_id": app, "status": "pending",
             },
         ),
         (

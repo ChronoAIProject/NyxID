@@ -1822,6 +1822,14 @@ pub(crate) async fn sweep_service(
 pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
     scopes::ensure_indexes(db).await?;
+    targets::ensure_indexes(db).await?;
+    db.collection::<bson::Document>(provider::REQUESTS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"app_id":1,"status":1,"_id":1})
+                .build(),
+        )
+        .await?;
     db.collection::<OAuthSession>(SESSIONS)
         .create_index(
             IndexModel::builder()
@@ -1973,3 +1981,6 @@ pub(crate) mod grants;
 
 #[path = "channel_meta_scopes.rs"]
 pub(crate) mod scopes;
+
+#[path = "channel_meta_targets.rs"]
+pub(crate) mod targets;
