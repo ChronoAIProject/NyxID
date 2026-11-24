@@ -51,6 +51,10 @@ fn field(row: &Document, name: &str) -> Bson {
 }
 
 impl EntryCredentialSnapshot {
+    pub(super) fn channel_snapshot(&self) -> &CredentialSnapshot {
+        &self.bot
+    }
+
     pub(crate) async fn load(
         db: &Database,
         adapter: &dyn PlatformAdapter,
@@ -221,9 +225,6 @@ impl EntryCredentialSnapshot {
                 result.guards.push(Guard {collection:crate::models::platform_credential::COLLECTION_NAME,
                     filter:doc! {"_id":field(&auxiliary,"_id"),"provider":descriptor.provider,"secrets":field(&auxiliary,"secrets")}});
             }
-            // All supported composite credential mutations also write the provider
-            // row transactionally, including insertion/removal of auxiliary keys.
-            // Its updated_at guard therefore fences even an initially absent map.
             result.shared = Some(shared);
         }
         result.guards.push(Guard {
@@ -233,13 +234,39 @@ impl EntryCredentialSnapshot {
         Ok(result)
     }
 
+    pub(super) fn pin_dependencies(
+        &self,
+        evidence: &crate::models::channel_bot::CredentialContinuity,
+        verification: &str,
+    ) -> AppResult<String> {
+        let shared = self
+            .shared
+            .as_ref()
+            .map(|shared| (shared.producer_ids(), &shared.secrets));
+        super::channel_credential_continuity::dependencies(
+            self.bot.bot(),
+            "native",
+            &[],
+            &(verification, shared, &self.connection_identity),
+            evidence,
+        )
+    }
+
     pub(crate) fn fingerprint(&self) -> AppResult<String> {
         use sha2::{Digest, Sha256};
         let shared = self.shared.as_ref().map(|shared| &shared.secrets);
+        let verification = self.bot.fingerprint()?;
+        if let Some(evidence) = super::channel_credential_continuity::verified(self.bot.bot())? {
+            return Ok(super::channel_credential_continuity::select(
+                evidence,
+                "native",
+                self.pin_dependencies(evidence, &verification)?,
+            ));
+        }
         let material = Zeroizing::new(
             serde_json::to_vec(&(
                 "nyxid-native-entry-credentials:v2",
-                self.bot.fingerprint()?,
+                verification,
                 shared,
                 &self.connection_identity,
             ))
@@ -295,6 +322,20 @@ impl EntryCredentialSnapshot {
             return super::platform_credential_service::decrypt_snapshot(keys, Some(shared)).await;
         }
         self.bot.secrets(keys, adapter).await
+    }
+
+    pub(super) async fn fence_sources_for_rewrap(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<bool> {
+        if !self
+            .check_dependencies(db, session, TokenRequirement::Identity, true)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.bot.fence_signing_source(db, session).await
     }
 
     pub(crate) async fn fence_in_session(
@@ -390,6 +431,9 @@ impl EntryCredentialSnapshot {
             if !exists {
                 return Ok(false);
             }
+        }
+        if let Some(shared) = &self.shared {
+            return shared.auxiliary_presence_matches(db, session).await;
         }
         Ok(true)
     }

@@ -356,6 +356,7 @@ async fn persist_verified_bot(
         poll_error_count: 0,
         last_poll_notice: None,
         error: None,
+        credential_continuity: None,
         secret_context_versions: Default::default(),
         registration_pin_encrypted: match managed {
             Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
@@ -1061,14 +1062,22 @@ pub async fn repair_managed_bot(
     if bot.webhook_secret_encrypted.is_none() {
         let secret = zeroize::Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
         let encrypted = keys.encrypt(secret.as_bytes()).await?;
-        db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-            doc! { "_id": &bot.id, "is_active": true, "webhook_secret_encrypted": bson::Bson::Null },
-            doc! { "$set": {
+        let mut filter = doc! { "_id": &bot.id, "is_active": true, "webhook_secret_encrypted": bson::Bson::Null };
+        filter.extend(super::channel_credential_continuity::physical_filter(bot)?);
+        let mut set = doc! {
                 "webhook_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
                 "webhook_secret_hash": hex::encode(Sha256::digest(secret.as_bytes())),
                 "updated_at": bson::DateTime::now(),
-            } },
-        ).await?;
+        };
+        let mut unset = bson::Document::new();
+        super::channel_credential_continuity::replacement(bot, &mut set, &mut unset)?;
+        let mut update = doc! {"$set":set};
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
+        }
+        db.collection::<ChannelBot>(COLLECTION_NAME)
+            .update_one(filter, update)
+            .await?;
     }
     let bot = get_bot(db, &bot.id).await?;
     if !bot.is_active {
@@ -1294,14 +1303,27 @@ async fn update_bot_inner(
         );
     }
 
+    let mut filter = doc! {"_id":bot_id,"user_id":user_id};
+    if !fields.0.is_empty() {
+        filter.extend(super::channel_credential_continuity::physical_filter(&bot)?);
+        super::channel_credential_continuity::replacement(&bot, &mut set_doc, &mut unset_doc)?;
+    }
     let mut update_doc = doc! { "$set": set_doc };
     if !unset_doc.is_empty() {
         update_doc.insert("$unset", unset_doc);
     }
 
-    db.collection::<ChannelBot>(COLLECTION_NAME)
-        .update_one(doc! { "_id": bot_id, "user_id": user_id }, update_doc)
-        .await?;
+    if db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .update_one(filter, update_doc)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict(
+            "Bot credentials or verification changed. Run verification again.".into(),
+        ));
+    }
 
     get_bot_for_user(db, bot_id, user_id).await
 }
@@ -2681,6 +2703,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
             secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
