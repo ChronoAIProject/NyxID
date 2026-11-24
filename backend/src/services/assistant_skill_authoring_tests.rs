@@ -3193,6 +3193,16 @@ async fn verified_checkpoint_survives_pin_failure_without_republishing() {
         fresh_preview["current_skills_revision"],
         row.agent_skills_revision + 1
     );
+    let original_card_preview =
+        review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &allowed.id)
+            .await
+            .unwrap();
+    assert!(
+        original_card_preview["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("renew"))
+    );
     let axum::Json(renewal) = crate::handlers::assistant_agent_learning::approve(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
