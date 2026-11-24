@@ -142,6 +142,8 @@ pub struct NyxbotChannel {
     pub agent_api_key_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub agent_key_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]
     pub gateway_channel_id: Option<String>,
     #[serde(default)]

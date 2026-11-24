@@ -11,6 +11,7 @@ use crate::{
         assistant_nyxagent::{excerpt, identifier},
         channel_platform::canonical_platform,
         channel_routing_service, feature_flag_service, key_service,
+        nyxbot_channel_key as channel_key,
         nyxbot_channel_setup_service::{
             accessible_bot, audit, link, load_channel, org_access_with, release_org_channel,
         },
@@ -508,10 +509,14 @@ pub(crate) async fn connect(
     if gateway {
         let agent = create_gateway_agent_key(state, owner, &label).await?;
         agent_key_ciphertext = Some(
-            state
-                .encryption_keys
-                .encrypt(agent.full_key.as_bytes())
-                .await?,
+            channel_key::seal(
+                &state.encryption_keys,
+                &id,
+                owner,
+                &agent.id,
+                &agent.full_key,
+            )
+            .await?,
         );
         agent_key_id = Some(agent.id.clone());
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
@@ -544,6 +549,11 @@ pub(crate) async fn connect(
         route_api_key_id: route_key.id.clone(),
         route_id: None,
         agent_api_key_id: agent_key_id.clone(),
+        secret_context_versions: if gateway && state.encryption_keys.contextual_record_writes() {
+            [(channel_key::FIELD.to_owned(), 3)].into()
+        } else {
+            Default::default()
+        },
         agent_key_ciphertext,
         gateway_channel_id: None,
         gateway_record_id: None,

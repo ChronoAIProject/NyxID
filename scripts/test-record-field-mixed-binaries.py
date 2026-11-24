@@ -26,6 +26,8 @@ def main():
                         help="exercise active and rolled-back channel writers against the dual-reader base")
     parser.add_argument("--whatsapp", action="store_true",
                         help="exercise retained enrollment migration and token replacement after writer rollback")
+    parser.add_argument("--gateway-key", action="store_true",
+                        help="exercise managed channel-key replacement, removal and retained migration")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -114,7 +116,7 @@ def main():
         run("candidate", "read", "current")
         if args.reader_preparation:
             return
-        if args.whatsapp:
+        if args.whatsapp or args.gateway_key:
             run("candidate", "migrate", "old", writes=True)
             run("candidate", "read", "old", legacy=False)
             run("base", "reject", "old")
@@ -124,7 +126,7 @@ def main():
             run("candidate", "clear", "current")
             run("base", "read", "current")
         registry_test = args.test
-        if args.whatsapp:
+        if args.whatsapp or args.gateway_key:
             registry_test = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
         if args.channel_writers:
             run("candidate", "replace", "current", writes=True)

@@ -191,7 +191,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed"
+        "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241"
     );
     for digest in [
         Some(live.as_str()),
@@ -200,6 +200,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
+        Some(previous_labels::NYXBOT_CHANNEL_KEY_DIGEST),
+        Some(previous_labels::META_OAUTH_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -241,7 +243,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::WHATSAPP_DIGEST
+                        previous_labels::NYXBOT_CHANNEL_KEY_DIGEST
+                            | previous_labels::META_OAUTH_DIGEST
+                            | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST
                             | previous_labels::OAUTH_WEBHOOK_DIGEST
                             | previous_labels::RECONCILED_DIGEST

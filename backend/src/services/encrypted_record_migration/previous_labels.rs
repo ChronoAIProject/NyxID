@@ -210,6 +210,11 @@ pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
 pub(super) const CHANNEL_BOT_DIGEST: &str =
     "fdb9b9bb2bba7447d7cef07e588e6c1d1ce9461af13bd17be7664d0a47dc1f12";
 
-// Last dev registry before the Meta OAuth session entry was appended.
 pub(super) const WHATSAPP_DIGEST: &str =
     "6c328214696d6e4cdbb50c0b9aa5ef852c20e6e480fd2203ed6002b48477a50b";
+
+pub(super) const NYXBOT_CHANNEL_KEY_DIGEST: &str =
+    "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9";
+
+pub(super) const META_OAUTH_DIGEST: &str =
+    "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed";

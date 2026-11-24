@@ -1961,7 +1961,7 @@ async fn retire_shared(
             .await?;
         db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"channel_bot_id":bot},
             doc! {"$set":{"status":"disconnected","owner_sender_ids":[],"gateway_no_progress":false},
-                "$unset":{"agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"",
+                "$unset":{"agent_key_ciphertext":"", crate::services::nyxbot_channel_key::VERSION_PATH:"","pending_agent_api_key_id":"","pending_route_api_key_id":"",
                     "link_code_hash":"","link_code_expires_at":""},
                 "$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64}}).session(&mut *tx).await?;
     }

@@ -443,6 +443,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         route_api_key_id: route.id.clone(),
         route_id: Some(Uuid::new_v4().to_string()),
         agent_api_key_id: Some(agent.id.clone()),
+        secret_context_versions: Default::default(),
         agent_key_ciphertext: Some(
             state
                 .encryption_keys
@@ -3603,6 +3604,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             route_api_key_id: "k".into(),
             route_id: None,
             agent_api_key_id: None,
+            secret_context_versions: Default::default(),
             agent_key_ciphertext: None,
             gateway_channel_id: None,
             gateway_record_id: None,

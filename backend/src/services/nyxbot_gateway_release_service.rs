@@ -765,6 +765,7 @@ pub(crate) async fn retire_attempt(
                     if row.status=="pending" {
                         set.insert("status","failed");set.insert("last_error","setup_interrupted");
                         unset.insert("agent_key_ciphertext","");
+                        unset.insert(crate::services::nyxbot_channel_key::VERSION_PATH,"");
                         unset.insert("link_code_hash","");unset.insert("link_code_expires_at","");
                     }
                     db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"gateway_setup_release_id":&id},doc! {
@@ -881,7 +882,7 @@ async fn retire_connection_checked(
             let ids=retire_in_session(state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
-                "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
+                "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"",crate::services::nyxbot_channel_key::VERSION_PATH:"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
             super::channel_thread_follow_service::suspend_in_session(&db,&current.user_id,&current.id,error.as_deref().unwrap_or("disconnected"),session).await?;
             db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
                 .delete_many(doc! {"source.channel_id":&current.id}).session(&mut *session).await?;
@@ -2473,7 +2474,7 @@ pub(crate) async fn fallback(
             super::channel_routing_service::fence_route_key(&db,&next_key,session).await?;
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id,"status":"pending"},doc! {
                 "$inc":{"execution_policy_revision":1_i64},"$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
-                "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
+                "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"",crate::services::nyxbot_channel_key::VERSION_PATH:"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
                 .session(&mut *session).await?;
             Ok(ids)
         }).await;transactions::transaction_result(work)
