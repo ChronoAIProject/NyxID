@@ -38,15 +38,21 @@ impl Preview {
                 )
             })
             .collect::<Vec<_>>();
-        format!(
-            "{} {} Guests can use: {}. {}{}",
-            self.description,
-            EXCLUSIONS,
-            if services.is_empty() {
+        let guest_capabilities = if self.guest_enabled {
+            let list = if services.is_empty() {
                 "Model-only chat".into()
             } else {
                 services.join(", ")
-            },
+            };
+            format!(" Guests can use: {list}.")
+        } else {
+            String::new()
+        };
+        format!(
+            "{} {}{} {}{}",
+            self.description,
+            EXCLUSIONS,
+            guest_capabilities,
             self.audience_readiness.summary(),
             self.health
                 .as_ref()
@@ -169,7 +175,7 @@ pub(crate) async fn load(
         None
     };
     let mut description = if !policy.enabled && !carried {
-        "Customer access starts off. Assigning a specialist keeps private chats restricted to verified organization members; explicitly enable customer conversations after setup is ready.".to_owned()
+        "Customer access starts off. Only verified organization members can use private chats until an administrator enables customer conversations.".to_owned()
     } else if !policy.enabled {
         "Saved guest access is off and stays off. Only verified organization members can talk to this bot.".to_owned()
     } else if carried && private != "everyone" {
@@ -177,7 +183,7 @@ pub(crate) async fn load(
     } else {
         EXPOSURE.to_owned()
     };
-    if !(ready && policy.follows_agent_grants) {
+    if policy.enabled && !(ready && policy.follows_agent_grants) {
         description.push_str(" Existing guest service limits apply. Guests can use only the services listed below; an empty list means model-only chat.");
     }
     Ok(Preview {

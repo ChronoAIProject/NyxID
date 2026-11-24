@@ -310,6 +310,7 @@
   "Current remote version {{observed_version}}.": "目前遠端版本 {{observed_version}}。",
   "Current state": "目前狀態",
   "Custom {{label}} value": "自訂 {{label}} 值",
+  "Customer access starts off. Only verified organization members can use private chats until an administrator enables customer conversations.": "客戶存取權預設為關閉。管理員啟用客戶對話前，只有已驗證的組織成員可以使用私人聊天。",
   "Customize the colors of each theme. Changes apply immediately and are saved in this browser.": "自訂各佈景主題的色彩。變更立即生效，並儲存於此瀏覽器中。",
   "Daily activity: {{value}} requests and {{value1}} errors across {{length}} UTC days": "每日活動：{{length}} 個 UTC 日內共 {{value}} 次請求、{{value1}} 次錯誤",
   "Daily guest budget": "每日訪客預算",

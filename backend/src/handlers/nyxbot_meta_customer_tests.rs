@@ -396,6 +396,8 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         .unwrap();
         assert!(!preview.guest_enabled);
         assert_eq!(preview.private_chats, "owner");
+        assert!(preview.description.contains("Customer access starts off"));
+        assert!(!preview.summary().contains("Guests can use"));
         let (status, assigned) = action(&router, &token, &fresh_id, &agent.id, "assign").await;
         assert_eq!(status, StatusCode::OK, "{assigned}");
         assert_eq!(assigned["guests_enabled"], false);

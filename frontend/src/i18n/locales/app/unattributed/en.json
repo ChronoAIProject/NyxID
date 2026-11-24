@@ -310,6 +310,7 @@
   "Current remote version {{observed_version}}.": "Current remote version {{observed_version}}.",
   "Current state": "Current state",
   "Custom {{label}} value": "Custom {{label}} value",
+  "Customer access starts off. Only verified organization members can use private chats until an administrator enables customer conversations.": "Customer access starts off. Only verified organization members can use private chats until an administrator enables customer conversations.",
   "Customize the colors of each theme. Changes apply immediately and are saved in this browser.": "Customize the colors of each theme. Changes apply immediately and are saved in this browser.",
   "Daily activity: {{value}} requests and {{value1}} errors across {{length}} UTC days": "Daily activity: {{value}} requests and {{value1}} errors across {{length}} UTC days",
   "Daily guest budget": "Daily guest budget",
