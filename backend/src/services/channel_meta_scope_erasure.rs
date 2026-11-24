@@ -1117,6 +1117,7 @@ async fn erase_guest(
             .filter(|(collection, _)| *collection == "assistant_messages"),
     );
     let stage = progress.get_i32("guest_delete_stage").unwrap_or(0);
+    progress.insert("guest_delete_stage", stage);
     if stage < 0 {
         return Err(grants::incomplete());
     }

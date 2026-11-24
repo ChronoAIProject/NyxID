@@ -8097,6 +8097,12 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
     };
     for manual in [false, true] {
         let (state, adapter, server, mut bot, key) = scoped_reply_fixture().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v25.0/222/subscribed_apps"))
+            .and(header("authorization", "Bearer fixture-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+            .mount(&server)
+            .await;
         if manual {
             bot.credential_source = "user".into();
             bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
@@ -8106,12 +8112,6 @@ async fn single_consent_owner_dm_and_busy_event_inputs_are_erased_without_removi
                 .replace_one(doc! {"_id":&bot.id}, &bot)
                 .await
                 .unwrap();
-            Mock::given(method("DELETE"))
-                .and(path("/v25.0/222/subscribed_apps"))
-                .and(header("authorization", "Bearer fixture-token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
-                .mount(&server)
-                .await;
         }
         assistant::ensure_indexes(&state.db).await.unwrap();
         let source = admit_page_message(
