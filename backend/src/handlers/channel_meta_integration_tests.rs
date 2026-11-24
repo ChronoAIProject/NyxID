@@ -136,6 +136,7 @@ async fn reply(
 
 async fn full_path(platform: &str) {
     let (state, _, server, bot) = fixture(platform).await;
+    let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     configure(&state, &bot).await;
     route(&state, &bot, &format!("{}/callback", server.uri())).await;
     let mut second_bot = bot.clone();
@@ -487,6 +488,7 @@ async fn signed_held_instagram_control_events_project_without_admitting_dms() {
 #[tokio::test]
 async fn managed_shared_dispatch_preserves_lookup_hold_through_reload() {
     let (state, adapter, server, bot) = fixture("instagram").await;
+    let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     configure(&state, &bot).await;
     route(&state, &bot, &format!("{}/callback", server.uri())).await;
 
@@ -643,6 +645,7 @@ async fn managed_shared_dispatch_preserves_lookup_hold_through_reload() {
 #[tokio::test]
 async fn meta_callback_failure_is_not_replayed_and_does_not_advance_last_success() {
     let (state, a, server, bot) = fixture("instagram").await;
+    let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     route(&state, &bot, &format!("{}/callback", server.uri())).await;
     Mock::given(method("POST"))
         .and(path("/callback"))
