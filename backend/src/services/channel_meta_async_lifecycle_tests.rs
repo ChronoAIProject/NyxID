@@ -301,8 +301,10 @@ async fn meta_async_scope_read_error_and_unresolved_proof_retry_without_discardi
         .run_command(doc! {"renameCollection":&backing,"to":&original})
         .await
         .unwrap();
-    due(&f, &watch.id).await;
-    sweep(&f).await;
+    // The worker's ready path also wakes and admits the event. Queue through
+    // the same production enqueue transaction without starting dispatch: this
+    // fixture owns the first admission under the malformed chronology below.
+    assert!(watches::enqueue(db, &watch).await.unwrap());
     assert_eq!(
         db.collection::<Document>(WATCHES)
             .find_one(doc! {"_id":&watch.id})
@@ -320,6 +322,16 @@ async fn meta_async_scope_read_error_and_unresolved_proof_retry_without_discardi
         .await
         .unwrap()
         .unwrap();
+    let pending = engine::get(db, &f.bot.user_id, &watch.conversation_id)
+        .await
+        .unwrap();
+    assert!(pending.active_turn.is_none());
+    assert!(
+        pending
+            .pending_events
+            .iter()
+            .any(|event| event.id == watch.id)
+    );
     db.collection::<Document>(GRANT_SCOPES)
         .update_one(
             doc! {"_id":f.scope.get("_id").cloned()},
@@ -330,11 +342,10 @@ async fn meta_async_scope_read_error_and_unresolved_proof_retry_without_discardi
     let request:engine::TurnRequest=serde_json::from_value(serde_json::json!({"conversation_id":&watch.conversation_id,"text":"Process queued result"})).unwrap();
     let mut start = engine::TurnStart::from(&request);
     start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
-    assert!(
-        engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys)
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        engine::begin_turn(db, &f.bot.user_id, start, &f.state.encryption_keys).await,
+        Err(crate::errors::AppError::Conflict(message)) if message.contains("Meta grant evidence is incomplete")
+    ));
     let retained = db
         .collection::<Document>(WATCHES)
         .find_one(doc! {"_id":&watch.id})
