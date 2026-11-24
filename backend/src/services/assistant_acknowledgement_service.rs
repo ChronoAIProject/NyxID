@@ -2649,9 +2649,8 @@ async fn request_candidate_inner(
     // A captured Meta request cannot borrow a successor turn's input, even
     // when both turns use the same home and credential. Ordinary idle action
     // callers retain their existing behavior.
-    if origin.is_none()
-        && let Some(turn) = chat.turn_id.as_deref()
-    {
+    let captured_turn = chat.turn_id.as_deref().filter(|_| origin.is_none());
+    if let Some(turn) = captured_turn {
         let captured = super::channel_meta_service::scopes::assistant_turn_references(
             db,
             session,
@@ -2803,6 +2802,7 @@ async fn request_candidate_inner(
     ]
     .into_iter()
     .flatten()
+    .filter(|turn| Some(*turn) != captured_turn)
     {
         for proof in super::channel_meta_service::scopes::assistant_turn_references(
             db,
