@@ -513,9 +513,9 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
         401 => "gateway_not_authenticated",
         403 => "gateway_permission_required",
         400 if response.body["code"].as_str() == Some("invalid_request")
-            && response.body["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("provider")) =>
+            && response.body["detail"].as_str().is_some_and(|detail| {
+                detail.trim() == PROVIDER_SLUG || detail.contains("provider")
+            }) =>
         {
             "gateway_provider_not_registered"
         }
