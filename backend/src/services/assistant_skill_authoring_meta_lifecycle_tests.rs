@@ -105,6 +105,106 @@ async fn expired_skill_review_renews_after_real_registry_write_refusal_and_resto
     }
 }
 
+#[tokio::test]
+async fn full_access_renewal_receipt_keeps_b_source_while_a_is_active_in_both_erasure_orders() {
+    for a_first in [true, false] {
+        let f = fixture("meta_full_access_renewal_receipt").await;
+        let server = setup_ornn(&f).await;
+        let (b, b_chat) = meta_turn(&f).await;
+        let first = draft_in_chat(&f, &b_chat).await.unwrap();
+        let db = &f.state.db;
+        let proposal = stored(&f, first["proposal_id"].as_str().unwrap()).await;
+        let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+        let original = cards
+            .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&original.id},
+                doc! {"$set":{"status":"expired","expires_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        let (a, a_chat) = meta_turn(&f).await;
+        crate::services::assistant_settings_service::update(
+            db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let skill = Uuid::new_v4().to_string();
+        mount_publication(&f, &server, &proposal, &skill, "POST").await;
+        let axum::Json(result)=crate::handlers::assistant_agent_learning::approve(
+            axum::extract::State(f.state.clone()),crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((proposal.agent_id.clone(),proposal.id.clone())),
+            axum::Json(serde_json::from_value(json!({"revision":proposal.revision,"agent_skills_revision":proposal.agent_skills_revision,"renewal_of":&original.id})).unwrap()),
+        ).await.unwrap();
+        assert_eq!(result["status"], "pinned");
+        let receipt = cards
+            .find_one(doc! {"user_id":&f.owner,"tool_name":review::TOOL,"decided_by":"access_mode"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.creation_turn_id, original.creation_turn_id);
+        assert_eq!(receipt.requested_turn_id, original.requested_turn_id);
+        assert_ne!(receipt.creation_turn_id, a_chat.turn_id);
+        assert_eq!(
+            bson::to_bson(&receipt.meta_contexts).unwrap(),
+            bson::to_bson(&original.meta_contexts).unwrap()
+        );
+        let a_turn = engine::get(db, &f.owner, &a_chat.conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            a_turn.active_turn.as_ref().unwrap().turn_id,
+            a_chat.turn_id.as_deref().unwrap()
+        );
+        settle(&f, &a_turn).await;
+        let (first_bot, second_bot) = if a_first { (&a, &b) } else { (&b, &a) };
+        assert!(erase(&f, first_bot).await);
+        assert_eq!(
+            cards
+                .count_documents(doc! {"_id":&receipt.id})
+                .await
+                .unwrap(),
+            u64::from(a_first)
+        );
+        if !a_first {
+            assert!(
+                db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+                    .find_one(
+                        doc! {"conversation_id":&a_chat.conversation_id,"turn_id":&a_chat.turn_id}
+                    )
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let retained = stored(&f, &proposal.id).await;
+        assert_eq!(retained.status, "pinned");
+        assert_eq!(
+            retained.publication.as_ref().unwrap().skill_id.as_deref(),
+            Some(skill.as_str())
+        );
+        assert!(erase(&f, second_bot).await);
+        assert!(
+            cards
+                .find_one(doc! {"_id":&receipt.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.verify().await;
+        db.drop().await.unwrap();
+    }
+}
+
 async fn settle(f: &Fixture, row: &crate::models::assistant_conversation::AssistantConversation) {
     engine::finish_turn(
         &f.state.db,
