@@ -301,6 +301,45 @@ shared by callers whose approvals resolve to that organization's Workspace
 catalog policy. Its scope reaches beyond the specialist and channel, so use
 an exact workbook and range in the rule. A different spelling or range, such as
 `Questions` in place of `Questions!A:H`, needs its own reviewed exact rule.
+
+### Separate guest Sheets from owner Workspace workflows
+
+Approval rules match method, resource and verb. The organization and catalog
+IDs determine which policy applies, so every connection to the same Workspace
+catalog under the same organization shares that policy. The rules have no
+guest-only selector.
+
+With adopted Grants and `assistant:guest-operation-scopes` available to the
+acting administrator, use an explicit **empty guest operation selection** for
+the Workspace connection. A specialist grant with no guest level defaults to
+`use`, and no operation selection means all eligible operations. Grant the
+standalone `api-google-sheets` connection at `use` for guests. Check the
+channel's effective guest services and guest tool discovery. This replaces the
+guest's Workspace access with Sheets operations while preserving the owner's
+Workspace grant and policy. Guests lose the Drive, Gmail, Calendar and other
+operations they previously accessed through that Workspace connection.
+
+If guest operation authoring is unavailable, use a separate guest-facing
+specialist granted only the standalone Sheets connection. Keep Workspace on
+the owner specialist. Review the guest-facing specialist's effective Grants
+before exposing it on a channel.
+
+On the separate Sheets catalog, set the explicit default `require_approval`
+for unmatched operations. The fixture auto-allows `GET` reads and the exact
+`POST` write on `/v4/spreadsheets/event/values/Questions%21A%3AH:append`, with
+`insertDataOption=INSERT_ROWS` enforced by guest operation access. Review the
+exact event workbook ID and A1 range for the intended connection. The policy
+applies to all callers using the organization's Sheets catalog. Use a dedicated
+Google credential with access to the event workbook, and verify the credential's
+effective OAuth scopes and file ACLs. The read rule leaves the workbook access
+decision to Google. Use test-owned files when checking the event read, append
+with row readback, and denial of an unrelated workbook through the same
+credential.
+
+The synthetic fixture has its own existing Workspace policy permitting the
+owner read and a specific `PUT`. Verify the real owner's effective policy and
+required workflows independently before relying on this setup.
+
 For live verification, identify the Google account behind the connection,
 verify its effective OAuth scopes and file sharing, and confirm the applicable
 global preference and service override for the exact operation.
