@@ -1233,3 +1233,42 @@ async fn combined_meta_patch_keeps_readiness_for_its_committed_target_during_a_s
     )
     .await;
 }
+
+#[tokio::test]
+async fn meta_org_connect_lost_ack_after_guest_enable() {
+    use crate::services::nyxbot_channel_connection_service::{
+        META_ACTIVATION_ACK_LOST, RESTORE_CONNECT_FAIL_STAGE,
+    };
+    let (state, _calls, _server) = setup("org_meta_lost_ack_guest_enable").await;
+    let (_, specialist, org_id) = org_meta(&state).await;
+    provision_org_wallet(&state, &org_id).await;
+    let (router, token) = app(&state).await;
+    let mut bot = bot_doc("instagram", "Support");
+    bot.insert("user_id", &org_id);
+    let id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>("channel_bots")
+        .insert_one(bot)
+        .await
+        .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "meta_activation_ack_lost",
+        async {
+            let (status, body) = RESTORE_CONNECT_FAIL_STAGE
+                .scope(
+                    META_ACTIVATION_ACK_LOST,
+                    action(&router, &token, &id, &specialist.id, "assign"),
+                )
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        },
+        async {
+            let (status, body) =
+                action(&router, &token, &id, &specialist.id, "enable_guests").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["guests_enabled"], true);
+        },
+    )
+    .await;
+}

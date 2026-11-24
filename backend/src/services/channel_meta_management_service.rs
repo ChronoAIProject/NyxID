@@ -154,8 +154,12 @@ pub async fn customer_setup(
         });
     }
     let readiness = if row.org_specialist.is_some() {
+        if action == PrepareModel {
+            return Err(AppError::ValidationError("Organization guest model setup runs under verified guest funding. Enable the ready organization guest binding, then test from a separate customer account; setup diagnostics appear on this channel.".into()));
+        }
+        let inputs = org::management::view_inputs(&state.db, actor, &row).await?;
         if action == EnableGuests {
-            if !org::guest_grants_ready(&state.db).await? {
+            if !inputs.ready {
                 return Err(AppError::ValidationError("Organization guest grants are not ready. Enable nyxbot:org-guest-grants-v1 after all serving replicas are ready.".into()));
             }
             let already_open = row.private_chats.as_deref() == Some("everyone")
@@ -185,10 +189,7 @@ pub async fn customer_setup(
                 .await?;
             }
         }
-        if action == PrepareModel {
-            return Err(AppError::ValidationError("Organization guest model setup runs under verified guest funding. Enable the ready organization guest binding, then test from a separate customer account; setup diagnostics appear on this channel.".into()));
-        }
-        org::management::view(&state.db, actor, &row).await?
+        inputs.render(&row, row.org_specialist.as_ref().ok_or_else(org::denied)?)
     } else {
         if action == PrepareModel {
             setup::prepare_guest_model(state, actor, Some(&specialist.id), None).await?;

@@ -818,6 +818,10 @@ pub(crate) async fn connect(
                     if guarded_default
                         && (current.agent_id != row.agent_id
                             || current.route_id.as_deref() != Some(route_id.as_str())
+                            || current.org_specialist != row.org_specialist
+                            || (row.org_specialist.is_some()
+                                && (current.private_chats != row.private_chats
+                                    || current.private_chat_posts != row.private_chat_posts))
                             || current
                                 .execution_policy_revision
                                 .checked_sub(row.execution_policy_revision)

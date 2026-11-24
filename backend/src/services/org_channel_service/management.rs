@@ -105,7 +105,22 @@ pub(crate) async fn load(
     Ok(row)
 }
 
-pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> AppResult<Value> {
+pub(crate) struct GuestViewInputs {
+    pub(crate) ready: bool,
+    admin: bool,
+    member_verified: bool,
+    agent: Option<AssistantAgent>,
+    services: Vec<GuestServiceSummary>,
+    reason: Option<&'static str>,
+    spent: Credits,
+    reserved: Credits,
+}
+
+pub(crate) async fn view_inputs(
+    db: &Database,
+    actor: &str,
+    row: &NyxbotChannel,
+) -> AppResult<GuestViewInputs> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
     let access = crate::services::org_agent_service::access(db, actor, &b.org_id).await?;
     let member_verified = crate::services::org_agent_service::can_use(&access)
@@ -129,28 +144,61 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
         None => Vec::new(),
     };
     let ready = super::guest_grants_ready(db).await?;
-    let follows = ready && b.guests.follows_agent_grants;
-    let available: Vec<Value> = services
-        .iter()
-        .map(|s| json!({"id":s.id,"label":s.label}))
-        .collect();
-    let mut effective = Vec::new();
-    let mut binding_limits_guest_services = false;
-    for service in services.iter().filter(|service| service.access != "none") {
-        if agent
-            .as_ref()
-            .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &service.id))
-        {
-            effective.push(service);
-        } else if b.guests.enabled && ready && !follows {
-            binding_limits_guest_services = true;
-        }
-    }
     let reason = crate::services::channel_bot_health::org_guest_billing(db, &b.org_id).await?;
-    let health = reason
-        .filter(|_| b.guests.enabled)
-        .map(crate::services::channel_bot_health::guest_billing_advice);
-    let mut view = json!({"channel_id":row.id,"org_id":b.org_id,"agent_id":row.agent_id,
+    let (spent, reserved) = super::budget::today(
+        db,
+        b.guests.continuity_channel_id.as_deref().unwrap_or(&row.id),
+    )
+    .await?;
+    Ok(GuestViewInputs {
+        ready,
+        admin,
+        member_verified,
+        agent,
+        services,
+        reason,
+        spent,
+        reserved,
+    })
+}
+
+impl GuestViewInputs {
+    pub(crate) fn render(
+        self,
+        row: &NyxbotChannel,
+        b: &crate::models::org_channel::Binding,
+    ) -> Value {
+        let Self {
+            ready,
+            admin,
+            member_verified,
+            agent,
+            services,
+            reason,
+            spent,
+            reserved,
+        } = self;
+        let follows = ready && b.guests.follows_agent_grants;
+        let available: Vec<Value> = services
+            .iter()
+            .map(|s| json!({"id":s.id,"label":s.label}))
+            .collect();
+        let mut effective = Vec::new();
+        let mut binding_limits_guest_services = false;
+        for service in services.iter().filter(|service| service.access != "none") {
+            if agent
+                .as_ref()
+                .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &service.id))
+            {
+                effective.push(service);
+            } else if b.guests.enabled && ready && !follows {
+                binding_limits_guest_services = true;
+            }
+        }
+        let health = reason
+            .filter(|_| b.guests.enabled)
+            .map(crate::services::channel_bot_health::guest_billing_advice);
+        let mut view = json!({"channel_id":row.id,"org_id":b.org_id,"agent_id":row.agent_id,
         "grants_ready":ready,"guest_policy_mode":if follows {"grants"} else {"legacy"},
         "binding_limits_guest_services":binding_limits_guest_services,
         "legacy_fields_ignored":ready,"effective_guest_services":effective,"can_manage":admin,"member_verified":member_verified,"guest_enabled":b.guests.enabled,
@@ -159,16 +207,17 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
         "private_chats":row.private_chats.as_deref().unwrap_or("owner"),"health":health,
         "description":ORG_GUEST_EXPLANATION,
         "guest_payer":"organization","available_services":available,"readiness_reason":reason});
-    let (spent, reserved) = super::budget::today(
-        db,
-        b.guests.continuity_channel_id.as_deref().unwrap_or(&row.id),
-    )
-    .await?;
-    view["daily_credits"] = json!(b.guests.daily_credits);
-    view["default_daily_credits"] = json!(default_daily_credits().to_string());
-    view["spent_today_credits"] = json!(spent);
-    view["reserved_today_credits"] = json!(reserved);
-    Ok(view)
+        view["daily_credits"] = json!(b.guests.daily_credits);
+        view["default_daily_credits"] = json!(default_daily_credits().to_string());
+        view["spent_today_credits"] = json!(spent);
+        view["reserved_today_credits"] = json!(reserved);
+        view
+    }
+}
+
+pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> AppResult<Value> {
+    let inputs = view_inputs(db, actor, row).await?;
+    Ok(inputs.render(row, row.org_specialist.as_ref().ok_or_else(super::denied)?))
 }
 
 pub(crate) async fn update(

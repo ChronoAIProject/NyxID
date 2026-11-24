@@ -428,6 +428,24 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
             .await
             .is_err()
         );
+        // A malformed ledger diagnostic must be reported before enabling exposure.
+        let budget_id = crate::services::org_channel_service::budget::day_key(
+            fresh_channel,
+            chrono::Utc::now(),
+        );
+        let budgets = state
+            .db
+            .collection::<bson::Document>(crate::models::org_channel::BUDGETS);
+        budgets
+            .insert_one(doc! {"_id":&budget_id, "spent_credits":{"invalid":true}})
+            .await
+            .unwrap();
+        let (status, body) = action(&router, &token, &fresh_id, &agent.id, "enable_guests").await;
+        assert!(!status.is_success(), "{body}");
+        let after_error = load_channel(&state, OWNER, fresh_channel).await.unwrap();
+        assert_eq!(after_error.org_specialist, closed.org_specialist);
+        assert_eq!(after_error.private_chats, closed.private_chats);
+        budgets.delete_one(doc! {"_id":&budget_id}).await.unwrap();
         for bot_id in [&row.channel_bot_id, &fresh_id] {
             let (status, enabled) =
                 action(&router, &token, bot_id, &agent.id, "enable_guests").await;
