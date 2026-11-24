@@ -371,6 +371,7 @@ pub(crate) async fn persist_verified_bot(
                 authorized_at: Some(Utc::now()),
                 events_since: None,
                 generation: 1,
+                grant_start_generation: 1,
                 token_fingerprint: super::channel_adapters::meta::token_fingerprint(
                     effective_token,
                 ),
@@ -2501,6 +2502,8 @@ pub(crate) async fn delete_bot_observed_with_state(
             }
             Err(error) => return Err(error),
         };
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_manual_before_purge_authority").await;
         if current.credential_source != bot.credential_source
             || current
                 .meta_binding
@@ -2954,7 +2957,14 @@ pub(crate) async fn erase_personal_bot(
             }
             Err(error) => return Err(error),
         };
-        if manual_purge
+        let same_grant_generation = stopped
+            .meta_binding
+            .as_ref()
+            .zip(bot.meta_binding.as_ref())
+            .is_some_and(|(live, captured)| {
+                live.grant_id == captured.grant_id && live.generation == captured.generation
+            });
+        if (manual_purge && same_grant_generation)
             || super::channel_meta_service::grants::manual_purge_authorized(db, &stopped).await?
         {
             let grant = &stopped

@@ -159,6 +159,15 @@ async fn begin_versioned(
                         return Err(AppError::Conflict("Inbox ownership changed".into()));
                     }
                     super::channel_meta_service::scopes::fence_current(db,tx,bot).await?;
+                    if db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME).find_one(doc! {
+                        "_id":&record.source_id,"channel_bot_id":&bot.id,"user_id":&record.user_id,"platform":&bot.platform,"direction":"inbound"
+                    }).session(&mut *tx).await?.is_none() {
+                        return Err(AppError::Conflict("Saved reply source attribution is unavailable".into()));
+                    }
+                    let original=super::channel_meta_service::scopes::source_in_session(db,tx,&record.source_id).await?;
+                    if original.as_ref()!=record.meta_grant.as_ref() {
+                        return Err(AppError::Conflict("Saved reply belongs to another inbox grant".into()));
+                    }
                     db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
                         .update_one(
                             doc! {"logical_key": &record.logical_key},
@@ -174,7 +183,18 @@ async fn begin_versioned(
                         .await?
                         .ok_or_else(unconfirmed)?;
                     validate_plan(&stored, record)?;
-                    // An existing legacy plan is adopted under the same fence.
+                    // A historical plan may join this grant only through its
+                    // exact admitted source, never through the current bot alone.
+                    if stored.meta_grant.is_none() {
+                        let proven=super::channel_meta_service::scopes::source_in_session(db,tx,&stored.source_id).await?;
+                        if stored.id != record.id && proven.as_ref()!=record.meta_grant.as_ref() {
+                            return Err(AppError::Conflict("Multipart grant attribution needs repair".into()));
+                        }
+                        db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
+                            doc! {"_id":&stored.id,"meta_grant":null},
+                            doc! {"$set":{"meta_grant":bson::to_bson(&record.meta_grant).map_err(|_|unconfirmed())?}}
+                        ).session(&mut *tx).await?;
+                    }
                     if stored.channel_bot_id.is_none() {
                         db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
                             .update_one(
@@ -186,6 +206,7 @@ async fn begin_versioned(
                     }
                     let mut stored = stored;
                     stored.channel_bot_id = Some(bot.id.clone());
+                    stored.meta_grant = record.meta_grant.clone();
                     Ok(stored)
                 })
             },
@@ -229,7 +250,11 @@ async fn begin_versioned(
 }
 
 fn validate_plan(stored: &ChannelTextDelivery, expected: &ChannelTextDelivery) -> AppResult<()> {
-    if stored.fingerprint != expected.fingerprint
+    if stored
+        .meta_grant
+        .as_ref()
+        .is_some_and(|grant| expected.meta_grant.as_ref() != Some(grant))
+        || stored.fingerprint != expected.fingerprint
         || stored.parts.len() != expected.parts.len()
         || stored.user_id != expected.user_id
         || stored.source_id != expected.source_id
@@ -315,14 +340,16 @@ pub async fn claim(db: &Database, row: &ChannelTextDelivery, index: usize) -> Ap
     for previous in 0..index {
         filter.insert(format!("parts.{previous}.state"), "sent");
     }
-    let changed = db
-        .collection::<ChannelTextDelivery>(COLLECTION_NAME)
-        .update_one(
-            filter,
-            doc! {"$set": {format!("parts.{index}.state"): "sending",
-            format!("parts.{index}.attempt_id"): &attempt}},
-        )
-        .await?;
+    let changed = super::channel_meta_service::scopes::update_record(
+        db,
+        row.meta_grant.as_ref(),
+        true,
+        COLLECTION_NAME,
+        filter,
+        doc! {"$set": {format!("parts.{index}.state"): "sending",
+        format!("parts.{index}.attempt_id"): &attempt}},
+    )
+    .await?;
     if changed.matched_count == 1 {
         #[cfg(test)]
         super::durable_wake_tests::after("text_part_prepared").await;
@@ -372,8 +399,8 @@ pub async fn finish(
             {format!("parts.{index}.state"):"pending",format!("parts.{index}.preparation.version"):1}
         ]));
     }
-    let changed = db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
-        filter,
+    let changed = super::channel_meta_service::scopes::update_record(
+        db,row.meta_grant.as_ref(),false,COLLECTION_NAME,filter,
         doc! {"$set": {format!("parts.{index}.state"): bson::to_bson(&state).map_err(|_| unconfirmed())?,
             format!("parts.{index}.platform_message_id"): platform_id,
             format!("parts.{index}.outbound_message_id"): outbound_id},

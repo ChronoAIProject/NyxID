@@ -1317,7 +1317,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "channel_meta_grant_scopes retains one bot/grant UUID pair, keyed subject identity, platform/application ID, binding fingerprint, generation range and authorization/cleanup progress per installation grant. It contains no raw provider subject, credentials, participant IDs, copied owner list or source records. A sealed grant remains independently discoverable for signed deletion after reconnect or account retirement; exact completion releases its app-drain obligation and retains only replay proof.",
+        why: "channel_meta_grant_scopes retains one bot/grant UUID pair, keyed subject identity, platform/application ID, binding fingerprint, generation range and authorization/cleanup progress per installation grant. It contains no raw provider subject, credentials, participant IDs, copied owner list or source records. A sealed grant remains independently discoverable for signed deletion after reconnect or account retirement; exact completion releases its app-drain obligation, removes the subject/binding fingerprints, app ID, generation bounds and attribution timestamps, and retains only opaque bot/grant identity and typed replay proof. Subjectless manual account retirement removes its unused scope.",
     },
     Entry {
         collection: "channel_meta_grant_authority",

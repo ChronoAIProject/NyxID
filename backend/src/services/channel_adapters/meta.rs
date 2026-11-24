@@ -162,6 +162,7 @@ impl MetaAdapter {
                     if live_binding.token_fingerprint != *token_fingerprint {
                         return Err(unreachable("credential_authority_changed"));
                     }
+                    crate::services::channel_meta_service::scopes::fence_current(db,tx,&live).await?;
                     let current = db
                         .collection::<bson::Document>(CONTROLS)
                         .find_one(doc! {"identity_key": key})
@@ -169,6 +170,7 @@ impl MetaAdapter {
                         .await?;
                     if let Some(row) = &current {
                         if matches!(bot.platform.as_str(), "instagram")
+                            && control_for_grant(row, live_binding)
                             && row.get_bool("controlled").ok() == Some(false)
                         {
                             // Instagram has no participant ownership read. A
@@ -211,6 +213,7 @@ impl MetaAdapter {
                             doc! {
                                 "$set": {
                                     "bot_id": &bot.id,
+                                    "meta_grant_id": &live_binding.grant_id,
                                     "controlled": *owns,
                                     "generation": *generation,
                                     "revision": expected_revision.unwrap_or(0) + 1,
@@ -638,6 +641,27 @@ pub(crate) fn authority(
     })
 }
 
+/// A reconnect closes the old consent range. Operational generation changes
+/// within one grant never clear an observed Instagram control loss.
+pub(crate) fn control_scope(
+    binding: &crate::models::channel_bot::MetaCredentialBinding,
+) -> bson::Document {
+    doc! {"$or":[{"meta_grant_id":&binding.grant_id},
+    {"meta_grant_id":{"$exists":false},"generation":{"$gte":binding.grant_start_generation,"$lte":binding.generation}}]}
+}
+fn control_for_grant(
+    row: &bson::Document,
+    binding: &crate::models::channel_bot::MetaCredentialBinding,
+) -> bool {
+    match row.get("meta_grant_id") {
+        Some(bson::Bson::String(grant)) => grant == &binding.grant_id,
+        None => row.get_i64("generation").is_ok_and(|generation| {
+            generation >= binding.grant_start_generation && generation <= binding.generation
+        }),
+        _ => false,
+    }
+}
+
 pub(crate) async fn require_reply(
     db: &mongodb::Database,
     bot: &ChannelBot,
@@ -718,7 +742,7 @@ pub(crate) async fn require_reply(
     if db
         .collection::<bson::Document>(CONTROLS)
         .find_one(doc! {"identity_key":format!("{}:{chat}", bot.id),
-        "generation": current.generation, "controlled":false})
+        "$and":[control_scope(current)], "controlled":false})
         .await?
         .is_some()
     {
@@ -795,20 +819,16 @@ pub(crate) async fn require_ingress(
     {
         return Err(unreachable("inbox_suspended"));
     }
-    let generation = live
+    let current = live
         .meta_binding
         .as_ref()
-        .map(|binding| binding.generation)
         .ok_or_else(|| unreachable("binding_unverified"))?;
-    if db
-        .collection::<bson::Document>(CONTROLS)
-        .find_one(doc! {"$or":[
-            {"identity_key":format!("{}:{chat}", bot.id), "generation":generation, "controlled":false},
-            {"identity_key":format!("platform:{}", bot.platform), "suspended":true},
-        ]})
-        .await?
-        .is_some()
-    {
+    if db.collection::<bson::Document>(CONTROLS)
+        .find_one(doc! {"identity_key":format!("{}:{chat}",bot.id),"controlled":false,"$and":[control_scope(current)]})
+        .await?.is_some()
+        || db.collection::<bson::Document>(CONTROLS)
+            .find_one(doc! {"identity_key":format!("platform:{}",bot.platform),"suspended":true})
+            .await?.is_some() {
         return Err(unreachable("inbox_control_lost"));
     }
     Ok(())
@@ -906,6 +926,7 @@ async fn apply_webhook_state_inner(
     {
         return Err(unreachable("binding_changed"));
     }
+    crate::services::channel_meta_service::scopes::fence_current(db, tx, &live).await?;
     for entry in value["entry"].as_array().ok_or_else(signature_error)? {
         if entry["id"].as_str() != Some(bot.platform_bot_id.as_str()) {
             continue;
@@ -966,7 +987,9 @@ async fn apply_webhook_state_inner(
                 .find_one(doc! {"identity_key": &key})
                 .session(&mut *tx)
                 .await?;
-            if let Some(row) = &current {
+            if let Some(row) = &current
+                && control_for_grant(row, binding)
+            {
                 let event_at = provider_event_at;
                 let previous = row
                     .get_datetime("provider_event_at")
@@ -1013,6 +1036,7 @@ async fn apply_webhook_state_inner(
                 .update_one(
                     filter,
                     doc! {"$set":{"bot_id":&bot.id,
+                    "meta_grant_id":&binding.grant_id,
                     "controlled":controlled,
                     "generation":binding.generation,
                     "revision":revision+1_i64,
