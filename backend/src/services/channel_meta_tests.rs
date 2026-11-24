@@ -1654,10 +1654,16 @@ async fn erase_personal_owner(state: &crate::AppState, owner: &str) {
         state
             .db
             .collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
-            .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+            .update_many(
+                doc! {"user_id":owner},
+                vec![doc! {"$set":{"retry_at":"$$NOW"}}],
+            )
             .await
             .unwrap();
-        personal::process_one(state).await.unwrap();
+        assert!(
+            personal::process_one(state).await.unwrap(),
+            "the server-timed account job must be claimable"
+        );
     }
     assert!(
         state
