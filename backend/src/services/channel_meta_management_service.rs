@@ -128,6 +128,7 @@ pub async fn customer_setup(
                 use sha2::Digest;
                 hex::encode(sha2::Sha256::digest(code.as_bytes()))
             },
+            &super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &row.id),
         )
         .await?;
         issued_link = Some(setup::LinkInstructions {

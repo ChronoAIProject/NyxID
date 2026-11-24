@@ -110,6 +110,44 @@ pub(crate) async fn meta_default_matches(
     meta_route_matches(db, row, callback, tx).await
 }
 
+/// Revalidate a live direct Meta assignment under the same bot/key write fences
+/// as route mutations. Relinking and owner challenges must not bless drift.
+pub(crate) async fn fence_meta_default(
+    db: &Database,
+    row: &NyxbotChannel,
+    callback: Option<&str>,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if row.transport != "direct" || !super::channel_adapters::meta::is_meta(&row.platform) {
+        return Ok(());
+    }
+    let repair = || {
+        AppError::Conflict("The inbox route changed. Assign the specialist again to repair its default callback before continuing".into())
+    };
+    let callback = callback.ok_or_else(repair)?;
+    let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
+    super::platform_bot_authority::fence_personal_routes(db, &row.channel_bot_id, owner, tx)
+        .await?;
+    super::channel_routing_service::fence_route_key(db, &row.route_api_key_id, tx)
+        .await
+        .map_err(|error| match error {
+            AppError::Conflict(_) => repair(),
+            error => error,
+        })?;
+    if let Some(key) = &row.agent_api_key_id {
+        super::channel_routing_service::fence_route_key(db, key, tx)
+            .await
+            .map_err(|error| match error {
+                AppError::Conflict(_) => repair(),
+                error => error,
+            })?;
+    }
+    if !meta_default_matches(db, row, callback, Some(tx)).await? {
+        return Err(repair());
+    }
+    Ok(())
+}
+
 /// The same committed route/key proof is used by reuse, repair and activation.
 /// Pending activation supplies its candidate route ID without pretending that
 /// the channel has already committed its active lifecycle state.

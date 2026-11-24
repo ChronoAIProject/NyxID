@@ -1207,6 +1207,139 @@ fn provider_request(subject: serde_json::Value, issued: i64) -> String {
 }
 
 #[tokio::test]
+async fn signed_deletion_finishes_after_account_erasure_purges_the_inbox_first_and_replays() {
+    use crate::services::personal_erasure_service as personal;
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let s = service(&state, &server);
+    let signed = provider_request(json!(900), Utc::now().timestamp());
+    let accepted = accept_provider_request(&s, "instagram", &signed, true)
+        .await
+        .unwrap();
+    let code = accepted["confirmation_code"].as_str().unwrap();
+    // Provider revocation independently makes remote unsubscription unnecessary.
+    // The deletion target is still pending: its worker has never run.
+    accept_provider_request(&s, "instagram", &signed, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "pending"
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id":"account-first-source", "user_id":&bot.user_id, "channel_bot_id":&bot.id},
+        )
+        .await
+        .unwrap();
+    let journal = super::super::channel_text_delivery::begin(
+        &state.db,
+        "legacy-result",
+        &bot.user_id,
+        "account-first-source",
+        "retained-provider-message",
+        1,
+    )
+    .await
+    .unwrap();
+    let mut accepted_personal = false;
+    for _ in 0..64 {
+        match personal::accept(&state.db, &bot.user_id, &bot.user_id, None).await {
+            Ok(_) => {
+                accepted_personal = true;
+                break;
+            }
+            Err(AppError::ErasurePreparing) => {
+                personal::prepare_one_for_test(&state.db, &state.encryption_keys)
+                    .await
+                    .unwrap();
+            }
+            Err(error) => panic!("account acceptance failed: {error:?}"),
+        }
+    }
+    assert!(accepted_personal);
+    // Fully run ordinary personal erasure before processing any provider job.
+    for _ in 0..640 {
+        if state
+            .db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&bot.user_id})
+            .await
+            .unwrap()
+            .is_none()
+        {
+            break;
+        }
+        state
+            .db
+            .collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+            .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+            .await
+            .unwrap();
+        personal::process_one(&state).await.unwrap();
+    }
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&bot.user_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"_id":&bot.id,"local_data_erased_at":{"$type":"date"}})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .find_one(doc! {"_id":&journal.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "pending"
+    );
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "completed"
+    );
+    // Replaying the durable target after bot and account removal uses only the
+    // scoped completion proof, with no retained provider identity required.
+    state.db.collection::<bson::Document>(provider::REQUESTS).update_one(doc! {"_id":code},
+        doc! {"$set":{"status":"pending","next_attempt_at":bson::DateTime::now(),
+            "targets":[{"bot_id":&bot.id,"grant_id":&bot.meta_binding.as_ref().unwrap().grant_id}]}})
+        .await.unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "completed"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn erasure_then_deauthorization_preserves_the_erasure_and_scrubs_all_provider_identity() {
     let (state, _, server, bot) = fixture("instagram").await;
     configure(&state, &bot).await;

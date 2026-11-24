@@ -180,7 +180,13 @@ pub(crate) async fn restore_existing(
     owner_id: &str,
     default_agent: bool,
     link_hash: &str,
+    expected_callback: Option<&str>,
 ) -> AppResult<()> {
+    let expected_callback = expected_callback.map(str::to_owned);
+    #[cfg(test)]
+    if expected_callback.is_some() {
+        super::durable_wake_tests::after("meta_owner_link_before_commit").await;
+    }
     let db = db.clone();
     let id = id.to_owned();
     let owner_id = owner_id.to_owned();
@@ -192,6 +198,9 @@ pub(crate) async fn restore_existing(
                 .ok_or_else(conflict)?;
             super::platform_bot_authority::fence_personal_routes(&db,&row.channel_bot_id,owner(&row),session).await?;
             if row.org_specialist.is_some() {super::org_channel_service::fence_management(&db,session,&row,&row.user_id).await?;}
+            super::nyxbot_channel_query_service::fence_meta_default(
+                &db, &row, expected_callback.as_deref(), session,
+            ).await?;
             if row.continuity_from_channel_id.is_none() {restore(&db,&row,None,default_agent,session).await?;}
             db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"active"},doc! {"$set":{"link_code_hash":&link_hash,
                 "link_code_expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),"gateway_groups_retry_at":if row.transport=="gateway" {bson::Bson::DateTime(bson::DateTime::now())} else {bson::Bson::Null}}}).session(&mut *session).await?;
@@ -206,15 +215,25 @@ pub(crate) async fn rotate_owner_link(
     db: &Database,
     row: &NyxbotChannel,
     hash: &str,
+    expected_callback: &str,
 ) -> AppResult<chrono::DateTime<Utc>> {
     if row.org_specialist.is_some() {
         return Err(conflict());
     }
     let expires = Utc::now() + chrono::Duration::hours(LINK_CODE_TTL_HOURS);
-    let args = (db.clone(), row.clone(), hash.to_owned(), expires);
-    super::transaction_service::run_db_only(db, &args, |tx, (db, row, hash, expires)| {
+    #[cfg(test)]
+    super::durable_wake_tests::after("meta_owner_link_before_commit").await;
+    let args = (
+        db.clone(),
+        row.clone(),
+        hash.to_owned(),
+        expires,
+        expected_callback.to_owned(),
+    );
+    super::transaction_service::run_db_only(db, &args, |tx, (db, row, hash, expires, callback)| {
         Box::pin(async move {
             super::platform_bot_authority::fence_personal_routes(db, &row.channel_bot_id, owner(row), tx).await?;
+            super::nyxbot_channel_query_service::fence_meta_default(db, row, Some(callback), tx).await?;
             let changed = db.collection::<NyxbotChannel>(CHANNELS).update_one(
                 doc! {"_id": &row.id, "user_id": &row.user_id, "status": "active", "agent_id": &row.agent_id, "org_specialist": null},
                 doc! {"$set": {"link_code_hash": hash, "link_code_expires_at": bson::DateTime::from_chrono(*expires)}},

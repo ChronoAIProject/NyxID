@@ -525,6 +525,7 @@ async fn issue_owner_link(state: &AppState, row: &NyxbotChannel) -> LinkInstruct
         &row.user_id,
         false,
         &sha256_hex(code.as_bytes()),
+        None,
     )
     .await
     .unwrap();

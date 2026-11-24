@@ -299,6 +299,11 @@ for historical or recovered metadata. This also erases precisely attributable
 legacy rows whose stored timestamps precede the current bot record. Canonical
 older plans also try the indexed exact saved handoff before a date comparison
 can exclude genuinely unproven pre-bot history. Erasing one inbox preserves sibling inbox plans.
+Personal account erasure uses this same inbox purge after confirmed remote
+cleanup, while exact attribution is still available. It records the completion
+proof before removing the bot, so an earlier accepted signed deletion can finish
+and replay after the account is gone. Scoped organization guest-default migration
+records are removed before that proof; sibling inbox records are retained.
 A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire
@@ -334,7 +339,9 @@ do not guess an association, delete all same-owner receipts or use a routing
 checkbox as proof. An ownerless scoped source is not sufficient by itself;
 independent owner-bearing reply receipts or the verified saved handoff can
 resolve it without deleting that source. Contradictory parent evidence, including ownerless receipts naming a sibling,
-keeps the obligation pending in either owner/source arrangement. A saved
+keeps the obligation pending in either owner/source arrangement. An exact saved
+handoff with inconsistent or incomplete parent ownership also remains pending,
+including when its timestamp predates the bot. A saved
 handoff with a retained channel preserves that channel's concrete bot identity;
 verified different-platform native handoffs can still preserve unrelated org
 receipts owned by their linking person. Restore metadata only, keeping credentials and message text
@@ -363,6 +370,11 @@ other defaults under the bot fence; Check refuses ambiguous historical defaults.
 The ordinary route API still supports explicit default replacement, and explicit
 per-conversation overrides retain their behavior. Route creation preserves
 storage, credential and routing error categories after failed-setup cleanup.
+Moving a specialist and issuing or rotating an owner challenge recheck the live
+Meta default and dedicated callback under the same write fences. Route drift
+returns a repair conflict before changing the assignment or challenge. Repairing
+the same organization specialist retains its deliberately saved guest policy;
+preview describes that retained policy.
 Marked credentials are
 authenticated under their old owner and rebound to the destination in the same
 fenced ownership transfer, following the existing staged/strict record writer

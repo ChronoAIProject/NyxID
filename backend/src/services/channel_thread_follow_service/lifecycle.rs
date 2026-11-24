@@ -257,7 +257,9 @@ pub async fn relink(
     manager: &str,
     channel: &str,
     agent: &str,
+    expected_callback: Option<&str>,
 ) -> AppResult<()> {
+    let expected_callback = expected_callback.map(str::to_owned);
     let manager = manager.to_owned();
     let db = db.clone();
     let owner = owner.to_owned();
@@ -272,6 +274,9 @@ pub async fn relink(
 
         let work:AppResult<()>=Box::pin(async {
             let current=fence(db,channel,owner,session).await?;
+            super::super::nyxbot_channel_query_service::fence_meta_default(
+                db, &current, expected_callback.as_deref(), session,
+            ).await?;
             if let Some(mut binding)=current.org_specialist.clone() {
                 super::super::org_channel_service::fence_management(db,session,&current,&manager).await?;
                 super::super::org_channel_service::live_doc(db,session,"assistant_agents",doc!{"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},true).await?;

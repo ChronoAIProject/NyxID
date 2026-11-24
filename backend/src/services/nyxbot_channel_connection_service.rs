@@ -374,6 +374,10 @@ pub(crate) async fn connect(
                     "Channel repair already completed; check the current assignment".into(),
                 ));
             }
+            #[cfg(test)]
+            if guarded_default {
+                super::durable_wake_tests::after("meta_reuse_before_link").await;
+            }
             link(state, owner, &existing.id, agent).await?;
             let code = new_link_code();
             crate::services::nyxbot_channel_continuity_service::restore_existing(
@@ -382,6 +386,14 @@ pub(crate) async fn connect(
                 owner,
                 agent.is_nyxbot(),
                 &sha256_hex(code.as_bytes()),
+                guarded_default
+                    .then(|| {
+                        super::nyxbot_channel_query_service::direct_callback(
+                            &state.config.base_url,
+                            &existing.id,
+                        )
+                    })
+                    .as_deref(),
             )
             .await?;
             let existing = load_channel(state, owner, &existing.id).await?;

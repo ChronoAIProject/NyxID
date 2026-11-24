@@ -120,12 +120,20 @@ pub(crate) async fn link(
     {
         return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": false}));
     }
+    let callback = (row.transport == "direct"
+        && super::channel_adapters::meta::is_meta(&row.platform))
+    .then(|| super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &row.id));
+    #[cfg(test)]
+    if callback.is_some() {
+        super::durable_wake_tests::after("meta_relink_before_commit").await;
+    }
     crate::services::channel_thread_follow_service::relink(
         &state.db,
         &row.user_id,
         owner,
         &row.id,
         &agent.id,
+        callback.as_deref(),
     )
     .await?;
     let open_group = state

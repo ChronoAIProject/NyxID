@@ -443,7 +443,7 @@ async fn ordinary_and_assistant_meta_connect_preserve_competing_routes_and_assig
 async fn meta_org_preview_uses_the_same_live_callback_proof_for_both_lookup_modes() {
     let (state, _calls, _server) = setup("meta_org_preview_callback").await;
     let (mut row, _, agent, org) = org_channel_tests::org_channel(&state, false).await;
-    app(&state).await;
+    let _ = app(&state).await;
     row.platform = "instagram".into();
     row.transport = "direct".into();
     row.org_specialist
@@ -535,11 +535,188 @@ async fn meta_org_preview_uses_the_same_live_callback_proof_for_both_lookup_mode
         )
         .await
         .unwrap();
-        assert_eq!(preview.guest_policy_mode, "legacy");
+        assert_eq!(preview.guest_policy_mode, "grants");
     }
     let retained = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert_eq!(retained.status, "active");
     assert_eq!(retained.link_code_hash, row.link_code_hash);
+    let (second, _) = crate::services::assistant_team_service::create_specialist_for(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        &org,
+        crate::services::assistant_team_service::CreateRequest {
+            name: "second-org-specialist".into(),
+            description: "Organization support".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            machines: None,
+            logins: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let error = link_channel(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Path(row.id.clone()),
+        Json(LinkRequest {
+            agent_id: Some(second.id),
+            private_chats: None,
+            private_chat_posts: None,
+            apply_to_existing: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(ref message) if message.contains("repair")));
+    let retained = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(retained.agent_id, row.agent_id);
+    assert_eq!(retained.link_code_hash, row.link_code_hash);
+    assert!(
+        retained
+            .org_specialist
+            .as_ref()
+            .unwrap()
+            .guests
+            .follows_agent_grants
+    );
+    // Ordinary Connect repairs the same specialist; its deliberately saved
+    // grants policy survives both preview and actual restoration.
+    let Json(connected) = connect_channel(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Json(ConnectRequest {
+            bot_id: row.channel_bot_id.clone(),
+            agent_id: Some(agent.id.clone()),
+        }),
+    )
+    .await
+    .unwrap();
+    let repaired = load_channel(
+        &state,
+        OWNER,
+        connected["channel_agent"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(repaired.id, row.id);
+    assert_eq!(repaired.agent_id.as_deref(), Some(agent.id.as_str()));
+    assert!(
+        repaired
+            .org_specialist
+            .as_ref()
+            .unwrap()
+            .guests
+            .follows_agent_grants
+    );
+    assert!(
+        crate::services::nyxbot_channel_query_service::reusable_meta(
+            &state.db,
+            OWNER,
+            &org,
+            &repaired,
+            &state.config.base_url
+        )
+        .await
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn meta_reused_connect_and_owner_link_refuse_callback_drift_before_committing() {
+    for entry in ["patch", "human", "assistant", "owner-code", "owner-action"] {
+        let (state, _calls, _server) = setup("meta_reuse_route_race").await;
+        let (router, token, agent, row) = assigned(&state, "instagram").await;
+        let second = specialist_named(&state, "second-personal-specialist").await;
+        let site = match entry {
+            "patch" => "meta_relink_before_commit",
+            "owner-code" | "owner-action" => "meta_owner_link_before_commit",
+            _ => "meta_reuse_before_link",
+        };
+        crate::services::durable_wake_tests::resume_after(
+            site,
+            async {
+                let error = match entry {
+                    "patch" => link_channel(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(OWNER),
+                        Path(row.id.clone()),
+                        Json(LinkRequest {
+                            agent_id: Some(second.id.clone()),
+                            private_chats: None,
+                            private_chat_posts: None,
+                            apply_to_existing: false,
+                        }),
+                    )
+                    .await
+                    .unwrap_err(),
+                    "assistant" => {
+                        connect_tool(&state, OWNER, "source-chat", &row.channel_bot_id, &second)
+                            .await
+                            .unwrap_err()
+                    }
+                    "owner-action" => {
+                        let (status, body) = action(
+                            &router,
+                            &token,
+                            &row.channel_bot_id,
+                            &agent.id,
+                            "owner_link",
+                        )
+                        .await;
+                        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                        return;
+                    }
+                    _ => connect_channel(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(OWNER),
+                        Json(ConnectRequest {
+                            bot_id: row.channel_bot_id.clone(),
+                            agent_id: Some(if entry == "owner-code" {
+                                agent.id.clone()
+                            } else {
+                                second.id.clone()
+                            }),
+                        }),
+                    )
+                    .await
+                    .unwrap_err(),
+                };
+                assert!(
+                    matches!(error, AppError::Conflict(ref message) if message.contains("repair")),
+                    "{entry}: {error:?}"
+                );
+            },
+            async {
+                callback(
+                    &state,
+                    &row.route_api_key_id,
+                    "https://callbacks.example.test/drifted",
+                )
+                .await;
+            },
+        )
+        .await;
+        let retained = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(retained.agent_id, row.agent_id, "{entry}");
+        assert_eq!(retained.link_code_hash, row.link_code_hash, "{entry}");
+        assert_eq!(
+            retained.execution_policy_revision, row.execution_policy_revision,
+            "{entry}"
+        );
+        assert!(
+            key_service::get_api_key(&state.db, OWNER, &row.route_api_key_id)
+                .await
+                .is_ok()
+        );
+    }
 }
 
 #[tokio::test]
@@ -826,7 +1003,7 @@ async fn meta_route_creation_preserves_storage_and_credential_error_categories()
             .insert_one(bot)
             .await
             .unwrap();
-        app(&state).await;
+        let _ = app(&state).await;
         crate::services::durable_wake_tests::resume_after(
             "meta_default_before_insert",
             async {

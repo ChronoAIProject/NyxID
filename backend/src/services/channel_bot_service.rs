@@ -2815,14 +2815,16 @@ pub(crate) async fn claim_owner_aurinko_lifecycle(
 /// marker is written. A crash after the remote effect repeats an idempotent
 /// removal using the same bot/connection and never claims a wider grant.
 pub(crate) async fn erase_personal_bot(
-    db: &mongodb::Database,
-    config: &AppConfig,
-    http: &reqwest::Client,
-    keys: &EncryptionKeys,
+    state: &crate::AppState,
     adapter: &dyn PlatformAdapter,
     owner: &str,
     bot_id: &str,
 ) -> AppResult<()> {
+    let durable = super::transaction_service::durable_database(&state.db);
+    let db = &durable;
+    let config = &state.config;
+    let http = &state.http_client;
+    let keys = &state.encryption_keys;
     if super::channel_adapters::meta::is_meta(adapter.platform_id()) {
         let accepted = db
             .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
@@ -2841,21 +2843,17 @@ pub(crate) async fn erase_personal_bot(
         }
         .disconnect(&bot)
         .await?;
-        // Participant control keys contain provider IDs and are not covered by
-        // the user_id inventory. Remove them before acknowledging cleanup.
-        db.collection::<bson::Document>(super::channel_adapters::meta::CONTROLS)
-            .delete_many(doc! {"bot_id":bot_id})
-            .await?;
-        db.collection::<bson::Document>(COLLECTION_NAME)
-            .update_one(
-                doc! {"_id":bot_id,"user_id":owner,"is_active":false},
-                doc! {"$set":{"personal_erasure_cleanup_complete":true}},
-            )
-            .await?;
+        // Finish the shared scoped purge while the bot and its attribution
+        // still exist. Its completion proof survives account inventory removal
+        // and lets any earlier signed deletion request finish on replay.
+        let grant = bot
+            .meta_binding
+            .as_ref()
+            .map(|binding| binding.grant_id.as_str())
+            .unwrap_or_default();
+        super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant).await?;
         return Ok(());
     }
-    let durable = super::transaction_service::durable_database(db);
-    let db = &durable;
     super::channel_retry_ingress::with_lifecycle(db, true, bot_id, async {
         super::channel_retry_ingress::with_ingress(db, bot_id, async {
             let mut tx=db.client().start_session().await?;

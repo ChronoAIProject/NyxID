@@ -165,6 +165,8 @@ pub(crate) async fn erase_provider_inbox(
         )
         .delete_many(doc! {"bot_id":bot_id})
         .await?;
+    super::super::org_channel_service::defaults::erase(&state.db, doc! {"channel_bot_id": bot_id})
+        .await?;
     let bots = state
         .db
         .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
@@ -203,7 +205,10 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         .collection::<crate::models::channel_bot::ChannelBot>(
             crate::models::channel_bot::COLLECTION_NAME,
         )
-        .find_one(doc! {"user_id":&job.user_id,"personal_erasure_cleanup_complete":{"$ne":true}})
+        .find_one(doc! {"user_id":&job.user_id,"$or":[
+            {"personal_erasure_cleanup_complete":{"$ne":true}},
+            {"platform":{"$in":["messenger","instagram"]}}
+        ]})
         .sort(doc! {"_id":1})
         .await?
     else {
@@ -214,10 +219,7 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         &state.token_exchange_cache,
     )?;
     super::super::channel_bot_service::erase_personal_bot(
-        &db,
-        &state.config,
-        &state.http_client,
-        &state.encryption_keys,
+        state,
         adapter.as_ref(),
         &job.user_id,
         &bot.id,

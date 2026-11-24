@@ -175,16 +175,20 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
                     // retain this unrelated historical plan without guessing.
                     continue;
                 }
-                if let Some(target) = saved_target(db, plan, &owners, &bot.platform).await? {
-                    evidence.prove(target);
-                } else if evidence.parent.is_none()
-                    && plan
-                        .created_at
-                        .is_some_and(|created| created < bot.created_at)
-                {
-                    // Exact handoff proof can recover older canonical plans.
-                    // Only genuinely unproven pre-bot history is excluded.
-                    continue;
+                match saved_target(db, plan, &owners, &bot.platform).await? {
+                    SavedTarget::Proven(target) => evidence.prove(target),
+                    SavedTarget::Absent
+                        if evidence.parent.is_none()
+                            && plan
+                                .created_at
+                                .is_some_and(|created| created < bot.created_at) =>
+                    {
+                        // Only absent evidence can exclude older history. An
+                        // exact but inconsistent/incomplete handoff stays pending.
+                        continue;
+                    }
+                    SavedTarget::Incomplete => evidence.conflicting = true,
+                    SavedTarget::Absent => {}
                 }
             }
             match evidence.target() {
@@ -207,18 +211,24 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
     }
 }
 
+enum SavedTarget {
+    Absent,
+    Incomplete,
+    Proven(Target),
+}
+
 async fn saved_target(
     db: &Database,
     plan: &LegacyPlan,
     owners: &[String],
     platform: &str,
-) -> AppResult<Option<Target>> {
+) -> AppResult<SavedTarget> {
     let Some((turn, destination)) = plan
         .logical_key
         .strip_prefix("saved-result:")
         .and_then(|key| key.split_once(':'))
     else {
-        return Ok(None);
+        return Ok(SavedTarget::Absent);
     };
     if turn.is_empty()
         || turn.len() > 128
@@ -227,7 +237,7 @@ async fn saved_target(
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     {
-        return Ok(None);
+        return Ok(SavedTarget::Absent);
     }
     let mut replies = db
         .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
@@ -241,11 +251,8 @@ async fn saved_target(
     while let Some(reply) = replies.try_next().await? {
         read += 1;
         if read > 64 {
-            return Ok(None);
+            return Ok(SavedTarget::Incomplete);
         }
-        let Ok(person) = reply.get_str("user_id") else {
-            continue;
-        };
         let Ok(targets) = reply
             .get_document("handoff_delivery")
             .and_then(|v| v.get_array("targets"))
@@ -261,16 +268,19 @@ async fn saved_target(
                 continue;
             }
             let Ok(origin) = saved.get_document("origin") else {
-                continue;
+                return Ok(SavedTarget::Incomplete);
             };
             let Ok(origin) = bson::from_document::<
                 crate::models::assistant_conversation::ChannelOrigin,
             >(origin.clone()) else {
-                continue;
+                return Ok(SavedTarget::Incomplete);
             };
             if super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key {
                 continue;
             }
+            let Ok(person) = reply.get_str("user_id") else {
+                return Ok(SavedTarget::Incomplete);
+            };
             let channel = db
                 .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
                 .find_one(doc! {"_id": &origin.nyxbot_channel_id})
@@ -285,17 +295,17 @@ async fn saved_target(
                 if channel.get_str("user_id") != Ok(person)
                     || channel.get_str("platform") != Ok(origin.platform.as_str())
                 {
-                    return Ok(None);
+                    return Ok(SavedTarget::Incomplete);
                 }
                 let native_person = origin.platform != platform && person == plan.user_id;
                 if !native_person && !owner.is_ok_and(|owner| owners.iter().any(|id| id == owner)) {
-                    return Ok(None);
+                    return Ok(SavedTarget::Incomplete);
                 }
                 // Preserve a retained parent's concrete identity, including
                 // foreign org native bots. It must agree with any ownerless
                 // source/receipt constraint before erasure may finish.
                 let Ok(bot) = channel.get_str("channel_bot_id") else {
-                    return Ok(None);
+                    return Ok(SavedTarget::Incomplete);
                 };
                 Target::Bot(bot.to_owned())
             } else if origin.platform != platform && person == plan.user_id {
@@ -303,12 +313,19 @@ async fn saved_target(
                 // plan even when its old channel was already removed.
                 Target::OtherPlatform
             } else {
-                return Ok(None);
+                return Ok(SavedTarget::Incomplete);
             };
             evidence.prove(found);
         }
     }
-    Ok(evidence.target())
+    if evidence.conflicting {
+        Ok(SavedTarget::Incomplete)
+    } else {
+        Ok(evidence
+            .target()
+            .map(SavedTarget::Proven)
+            .unwrap_or(SavedTarget::Absent))
+    }
 }
 
 #[cfg(test)]
@@ -931,6 +948,15 @@ mod tests {
     async fn predating_canonical_handoff_is_resolved_before_excluding_unproven_old_history() {
         let (state, _, _server, mut bot) = fixture("instagram").await;
         stop_for_erasure(&state, &mut bot).await;
+        let migrations = state.db.collection::<Document>(
+            crate::services::assistant_access_policy::MIGRATIONS_COLLECTION_NAME,
+        );
+        migrations.insert_many([
+            doc! {"_id":"own-defaults","migration":"issue-2482","channel_bot_id":&bot.id,
+                "org_id":&bot.user_id,"channel_id":"retired-channel","binding_revision":"own-binding"},
+            doc! {"_id":"sibling-defaults","migration":"issue-2482","channel_bot_id":"retained-sibling",
+                "org_id":&bot.user_id,"channel_id":"sibling-channel","binding_revision":"sibling-binding"},
+        ]).await.unwrap();
         let channel = uuid::Uuid::new_v4().to_string();
         state
             .db
@@ -998,6 +1024,103 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+        assert!(
+            migrations
+                .find_one(doc! {"_id":"own-defaults"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            migrations
+                .find_one(doc! {"_id":"sibling-defaults"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn predating_exact_handoff_with_contradictory_owner_stays_pending_until_verified_repair()
+    {
+        let (state, _, _server, mut bot) = fixture("instagram").await;
+        stop_for_erasure(&state, &mut bot).await;
+        let channel = uuid::Uuid::new_v4().to_string();
+        let mut metadata = parent(&bot.user_id, &bot.id, &channel, "instagram");
+        metadata.insert("user_id", "contradictory-conversation-owner");
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .insert_one(metadata)
+            .await
+            .unwrap();
+        let origin = ChannelOrigin {
+            org_execution: None,
+            native_event_id: None,
+            thread: None,
+            nyxbot_channel_id: channel.clone(),
+            partition: "private-owner".into(),
+            platform: "instagram".into(),
+        };
+        let turn = uuid::Uuid::new_v4().to_string();
+        let key = channel_supplemental_delivery::saved_key(&turn, &origin);
+        let plan = channel_text_delivery::begin(
+            &state.db,
+            &key,
+            &bot.user_id,
+            "expired-contradictory-source",
+            "retained-provider-id",
+            1,
+        )
+        .await
+        .unwrap();
+        state.db.collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .update_one(doc! {"_id":&plan.id}, doc! {"$set":{
+                "created_at":bson::DateTime::from_chrono(bot.created_at - chrono::Duration::days(1)),
+                "parts.0.platform_message_id":"historical-provider-id"}}).await.unwrap();
+        state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&bot.user_id,
+                "turn_id":&turn,"role":"assistant","handoff_delivery":{"targets":[saved(&turn,&origin)]}})
+            .await.unwrap();
+        let grant = &bot.meta_binding.as_ref().unwrap().grant_id;
+        let result =
+            super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+                .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert!(
+            channel_text_delivery::load(&state.db, &key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .db
+                .collection::<Document>("channel_meta_erasure_fences")
+                .find_one(doc! {"_id":&bot.id,"local_data_erased_at":{"$exists":true}})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Operational repair restores the independently verified parent owner.
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&channel},
+                doc! {"$set":{"user_id":&bot.user_id}},
+            )
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+            .await
+            .unwrap();
+        assert!(
+            channel_text_delivery::load(&state.db, &key)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
