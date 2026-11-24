@@ -96,17 +96,7 @@ pub(crate) async fn cutover(
     if next.generation <= previous.generation || next.grant_id == previous.grant_id {
         return Err(super::grants::incomplete());
     }
-    if !previous.grant_subject_id.is_empty() {
-        let identity = super::provider::grant_identity(
-            &old.platform,
-            &previous.app_id,
-            &previous.grant_subject_id,
-        )?;
-        db.collection::<Document>("channel_meta_grant_authority").update_one(doc! {"identity":&identity},doc! {
-            "$inc":{"revision":1_i64},"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),
-                "identity":identity,"platform":&old.platform,"app_id":&previous.app_id,"outstanding":true}})
-            .upsert(true).session(&mut *tx).await?;
-    }
+    fence_reconnect(db, tx, old).await?;
     let scope = ensure_current(db, tx, old, false).await?;
     let changed = db
         .collection::<GrantScope>(GRANT_SCOPES)
@@ -755,4 +745,69 @@ pub(crate) async fn synchronize_chronology(
         result.insert("authorized_at", bson::Bson::Null);
     }
     Ok(result)
+}
+
+pub(crate) async fn check_subject_cutoff(
+    db: &Database,
+    platform: &str,
+    app: &str,
+    subject: &str,
+    authorized: chrono::DateTime<chrono::Utc>,
+    fresh: bool,
+) -> AppResult<()> {
+    if subject.is_empty() {
+        return Ok(());
+    }
+    let identity = super::provider::grant_identity(platform, app, subject)?;
+    if let Some(row) = db
+        .collection::<Document>("channel_meta_grant_authority")
+        .find_one(doc! {"identity":identity})
+        .await?
+    {
+        let at = bson::DateTime::from_chrono(authorized);
+        let revoked = if fresh {
+            row.get_datetime("revoked_at")
+                .ok()
+                .map(|at| bson::DateTime::from_millis(at.timestamp_millis().saturating_add(1000)))
+        } else {
+            None
+        };
+        for cutoff in [revoked, row.get_datetime("erasure_cutoff").ok().copied()]
+            .into_iter()
+            .flatten()
+        {
+            if at < cutoff {
+                return Err(super::meta::unreachable("reconnect_required"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn require_current_operation(db: &Database, bot: &ChannelBot) -> AppResult<()> {
+    let grant = reference(bot)?;
+    super::super::transaction_service::run_db_only(db, &(db, &grant), |tx, &(db, grant)| {
+        Box::pin(fence_reference(db, tx, grant, true))
+    })
+    .await
+}
+
+/// Fresh consent may recover a deauthorization. An independently accepted
+/// deletion of the installation must finish before its public ID can be reused.
+pub(crate) async fn fence_reconnect(
+    db: &Database,
+    tx: &mut ClientSession,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    let scope = ensure_current(db, tx, bot, false).await?;
+    if scope.erasure_requested {
+        return Err(super::grants::incomplete());
+    }
+    fence_subject(
+        db,
+        tx,
+        &bson::to_document(&scope).map_err(|_| super::grants::incomplete())?,
+        false,
+    )
+    .await
 }

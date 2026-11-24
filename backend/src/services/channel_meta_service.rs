@@ -197,6 +197,7 @@ pub(crate) async fn set_bot_delivery(
                     .ok_or_else(conflict)?;
                 let binding = current.meta_binding.as_ref().ok_or_else(conflict)?;
                 if enabled {
+                    scopes::fence_current(db, tx, &current).await?;
                     require_platform_delivery(db, tx, &current.platform).await?;
                     meta::require_resumable(&current)?;
                     if binding.subscription != "suspended" {
@@ -427,6 +428,13 @@ impl MetaService<'_> {
                         template.reconnect_bot_id.is_none(),
                     )
                     .await?;
+                    if let Some(bot_id) = template.reconnect_bot_id.as_deref() {
+                        let bot = db.collection::<ChannelBot>(BOTS)
+                            .find_one(doc! {"_id":bot_id,"user_id":&template.owner_id,
+                                "is_active":true,"meta_binding.generation":template.expected_generation})
+                            .session(&mut *tx).await?.ok_or_else(conflict)?;
+                        scopes::fence_reconnect(db, tx, &bot).await?;
+                    }
                     use crate::models::platform_credential::{COLLECTION_NAME, PlatformCredential};
                     let row = db
                         .collection::<PlatformCredential>(COLLECTION_NAME)
@@ -494,6 +502,20 @@ impl MetaService<'_> {
         Ok(session)
     }
     async fn assets(&self, session: &OAuthSession) -> AppResult<Vec<AssetCredential>> {
+        let subject = session
+            .grant_subject_id
+            .as_deref()
+            .filter(|subject| !subject.is_empty())
+            .ok_or_else(conflict)?;
+        scopes::check_subject_cutoff(
+            self.db,
+            &session.platform,
+            &session.app_id,
+            subject,
+            session.created_at,
+            true,
+        )
+        .await?;
         let bytes = self
             .keys
             .decrypt(session.assets_encrypted.as_deref().ok_or_else(conflict)?)
@@ -1154,6 +1176,7 @@ impl MetaService<'_> {
         {
             return Err(conflict());
         }
+        scopes::require_current_operation(self.db, &current).await?;
         let result = self.verify_current(&current).await;
         if matches!(&result,Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required")
         {
@@ -1301,17 +1324,12 @@ impl MetaService<'_> {
             if binding.subscription == "active" {
                 // Readback proved a missing subscription. Expose that fact even
                 // if the subsequent provider repair is interrupted or refused.
-                let changed = self.db.collection::<ChannelBot>(BOTS).update_one(
-                    doc! {"_id": &bot.id, "is_active": true, "meta_binding.generation":binding.generation,
-                          "meta_binding.subscription":"active"},
-                    doc! {"$set":{"meta_binding.subscription":"pending","status":"pending_webhook",
-                        "webhook_registered":false, "diagnostics.subscription_state":{"registered":false,"checked_at":bson::DateTime::now(),"last_error":null},
-                        "meta_binding.next_reconcile_at": bson::DateTime::now()}},
-                ).await?;
-                if changed.matched_count != 1 {
-                    return Err(conflict());
-                }
+                self.publish_verification_state(bot,doc! {"meta_binding.subscription":"active"},
+                    doc! {"meta_binding.subscription":"pending","status":"pending_webhook",
+                        "webhook_registered":false,"diagnostics.subscription_state":{"registered":false,"checked_at":bson::DateTime::now(),"last_error":null},
+                        "meta_binding.next_reconcile_at":bson::DateTime::now()}).await?;
             }
+            scopes::require_current_operation(self.db, bot).await?;
             let subscribed = graph_json(
                 self.http
                     .post(&subscription_url)
@@ -1348,25 +1366,51 @@ impl MetaService<'_> {
         if bot.platform == "messenger" {
             verify_fields.insert("meta_binding.expires_at", bson::Bson::Null);
         }
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_verify_provider_confirmed").await;
         // Instagram verification observes the credential; it does not publish
         // an old expiry over a concurrent same-token lifetime extension.
-        let result = self
-            .db
-            .collection::<ChannelBot>(BOTS)
-            .update_one(
-                doc! {"_id":&bot.id,
-                "is_active":true,
-                "user_id":&bot.user_id,
-                "meta_binding.generation":binding.generation,
-                "meta_binding.token_fingerprint":&binding.token_fingerprint},
-                doc! {"$set":verify_fields},
-            )
-            .await?;
+        self.publish_verification_state(bot, doc! {}, verify_fields)
+            .await
+    }
 
-        if result.matched_count != 1 {
-            return Err(conflict());
-        }
-        Ok(())
+    async fn publish_verification_state(
+        &self,
+        bot: &ChannelBot,
+        mut filter: bson::Document,
+        fields: bson::Document,
+    ) -> AppResult<()> {
+        let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
+        filter.extend(doc! {"_id":&bot.id,"user_id":&bot.user_id,"is_active":true,
+            "meta_binding.generation":binding.generation,"meta_binding.token_fingerprint":&binding.token_fingerprint});
+        filter.extend(grants::grant_filter(&binding.grant_id));
+        super::transaction_service::run_db_only(
+            self.db,
+            &(self.db, &filter, &fields),
+            |tx, &(db, filter, fields)| {
+                Box::pin(async move {
+                    let live = db
+                        .collection::<ChannelBot>(BOTS)
+                        .find_one(filter.clone())
+                        .session(&mut *tx)
+                        .await?
+                        .ok_or_else(conflict)?;
+                    scopes::fence_current(db, tx, &live).await?;
+                    if db
+                        .collection::<ChannelBot>(BOTS)
+                        .update_one(filter.clone(), doc! {"$set":fields.clone()})
+                        .session(tx)
+                        .await?
+                        .matched_count
+                        != 1
+                    {
+                        return Err(conflict());
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .await
     }
     /// Apply a confirmed provider response to its original grant. Rewrap may
     /// change every envelope during HTTP. Authenticate the token's logical pin
@@ -1374,6 +1418,7 @@ impl MetaService<'_> {
     async fn publish_token_result(
         &self,
         observed: &ChannelBot,
+        enabling: bool,
         mut filter: bson::Document,
         set: bson::Document,
     ) -> AppResult<()> {
@@ -1387,7 +1432,9 @@ impl MetaService<'_> {
         filter.extend(grants::grant_filter(&binding.grant_id));
         let expected_pin = field_pin(observed, TOKEN)?;
         let args = (
+            self.db,
             self.db.collection::<ChannelBot>(BOTS),
+            enabling,
             filter,
             expected_pin,
             observed.ownership_version,
@@ -1396,7 +1443,7 @@ impl MetaService<'_> {
         super::transaction_service::run_db_only(
             self.db,
             &args,
-            |tx, (bots, filter, pin, ownership_version, set)| {
+            |tx, (db, bots, enabling, filter, pin, ownership_version, set)| {
                 Box::pin(async move {
                     let live = bots
                         .find_one(filter.clone())
@@ -1407,6 +1454,9 @@ impl MetaService<'_> {
                         || field_pin(&live, TOKEN)? != *pin
                     {
                         return Err(conflict());
+                    }
+                    if *enabling {
+                        scopes::fence_current(db, tx, &live).await?;
                     }
                     let mut set = set.clone();
                     let mut unset = doc! {"secret_context_versions.bot_token_encrypted": ""};
@@ -1568,6 +1618,7 @@ impl MetaService<'_> {
         super::durable_wake_tests::after("meta_disconnect_provider_confirmed").await;
         self.publish_token_result(
             &current,
+            false,
             doc! {"is_active":false, "meta_binding.subscription":"removal_pending",
             "meta_binding.generation":if current.is_active {generation+1} else {generation}},
             doc! {"meta_binding.subscription":"removed", "bot_token_encrypted":binary(Vec::new()),
@@ -1619,6 +1670,7 @@ impl MetaService<'_> {
         {
             return Ok(());
         }
+        scopes::require_current_operation(self.db, bot).await?;
         if binding.expires_at.is_some_and(|e| e <= Utc::now()) {
             return self.reconnect_required(bot).await;
         }
@@ -1694,6 +1746,7 @@ impl MetaService<'_> {
         super::durable_wake_tests::after("meta_refresh_provider_confirmed").await;
         self.publish_token_result(
             &current,
+            true,
             doc! {"is_active":true, "meta_binding.generation":binding.generation,
                 "meta_binding.subscription":&live.subscription},
             doc! {

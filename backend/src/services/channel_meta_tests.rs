@@ -6590,6 +6590,209 @@ async fn deferred_first_capture_page_does_not_hold_later_installations_or_comple
     server.verify().await;
 }
 
+async fn overflow_installation(state: &crate::AppState, bot: &ChannelBot) -> ChannelBot {
+    let bots = state.db.collection::<ChannelBot>(BOTS);
+    let mut target = bot.clone();
+    target.id = "ffffffff-ffff-4fff-bfff-ffffffffffff".into();
+    target.meta_binding.as_mut().unwrap().expires_at = Some(Utc::now() + Duration::days(2));
+    bots.delete_one(doc! {"_id":&bot.id}).await.unwrap();
+    bots.insert_one(&target).await.unwrap();
+    let earlier: Vec<_> = (0..100)
+        .map(|number| {
+            let mut row = target.clone();
+            row.id = format!("00000000-0000-4000-8000-{number:012x}");
+            row.platform_bot_id = format!("asset-{number}");
+            row.meta_binding.as_mut().unwrap().grant_id = uuid::Uuid::new_v4().to_string();
+            row
+        })
+        .collect();
+    bots.insert_many(earlier).await.unwrap();
+    target
+}
+
+#[tokio::test]
+async fn accepted_subject_cutoff_closes_overflow_verify_refresh_reconnect_and_cached_assets() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let bot = overflow_installation(&state, &bot).await;
+    let s = service(&state, &server);
+    let start = s
+        .start(&bot.user_id, &bot.user_id, "instagram", "Overflow", None)
+        .await
+        .unwrap();
+    let sessions = state.db.collection::<bson::Document>(SESSIONS);
+    let pending = sessions
+        .find_one(doc! {"_id":&start.session_id})
+        .await
+        .unwrap()
+        .unwrap();
+    accept_provider_request(
+        &s,
+        "instagram",
+        &provider_request(json!(900), Utc::now().timestamp()),
+        true,
+    )
+    .await
+    .unwrap();
+    let untouched = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(untouched.is_active);
+    assert!(!untouched.meta_binding.as_ref().unwrap().erasure_requested);
+    assert!(s.verify(&untouched).await.is_err());
+    assert!(s.refresh(&untouched).await.is_err());
+    assert!(
+        s.start(
+            &bot.user_id,
+            &bot.user_id,
+            "instagram",
+            "Reconnect",
+            Some(&bot.id)
+        )
+        .await
+        .is_err()
+    );
+    // An encrypted cache can still await a compatibility page. Progress must
+    // enforce the accepted identity cutoff without waiting for its deletion.
+    let assets = vec![AssetCredential {
+        id: "222".into(),
+        name: "Cached account".into(),
+        token: Zeroizing::new("cached-token".into()),
+        grant_subject_id: "900".into(),
+        expires_at: None,
+    }];
+    let encrypted = state
+        .encryption_keys
+        .encrypt(&serde_json::to_vec(&assets).unwrap())
+        .await
+        .unwrap();
+    let mut cached = pending;
+    cached.insert("status", "assets");
+    cached.insert("grant_subject_id", "900");
+    cached.insert("assets_encrypted", binary(encrypted));
+    sessions
+        .replace_one(doc! {"_id":&start.session_id}, cached)
+        .await
+        .unwrap();
+    assert!(s.progress(&bot.user_id, &start.session_id).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn accepted_overflow_cutoff_refuses_verify_and_refresh_publication_after_provider_success() {
+    for refresh in [false, true] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        let bot = overflow_installation(&state, &bot).await;
+        Mock::given(method("GET"))
+            .and(path("/v25.0/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"user_id":"222","username":"professional","account_type":"Business"}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        if refresh {
+            Mock::given(method("GET"))
+                .and(path("/refresh_access_token"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        json!({"access_token":"refreshed-token","expires_in":5184000}),
+                    ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        } else {
+            subscriptions(&server, "222").await;
+        }
+        let s = service(&state, &server);
+        super::super::durable_wake_tests::resume_after(
+            if refresh {
+                "meta_refresh_provider_confirmed"
+            } else {
+                "meta_verify_provider_confirmed"
+            },
+            async {
+                let result = if refresh {
+                    s.refresh(&bot).await
+                } else {
+                    s.verify(&bot).await
+                };
+                assert!(result.is_err());
+            },
+            async {
+                accept_provider_request(
+                    &s,
+                    "instagram",
+                    &provider_request(json!(900), Utc::now().timestamp()),
+                    true,
+                )
+                .await
+                .unwrap();
+                let untouched = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+                    .await
+                    .unwrap();
+                assert!(
+                    untouched.is_active
+                        && !untouched.meta_binding.as_ref().unwrap().erasure_requested
+                );
+            },
+        )
+        .await;
+        let after = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            after.meta_binding.as_ref().unwrap().expires_at,
+            bot.meta_binding.as_ref().unwrap().expires_at
+        );
+        assert_eq!(
+            after.meta_binding.as_ref().unwrap().token_fingerprint,
+            bot.meta_binding.as_ref().unwrap().token_fingerprint
+        );
+        server.verify().await;
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reconnect_start_recovers_deauthorization_but_refuses_pending_deletion() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let s = service(&state, &server);
+    let signed = provider_request(json!(900), Utc::now().timestamp());
+    accept_provider_request(&s, "instagram", &signed, false)
+        .await
+        .unwrap();
+    s.start(
+        &bot.user_id,
+        &bot.user_id,
+        "instagram",
+        "Reconnect",
+        Some(&bot.id),
+    )
+    .await
+    .unwrap();
+    accept_provider_request(&s, "instagram", &signed, true)
+        .await
+        .unwrap();
+    assert!(
+        s.start(
+            &bot.user_id,
+            &bot.user_id,
+            "instagram",
+            "Reconnect",
+            Some(&bot.id)
+        )
+        .await
+        .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_without_hints() {
     let (state, _, _server, bot) = fixture("messenger").await;
