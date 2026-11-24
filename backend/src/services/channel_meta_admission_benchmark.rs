@@ -202,5 +202,37 @@ async fn long_web_turn_requests_cards_with_one_projected_provenance_read_each() 
         reads[p95].as_micros(),
         elapsed[p95].as_micros()
     );
+    let auto = acks::AutoAllowed {
+        class: acks::OwnerActionClass::Read,
+        mode: crate::models::assistant_settings::AccessMode::Autopilot,
+        reason: "approval",
+    };
+    let mut receipt_times = Vec::new();
+    for n in 0..samples {
+        let start = Instant::now();
+        acks::record_auto_allowed(
+            &db,
+            &chat,
+            "read_item",
+            &serde_json::json!({"item":n}),
+            &auto,
+            "Read this item",
+        )
+        .await;
+        receipt_times.push(start.elapsed());
+    }
+    let receipts = db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .count_documents(doc! {"conversation_id":&row.id,"decided_by":"access_mode"})
+        .await
+        .unwrap();
+    assert_eq!(receipts, samples as u64);
+    let receipt_reads = timings.lock().unwrap().1.len() - reads.len();
+    assert_eq!(receipt_reads, samples);
+    receipt_times.sort_unstable();
+    eprintln!(
+        "ordinary_auto_receipts={receipts} projected_reads={receipt_reads} receipt_p95_us={}",
+        receipt_times[p95].as_micros()
+    );
     db.drop().await.unwrap();
 }
