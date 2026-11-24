@@ -154,6 +154,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Conflict: trigger_overlap_skip")]
+    TriggerOverlapSkip { blocking_run_id: String },
+
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
     #[error("The voice request queue is full")]
@@ -934,7 +937,9 @@ impl AppError {
             Self::CrashReportingUnavailable => StatusCode::NOT_FOUND,
             Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
-            Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::Conflict(_)
+            | Self::TriggerOverlapSkip { .. }
+            | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
                 StatusCode::CONFLICT
             }
@@ -1175,7 +1180,7 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) => 1004,
+            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1470,7 +1475,7 @@ impl AppError {
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "conflict",
+            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => "conflict",
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
