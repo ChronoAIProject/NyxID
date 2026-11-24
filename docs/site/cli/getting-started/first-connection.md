@@ -1,49 +1,32 @@
 ---
-title: Your first connection
-description: Connect an AI service from the terminal and verify it with a proxied request that returns HTTP 200.
+title: Your first CLI request
+description: Check your NyxID identity, find a GitHub connection and read the username of the authorized GitHub account.
 ---
 
-Four steps, ending in an `HTTP/1.1 200` from your first proxied call. This assumes the [CLI is installed](/docs/cli/getting-started/install) and you are [logged in](/docs/cli/getting-started/authenticate).
+[Install the CLI](/docs/cli/getting-started/install), then [authenticate](/docs/cli/getting-started/authenticate#log-in). You need a NyxID account and a connected GitHub service. If the account is new, [connect GitHub in Studio](/docs/web/getting-started/first-connection#connect-a-service).
 
-Throughout, substitute your real OpenAI / Anthropic / GitHub key for `sk-...` — that is your **external service credential**, not a NyxID key. NyxID stores it [encrypted](/docs/shared/concepts/encryption) and never returns it.
-
-## 1. Set the provider credential
+## Check your account and list connections
 
 ```bash
-export OPENAI_API_KEY=sk-...
+nyxid whoami
+nyxid service list
 ```
 
-## 2. Add the service from the catalog
+Confirm that the identity is the one you used in Studio. Look for the GitHub connection in the list and copy its slug. If it is missing, check the account, CLI profile, and the service owner in Studio. When using a restricted CLI profile, check the selected key's access to the connection.
+
+## Read your GitHub profile
+
+Set `SERVICE_SLUG` to the exact slug of your connection. The example uses the usual first GitHub OAuth connection. The request uses HTTP GET.
 
 ```bash
-nyxid service add llm-openai --credential-env OPENAI_API_KEY
+SERVICE_SLUG='api-github'
+nyxid proxy request "$SERVICE_SLUG" user
 ```
 
-This provisions the endpoint, stores the credential, and creates the routing config in one step. (For a private API the catalog doesn't know, pass `--custom --endpoint-url <url> --auth-method bearer`.)
+Look for your GitHub login in the JSON response, for example:
 
-## 3. Copy the returned slug
-
-The CLI prints a `Slug:` line. If `llm-openai` already existed on your account, the new entry may be suffixed (e.g. `llm-openai-2`). Use **that exact slug** in the next step — it is the handle that addresses your specific service instance.
-
-## 4. Verify with a proxied request
-
-```bash
-nyxid proxy request <RETURNED_SERVICE_SLUG> models
+```json
+{"login":"octocat","id":583231}
 ```
 
-Success is an `HTTP/1.1 200` carrying a real provider JSON body — for OpenAI's `models` endpoint, `{"object":"list","data":[{"id":"gpt-...","object":"model",...}]}`. NyxID injected your stored credential; the request never carried it from your terminal.
-
-:::warning
-**Windows:** run every command above from WSL Ubuntu or Git Bash, not the raw command prompt.
-:::
-
-### If it errors
-
-- **`401` from the provider** — the key from step 1 is wrong or revoked. Rotate it: `nyxid service rotate-credential <id> --credential-env <NEW_VAR>` (find `<id>` with `nyxid service list`).
-- **`403` from NyxID** — your session or key lacks the `proxy` scope.
-
-## Next
-
-- [Wire your AI agent to NyxID](/docs/ai/getting-started/first-agent-call) — let Claude Code, Cursor, or Codex call this service through MCP.
-- [The proxy](/docs/shared/concepts/the-proxy) — how a proxied request flows and where the credential is injected.
-- [Browse the catalog](/docs/cli/reference/catalog): `nyxid catalog list`, `nyxid catalog show <slug>`, `nyxid catalog endpoints <slug>`.
+If NyxID returns 403, check the profile's proxy access and allowed services. If GitHub returns 401, reauthorize the GitHub connection in Studio, then repeat the same read. [CLI proxy reference](/docs/cli/reference/proxy) · [Connect another service from the CLI](/docs/cli/guides/connect-a-service)

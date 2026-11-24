@@ -10,7 +10,7 @@ NyxID is available as a hosted service at `https://nyx.chrono-ai.fun` (no setup 
 Early access to the hosted instance requires an invite code.
 
 1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab.
-2. Enter invite code: `NYX-FGNY85AF`
+2. If prompted, enter the invite code supplied by your workspace.
 3. Sign in with **Google**, **GitHub**, or **Apple** — or create an account with an email address and password.
 
 :::note
@@ -45,7 +45,7 @@ Use **Open Studio** in the Assistant account menu to manage services and develop
 | **Developer** | Register OAuth clients (developer apps) to add "Sign in with NyxID" to your own apps. |
 | **Admin** | (Admins only) User management, audit log, service catalog, OAuth clients. |
 
-In Studio, the **AI Services** page manages connections and keys. It has two tabs:
+In Studio, the **AI Services** page manages connections and keys. For this guide, use these tabs:
 
 - **External Services** — your external API credentials stored and encrypted by NyxID. Each entry is a `UserService` that the proxy resolves by slug.
 - **Agent Keys** — scoped `nyx_...` keys you hand to your AI tools. These are NyxID-native keys; they never contain the underlying external secret.

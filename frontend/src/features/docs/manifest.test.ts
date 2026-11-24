@@ -20,8 +20,16 @@ const SITE_DIR = path.resolve(
 describe("docs manifest", () => {
   const pages = allDocPages();
 
-  it("ships the Phase 1 page set", () => {
-    expect(pages.length).toBeGreaterThan(20);
+  it("offers a working first task for each audience", () => {
+    const entries = Object.fromEntries(
+      DOCS_TABS.map((tab) => [tab.label, tab.groups[0]?.pages[0]?.slug]),
+    );
+    expect(entries).toEqual({
+      NyxBot: "nyxbot/getting-started/first-chat",
+      "AI clients (MCP)": "ai/getting-started/connect-your-agent",
+      Studio: "web/getting-started/first-connection",
+      CLI: "cli/getting-started/install",
+    });
   });
 
   it("has unique slugs", () => {
@@ -45,6 +53,7 @@ describe("docs manifest", () => {
   });
 
   it("maps slugs to their surface tab", () => {
+    expect(docTabForSlug("nyxbot/getting-started/first-chat")).toBe("nyxbot");
     expect(docTabForSlug("ai/guides/mcp-proxy")).toBe("ai");
     expect(docTabForSlug("web/getting-started/sign-up")).toBe("web");
     expect(docTabForSlug("cli/getting-started/install")).toBe("cli");

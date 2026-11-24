@@ -16,6 +16,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 The installer uses attested prebuilt binaries for macOS x64/arm64 and Linux x64/arm64. Linux arm64 binaries target Ubuntu 20.04 / `glibc 2.31`, so Jetson-class Ubuntu 20.04 hosts use the prebuilt path instead of compiling locally.
 
+Check the installed release, then [sign in](/docs/cli/getting-started/authenticate#log-in) and [read your first connected profile](/docs/cli/getting-started/first-connection).
+
+```bash
+nyxid --version
+```
+
 ## Custom installation paths
 
 The wrapper installs to `${XDG_DATA_HOME:-$HOME/.local/share}/nyxid/versions/vX.Y.Z/nyxid`

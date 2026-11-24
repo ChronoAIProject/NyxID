@@ -8,10 +8,10 @@ The CLI authenticates once and reuses a locally stored session for every subsequ
 ## Log in
 
 ```bash
-nyxid login --base-url <BASE_URL>
+nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
-`nyxid login` starts device-code approval and stores the selected identity under `~/.nyxid/`. The approver chooses a full account session or a restricted Agent Key. Use the API base URL for `<BASE_URL>`:
+`nyxid login` starts device-code approval and stores the selected identity under `~/.nyxid/`. The approver chooses a full account session or a restricted Agent Key. After approval, [check your identity and read a connected profile](/docs/cli/getting-started/first-connection). Use the API base URL for your deployment:
 
 - **Hosted:** `https://nyx-api.chrono-ai.fun`
 - **Self-host:** `http://localhost:3001` (the API runs on 3001; the web console is on 3000)
