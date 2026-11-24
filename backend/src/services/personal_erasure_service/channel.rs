@@ -90,10 +90,18 @@ pub(crate) async fn erase_provider_inbox(
         )
         .await?;
     if let Some(bot) = &retired {
-        super::super::channel_meta_journal_erasure::erase_legacy(&state.db, bot).await?;
+        super::super::channel_meta_journal_erasure::erase_legacy(
+            &state.db,
+            bot,
+            &state.token_exchange_cache,
+        )
+        .await?;
     } else if let Some(context) = &retired_context {
         super::super::channel_meta_journal_erasure::erase_retired_legacy(
-            &state.db, bot_id, context,
+            &state.db,
+            bot_id,
+            context,
+            &state.token_exchange_cache,
         )
         .await?;
     }

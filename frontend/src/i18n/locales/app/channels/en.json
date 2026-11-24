@@ -44,6 +44,7 @@
   "Additional manager bot token": "Additional manager bot token",
   "Address: ": "Address: ",
   "After closing this dialog, you cannot retrieve this token. If it is lost, generate another replacement; that immediately invalidates this one.": "After closing this dialog, you cannot retrieve this token. If it is lost, generate another replacement; that immediately invalidates this one.",
+  "After saving these credentials, ask an authorized operator to resume inbox delivery. Then run Verify Bot and confirm a new message and reply.": "After saving these credentials, ask an authorized operator to resume inbox delivery. Then run Verify Bot and confirm a new message and reply.",
   "Agent (API Key)": "Agent (API Key)",
   "Agent API Key": "Agent API Key",
   "Agent activity support could not be loaded.": "Agent activity support could not be loaded.",

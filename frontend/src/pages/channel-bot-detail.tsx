@@ -880,7 +880,9 @@ function EditVerificationSection({
           </div>
         ))}
         {(bot.platform === "whatsapp" || isMetaInbox(bot.platform)) ? (
-          <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
+          <p className="text-13 text-muted-foreground">{isMetaInbox(bot.platform) && bot.status === "suspended"
+            ? translateUi("After saving these credentials, ask an authorized operator to resume inbox delivery. Then run Verify Bot and confirm a new message and reply.")
+            : translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
         )}

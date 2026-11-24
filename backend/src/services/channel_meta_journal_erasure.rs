@@ -1,4 +1,5 @@
 //! Exact attribution of legacy saved-result receipts before inbox erasure.
+use super::provider_token_exchange_service::TokenExchangeCache;
 use crate::{
     errors::{AppError, AppResult},
     models::channel_bot::ChannelBot,
@@ -6,7 +7,7 @@ use crate::{
 use bson::{Document, doc};
 use futures::TryStreamExt;
 use mongodb::Database;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// Attribution reads omit multipart send state and stored provider receipts.
 #[derive(serde::Deserialize)]
@@ -109,7 +110,11 @@ impl Evidence {
     }
 }
 
-pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<()> {
+pub(crate) async fn erase_legacy(
+    db: &Database,
+    bot: &ChannelBot,
+    cache: &Arc<TokenExchangeCache>,
+) -> AppResult<()> {
     erase_attributed(
         db,
         &bot.id,
@@ -117,13 +122,18 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
         &bot.platform,
         bot.created_at,
         true,
+        cache,
     )
     .await
 }
 
 /// Preserve exact attribution on the original journal before its TTL sources
 /// can disappear. Account erasure does not delete a former owner's receipt.
-pub(crate) async fn attribute_legacy(db: &Database, bot: &ChannelBot) -> AppResult<()> {
+pub(crate) async fn attribute_legacy(
+    db: &Database,
+    bot: &ChannelBot,
+    cache: &Arc<TokenExchangeCache>,
+) -> AppResult<()> {
     erase_attributed(
         db,
         &bot.id,
@@ -131,6 +141,7 @@ pub(crate) async fn attribute_legacy(db: &Database, bot: &ChannelBot) -> AppResu
         &bot.platform,
         bot.created_at,
         false,
+        cache,
     )
     .await
 }
@@ -139,6 +150,7 @@ pub(crate) async fn erase_retired_legacy(
     db: &Database,
     bot_id: &str,
     grant: &crate::models::channel_meta::RetiredGrant,
+    cache: &Arc<TokenExchangeCache>,
 ) -> AppResult<()> {
     let account = db
         .collection::<Document>(crate::models::personal_erasure::COLLECTION_NAME)
@@ -156,6 +168,7 @@ pub(crate) async fn erase_retired_legacy(
         &grant.platform,
         grant.bot_created_at,
         true,
+        cache,
     )
     .await
 }
@@ -167,7 +180,12 @@ async fn erase_attributed(
     platform: &str,
     created_at: chrono::DateTime<chrono::Utc>,
     erase: bool,
+    cache: &Arc<TokenExchangeCache>,
 ) -> AppResult<()> {
+    let platforms: BTreeSet<String> = super::channel_adapters::registered_adapters(cache)
+        .into_iter()
+        .map(|adapter| adapter.platform_id().to_owned())
+        .collect();
     let plans = db.collection::<LegacyPlan>(crate::models::channel_text_delivery::COLLECTION_NAME);
     let owners = bot_owners(db, bot_id, owner).await?;
     let owners: Vec<_> = owners.into_iter().collect();
@@ -260,7 +278,7 @@ async fn erase_attributed(
                 .iter()
                 .filter(|event| event.get_str("_id") == Ok(plan.source_id.as_str()))
             {
-                match native_target(event, &parents, plan, bot_id, platform) {
+                match native_target(event, &parents, plan, bot_id, platform, &platforms) {
                     Ok(Some(target)) => evidence.prove(target),
                     Ok(None) => {}
                     Err(()) => evidence.conflicting = true,
@@ -273,7 +291,7 @@ async fn erase_attributed(
                     // retain this unrelated historical plan without guessing.
                     continue;
                 }
-                match saved_target(db, plan, &owners, platform).await? {
+                match saved_target(db, plan, &owners, platform, &platforms).await? {
                     SavedTarget::Proven(target) => evidence.prove(target),
                     SavedTarget::Absent
                         if evidence.parent.is_none()
@@ -334,6 +352,7 @@ fn native_target(
     plan: &LegacyPlan,
     erased_bot: &str,
     erased_platform: &str,
+    platforms: &BTreeSet<String>,
 ) -> Result<Option<Target>, ()> {
     if event.get_str("user_id") != Ok(plan.user_id.as_str()) {
         return Ok(None);
@@ -353,9 +372,7 @@ fn native_target(
     {
         return Err(());
     }
-    let cache =
-        std::sync::Arc::new(super::provider_token_exchange_service::TokenExchangeCache::new());
-    if super::channel_adapters::resolve_adapter(&origin.platform, &cache).is_err() {
+    if !platforms.contains(&origin.platform) {
         return Err(());
     }
     if let Some(key) = plan.logical_key.strip_prefix("saved-result:") {
@@ -393,6 +410,7 @@ async fn saved_target(
     plan: &LegacyPlan,
     owners: &[String],
     platform: &str,
+    platforms: &BTreeSet<String>,
 ) -> AppResult<SavedTarget> {
     let Some((turn, destination)) = plan
         .logical_key
@@ -474,14 +492,7 @@ async fn saved_target(
             >(origin.clone()) else {
                 return Ok(SavedTarget::Incomplete);
             };
-            if super::channel_adapters::resolve_adapter(
-                &origin.platform,
-                &std::sync::Arc::new(
-                    super::provider_token_exchange_service::TokenExchangeCache::new(),
-                ),
-            )
-            .is_err()
-            {
+            if !platforms.contains(&origin.platform) {
                 return Ok(SavedTarget::Incomplete);
             }
             if saved
@@ -812,7 +823,9 @@ mod tests {
             .insert_one(&personal)
             .await
             .unwrap();
-        erase_legacy(&state.db, &bot).await.unwrap();
+        erase_legacy(&state.db, &bot, &state.token_exchange_cache)
+            .await
+            .unwrap();
         assert!(
             channel_text_delivery::load(&state.db, &own_key)
                 .await
@@ -866,7 +879,7 @@ mod tests {
                 "inbound_message_id": &source, "channel_bot_id": parent})
                 .await
                 .unwrap();
-            let result = erase_legacy(&state.db, &bot).await;
+            let result = erase_legacy(&state.db, &bot, &state.token_exchange_cache).await;
             if contradiction {
                 assert!(matches!(result, Err(AppError::Conflict(_))));
                 assert!(
@@ -882,7 +895,9 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                erase_legacy(&state.db, &bot).await.unwrap();
+                erase_legacy(&state.db, &bot, &state.token_exchange_cache)
+                    .await
+                    .unwrap();
             } else {
                 result.unwrap();
             }
@@ -978,7 +993,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            erase_legacy(&state.db, &bot).await,
+            erase_legacy(&state.db, &bot, &state.token_exchange_cache).await,
             Err(AppError::Conflict(_))
         ));
         let plans = state
@@ -1005,7 +1020,9 @@ mod tests {
             "_id":unknown_source,"user_id":&bot.user_id,"channel_bot_id":&bot.id})
             .await
             .unwrap();
-        erase_legacy(&state.db, &bot).await.unwrap();
+        erase_legacy(&state.db, &bot, &state.token_exchange_cache)
+            .await
+            .unwrap();
         assert!(
             plans
                 .find_one(doc! {"_id":&receipt.id,"channel_bot_id":native_bot})
@@ -1092,7 +1109,9 @@ mod tests {
         let stats = empty.get_document("executionStats").unwrap();
         assert_eq!(query_counter(stats, "nReturned"), 0);
         assert_eq!(query_counter(stats, "totalDocsExamined"), 0);
-        erase_legacy(&db, &bot).await.unwrap();
+        erase_legacy(&db, &bot, &state.token_exchange_cache)
+            .await
+            .unwrap();
         let observed = super::super::durable_wake_tests::take(&commands);
         assert_eq!(
             observed
@@ -1187,7 +1206,9 @@ mod tests {
                 .unwrap();
             after = Some(actual.last().unwrap().get_str("_id").unwrap().to_owned());
         }
-        erase_legacy(&db, &bot).await.unwrap();
+        erase_legacy(&db, &bot, &state.token_exchange_cache)
+            .await
+            .unwrap();
         let observed = super::super::durable_wake_tests::take(&commands);
         assert_eq!(
             observed
@@ -1259,7 +1280,9 @@ mod tests {
             .insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
                 "turn_id": &turn, "role": "assistant", "handoff_delivery": {"targets": [saved(&turn, &origin)]}})
             .await.unwrap();
-        erase_legacy(&state.db, &bot).await.unwrap();
+        erase_legacy(&state.db, &bot, &state.token_exchange_cache)
+            .await
+            .unwrap();
         assert!(
             channel_text_delivery::load(&state.db, &key)
                 .await

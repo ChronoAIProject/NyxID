@@ -44,6 +44,7 @@
   "Additional manager bot token": "其他管理机器人的令牌",
   "Address: ": "地址： ",
   "After closing this dialog, you cannot retrieve this token. If it is lost, generate another replacement; that immediately invalidates this one.": "关闭此对话框后，你将无法再次获取此令牌。如果丢失，请再生成一个替换令牌；这会立即使当前令牌失效。",
+  "After saving these credentials, ask an authorized operator to resume inbox delivery. Then run Verify Bot and confirm a new message and reply.": "保存凭据后，请有权限的操作员恢复收件箱消息收发。然后运行“验证机器人”，并确认一条新消息及其回复。",
   "Agent (API Key)": "智能体（API 密钥）",
   "Agent API Key": "智能体 API 密钥",
   "Agent activity support could not be loaded.": "无法加载智能体活动支持信息。",

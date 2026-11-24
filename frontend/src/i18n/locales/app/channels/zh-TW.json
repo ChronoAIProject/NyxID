@@ -44,6 +44,7 @@
   "Additional manager bot token": "其他管理機器人的權杖",
   "Address: ": "位址： ",
   "After closing this dialog, you cannot retrieve this token. If it is lost, generate another replacement; that immediately invalidates this one.": "關閉此對話方塊後，你將無法再次取得此權杖。如果遺失，請再產生一個替換權杖；這會立即使目前權杖失效。",
+  "After saving these credentials, ask an authorized operator to resume inbox delivery. Then run Verify Bot and confirm a new message and reply.": "儲存憑證後，請有權限的操作人員恢復收件匣訊息收發。接著執行「驗證機器人」，並確認一則新訊息及其回覆。",
   "Agent (API Key)": "代理程式（API 金鑰）",
   "Agent API Key": "代理程式 API 金鑰",
   "Agent activity support could not be loaded.": "無法載入代理程式活動支援。",

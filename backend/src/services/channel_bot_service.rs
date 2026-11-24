@@ -2964,7 +2964,12 @@ pub(crate) async fn erase_personal_bot(
         }
         // Personal erasure retires only the departing owner's authority. A
         // signed provider request independently authorizes any wider purge.
-        super::channel_meta_journal_erasure::attribute_legacy(db, &bot).await?;
+        super::channel_meta_journal_erasure::attribute_legacy(
+            db,
+            &bot,
+            &state.token_exchange_cache,
+        )
+        .await?;
         super::channel_meta_service::provider::retire_account_inbox(db, owner, bot_id).await?;
         return Ok(());
     }

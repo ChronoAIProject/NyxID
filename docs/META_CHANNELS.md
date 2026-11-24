@@ -326,9 +326,15 @@ Signed requests retain their authenticated authorization cutoff. A missing or
 malformed authorization date keeps that exact target pending without revoking
 its token, unsubscribing it or purging its data. Verified chronology repair is
 checked against both sides of the original cutoff before any provider effect.
-A later grant stays outside the request. A verified replay can restore the
-original authenticated cutoff on an earlier request format; exact durable
-completion proof can settle an already erased target independently of that date.
+A later grant stays outside the request. For an older deletion job missing its
+cutoff, replay the identical signed request to the same app and deletion endpoint
+within 24 hours of its signed issue time. Check the original confirmation code
+for completion. After that window, the granting administrator can request
+deletion again in Meta. The fresh signed request has its own cutoff and
+confirmation code. Once it completes cleanup for the exact captured grant,
+the worker can settle the older target using that grant’s durable completion
+proof. Check both confirmation codes. An older target without exact proof
+stays pending. Never substitute the time of the retry for the original cutoff.
 Deauthorization transitions reread the live grant in their transaction and
 preserve a concurrent deletion request.
 Missing or malformed exact completion
