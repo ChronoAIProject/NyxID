@@ -126,6 +126,42 @@ fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
     }
 }
 
+/// First dispatch and erasure contend on the original grant and proposal.
+/// Already-dispatched publication continues its independent reconciliation.
+pub(crate) async fn fence_proposal_in_session(
+    db: &Database,
+    tx: &mut ClientSession,
+    proposal: &AssistantAgentLearningProposal,
+) -> AppResult<()> {
+    if proposal.source != ProposalSource::Authored
+        || proposal
+            .publication
+            .as_ref()
+            .is_some_and(|p| p.started || p.uncertain_dispatch || p.verified_at.is_some())
+    {
+        return Ok(());
+    }
+    let Some(row)=db.collection::<bson::Document>(CLAIMS).find_one(doc! {"claim.proposal_id":&proposal.id,"owner_id":&proposal.owner_id,"agent_id":&proposal.agent_id})
+        .session(&mut *tx).await? else {return Ok(())};
+    let claim: AuthoredDraftClaim =
+        bson::from_document(row.get_document("claim").map_err(|_| conflict())?.clone())
+            .map_err(|_| conflict())?;
+    if claim.meta_contexts.is_empty() {
+        return Ok(());
+    }
+    let chat = source_authority(
+        db,
+        &proposal.owner_id,
+        &claim.api_key_id,
+        &claim.conversation_id,
+    )
+    .await?;
+    let (conversation, _, _) = acks::fence(db, &chat, tx).await?;
+    let source =
+        acks::source::select(db, tx, &chat, &conversation, Some(&origin(&claim)), false).await?;
+    acks::source::fence_selection(db, tx, &source).await
+}
+
 async fn reuse(
     db: &Database,
     claim_id: &str,
