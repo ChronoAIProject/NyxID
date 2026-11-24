@@ -493,6 +493,7 @@ pub async fn create(
 mod claims;
 pub(crate) mod erasure;
 pub(crate) use claims::fence_proposal_in_session;
+pub use claims::renew;
 
 /// Ornn checks the exact package before the owner is asked to review it, so
 /// a refused format returns to the author as fixable rule identifiers. Only

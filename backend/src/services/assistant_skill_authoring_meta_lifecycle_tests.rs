@@ -25,13 +25,18 @@ async fn settle(f: &Fixture, row: &crate::models::assistant_conversation::Assist
 }
 
 async fn meta_turn(f: &Fixture) -> (ChannelBot, ChatAuthority) {
-    let bot = crate::services::channel_adapters::meta::tests::registered_bot(
+    let mut bot = crate::services::channel_adapters::meta::tests::registered_bot(
         &f.state,
         &f.owner,
         "instagram",
     )
     .await;
     let db = &f.state.db;
+    bot.platform_bot_id = Uuid::new_v4().as_u128().to_string();
+    db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
     crate::services::transaction_service::run_db_only(db, &(db, &bot), |tx, &(db, bot)| {
         Box::pin(meta::scopes::ensure_current(db, tx, bot, true))
     })
@@ -210,5 +215,199 @@ async fn uncertain_draft_publication_keeps_erasure_pending_with_original_evidenc
             .unwrap()
             .is_some()
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn renew_meta_skill_review_keeps_original_b_source_while_a_or_web_uses_home() {
+    for meta_active in [true, false] {
+        let f = fixture("meta_draft_renew_original_source").await;
+        let (b, chat) = meta_turn(&f).await;
+        let first = draft_in_chat(&f, &chat).await.unwrap();
+        let db = &f.state.db;
+        let proposal = db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .find_one(doc! {"_id":first["proposal_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+        let original = cards
+            .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&original.id},
+                doc! {"$set":{"status":"expired","expires_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        let a = if meta_active {
+            Some(meta_turn(&f).await.0)
+        } else {
+            settle(&f, &engine::get(db, &f.owner, &f.row.id).await.unwrap()).await;
+            let request: engine::TurnRequest = serde_json::from_value(
+                json!({"conversation_id":&f.row.id,"text":"Independent web work"}),
+            )
+            .unwrap();
+            engine::begin_turn(db, &f.owner, &request, &f.state.encryption_keys)
+                .await
+                .unwrap();
+            None
+        };
+        let axum::Json(result) = crate::handlers::assistant_agent_learning::approve(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((proposal.agent_id.clone(), proposal.id.clone())),
+            axum::Json(
+                serde_json::from_value(json!({"revision":proposal.revision,
+                "agent_skills_revision":proposal.agent_skills_revision,"renewal_of":&original.id}))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let renewed = cards
+            .find_one(
+                doc! {"_id":result["acknowledgement"]["acknowledgement_id"].as_str().unwrap()},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(renewed.id, original.id);
+        assert_eq!(renewed.creation_turn_id, original.creation_turn_id);
+        assert_eq!(renewed.requested_turn_id, original.requested_turn_id);
+        assert_eq!(renewed.arguments_digest, original.arguments_digest);
+        assert_eq!(
+            bson::to_bson(&renewed.meta_contexts).unwrap(),
+            bson::to_bson(&original.meta_contexts).unwrap()
+        );
+        settle(&f, &engine::get(db, &f.owner, &f.row.id).await.unwrap()).await;
+        if let Some(a) = a {
+            assert!(erase(&f, &a).await);
+            assert!(
+                cards
+                    .find_one(doc! {"_id":&renewed.id,"status":"pending"})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(erase(&f, &b).await);
+        assert!(
+            cards
+                .find_one(doc! {"_id":&renewed.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn prepared_renewal_cannot_recreate_review_after_original_grant_cleanup() {
+    let f = fixture("meta_draft_late_renewal").await;
+    let (bot, chat) = meta_turn(&f).await;
+    let first = draft_in_chat(&f, &chat).await.unwrap();
+    let db = &f.state.db;
+    let proposal = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":first["proposal_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    let binding = publication::binding(
+        &proposal,
+        proposal.publication.as_ref().unwrap(),
+        proposal.agent_skills_revision,
+    );
+    assert!(erase(&f, &bot).await);
+    assert!(
+        renew(
+            db,
+            &chat,
+            first["acknowledgement_id"].as_str().unwrap(),
+            &binding
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+            .count_documents(doc! {"authored_skill.proposal_id":&proposal.id})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn contradictory_mixed_grant_claim_keeps_both_original_operations_for_repair() {
+    let f = fixture("meta_draft_mixed_claim_repair").await;
+    let (a, chat) = meta_turn(&f).await;
+    let first = draft_in_chat(&f, &chat).await.unwrap();
+    let (b, b_chat) = meta_turn(&f).await;
+    let db = &f.state.db;
+    let b_row = engine::get(db, &f.owner, &b_chat.conversation_id)
+        .await
+        .unwrap();
+    let proof = b_row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .channel_context
+        .as_ref()
+        .unwrap();
+    db.collection::<bson::Document>(CLAIMS)
+        .update_one(
+            doc! {"claim.proposal_id":first["proposal_id"].as_str().unwrap()},
+            doc! {"$push":{"claim.meta_contexts":bson::to_bson(proof).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let before = db
+        .collection::<bson::Document>(CLAIMS)
+        .find_one(doc! {"claim.proposal_id":first["proposal_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    for bot in [&a, &b] {
+        let scope = db
+            .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+            .find_one(
+                doc! {"bot_id":&bot.id,"grant_id":meta::scopes::reference(bot).unwrap().grant_id},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let result = crate::services::transaction_service::run_db_only(
+            db,
+            &(db, &scope),
+            |tx, &(db, scope)| Box::pin(erasure::erase_page(db, tx, scope, None)),
+        )
+        .await;
+        assert!(
+            matches!(result,Err(AppError::Conflict(message)) if message.contains("Meta grant evidence is incomplete"))
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(CLAIMS)
+                .find_one(doc! {"_id":before.get("_id").cloned()})
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert!(
+            db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":first["proposal_id"].as_str().unwrap()})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
     db.drop().await.unwrap();
 }
