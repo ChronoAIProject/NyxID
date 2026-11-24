@@ -899,7 +899,8 @@ async fn legacy_meta_policy_cannot_lift_execution_refusal_without_a_live_route()
 async fn meta_org_enable_cannot_fall_back_to_legacy_after_readiness_preflight() {
     use crate::services::{org_channel_service as org, security_readiness_service as readiness};
     let (state, _calls, _server) = setup("meta_org_enable_readiness_boundary").await;
-    let (row, agent, _) = org_meta(&state).await;
+    let (row, agent, org_id) = org_meta(&state).await;
+    provision_org_wallet(&state, &org_id).await;
     let (router, token) = app(&state).await;
     let replica = readiness::overlapping_test_replica(&state.db).await;
     assert!(org::guest_grants_ready(&state.db).await.unwrap());

@@ -1135,7 +1135,7 @@ mod tests {
         let retained = plan(&bot.user_id, &source, None);
         receipts.push(
             doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
-            "inbound_message_id": source, "channel_bot_id": sibling},
+            "inbound_message_id": source, "channel_bot_id": &sibling},
         );
         legacy.push(retained.clone());
         plans.insert_many(legacy).await.unwrap();
@@ -1208,11 +1208,13 @@ mod tests {
                 .count_documents(doc! {"channel_bot_id": null})
                 .await
                 .unwrap(),
-            1
+            0
         );
         assert!(
             plans
-                .find_one(doc! {"_id": retained.get_str("_id").unwrap()})
+                .find_one(
+                    doc! {"_id": retained.get_str("_id").unwrap(), "channel_bot_id": &sibling}
+                )
                 .await
                 .unwrap()
                 .is_some()
