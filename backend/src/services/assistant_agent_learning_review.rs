@@ -3138,6 +3138,37 @@ impl AuthoredCardActions {
 /// dispatched offers only Reprepare (any card of the draft, live or expired)
 /// and Discard/Deny; after a rebuild, older cards offer ShowUpdatedDraft
 /// until the new package has its card.
+pub(crate) fn renewal_eligible(
+    row: &AssistantAgentLearningProposal,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    skills_revision: i64,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let (Some(p), Some(reference)) = (row.publication.as_ref(), card.authored_skill.as_ref())
+    else {
+        return false;
+    };
+    row.source == ProposalSource::Authored
+        && undispatched_status(row)
+        && non_effective(p, now)
+        && !review_required_failure(row)
+        && !legacy_package(p, None)
+        && card.status != "denied"
+        && card.user_id == row.owner_id
+        && card.tool_name.as_deref() == Some(TOOL)
+        && reference.proposal_id == row.id
+        && reference.agent_id == row.agent_id
+        && reference.revision == row.revision
+        && card.arguments_digest.as_deref()
+            == Some(
+                acks::arguments_digest(&publication::binding(row, p, reference.skills_revision))
+                    .as_str(),
+            )
+        && (card.expires_at <= now
+            || card.status == "expired"
+            || reference.skills_revision != skills_revision)
+}
+
 async fn actions_for_card(
     state: &AppState,
     actor: &str,
@@ -3244,9 +3275,7 @@ async fn actions_for_card(
     if !effective && (card.status != "pending" || !card_live) {
         actions.push(AuthoredAction::Discard);
     }
-    if package_publishable
-        && (!card_live || !current_revision)
-        && !lease_live
+    if renewal_eligible(row, card, agent.skills_revision, now)
         && !actions.iter().any(|action| {
             matches!(
                 action,
