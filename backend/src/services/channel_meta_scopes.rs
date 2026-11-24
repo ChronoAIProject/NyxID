@@ -658,11 +658,36 @@ pub(crate) async fn record_thread(
             let mut update=update.clone();
             update.push(doc! {"$set":{
                 "conversation_id":{"$cond":[{"$ne":[{"$ifNull":["$meta_grant.grant_id",null]},&grant.grant_id]},null,"$conversation_id"]},
+                "owner_seen":{"$cond":[{"$ne":[{"$ifNull":["$meta_grant.grant_id",null]},&grant.grant_id]},false,"$owner_seen"]},
                 "meta_grant":{"$literal":bson::to_bson(&grant).map_err(|_|super::grants::incomplete())?},
             }});
             db.collection::<crate::models::nyxbot_channel::NyxbotThread>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
                 .find_one_and_update(partition.clone(),update).upsert(true).return_document(mongodb::options::ReturnDocument::After)
                 .session(tx).await?.ok_or_else(super::grants::incomplete)
+        })
+    }).await
+}
+
+pub(crate) async fn observe_thread(
+    db: &Database,
+    bot: &str,
+    thread: &crate::models::nyxbot_channel::NyxbotThread,
+    fields: Document,
+) -> AppResult<()> {
+    super::super::transaction_service::run_db_only(db, &(db, bot, thread, &fields), |tx, &(db, bot, thread, fields)| {
+        Box::pin(async move {
+            let source = thread.last_relay_message_id.as_deref().or(thread.last_message_id.as_deref())
+                .ok_or_else(super::grants::incomplete)?;
+            let grant = source_in_session(db,tx,source).await?.filter(|grant|grant.bot_id==bot)
+                .ok_or_else(super::grants::incomplete)?;
+            fence_reference(db,tx,&grant,true).await?;
+            let changed = db.collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                .update_one(doc! {"_id":&thread.id,"channel_id":&thread.channel_id,
+                    "last_message_id":&thread.last_message_id,"last_relay_message_id":&thread.last_relay_message_id,
+                    "meta_grant.bot_id":bot,"meta_grant.grant_id":&grant.grant_id}, doc! {"$set":fields.clone()})
+                .session(tx).await?;
+            if changed.matched_count!=1 {return Err(super::grants::incomplete());}
+            Ok(())
         })
     }).await
 }

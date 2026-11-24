@@ -307,6 +307,16 @@ pub(crate) async fn sender(
             if !eligible || !link.active || link.binding_revision != binding.revision {
                 return Err(denied());
             }
+            if super::channel_adapters::meta::is_meta(&row.platform) {
+                let grant = link
+                    .meta_grant
+                    .as_ref()
+                    .filter(|grant| grant.bot_id == row.channel_bot_id)
+                    .ok_or_else(denied)?;
+                if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&grant.bot_id,"is_active":true,"meta_binding.grant_id":&grant.grant_id})
+                    .projection(doc! {"_id":1}).await?.is_none() {return Err(denied());}
+            }
             let acl = super::org_agent_service::access(db, &link.user_id, &binding.org_id).await?;
             if !super::org_agent_service::can_use(&acl) {
                 return Err(denied());
@@ -629,8 +639,20 @@ fn check_audience<'a>(
                 fence,
             )
             .await?;
-            live_doc(db, session, LINKS, doc!{"_id":&execution.link_id,"channel_id":&channel.id,"user_id":actor,
+            let link = live_doc(db, session, LINKS, doc!{"_id":&execution.link_id,"channel_id":&channel.id,"user_id":actor,
             "active":true,"revision":&execution.link_revision,"binding_revision":&execution.revision,"sender_hash":&execution.sender_hash}, fence).await?;
+            if super::channel_adapters::meta::is_meta(&channel.platform) {
+                let grant: crate::models::channel_meta::GrantRef =
+                    bson::from_bson(link.get("meta_grant").cloned().ok_or_else(denied)?)
+                        .map_err(|_| denied())?;
+                if grant.bot_id != channel.channel_bot_id {
+                    return Err(denied());
+                }
+                // The existing route fence below serializes this same parent
+                // with cutover; retain one bot write in this transaction.
+                live_doc(db,session,crate::models::channel_bot::COLLECTION_NAME,
+                    doc! {"_id":&grant.bot_id,"is_active":true,"meta_binding.grant_id":&grant.grant_id},false).await?;
+            }
         }
         // Routes and keys are transport authority even for native sources. Fence
         // their revocation in the same transaction as a turn or billed admission.

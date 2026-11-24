@@ -1105,6 +1105,13 @@ impl MetaService<'_> {
                     binding.subscription = "suspended".into();
                 }
                 scopes::cutover(db,tx,&old,&binding).await?;
+                // An address verified through A is not independent proof for
+                // B. Retain the assignment and policy; require a fresh owner
+                // challenge on the current active connection after consent.
+                db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+                    .update_one(doc! {"channel_bot_id":bot_id,"status":"active"},
+                        doc! {"$set":{"owner_sender_ids":[]},"$unset":{"link_code_hash":"","link_code_expires_at":""},
+                            "$inc":{"execution_policy_revision":1_i64}}).session(&mut *tx).await?;
                 // Participant observations remain on their original rows. Their
                 // admitted grant/range prevents a prior grant from authorizing B;
                 // B replaces a participant row only after fresh provider proof.

@@ -3071,7 +3071,17 @@ async fn inbound_message(
             | chats::Admission::Owner => return Ok(Inbound::Silent("refused_members")),
         }
     } else {
-        if let Some(linked) = link_owner(state, row, sender, text, private).await? {
+        let linked = if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+            let grant = crate::services::channel_meta_service::scopes::event_reference(
+                &state.db, event_key,
+            )
+            .await?
+            .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?;
+            link_owner_with_grant(state, row, sender, text, private, Some(&grant)).await?
+        } else {
+            link_owner(state, row, sender, text, private).await?
+        };
+        if let Some(linked) = linked {
             // Linking changes the persisted sender set after record_chat used
             // the pre-link snapshot. Project only the identity actually saved.
             let current = load_channel(state, &row.user_id, &row.id).await?;
@@ -3141,6 +3151,17 @@ async fn link_owner(
     text: &str,
     private: bool,
 ) -> AppResult<Option<Inbound>> {
+    link_owner_with_grant(state, row, sender, text, private, None).await
+}
+
+async fn link_owner_with_grant(
+    state: &AppState,
+    row: &NyxbotChannel,
+    sender: &Sender<'_>,
+    text: &str,
+    private: bool,
+    grant: Option<&crate::models::channel_meta::GrantRef>,
+) -> AppResult<Option<Inbound>> {
     if row.org_specialist.is_some()
         || sender.kind != crate::models::channel_thread::ThreadSenderKind::Human
     {
@@ -3160,16 +3181,30 @@ async fn link_owner(
                 .into()
         })
     {
-        let linked = state
-            .db
-            .collection::<NyxbotChannel>(CHANNELS)
-            .update_one(
-                doc! {"_id": &row.id, "link_code_hash": hash},
-                doc! {"$inc":{"execution_policy_revision":1_i64},"$addToSet": {"owner_sender_ids": sender.id},
-                "$unset": {"link_code_hash": "", "link_code_expires_at": ""},
-                "$set": {"updated_at": bson::DateTime::now()}},
+        let filter = doc! {"_id": &row.id, "link_code_hash": hash};
+        let update = doc! {"$inc":{"execution_policy_revision":1_i64},"$addToSet": {"owner_sender_ids": sender.id},
+        "$unset": {"link_code_hash": "", "link_code_expires_at": ""},
+        "$set": {"updated_at": bson::DateTime::now()}};
+        let linked = if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+            let grant = grant
+                .filter(|grant| grant.bot_id == row.channel_bot_id)
+                .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?;
+            crate::services::channel_meta_service::scopes::update_record(
+                &state.db,
+                Some(grant),
+                true,
+                CHANNELS,
+                filter,
+                update,
             )
-            .await?;
+            .await?
+        } else {
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .update_one(filter, update)
+                .await?
+        };
         if linked.matched_count != 1 {
             return Ok(Some(Inbound::Silent("refused_link_consumed")));
         }

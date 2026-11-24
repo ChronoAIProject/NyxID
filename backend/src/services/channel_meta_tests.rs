@@ -5926,6 +5926,12 @@ async fn same_owner_reconsent_refuses_old_sources_but_preserves_issued_acknowled
     else {
         panic!("A claim");
     };
+    let channel = uuid::Uuid::new_v4().to_string();
+    state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc! {
+        "_id":&channel,"channel_bot_id":&a.id,"user_id":&a.user_id,"status":"active","owner_sender_ids":["333"],
+        "link_code_hash":"old-challenge","link_code_expires_at":bson::DateTime::now(),"agent_id":"saved-specialist",
+        "private_chats":"everyone","execution_policy_revision":4_i64,
+    }).await.unwrap();
     page_grant(&server, "901", "page-token-b").await;
     let s = service(&state, &server);
     let start = s
@@ -5956,6 +5962,17 @@ async fn same_owner_reconsent_refuses_old_sources_but_preserves_issued_acknowled
         a.meta_binding.as_ref().unwrap().grant_id,
         b.meta_binding.as_ref().unwrap().grant_id
     );
+    let retained = state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one(doc! {"_id":&channel})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.get_array("owner_sender_ids").unwrap().is_empty());
+    assert!(!retained.contains_key("link_code_hash"));
+    assert_eq!(retained.get_str("agent_id"), Ok("saved-specialist"));
+    assert_eq!(retained.get_str("private_chats"), Ok("everyone"));
     assert!(
         journal::begin_bound(
             &state.db,
@@ -6183,6 +6200,14 @@ async fn meta_events_and_guest_chat_sessions_keep_original_grants_and_explicit_s
         current.last_message_id.as_deref(),
         Some("isolation-source-b")
     );
+    assert!(
+        scopes::observe_thread(&state.db, &a.id, &thread, doc! {"owner_seen":true})
+            .await
+            .is_err()
+    );
+    scopes::observe_thread(&state.db, &b.id, &current, doc! {"owner_seen":true})
+        .await
+        .unwrap();
     assert!(
         scopes::record_thread(
             &state.db,

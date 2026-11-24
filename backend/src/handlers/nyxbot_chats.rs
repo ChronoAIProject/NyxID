@@ -160,14 +160,24 @@ pub(super) async fn note_owner_presence(
             chat.owner_chat = true;
             chat.title = Some("You".into());
         }
-        state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .update_one(
-                doc! {"_id": &chat.id,"channel_id":&row.id},
-                doc! {"$set": set},
+        if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+            crate::services::channel_meta_service::scopes::observe_thread(
+                &state.db,
+                &row.channel_bot_id,
+                &chat,
+                set,
             )
             .await?;
+        } else {
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .update_one(
+                    doc! {"_id": &chat.id,"channel_id":&row.id},
+                    doc! {"$set": set},
+                )
+                .await?;
+        }
         chat.owner_seen = true;
     }
     Ok(chat)
