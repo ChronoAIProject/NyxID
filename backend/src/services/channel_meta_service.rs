@@ -1510,6 +1510,9 @@ impl MetaService<'_> {
         .await
     }
     pub async fn refresh(&self, bot: &ChannelBot) -> AppResult<()> {
+        if bot.platform != "instagram" {
+            return Ok(());
+        }
         super::channel_connection_webhook_service::serialized(
             self.db,
             &format!("meta-asset:{}:{}", bot.platform, bot.platform_bot_id),
@@ -1540,8 +1543,7 @@ impl MetaService<'_> {
         }
         let bot = &current;
         let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
-        if bot.platform != "instagram"
-            || !bot.is_active
+        if !bot.is_active
             || binding.provider_revoked
             || binding.grant_reconnect_required
             || binding.subscription == "reconnect_required"

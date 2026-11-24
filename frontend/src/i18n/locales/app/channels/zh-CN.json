@@ -428,6 +428,7 @@
   "Rotate the manager token in Admin → Platform Credentials → Telegram — bot creation. Deleting this channel connection keeps the manager and bot creation available.": "请在“管理 → 平台凭据 → Telegram — 机器人创建”中轮换管理机器人令牌。删除此频道连接后，管理机器人和机器人创建功能仍然可用。",
   "Route / agent connection": "路由 / 智能体连接",
   "Route a conversation to an AI agent using one of your API keys.": "使用你的 API 密钥之一将对话路由到 AI 智能体。",
+  "Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.": "点击“验证机器人”检查收件箱订阅。订阅生效后，以客户身份发送一条消息，并在同一对话中确认收到回复。",
   "Save Credentials": "保存凭证",
   "Save event subscriptions": "保存事件订阅",
   "Save identity": "保存身份",

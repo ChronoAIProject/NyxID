@@ -428,6 +428,7 @@
   "Rotate the manager token in Admin → Platform Credentials → Telegram — bot creation. Deleting this channel connection keeps the manager and bot creation available.": "Rotate the manager token in Admin → Platform Credentials → Telegram — bot creation. Deleting this channel connection keeps the manager and bot creation available.",
   "Route / agent connection": "Route / agent connection",
   "Route a conversation to an AI agent using one of your API keys.": "Route a conversation to an AI agent using one of your API keys.",
+  "Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.": "Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.",
   "Save Credentials": "Save Credentials",
   "Save event subscriptions": "Save event subscriptions",
   "Save identity": "Save identity",

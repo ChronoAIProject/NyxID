@@ -818,6 +818,14 @@ function EditBotNameDialog({
   );
 }
 
+function isMetaInbox(platform: string) {
+  return platform === "messenger" || platform === "instagram";
+}
+
+function MetaVerificationHint() {
+  return <p role="status" className="text-13 text-muted-foreground">{translateUi("Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.")}</p>;
+}
+
 function EditVerificationSection({
   bot,
 }: {
@@ -871,7 +879,7 @@ function EditVerificationSection({
             {errors[field.name] && <p className="text-13 text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
-        {bot.platform === "whatsapp" ? (
+        {(bot.platform === "whatsapp" || isMetaInbox(bot.platform)) ? (
           <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
@@ -1202,7 +1210,7 @@ export function ChannelBotDetailPage() {
         </p>
       ))}
 
-      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
+      {bot.status === "pending_webhook" && (isMetaInbox(bot.platform) ? <MetaVerificationHint /> : bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
 
@@ -1265,7 +1273,7 @@ export function ChannelBotDetailPage() {
       )}
       {(() => {
         if (bot.credential_source === "telegram_manager") return null;
-        if (bot.platform === "messenger" || bot.platform === "instagram") {
+        if (isMetaInbox(bot.platform)) {
           return bot.credential_source === "platform"
             ? <ManagedMetaDetail bot={bot} orgId={ownerOrgId} />
             : <><MetaCustomerSetup botId={bot.id} orgId={ownerOrgId} /><EditVerificationSection bot={bot} /></>;
