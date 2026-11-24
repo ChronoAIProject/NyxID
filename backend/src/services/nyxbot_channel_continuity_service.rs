@@ -117,7 +117,7 @@ pub(crate) async fn activate(
     owner_id: &str,
     id: &str,
     binding: ActivationBinding<'_>,
-) -> AppResult<()> {
+) -> AppResult<NyxbotChannel> {
     let ActivationBinding {
         route_id: route,
         predecessor_id: explicit,
@@ -167,7 +167,8 @@ pub(crate) async fn activate(
                     "link_code_expires_at":bson::DateTime::from_chrono(now+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),
                     "gateway_groups_retry_at":groups_due,"gateway_native_phase":row.gateway_source.as_ref().map(|_|"ready"),"updated_at":bson::DateTime::from_chrono(now)},
                     "$unset":{"gateway_setup_release_id":""}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
-            Ok(())
+            db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&id})
+                .session(&mut *session).await?.ok_or_else(conflict)
         }).await;transactions::transaction_result(work)
     }).await.map_err(transactions::map_transaction_error)
 }

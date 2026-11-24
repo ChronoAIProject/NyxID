@@ -317,7 +317,7 @@ pub(crate) async fn update_assignment_access(
     id: &str,
     agent_id: &str,
     settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
-) -> AppResult<Value> {
+) -> AppResult<(Value, bool)> {
     let row = load_channel(state, actor, id).await?;
     if row.transport != "direct" || !super::channel_adapters::meta::is_meta(&row.platform) {
         let mut result = update_access_inner(state, actor, row, settings, false).await?;
@@ -326,27 +326,30 @@ pub(crate) async fn update_assignment_access(
         if let (Some(result), Some(linked)) = (result.as_object_mut(), linked.as_object()) {
             result.extend(linked.clone());
         }
-        return Ok(result);
+        return Ok((result, false));
     }
     let agent = super::assistant_team_service::agent(&state.db, actor, agent_id).await?;
-    let audience =
-        if settings.private_chats.as_deref() == Some("everyone") && row.org_specialist.is_none() {
-            Some(
-                super::assistant_service_execution::readiness::audience_readiness(
-                    &state.db,
-                    &state.encryption_keys,
-                    &row.user_id,
-                    Some(&agent.id),
-                )
-                .await?,
+    let audience = if settings.private_chats.as_deref() == Some("everyone") {
+        Some(
+            super::assistant_service_execution::readiness::audience_readiness(
+                &state.db,
+                &state.encryption_keys,
+                row.org_specialist
+                    .as_ref()
+                    .map_or(row.user_id.as_str(), |binding| binding.org_id.as_str()),
+                Some(&agent.id),
             )
-        } else {
-            None
-        };
+            .await?,
+        )
+    } else {
+        None
+    };
     let changed = row.agent_id.as_deref() != Some(agent.id.as_str())
         && !(row.agent_id.is_none() && agent.is_nyxbot());
     let (current, applied) =
         mutate_meta_assignment(state, actor, &row, Some(&agent), Some(settings), None).await?;
+    #[cfg(test)]
+    super::durable_wake_tests::after("meta_combined_after_commit").await;
     let mut result = access_result(state, actor, &current, settings, applied, audience).await?;
     if changed {
         if settings.private_chats.as_deref() != Some("everyone") {
@@ -357,7 +360,7 @@ pub(crate) async fn update_assignment_access(
     }
     result["agent"] = json!(agent.name);
     result["changed"] = json!(changed);
-    Ok(result)
+    Ok((result, true))
 }
 
 pub(crate) async fn prepare_guest_model(
@@ -613,6 +616,11 @@ async fn access_result(
             facts.guest_readiness = readiness;
             result["audience_readiness"] = json!(facts);
         }
+    } else if let Some(facts) = audience {
+        // Organization diagnostics use the committed binding's org and target,
+        // just as the existing organization preview does.
+        result["guest_readiness"] = json!(&facts.guest_readiness);
+        result["audience_readiness"] = json!(facts);
     }
     Ok(result)
 }

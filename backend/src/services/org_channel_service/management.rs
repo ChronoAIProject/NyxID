@@ -228,7 +228,17 @@ async fn update_choice(
     {
         return Err(settings_changed());
     }
+    let direct_meta = row.transport == "direct"
+        && crate::services::channel_adapters::meta::is_meta(&row.platform);
+    let require_grants = direct_meta && open_private_chats;
+    #[cfg(test)]
+    if require_grants {
+        crate::services::durable_wake_tests::after("org_meta_before_guest_mode").await;
+    }
     let ready = super::guest_grants_ready(db).await?;
+    if require_grants && !ready {
+        return Err(AppError::SecurityReadinessUnavailable);
+    }
     let daily_credits = input
         .daily_credits
         .or(b.guests.daily_credits)
@@ -263,7 +273,8 @@ async fn update_choice(
     };
     ids.sort();
     ids.dedup();
-    let author_services = !ready && (input.enabled || input.service_ids.is_some());
+    let author_services = !ready
+        && (input.service_ids.is_some() || (input.enabled && (!direct_meta || !b.guests.enabled)));
     let mut authority = BTreeMap::new();
     for id in ids.iter().filter(|_| author_services) {
         let service = db
@@ -325,16 +336,20 @@ async fn update_choice(
         author_services,
         open_private_chats,
         widening,
+        require_grants,
+        direct_meta,
         callback.map(str::to_owned),
     );
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,widening,callback)|Box::pin(async move{
-        if *widening {
-            crate::services::nyxbot_channel_query_service::fence_meta_default(db,row,callback.as_deref(),tx).await?;
-        }
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,widening,require_grants,direct_meta,callback)|Box::pin(async move{
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;
         super::fence_management(db,tx,row,actor).await?;
-        if *ready && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }
+        if (*ready || *require_grants) && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }
         let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
+        let newly_eligible = *direct_meta && !*ready
+            && !legacy_eligible(&b.guests,&live) && legacy_eligible(policy,&live);
+        if *widening || newly_eligible {
+            crate::services::nyxbot_channel_query_service::fence_meta_default(db,row,callback.as_deref(),tx).await?;
+        }
         if *author_services && policy.service_authority.iter().any(|(id,d)| !live.grants.service_ids.contains(id) || service_digest(&live,id)!=*d) {return Err(AppError::Conflict("Agent permissions changed; review the guest delegation again".into()));}
         for id in policy.service_ids.iter().filter(|_| *author_services) {
             let service:UserService=bson::from_document(super::live_doc(db,tx,"user_services",doc!{"_id":id,"user_id":&b.org_id,"is_active":true},true).await?).map_err(|_|super::denied())?;
@@ -367,6 +382,19 @@ async fn update_choice(
         super::lifecycle::retire_in_session(db,tx,&row.id,Some(&b.org_id)).await?;
         crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await
     })).await
+}
+
+/// Match the legacy execution floor, including execution-wide digest refusal.
+fn legacy_eligible(
+    policy: &crate::models::org_channel::GuestPolicy,
+    agent: &AssistantAgent,
+) -> bool {
+    policy.enabled
+        && !policy.revision.is_empty()
+        && policy.daily_credits.is_some_and(|cap| cap > Credits::ZERO)
+        && policy.service_authority.iter().all(|(id, digest)| {
+            agent.grants.service_ids.contains(id) && service_digest(agent, id) == *digest
+        })
 }
 
 fn settings_changed() -> AppError {
