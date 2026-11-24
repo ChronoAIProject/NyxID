@@ -3035,3 +3035,63 @@ async fn channel_transfer_rebinds_all_fields_and_aborts_route_retirement_on_a_da
         assert!(rows.find_one(lookup.clone()).await.unwrap().unwrap() == after);
     }
 }
+
+#[tokio::test]
+async fn whatsapp_transfer_retains_the_enrollment_token_under_its_original_generation() {
+    use super::whatsapp_native as wa;
+    let f = fixture("wa_transfer_token").await;
+    let mut bot = insert_bot(&f).await;
+    let keys = test_utils::test_encryption_keys();
+    bot.platform = "whatsapp".into();
+    bot.platform_bot_id = "333".into();
+    bot.app_secret_encrypted = Some(keys.encrypt(b"fixture-app-secret").await.unwrap());
+    let id = doc! {"_id":&bot.id};
+    let parents = f.db.collection::<ChannelBot>(BOTS);
+    parents.replace_one(id.clone(), &bot).await.unwrap();
+    let empty = wa::configure(&f.db, &bot, "111", "222", true, 0)
+        .await
+        .unwrap();
+    let mut legacy = test_utils::test_app_config();
+    legacy.contextual_record_writes = false;
+    let legacy = crate::crypto::aes::EncryptionKeys::from_config(&legacy);
+    wa::native_verify_token(&f.db, &legacy, &empty)
+        .await
+        .unwrap();
+    let populated = wa::load(&f.db, &bot).await.unwrap().unwrap();
+    let kind = ResourceKind::ChannelBot;
+    let review = preview(&f.db, &f.admin, kind, &bot.id, &f.destination, 5)
+        .await
+        .unwrap();
+    move_resource(
+        &f,
+        kind,
+        &bot.id,
+        &f.destination,
+        &review.version,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap();
+    let rows =
+        f.db.collection::<Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME);
+    assert!(
+        wa::configure(&f.db, &bot, "111", "222", true, populated.revision)
+            .await
+            .is_err()
+    );
+    let retained = rows.find_one(id.clone()).await.unwrap().unwrap();
+    assert!(
+        wa::token_record::migrate(&f.db, &keys, &retained)
+            .await
+            .unwrap()
+    );
+    let current = rows.find_one(id.clone()).await.unwrap().unwrap();
+    wa::token_record::verify(&keys, &current).await.unwrap();
+    for stale in [&empty, &populated] {
+        assert!(wa::native_verify_token(&f.db, &keys, stale).await.is_err());
+    }
+    let destination = parents.find_one(id.clone()).await.unwrap().unwrap();
+    assert!(wa::load(&f.db, &destination).await.unwrap().is_none());
+    assert!(rows.find_one(id).await.unwrap().unwrap() == current);
+    f.db.drop().await.unwrap();
+}

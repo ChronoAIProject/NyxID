@@ -52,6 +52,7 @@ enum Adapter {
     Broker,
     OAuthWebhook,
     ChannelBot,
+    NativeWhatsapp,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -340,7 +341,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "channel_whatsapp_native",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NativeWhatsapp,
         fields: &["native_verify_token_encrypted"],
     },
     Entry {
@@ -565,9 +566,12 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::RECONCILED_DIGEST | previous_labels::OAUTH_WEBHOOK_DIGEST) => {
-            project_labels(&row, previous_labels::reconciled())?
-        }
+        Some(
+            previous_labels::WHATSAPP_DIGEST
+            | previous_labels::CHANNEL_BOT_DIGEST
+            | previous_labels::OAUTH_WEBHOOK_DIGEST
+            | previous_labels::RECONCILED_DIGEST,
+        ) => project_labels(&row, previous_labels::reconciled())?,
         Some(previous_labels::DIGEST) => {
             project_labels(&row, previous_labels::LABELS.iter().copied())?
         }
@@ -764,6 +768,7 @@ async fn verify(
                 .await
         }
         Adapter::ChannelBot => super::channel_bot_record::verify(keys, row).await,
+        Adapter::NativeWhatsapp => super::whatsapp_native::token_record::verify(keys, row).await,
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::verify(keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::verify_current_snapshot(keys, row).await
@@ -890,6 +895,9 @@ async fn migrate(
                 .await
         }
         Adapter::ChannelBot => Box::pin(super::channel_bot_record::migrate(db, keys, row)).await,
+        Adapter::NativeWhatsapp => {
+            super::whatsapp_native::token_record::migrate(db, keys, row).await
+        }
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::migrate(db, keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::migrate_snapshot(db, keys, row).await
@@ -1439,6 +1447,7 @@ mod tests {
     mod registry;
     mod swaps;
     mod webhooks;
+    mod whatsapp;
 
     use super::*;
     use crate::crypto::{

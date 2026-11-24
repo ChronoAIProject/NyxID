@@ -75,6 +75,8 @@ pub struct NativeWhatsapp {
     /// remains hash-only on ChannelBot and is never reused for native setup.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub native_verify_token_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]
     pub revision: i64,
     #[serde(default)]

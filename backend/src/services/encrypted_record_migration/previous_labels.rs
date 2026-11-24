@@ -206,3 +206,10 @@ pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
         })
         .chain(ADDED.iter().copied())
 }
+
+pub(super) const CHANNEL_BOT_DIGEST: &str =
+    "fdb9b9bb2bba7447d7cef07e588e6c1d1ce9461af13bd17be7664d0a47dc1f12";
+
+// Last dev registry before the Meta OAuth session entry was appended.
+pub(super) const WHATSAPP_DIGEST: &str =
+    "6c328214696d6e4cdbb50c0b9aa5ef852c20e6e480fd2203ed6002b48477a50b";
