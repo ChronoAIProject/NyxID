@@ -2645,3 +2645,273 @@ async fn meta_transfer_fences_admitted_authority_and_requires_the_new_owner_to_r
         );
     }
 }
+
+#[tokio::test]
+async fn marked_channel_transfer_rebinds_credentials_in_staged_and_strict_modes_before_meta_cleanup()
+ {
+    use crate::services::{
+        channel_bot_service as bots, channel_meta_service, channel_registration,
+    };
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    for contextual in [false, true] {
+        for platform in ["messenger", "instagram"] {
+            let f = fixture("marked_meta_transfer").await;
+            let mut keys = test_utils::test_encryption_keys();
+            keys.set_contextual_record_writes(contextual);
+            keys.set_allow_legacy_record_reads(!contextual);
+            let bot = insert_bot(&f).await;
+            let fields = [
+                "bot_token_encrypted",
+                "app_secret_encrypted",
+                "registration_pin_encrypted",
+                "webhook_secret_encrypted",
+                "lark_verification_token_encrypted",
+                "lark_encrypt_key_encrypted",
+            ];
+            let mut set = doc! {"platform": platform, "platform_bot_id": "222", "app_id": "111",
+            "meta_binding": {"grant_id": Uuid::new_v4().to_string(), "generation": 7_i64,
+                "token_fingerprint": crate::services::channel_adapters::meta::token_fingerprint("transfer-token"),
+                "grant_actor_id": &f.owner, "grant_subject_id": "900", "app_id": "111",
+                "exclusive_routing_verified": true, "subscription": "active"}};
+            for field in fields {
+                let path = [field];
+                let context =
+                    crate::crypto::record_field::RecordContext::new(BOTS, &bot.id, &f.owner, &path)
+                        .unwrap();
+                let plaintext: &[u8] = if field == "bot_token_encrypted" {
+                    b"transfer-token"
+                } else {
+                    b"transfer-secret"
+                };
+                set.insert(
+                    field,
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: keys.encrypt_record(plaintext, &context).await.unwrap(),
+                    },
+                );
+                set.insert(format!("secret_context_versions.{field}"), 3);
+            }
+            f.db.collection::<Document>(BOTS)
+                .update_one(doc! {"_id": &bot.id}, doc! {"$set": set})
+                .await
+                .unwrap();
+            let reviewed = preview(
+                &f.db,
+                &f.admin,
+                ResourceKind::ChannelBot,
+                &bot.id,
+                &f.destination,
+                5,
+            )
+            .await
+            .unwrap();
+            let request = Uuid::new_v4().to_string();
+            let command = || TransferCommand {
+                actor: &f.admin,
+                api_key_id: None,
+                first_party_human: true,
+                kind: ResourceKind::ChannelBot,
+                resource_id: &bot.id,
+                destination: &f.destination,
+                request_id: &request,
+                expected_version: &reviewed.version,
+                capacity: 5,
+            };
+            assert!(matches!(
+                transfer_with_keys(&f.db, None, command()).await,
+                Err(AppError::Conflict(_))
+            ));
+            assert_eq!(
+                bots::get_bot(&f.db, &bot.id).await.unwrap().user_id,
+                f.owner
+            );
+            transfer_with_keys(&f.db, Some(&keys), command())
+                .await
+                .unwrap();
+            let moved = bots::get_bot(&f.db, &bot.id).await.unwrap();
+            assert_eq!(moved.user_id, f.destination);
+            assert_eq!(moved.meta_binding.as_ref().unwrap().generation, 8);
+            assert_eq!(
+                moved.meta_binding.as_ref().unwrap().subscription,
+                "reconnect_required"
+            );
+            assert!(
+                !moved
+                    .meta_binding
+                    .as_ref()
+                    .unwrap()
+                    .exclusive_routing_verified
+            );
+            for field in fields {
+                assert_eq!(
+                    moved.secret_context_versions.get(field),
+                    contextual.then_some(&3)
+                );
+                let opened = channel_registration::open_secret(&keys, &moved, field)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let expected: &[u8] = if field == "bot_token_encrypted" {
+                    b"transfer-token"
+                } else {
+                    b"transfer-secret"
+                };
+                assert_eq!(opened.as_slice(), expected);
+            }
+            if contextual {
+                let mut wrong_owner = moved.clone();
+                wrong_owner.user_id = f.owner.clone();
+                assert!(bots::decrypt_bot_token(&keys, &wrong_owner).await.is_err());
+            }
+            let http = MockServer::start().await;
+            Mock::given(method("DELETE"))
+                .and(path("/v25.0/222/subscribed_apps"))
+                .and(header("authorization", "Bearer transfer-token"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"success": true})),
+                )
+                .expect(1)
+                .mount(&http)
+                .await;
+            let mut state = test_utils::test_app_state(f.db.clone());
+            state.encryption_keys = std::sync::Arc::new(keys);
+            let mut service = channel_meta_service::MetaService::from(&state);
+            service.endpoints = channel_meta_service::MetaEndpoints {
+                facebook_graph: http.uri(),
+                instagram_graph: http.uri(),
+                instagram_oauth: http.uri(),
+            };
+            assert!(matches!(service.verify(&moved).await,
+                Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"));
+            service.disconnect(&moved).await.unwrap();
+            let retired = bots::get_bot(&f.db, &bot.id).await.unwrap();
+            assert!(!retired.is_active);
+            assert_eq!(
+                retired.meta_binding.as_ref().unwrap().subscription,
+                "removed"
+            );
+            assert!(
+                !retired
+                    .secret_context_versions
+                    .contains_key("bot_token_encrypted")
+            );
+            http.verify().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unmarked_channel_transfer_fences_a_first_marker_even_when_the_transaction_has_a_current_preview()
+ {
+    let f = fixture("channel_transfer_first_marker").await;
+    let keys = test_utils::test_encryption_keys();
+    let bot = insert_bot(&f).await;
+    let rows = f.db.collection::<Document>(BOTS);
+    rows.update_one(doc! {"_id": &bot.id}, doc! {"$set": {"bot_token_encrypted": bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic, bytes: keys.encrypt(b"first-marker-token").await.unwrap(),
+    }}}).await.unwrap();
+    let unmarked = rows.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
+    crate::services::channel_registration::bind_fixture_fields(
+        &f.db,
+        &keys,
+        &bot.id,
+        &["bot_token_encrypted"],
+    )
+    .await;
+    let marked = rows.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
+    let reviewed = preview(
+        &f.db,
+        &f.admin,
+        ResourceKind::ChannelBot,
+        &bot.id,
+        &f.destination,
+        5,
+    )
+    .await
+    .unwrap();
+    // Reproduce the source-capture/preview ordering independently of the
+    // ordinary raw-document preview hash: the transaction will see exactly
+    // its approved marked preview, but the earlier captured source was v0.
+    rows.replace_one(doc! {"_id": &bot.id}, &unmarked)
+        .await
+        .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "channel_transfer_after_secret_snapshot",
+        async {
+            let result = transfer_with_keys(
+                &f.db,
+                Some(&keys),
+                TransferCommand {
+                    actor: &f.admin,
+                    api_key_id: None,
+                    first_party_human: true,
+                    kind: ResourceKind::ChannelBot,
+                    resource_id: &bot.id,
+                    destination: &f.destination,
+                    request_id: &Uuid::new_v4().to_string(),
+                    expected_version: &reviewed.version,
+                    capacity: 5,
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::Conflict(_))));
+        },
+        async {
+            rows.replace_one(doc! {"_id": &bot.id}, &marked)
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    let unchanged = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.user_id, f.owner);
+    assert_eq!(unchanged.ownership_version, 0);
+    assert_eq!(
+        unchanged.secret_context_versions.get("bot_token_encrypted"),
+        Some(&3)
+    );
+    assert_eq!(
+        crate::services::channel_bot_service::decrypt_bot_token(&keys, &unchanged)
+            .await
+            .unwrap()
+            .as_str(),
+        "first-marker-token"
+    );
+    // The same current preview succeeds when its marked source is captured and
+    // rebound normally; the failed attempt leaves no retirement or owner write.
+    transfer_with_keys(
+        &f.db,
+        Some(&keys),
+        TransferCommand {
+            actor: &f.admin,
+            api_key_id: None,
+            first_party_human: true,
+            kind: ResourceKind::ChannelBot,
+            resource_id: &bot.id,
+            destination: &f.destination,
+            request_id: &Uuid::new_v4().to_string(),
+            expected_version: &reviewed.version,
+            capacity: 5,
+        },
+    )
+    .await
+    .unwrap();
+    let moved = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(moved.user_id, f.destination);
+    assert_eq!(
+        crate::services::channel_bot_service::decrypt_bot_token(&keys, &moved)
+            .await
+            .unwrap()
+            .as_str(),
+        "first-marker-token"
+    );
+}

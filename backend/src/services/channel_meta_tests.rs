@@ -1317,6 +1317,13 @@ async fn erasure_then_deauthorization_preserves_the_erasure_and_scrubs_all_provi
 async fn deauthorization_then_deletion_works_after_the_token_was_retired_in_the_same_second() {
     let (state, _, server, bot) = fixture("instagram").await;
     configure(&state, &bot).await;
+    super::super::channel_registration::bind_fixture_fields(
+        &state.db,
+        &state.encryption_keys,
+        &bot.id,
+        &["bot_token_encrypted"],
+    )
+    .await;
     let second = Utc::now().timestamp();
     state.db.collection::<ChannelBot>(BOTS).update_one(doc!{"_id":&bot.id},
     doc!{"$set":{"meta_binding.authorized_at":bson::DateTime::from_millis(second*1000+999)}}).await.unwrap();
@@ -1333,6 +1340,11 @@ async fn deauthorization_then_deletion_works_after_the_token_was_retired_in_the_
     assert!(retired.is_active);
     assert_eq!(retired.status, "failed");
     assert!(retired.bot_token_encrypted.is_empty());
+    assert!(
+        !retired
+            .secret_context_versions
+            .contains_key("bot_token_encrypted")
+    );
     let erased = accept_provider_request(&s, "instagram", &request, true)
         .await
         .unwrap();

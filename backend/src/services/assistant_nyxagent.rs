@@ -1382,6 +1382,10 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             doc! {"conversation_id": 1, "turn_id": 1, "role": 1},
             false,
         ),
+        // Legacy saved-result erasure resolves one exact server-authored turn,
+        // including org bots linked to a person's specialist. Bound this read
+        // independently of the historical conversation owner.
+        (MESSAGES, doc! {"turn_id": 1, "role": 1}, false),
         (
             CONVERSATIONS,
             doc! {"user_id": 1, "agent_id": 1, "updated_at": -1},

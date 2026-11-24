@@ -44,25 +44,6 @@ async fn bot_owners(db: &Database, bot: &ChannelBot) -> AppResult<BTreeSet<Strin
     Ok(owners)
 }
 
-async fn conversation_owners(db: &Database, owners: &BTreeSet<String>) -> AppResult<Vec<String>> {
-    let owners: Vec<_> = owners.iter().cloned().collect();
-    let mut people: BTreeSet<String> = owners.iter().cloned().collect();
-    let mut channels = db
-        .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-        .find(doc! {"$or": [
-            {"bot_owner_id": {"$in": &owners}},
-            {"bot_owner_id": null, "user_id": {"$in": &owners}}
-        ]})
-        .projection(doc! {"user_id": 1})
-        .await?;
-    while let Some(channel) = channels.try_next().await? {
-        if let Ok(person) = channel.get_str("user_id") {
-            people.insert(person.to_owned());
-        }
-    }
-    Ok(people.into_iter().collect())
-}
-
 #[derive(Default)]
 struct Evidence {
     proven: Option<Target>,
@@ -112,15 +93,13 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
     let plans =
         db.collection::<ChannelTextDelivery>(crate::models::channel_text_delivery::COLLECTION_NAME);
     let owners = bot_owners(db, bot).await?;
-    let people = conversation_owners(db, &owners).await?;
     let owners: Vec<_> = owners.into_iter().collect();
     let mut after = None;
     loop {
-        // New parented plans need no source scan. Only legacy saved results
-        // that could have been created during this bot's lifetime need proof.
-        let mut filter = doc! {"channel_bot_id": null, "user_id": {"$in": &owners},
-        "logical_key": {"$regex": "^saved-result:"},
-        "$or": [{"created_at": {"$gte": bson::DateTime::from_chrono(bot.created_at)}}, {"created_at": null}]};
+        // Retained owner/source evidence also covers historical noncanonical
+        // keys. Only expired-source recovery assumes the saved-result format.
+        // New parented plans need neither source nor channel-history scans.
+        let mut filter = doc! {"channel_bot_id": null, "user_id": {"$in": &owners}};
         if let Some(id) = &after {
             filter.insert("_id", doc! {"$gt": id});
         }
@@ -173,12 +152,17 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
             {
                 evidence.observe(receipt, &plan.user_id, "inbound_message_id");
             }
-            if evidence.proven.is_none()
-                && !evidence.conflicting
-                && let Some(target) =
-                    saved_target(db, plan, &people, &owners, &bot.platform).await?
-            {
-                evidence.prove(target);
+            if evidence.proven.is_none() && !evidence.conflicting {
+                let canonical = plan.logical_key.starts_with("saved-result:")
+                    && plan.created_at >= bot.created_at;
+                if !canonical && evidence.parent.is_none() {
+                    // No exact join and no supported Meta saved-result key:
+                    // retain this unrelated historical plan without guessing.
+                    continue;
+                }
+                if let Some(target) = saved_target(db, plan, &owners, &bot.platform).await? {
+                    evidence.prove(target);
+                }
             }
             match evidence.target() {
                 Some(Target::Bot(id)) if id == bot.id => remove.push(doc! {
@@ -203,7 +187,6 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
 async fn saved_target(
     db: &Database,
     plan: &ChannelTextDelivery,
-    people: &[String],
     owners: &[String],
     platform: &str,
 ) -> AppResult<Option<Target>> {
@@ -225,11 +208,18 @@ async fn saved_target(
     }
     let mut replies = db
         .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
-        .find(doc! {"user_id": {"$in": people}, "turn_id": turn, "role": "assistant"})
+        .find(doc! {"turn_id": turn, "role": "assistant"})
         .projection(doc! {"user_id": 1, "handoff_delivery.targets": 1})
+        .limit(65)
+        .max_time(std::time::Duration::from_secs(5))
         .await?;
     let mut evidence = Evidence::default();
+    let mut read = 0;
     while let Some(reply) = replies.try_next().await? {
+        read += 1;
+        if read > 64 {
+            return Ok(None);
+        }
         let Ok(person) = reply.get_str("user_id") else {
             continue;
         };
@@ -270,15 +260,24 @@ async fn saved_target(
                     .get_str("bot_owner_id")
                     .or_else(|_| channel.get_str("user_id"));
                 if channel.get_str("user_id") != Ok(person)
-                    || !owner.is_ok_and(|owner| owners.iter().any(|id| id == owner))
                     || channel.get_str("platform") != Ok(origin.platform.as_str())
                 {
                     return Ok(None);
                 }
-                let Ok(bot) = channel.get_str("channel_bot_id") else {
-                    return Ok(None);
-                };
-                Target::Bot(bot.to_owned())
+                if origin.platform != platform && person == plan.user_id {
+                    // Native org bots journal under the linking person. Its
+                    // verified different-platform destination cannot belong to
+                    // this person's Meta inbox, irrespective of the bot owner.
+                    Target::OtherPlatform
+                } else {
+                    if !owner.is_ok_and(|owner| owners.iter().any(|id| id == owner)) {
+                        return Ok(None);
+                    }
+                    let Ok(bot) = channel.get_str("channel_bot_id") else {
+                        return Ok(None);
+                    };
+                    Target::Bot(bot.to_owned())
+                }
             } else if origin.platform != platform && person == plan.user_id {
                 // A retained non-Meta destination proves this cannot be a Meta
                 // plan even when its old channel was already removed.
@@ -652,6 +651,23 @@ mod tests {
         super::super::channel_reply_delivery::ensure_indexes(&state.db)
             .await
             .unwrap();
+        super::super::assistant_nyxagent::ensure_indexes(&state.db)
+            .await
+            .unwrap();
+        let turn_indexes: Vec<_> = state
+            .db
+            .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(
+            turn_indexes
+                .iter()
+                .any(|index| index.keys == doc! {"turn_id": 1, "role": 1})
+        );
         let indexes: Vec<_> = state
             .db
             .collection::<Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
@@ -695,11 +711,18 @@ mod tests {
             observed.get("find:channel_messages").copied().unwrap_or(0),
             0
         );
+        for command in ["find:nyxbot_channels", "find:assistant_messages"] {
+            assert_eq!(observed.get(command).copied().unwrap_or(0), 0, "{command}");
+        }
         let mut legacy = Vec::new();
         let mut receipts = Vec::new();
-        for _ in 0..205 {
+        for index in 0..205 {
             let source = uuid::Uuid::new_v4().to_string();
-            legacy.push(plan(&bot.user_id, &source, None));
+            let mut historical = plan(&bot.user_id, &source, None);
+            if index % 2 == 0 {
+                historical.insert("logical_key", format!("legacy-result-{index}"));
+            }
+            legacy.push(historical);
             receipts.push(
                 doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
                 "inbound_message_id": source, "channel_bot_id": &bot.id},
@@ -746,6 +769,53 @@ mod tests {
         assert!(
             plans
                 .find_one(doc! {"_id": retained.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    #[tokio::test]
+    async fn personal_meta_erasure_preserves_verified_org_native_handoffs_owned_by_the_linking_person()
+     {
+        let (state, _, _server, bot) = fixture("instagram").await;
+        let org = uuid::Uuid::new_v4().to_string();
+        let native_bot = uuid::Uuid::new_v4().to_string();
+        let native_channel = uuid::Uuid::new_v4().to_string();
+        let mut channel = parent(&bot.user_id, &native_bot, &native_channel, "discord");
+        channel.insert("bot_owner_id", org);
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .insert_one(channel)
+            .await
+            .unwrap();
+        let origin = ChannelOrigin {
+            org_execution: None,
+            native_event_id: Some("retained-native-event".into()),
+            thread: None,
+            nyxbot_channel_id: native_channel,
+            partition: "private-admin".into(),
+            platform: "discord".into(),
+        };
+        let turn = uuid::Uuid::new_v4().to_string();
+        let key = channel_supplemental_delivery::saved_key(&turn, &origin);
+        channel_text_delivery::begin(
+            &state.db,
+            &key,
+            &bot.user_id,
+            "expired-native-source",
+            "old-native",
+            1,
+        )
+        .await
+        .unwrap();
+        state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
+                "turn_id": &turn, "role": "assistant", "handoff_delivery": {"targets": [saved(&turn, &origin)]}})
+            .await.unwrap();
+        erase_legacy(&state.db, &bot).await.unwrap();
+        assert!(
+            channel_text_delivery::load(&state.db, &key)
                 .await
                 .unwrap()
                 .is_some()

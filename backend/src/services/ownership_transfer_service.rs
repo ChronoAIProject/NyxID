@@ -773,6 +773,30 @@ pub async fn transfer_with_keys(
     } else {
         None
     };
+    let bot_rebind = if kind == ResourceKind::ChannelBot {
+        let source = db
+            .collection::<Document>(BOTS)
+            .find_one(doc! {"_id": &resource_id, "is_active": true})
+            .await?
+            .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
+        let bot: ChannelBot = bson::from_document(source.clone())
+            .map_err(|_| AppError::Internal("Invalid channel transfer storage".into()))?;
+        let rebound = if bot.secret_context_versions.is_empty() {
+            Document::new()
+        } else {
+            let keys = keys.ok_or_else(|| {
+                AppError::Conflict("Credential encryption is required for this transfer".into())
+            })?;
+            super::channel_registration::rebind_marked_owner(keys, &bot, &destination).await?
+        };
+        Some((source, rebound))
+    } else {
+        None
+    };
+    #[cfg(test)]
+    if kind == ResourceKind::ChannelBot {
+        super::durable_wake_tests::after("channel_transfer_after_secret_snapshot").await;
+    }
     let refresh_key_id = if kind == ResourceKind::ChannelBot {
         db.collection::<Document>(BOTS)
             .find_one(doc! { "_id": &resource_id, "platform": "x", "is_active": true })
@@ -816,6 +840,7 @@ pub async fn transfer_with_keys(
                 let expected_version = expected_version.clone();
                 let refresh_key_id = refresh_key_id.clone();
                 let catalog_rebind = catalog_rebind.clone();
+                let bot_rebind = bot_rebind.clone();
                 let fresh_oauth_handle = fresh_oauth_handle.clone();
                 Box::pin(async move {
                     let result: AppResult<OwnershipTransfer> = async {
@@ -963,6 +988,9 @@ pub async fn transfer_with_keys(
             if let Some((_, rebound)) = &catalog_rebind {
                 set.extend(rebound.clone());
             }
+            if let Some((_, rebound)) = &bot_rebind {
+                set.extend(rebound.clone());
+            }
             let mut update = doc! { "$set": set };
             if kind == ResourceKind::ChannelBot {
                 let mut increments=doc! {"ownership_version":1_i64};
@@ -991,6 +1019,11 @@ pub async fn transfer_with_keys(
             if let Some((source, _)) = &catalog_rebind {
                 let mut exact = super::record_storage::exact_document_predicate(source);
                 resource_filter.insert("$expr", exact.remove("$expr").ok_or_else(||AppError::Internal("Catalog transfer source is invalid".into()))?);
+            }
+            if let Some((source, _)) = &bot_rebind {
+                let mut exact = super::channel_registration::transfer_source_predicate(source);
+                resource_filter.insert("$expr", exact.remove("$expr").ok_or_else(||
+                    AppError::Internal("Channel transfer source is invalid".into()))?);
             }
             let resource_update = db
                 .collection::<Document>(kind.collection())

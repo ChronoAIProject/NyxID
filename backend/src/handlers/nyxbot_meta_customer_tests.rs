@@ -843,3 +843,65 @@ async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retire
         );
     }
 }
+
+#[tokio::test]
+async fn meta_assignment_repair_does_not_retire_a_route_recovered_by_the_health_checker() {
+    let (state, _calls, _server) = setup("meta_repair_health_recovery").await;
+    let agent = specialist(&state).await;
+    let bot = bot_doc("instagram", "Recovering inbox");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>("channel_bots")
+        .insert_one(bot)
+        .await
+        .unwrap();
+    let (router, token) = app(&state).await;
+    let (status, assigned) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+    assert_eq!(status, StatusCode::OK, "{assigned}");
+    let id = assigned["channel_id"].as_str().unwrap();
+    let channels = state.db.collection::<bson::Document>(CHANNELS);
+    channels
+        .update_one(
+            doc! {"_id": id},
+            doc! {"$set": {"delivery_status": "failing"}},
+        )
+        .await
+        .unwrap();
+    let before = load_channel(&state, OWNER, id).await.unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "channel_repair_before_retirement",
+        async {
+            let (status, result) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+            assert_eq!(status, StatusCode::CONFLICT, "{result}");
+        },
+        async {
+            // The ordinary checker deliberately does not touch updated_at or
+            // assignment revision when recording a recovered delivery probe.
+            channels
+                .update_one(doc! {"_id": id}, doc! {"$set": {"delivery_status": "ok"}})
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    let current = load_channel(&state, OWNER, id).await.unwrap();
+    assert_eq!(current.updated_at, before.updated_at);
+    assert_eq!(
+        current.execution_policy_revision,
+        before.execution_policy_revision
+    );
+    assert_eq!(current.status, "active");
+    assert_eq!(current.route_id, before.route_id);
+    assert_eq!(current.route_api_key_id, before.route_api_key_id);
+    assert_eq!(current.link_code_hash, before.link_code_hash);
+    assert!(
+        crate::services::nyxbot_channel_query_service::reusable(&state.db, OWNER, OWNER, &current,)
+            .await
+            .unwrap()
+    );
+    let (status, retried) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["channel_id"], id);
+    assert!(retried["owner_link_code"].is_null());
+}

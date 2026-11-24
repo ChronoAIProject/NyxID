@@ -349,7 +349,8 @@ async fn reconcile_target(
                 // reconnectable management identity for this grant.
                 state.db.collection::<bson::Document>(BOTS).update_one(
                         doc! {"_id": &bot.id, "meta_binding.grant_id": grant_id, "meta_binding.provider_revoked": true},
-                        doc! {"$set": {"bot_token_encrypted": binary(Vec::new())}},
+                        doc! {"$set": {"bot_token_encrypted": binary(Vec::new())},
+                            "$unset": {"secret_context_versions.bot_token_encrypted": ""}},
                     ).await?;
             } else {
                 if bot.is_active {

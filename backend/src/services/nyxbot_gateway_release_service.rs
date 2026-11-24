@@ -884,6 +884,7 @@ fn repair_snapshot_matches(expected: &NyxbotChannel, current: &NyxbotChannel) ->
         && expected.execution_policy_revision == current.execution_policy_revision
         && expected.notification_epoch == current.notification_epoch
         && expected.status == current.status
+        && expected.delivery_status == current.delivery_status
         && expected.agent_id == current.agent_id
         && expected.route_id == current.route_id
         && expected.route_api_key_id == current.route_api_key_id
