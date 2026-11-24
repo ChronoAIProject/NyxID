@@ -77,7 +77,26 @@ pub async fn customer_setup(
     let mut issued_link = None;
     let row = match existing {
         Some(mut row) => {
-            if row.agent_id.as_deref() != Some(specialist.id.as_str()) {
+            let reusable = super::nyxbot_channel_query_service::reusable(
+                &state.db,
+                &row.user_id,
+                &owner,
+                &row,
+            )
+            .await?;
+            if !reusable {
+                if action != Assign {
+                    return Err(AppError::Conflict(
+                        "Assign this specialist again to repair its inbox route before continuing"
+                            .into(),
+                    ));
+                }
+                let (repaired, link) =
+                    setup::connect_meta(state, actor, None, &bot.id, &specialist, true, Some(&row))
+                        .await?;
+                issued_link = Some(link);
+                row = repaired;
+            } else if row.agent_id.as_deref() != Some(specialist.id.as_str()) {
                 if action != Assign {
                     return Err(AppError::Conflict("The selected specialist differs from the committed inbox assignment. Explicitly assign it before continuing.".into()));
                 }
@@ -88,7 +107,7 @@ pub async fn customer_setup(
         }
         None if action == Assign => {
             let (row, link) =
-                setup::connect_meta(state, actor, None, &bot.id, &specialist, true).await?;
+                setup::connect_meta(state, actor, None, &bot.id, &specialist, true, None).await?;
             issued_link = Some(link);
             row
         }
@@ -155,10 +174,10 @@ pub async fn customer_setup(
             if facts.guest_readiness.status != "ready" {
                 return Err(AppError::ValidationError(facts.guest_readiness.fix.unwrap_or_else(||"Customer model setup is pending. Prepare the guest model, then check readiness again.".into())));
             }
-            setup::update_access(
+            setup::update_confirmed_access(
                 state,
                 actor,
-                &row.id,
+                &row,
                 &AccessSettings {
                     private_chats: Some("everyone".into()),
                     private_chat_posts: Some(false),

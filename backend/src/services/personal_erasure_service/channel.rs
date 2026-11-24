@@ -18,6 +18,18 @@ pub(crate) async fn erase_provider_inbox(
         )
         .find_one(doc! {"_id":bot_id})
         .await?;
+    if retired.is_none() {
+        let completed = state
+            .db
+            .collection::<Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"_id": bot_id, "local_data_erased_at": {"$type": "date"}})
+            .await?;
+        return if completed.is_some() {
+            Ok(())
+        } else {
+            Err(AppError::Conflict("Retired inbox attribution is unavailable; restore verified erasure metadata before completing cleanup".into()))
+        };
+    }
     if retired.as_ref().is_some_and(|bot| {
         bot.is_active
             || bot.meta_binding.as_ref().is_none_or(|binding| {
@@ -48,6 +60,13 @@ pub(crate) async fn erase_provider_inbox(
             doc! {"$inc": {"meta_observation_revision": 1_i64}},
         )
         .await?;
+    super::super::channel_meta_journal_erasure::erase_legacy(
+        &state.db,
+        retired
+            .as_ref()
+            .ok_or_else(|| AppError::Conflict("Retired inbox attribution is unavailable".into()))?,
+    )
+    .await?;
     let channels: Vec<crate::models::nyxbot_channel::NyxbotChannel> = state
         .db
         .collection("nyxbot_channels")
@@ -105,9 +124,6 @@ pub(crate) async fn erase_provider_inbox(
             .delete_one(doc! {"_id":&channel.id,"status":{"$nin":["active","pending"]}})
             .await?;
     }
-    // Legacy saved-result plans predate the bot parent field. Resolve their
-    // exact owner/source pairs before deleting the inbound message records.
-    erase_legacy_text_plans(&state.db, bot_id).await?;
     for (collection, field) in [
         (
             crate::models::channel_text_delivery::COLLECTION_NAME,
@@ -152,6 +168,17 @@ pub(crate) async fn erase_provider_inbox(
     let bots = state
         .db
         .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+    // No late writer can cross the installed erasure fence. Persist the proof
+    // before deleting the last owner/asset-bearing row so crash retries can
+    // distinguish completed cleanup from missing, unattributable history.
+    state
+        .db
+        .collection::<Document>("channel_meta_erasure_fences")
+        .update_one(
+            doc! {"_id": bot_id},
+            doc! {"$set": {"local_data_erased_at": bson::DateTime::now()}},
+        )
+        .await?;
     let deleted = bots
         .delete_one(doc! {
             "_id": bot_id,
@@ -166,38 +193,6 @@ pub(crate) async fn erase_provider_inbox(
         return Err(AppError::Conflict(
             "The inbox changed during erasure; cleanup remains pending".into(),
         ));
-    }
-    Ok(())
-}
-
-async fn erase_legacy_text_plans(db: &Database, bot_id: &str) -> AppResult<()> {
-    use futures::TryStreamExt;
-    let mut messages = db
-        .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
-        .find(doc! {"channel_bot_id": bot_id})
-        .projection(doc! {"_id": 1, "user_id": 1})
-        .await?;
-    let plans = db.collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
-    let mut batch = Vec::with_capacity(100);
-    while let Some(message) = messages.try_next().await? {
-        let owner = message.get_str("user_id").map_err(|_| {
-            AppError::Internal("Unable to resolve saved inbox delivery ownership".into())
-        })?;
-        let source = message.get_str("_id").map_err(|_| {
-            AppError::Internal("Unable to resolve saved inbox delivery source".into())
-        })?;
-        batch.push(doc! {"user_id": owner, "source_id": source});
-        if batch.len() == 100 {
-            plans
-                .delete_many(doc! {"channel_bot_id": null, "$or": &batch})
-                .await?;
-            batch.clear();
-        }
-    }
-    if !batch.is_empty() {
-        plans
-            .delete_many(doc! {"channel_bot_id": null, "$or": batch})
-            .await?;
     }
     Ok(())
 }

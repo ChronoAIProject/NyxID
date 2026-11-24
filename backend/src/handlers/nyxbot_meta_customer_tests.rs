@@ -67,12 +67,19 @@ async fn action(
     (status, serde_json::from_str(&body).unwrap())
 }
 async fn specialist(state: &AppState) -> crate::models::assistant_agent::AssistantAgent {
+    specialist_named(state, "customer-support").await
+}
+
+async fn specialist_named(
+    state: &AppState,
+    name: &str,
+) -> crate::models::assistant_agent::AssistantAgent {
     crate::services::assistant_team_service::create_specialist(
         &state.db,
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
-            name: "customer-support".into(),
+            name: name.into(),
             description: "Customer support".into(),
             display_name: None,
             persona: None,
@@ -421,5 +428,191 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         }
         server.abort();
         state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn personal_meta_enable_refuses_assignment_changed_after_readiness_before_the_access_commit()
+{
+    for restore_first in [false, true] {
+        let (state, _calls, _server) = setup("meta_enable_assignment_race").await;
+        let first = specialist(&state).await;
+        let next = specialist_named(&state, "replacement-support").await;
+        let bot = bot_doc("instagram", "Customer inbox");
+        let bot_id = bot.get_str("_id").unwrap().to_owned();
+        state
+            .db
+            .collection::<bson::Document>("channel_bots")
+            .insert_one(bot)
+            .await
+            .unwrap();
+        let (router, token) = app(&state).await;
+        let (status, assigned) = action(&router, &token, &bot_id, &first.id, "assign").await;
+        assert_eq!(status, StatusCode::OK, "{assigned}");
+        let id = assigned["channel_id"].as_str().unwrap();
+        let confirmed = load_channel(&state, OWNER, id).await.unwrap();
+        let (status, prepared) = action(&router, &token, &bot_id, &first.id, "prepare_model").await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let (status, progress) = action(&router, &token, &bot_id, &first.id, "check").await;
+                assert_eq!(status, StatusCode::OK, "{progress}");
+                if progress["readiness"]["guest_readiness"]["status"] == "ready" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        crate::services::durable_wake_tests::resume_after(
+            "channel_access_before_confirmed_update",
+            async {
+                let (status, result) =
+                    action(&router, &token, &bot_id, &first.id, "enable_guests").await;
+                assert_eq!(status, StatusCode::CONFLICT, "{result}");
+            },
+            async {
+                let (status, changed) = action(&router, &token, &bot_id, &next.id, "assign").await;
+                assert_eq!(status, StatusCode::OK, "{changed}");
+                if restore_first {
+                    let (status, changed) =
+                        action(&router, &token, &bot_id, &first.id, "assign").await;
+                    assert_eq!(status, StatusCode::OK, "{changed}");
+                }
+            },
+        )
+        .await;
+        let current = load_channel(&state, OWNER, id).await.unwrap();
+        assert_eq!(
+            current.agent_id.as_deref(),
+            Some(if restore_first {
+                first.id.as_str()
+            } else {
+                next.id.as_str()
+            })
+        );
+        assert_eq!(current.private_chats.as_deref().unwrap_or("owner"), "owner");
+        assert!(!current.private_chat_posts.unwrap_or(false));
+        // Ordinary callers can still narrow access using a stale assignment
+        // snapshot; only the explicit specialist-confirming setup action adds CAS.
+        crate::services::nyxbot_chat_settings_service::update_as(
+            &state.db,
+            &confirmed,
+            OWNER,
+            &crate::services::nyxbot_chat_settings_service::AccessSettings {
+                private_chats: Some("owner".into()),
+                private_chat_posts: None,
+                apply_to_existing: false,
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn meta_assign_repairs_incomplete_routes_and_keys_then_preserves_healthy_retry_owner_codes() {
+    for platform in ["messenger", "instagram"] {
+        for fault in ["pending", "missing_route", "revoked_key"] {
+            let (state, _calls, _server) = setup("meta_assignment_repair").await;
+            let agent = specialist(&state).await;
+            let bot = bot_doc(platform, "Repairable inbox");
+            let bot_id = bot.get_str("_id").unwrap().to_owned();
+            state
+                .db
+                .collection::<bson::Document>("channel_bots")
+                .insert_one(bot)
+                .await
+                .unwrap();
+            let (router, token) = app(&state).await;
+            let (status, assigned) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+            assert_eq!(status, StatusCode::OK, "{assigned}");
+            let prior = load_channel(&state, OWNER, assigned["channel_id"].as_str().unwrap())
+                .await
+                .unwrap();
+            match fault {
+                "pending" => {
+                    state
+                        .db
+                        .collection::<bson::Document>(CHANNELS)
+                        .update_one(
+                            doc! {"_id": &prior.id},
+                            doc! {"$set": {"status": "pending", "route_id": bson::Bson::Null}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "missing_route" => {
+                    state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::channel_conversation::COLLECTION_NAME,
+                        )
+                        .delete_one(doc! {"_id": prior.route_id.as_ref().unwrap()})
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    state
+                        .db
+                        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                        .update_one(
+                            doc! {"_id": &prior.route_api_key_id},
+                            doc! {"$set": {"is_active": false}},
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+            let (status, repaired) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+            assert_eq!(status, StatusCode::OK, "{platform}/{fault}: {repaired}");
+            let live = load_channel(&state, OWNER, repaired["channel_id"].as_str().unwrap())
+                .await
+                .unwrap();
+            assert_ne!(live.id, prior.id);
+            assert_eq!(live.agent_id.as_deref(), Some(agent.id.as_str()));
+            assert!(
+                repaired["owner_link_code"]
+                    .as_str()
+                    .is_some_and(|code| !code.is_empty())
+            );
+            assert!(
+                crate::services::nyxbot_channel_query_service::reusable(
+                    &state.db, OWNER, OWNER, &live
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(
+                load_channel(&state, OWNER, &prior.id).await.unwrap().status,
+                "disconnected"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::channel_conversation::COLLECTION_NAME
+                    )
+                    .count_documents(
+                        doc! {"channel_bot_id": &bot_id, "is_active": true, "default_agent": true}
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            let hash = live.link_code_hash.clone();
+            let (status, repeated) = action(&router, &token, &bot_id, &agent.id, "assign").await;
+            assert_eq!(status, StatusCode::OK, "{repeated}");
+            assert_eq!(repeated["channel_id"], live.id);
+            assert!(repeated["owner_link_code"].is_null());
+            assert_eq!(
+                load_channel(&state, OWNER, &live.id)
+                    .await
+                    .unwrap()
+                    .link_code_hash,
+                hash
+            );
+        }
     }
 }

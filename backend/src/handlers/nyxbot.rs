@@ -689,6 +689,7 @@ async fn connect_inner(
             allow_existing,
             restoration,
             restoration_claim_id,
+            repair_channel: None,
         },
         &GatewayConnection,
     )

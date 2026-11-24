@@ -53,7 +53,6 @@ pub(crate) async fn begin_bound(
     fingerprint: &str,
     count: usize,
 ) -> AppResult<ChannelTextDelivery> {
-    let bound = super::channel_adapters::meta::is_meta(&bot.platform).then_some(bot);
     begin_versioned(
         db,
         key,
@@ -63,7 +62,7 @@ pub(crate) async fn begin_bound(
         count,
         None,
         None,
-        bound,
+        Some(bot),
     )
     .await
 }
@@ -106,7 +105,8 @@ async fn begin_versioned(
         ],
         created_at: chrono::Utc::now(),
     };
-    if let Some(bot) = bound_bot {
+    if let Some(bot) = bound_bot.filter(|bot| super::channel_adapters::meta::is_meta(&bot.platform))
+    {
         #[cfg(test)]
         super::durable_wake_tests::after("meta_text_plan_before_fence").await;
         return super::transaction_service::run_db_only(
@@ -174,8 +174,25 @@ async fn begin_versioned(
     {
         return Err(error.into());
     }
-    let stored = load(db, key).await?.ok_or_else(unconfirmed)?;
+    let mut stored = load(db, key).await?.ok_or_else(unconfirmed)?;
     validate_plan(&stored, &record)?;
+    if let Some(bot) = bound_bot
+        && stored.channel_bot_id.is_none()
+    {
+        // Adopting an old non-Meta plan changes metadata only. Keep the
+        // original ordinary write path and never recreate a deleted receipt.
+        db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
+            doc! {"_id": &stored.id, "user_id": owner, "source_id": source, "channel_bot_id": null},
+            doc! {"$set": {"channel_bot_id": &bot.id}},
+        ).await?;
+        stored = load(db, key).await?.ok_or_else(unconfirmed)?;
+        validate_plan(&stored, &record)?;
+        if stored.channel_bot_id.as_deref() != Some(bot.id.as_str()) {
+            return Err(AppError::Conflict(
+                "Multipart delivery parent changed".into(),
+            ));
+        }
+    }
     Ok(stored)
 }
 
@@ -420,6 +437,71 @@ mod tests {
         )?;
         let digest = super::super::channel_reply_plan::fingerprint(&parts);
         Ok((parts, digest))
+    }
+
+    #[tokio::test]
+    async fn non_meta_saved_results_record_and_adopt_bot_parents_without_a_transaction_or_losing_receipts()
+     {
+        let (state, _, _server, mut bot) =
+            crate::services::channel_adapters::meta::tests::fixture("instagram").await;
+        bot.platform = "slack".into();
+        bot.meta_binding = None;
+        state
+            .db
+            .collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .replace_one(doc! {"_id": &bot.id}, &bot)
+            .await
+            .unwrap();
+        let (db, commands) = super::super::durable_wake_tests::monitored(&state.db).await;
+        let key = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "d".repeat(64));
+        let fresh = begin_bound(&db, &key, &bot, "source", "hash", 1)
+            .await
+            .unwrap();
+        assert_eq!(fresh.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        let PartClaim::Send(attempt) = claim(&db, &fresh, 0).await.unwrap() else {
+            panic!("new part");
+        };
+        finish(
+            &db,
+            &fresh,
+            0,
+            &attempt,
+            TextPartState::Sent,
+            Some("slack-provider-id"),
+            Some("outbound"),
+        )
+        .await
+        .unwrap();
+        let resumed = begin_bound(&db, &key, &bot, "source", "hash", 1)
+            .await
+            .unwrap();
+        assert!(
+            matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part)
+            if part.platform_message_id.as_deref() == Some("slack-provider-id"))
+        );
+        begin(
+            &db,
+            "legacy",
+            &bot.user_id,
+            "legacy-source",
+            "legacy-hash",
+            1,
+        )
+        .await
+        .unwrap();
+        let adopted = begin_bound(&db, "legacy", &bot, "legacy-source", "legacy-hash", 1)
+            .await
+            .unwrap();
+        assert_eq!(adopted.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        let observed = super::super::durable_wake_tests::take(&commands);
+        assert!(
+            !observed
+                .keys()
+                .any(|command| command.starts_with("commitTransaction:")
+                    || command.starts_with("abortTransaction:"))
+        );
     }
 
     #[tokio::test]

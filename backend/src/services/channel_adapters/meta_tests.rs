@@ -470,7 +470,7 @@ async fn generation_change_reproves_messenger_and_carries_positive_instagram_con
         .unwrap()
         .unwrap();
     assert_eq!(control.get_i64("generation").unwrap(), 2);
-    assert_eq!(control.get_bool("controlled").unwrap(), true);
+    assert!(control.get_bool("controlled").unwrap());
 
     let (state, instagram, _, bot) = fixture("instagram").await;
     let key = format!(
@@ -528,7 +528,7 @@ async fn generation_change_reproves_messenger_and_carries_positive_instagram_con
         .unwrap()
         .unwrap();
     assert_eq!(control.get_i64("generation").unwrap(), 2);
-    assert_eq!(control.get_bool("controlled").unwrap(), true);
+    assert!(control.get_bool("controlled").unwrap());
 }
 
 #[tokio::test]
@@ -589,7 +589,7 @@ async fn instagram_control_loss_stays_sticky_across_generation_and_next_dm() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(control.get_bool("controlled").unwrap(), false);
+    assert!(!control.get_bool("controlled").unwrap());
     assert_eq!(control.get_i64("generation").unwrap(), 1);
     assert_eq!(
         state

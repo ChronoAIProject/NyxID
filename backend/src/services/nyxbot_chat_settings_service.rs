@@ -92,14 +92,40 @@ pub(crate) async fn update_as(
     manager: &str,
     settings: &AccessSettings,
 ) -> AppResult<u64> {
+    update_inner(db, row, manager, settings, false).await
+}
+
+/// Customer setup confirms one specialist and assignment revision before
+/// evaluating readiness. Opening access must commit against that exact choice.
+pub(crate) async fn update_confirmed_as(
+    db: &Database,
+    row: &NyxbotChannel,
+    manager: &str,
+    settings: &AccessSettings,
+) -> AppResult<u64> {
+    update_inner(db, row, manager, settings, true).await
+}
+
+async fn update_inner(
+    db: &Database,
+    row: &NyxbotChannel,
+    manager: &str,
+    settings: &AccessSettings,
+    confirm_assignment: bool,
+) -> AppResult<u64> {
     settings.validate()?;
+    #[cfg(test)]
+    if confirm_assignment {
+        super::durable_wake_tests::after("channel_access_before_confirmed_update").await;
+    }
     let context = (
         db.clone(),
         row.clone(),
         settings.clone(),
         manager.to_owned(),
+        confirm_assignment,
     );
-    super::transaction_service::run_db_only(db, &context, |tx, (db, row, settings, manager)| {
+    super::transaction_service::run_db_only(db, &context, |tx, (db, row, settings, manager, confirm_assignment)| {
         Box::pin(async move {
             if row.org_specialist.is_some() {
                 super::org_channel_service::fence_management(db, tx, row, manager).await?;
@@ -130,6 +156,14 @@ pub(crate) async fn update_as(
             let mut channel_filter = doc! {
                 "_id": &row.id, "user_id": &row.user_id, "bot_owner_id": &row.bot_owner_id,
             };
+            if *confirm_assignment {
+                channel_filter.insert("agent_id", &row.agent_id);
+                channel_filter.insert("channel_bot_id", &row.channel_bot_id);
+                channel_filter.insert("$expr", doc! {"$eq": [
+                    {"$ifNull": ["$execution_policy_revision", 0_i64]},
+                    row.execution_policy_revision,
+                ]});
+            }
             // Preserve the ability to narrow private access on a failed link.
             if settings.private_chats.as_deref() == Some("everyone")
                 || settings.private_chat_posts == Some(true)

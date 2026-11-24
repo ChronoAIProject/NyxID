@@ -285,13 +285,43 @@ token retirement; it erases the captured grant's retired bot, subject, asset,
 username, OAuth credentials, relay metadata, control rows, journal/receipt IDs,
 setup links and associated guest conversations after cleanup. Existing required
 financial/audit records are retained. Saved-result text plans are included:
-new Meta plans carry the bot ID and are created under the inbox erasure fence;
+new saved-result plans on every platform carry the bot ID, and Meta plans are
+created under the inbox erasure fence;
 legacy plans are removed by exact owner/source-message pairs before their
 inbound records are deleted. Erasing one inbox preserves sibling inbox plans.
 A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire
 second; a delayed callback cannot revoke a grant authorized in a later second.
+
+Legacy saved-result plans can outlive the 30-day TTL on `channel_messages` and
+`channel_reply_deliveries`. On dev, a Meta inbox reaches this path through a
+personal owner's saved private-chat result. Its logical key is
+`saved-result:<turn ID>:<destination SHA-256>`; the saved assistant message keeps
+`handoff_delivery.targets` after delivery. Erasure first uses exact owner/source
+joins, then reproduces that destination hash from the saved target and resolves
+its original NyxBot channel's bot parent. It also considers retained ownership
+transfer history. It preserves positively identified sibling and other-platform
+receipts and never purges an owner's unrelated journals. Organization guest
+handoffs and initiated Meta posts do not authorize this saved-result path.
+
+If a relevant legacy receipt has lost both its source and its saved destination
+attribution, cleanup logs `legacy_saved_reply_attribution_required` and remains
+pending. Local delivery stays disabled; a signed deletion obligation receives
+no terminal TTL or success status. For recovery, an operator must restore the
+exact original owner/source metadata or saved `handoff_delivery.targets` and
+channel-parent metadata from independently verified retained records or a
+backup. Verify the owner, turn, destination hash and original bot association;
+do not guess an association, delete all same-owner receipts or use a routing
+checkbox as proof. Restore metadata only, keeping credentials and message text
+out of diagnostics. The existing pending-cleanup worker retries; a manual
+installation can also repeat its ordinary Delete action. If exact attribution
+cannot be recovered, retain the unresolved obligation and escalate it for
+operator handling rather than reporting completed erasure.
+
+After derived cleanup finishes, the erasure fence records a non-identifying
+completion timestamp before the retired bot is removed. This makes a crash
+retry after bot deletion idempotent without retaining provider identifiers.
 
 Turning off enrollment blocks new setup and preserves management/disconnect.
 For an incident, suspend delivery independently:

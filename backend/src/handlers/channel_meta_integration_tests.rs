@@ -382,7 +382,7 @@ async fn signed_held_instagram_control_events_project_without_admitting_dms() {
         .await
         .unwrap()
         .expect("held standby control should be projected after signature verification");
-    assert_eq!(control.get_bool("controlled").unwrap(), false);
+    assert!(!control.get_bool("controlled").unwrap());
     let get_bot = || channel_bot_service::get_bot(&state.db, &bot.id);
     // Capture the signed callback's bot and verification authority while the
     // delivery hold is still active. NyxID verifies the callback while held
@@ -446,7 +446,7 @@ async fn signed_held_instagram_control_events_project_without_admitting_dms() {
         .await
         .unwrap()
         .expect("the delayed signed control observation should be retained");
-    assert_eq!(second_control.get_bool("controlled").unwrap(), false);
+    assert!(!second_control.get_bool("controlled").unwrap());
     assert_eq!(
         second_control.get_i64("generation").unwrap(),
         resumed.meta_binding.as_ref().unwrap().generation

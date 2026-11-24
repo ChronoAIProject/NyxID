@@ -220,6 +220,7 @@ pub(crate) async fn connect_meta(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
     allow_existing: bool,
+    repair_channel: Option<&NyxbotChannel>,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
     use super::nyxbot_channel_connection_service::{
         self as connections, ConnectionRequest, RelayConnection,
@@ -237,6 +238,7 @@ pub(crate) async fn connect_meta(
             allow_existing,
             restoration: false,
             restoration_claim_id: None,
+            repair_channel,
         },
         &RelayConnection,
     )
@@ -270,8 +272,27 @@ pub(crate) async fn update_access(
     channel_id: &str,
     settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
 ) -> AppResult<Value> {
-    settings.validate()?;
     let row = load_channel(state, owner, channel_id).await?;
+    update_access_inner(state, owner, row, settings, false).await
+}
+
+pub(crate) async fn update_confirmed_access(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+    settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
+) -> AppResult<Value> {
+    update_access_inner(state, owner, row.clone(), settings, true).await
+}
+
+async fn update_access_inner(
+    state: &AppState,
+    owner: &str,
+    row: NyxbotChannel,
+    settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
+    confirm_assignment: bool,
+) -> AppResult<Value> {
+    settings.validate()?;
     if let Some(org) = row.bot_owner_id.as_deref()
         && !manages_bot_owner(state, owner, org).await?
     {
@@ -301,9 +322,15 @@ pub(crate) async fn update_access(
         } else {
             None
         };
-    let applied =
+    let applied = if confirm_assignment {
+        crate::services::nyxbot_chat_settings_service::update_confirmed_as(
+            &state.db, &row, owner, settings,
+        )
+        .await?
+    } else {
         crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
-            .await?;
+            .await?
+    };
     audit(
         state,
         owner,

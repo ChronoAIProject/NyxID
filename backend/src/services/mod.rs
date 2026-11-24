@@ -650,4 +650,5 @@ pub mod channel_meta_service;
 pub(crate) mod nyxbot_channel_connection_service;
 pub(crate) mod nyxbot_channel_setup_service;
 
+pub(crate) mod channel_meta_journal_erasure;
 pub mod channel_meta_management_service;

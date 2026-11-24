@@ -72,6 +72,7 @@ pub(crate) struct ConnectionRequest<'a> {
     pub allow_existing: bool,
     pub restoration: bool,
     pub restoration_claim_id: Option<&'a str>,
+    pub repair_channel: Option<&'a NyxbotChannel>,
 }
 
 /// Legacy gateway effects are supplied by the existing transport implementation.
@@ -305,6 +306,7 @@ pub(crate) async fn connect(
         allow_existing,
         restoration,
         restoration_claim_id,
+        repair_channel,
     } = request;
 
     crate::services::org_channel_service::require_target(&state.db, owner, agent).await?;
@@ -325,7 +327,22 @@ pub(crate) async fn connect(
     // Owners verified on a connection being rebuilt stay verified: the bot
     // and their chat-app account are the same.
     let mut rebuilt_from = None;
-    if let Some(existing) = active_for_bot(state, owner, &bot.id).await? {
+    let existing = if let Some(expected) = repair_channel {
+        let current = load_channel(state, owner, &expected.id).await?;
+        if current.channel_bot_id != bot.id
+            || current.execution_policy_revision != expected.execution_policy_revision
+            || current.route_api_key_id != expected.route_api_key_id
+            || current.status != expected.status
+        {
+            return Err(AppError::Conflict(
+                "Channel assignment changed during repair".into(),
+            ));
+        }
+        Some(current)
+    } else {
+        active_for_bot(state, owner, &bot.id).await?
+    };
+    if let Some(existing) = existing {
         if !allow_existing {
             return Err(AppError::Conflict(
                 "This bot already has a selected agent".into(),
@@ -339,6 +356,11 @@ pub(crate) async fn connect(
         )
         .await?
         {
+            if repair_channel.is_some() {
+                return Err(AppError::Conflict(
+                    "Channel repair already completed; check the current assignment".into(),
+                ));
+            }
             link(state, owner, &existing.id, agent).await?;
             let code = new_link_code();
             crate::services::nyxbot_channel_continuity_service::restore_existing(
