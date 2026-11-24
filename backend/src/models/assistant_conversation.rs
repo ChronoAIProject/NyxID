@@ -283,10 +283,26 @@ pub struct TurnActivity {
     pub status: String,
     #[serde(default)]
     pub failure: Option<ToolFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_recovery: Option<MemoryRecovery>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub started_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// Content-free linkage between a rejected memory write and one recovery part.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MemoryRecovery {
+    pub failed_activity_id: String,
+    pub part: u8,
+    pub total: u8,
+    /// Native write evidence. A turn can settle while an activity is still running.
+    #[serde(default)]
+    pub committed: bool,
+    /// Retain the claim for deduplication when history can only show an independent save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlinked: bool,
 }
 
 /// Additive strings keep old replicas readable. State is refreshed from the

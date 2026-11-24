@@ -974,6 +974,136 @@ a fixed notice only to an existing authorized owner thread. No
 public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
+### Reconciling a retained relay source
+
+An existing conversation reader can pass the workflow's `source_event_id` to
+`GET /api/v1/channel-conversations/{id}/messages?source_event_id=<alias>`.
+The alias is the 64-character lowercase hexadecimal value from verified channel
+context. The conversation ID is the same NyxID route ID used for the message
+history. The existing conversation ACL admits the resource owner and active
+members of the owning organization, including viewers. The lookup applies to
+NyxID-relayed events. Native gateway ingress, including native Discord and
+WhatsApp, uses its own receipt paths.
+
+Readers who supply the exact retained alias can see source and result metadata
+for its bound turn, including turns associated with a private channel
+conversation. The response is limited to the alias, the original inbound ID,
+the recorded platform message and sender IDs, the provider response ID, and
+the turn and reply status fields. Message text, attachments, assistant
+conversation and turn IDs, execution identity, and gateway credentials stay
+outside this response. The alias is a lookup key under the conversation ACL.
+
+Before using any returned IDs, require a top-level `source_event_id` that
+exactly equals the requested alias and an `inbound_message_id` that is a
+NyxID message UUID. Older servers can return a normal message page with HTTP
+200 because they ignore the query parameter. Treat any response without the
+exact mapping fields as unresolved during rollout.
+
+The response includes the original `inbound_message_id`, its native
+`platform_message_id` and `sender_platform_id` when recorded, and the provider
+`response_id` when retained. The relay activity's event UUID is the NyxID
+inbound message ID. That UUID also appears as `reply_to_message_id` on related
+outbound message rows. A source may have several related messages, such as an
+explicit tool post and an automatic reply. For CMA-owned delivery, use the
+designated consumer's receipt for the exact event and response to identify the
+answer, and use outbound rows to cross-check platform message IDs.
+
+`turn_status` reports the exact assistant turn's status. `reply_status` reports
+NyxID's local reply evidence. `confirmed` records the completion of NyxID's
+reply operation. `reply_evidence` distinguishes explicit confirmation returned
+by the gateway reply target from a complete set of locally recorded platform
+part receipts. `reply_kind`
+marks confirmed output as `completed_turn_output`, `failed_turn_output`, or
+`unclassified`. Failed-turn output can include a failure notice or partial
+answer and does not establish a successful final answer.
+`pending` covers preparation or a receipt wait, including a gateway 409
+`routed_reply_in_progress` admission. `handed_to_gateway` records provider
+stream or replay custody. A terminal provider frame carries no platform
+receipt evidence. `unconfirmed`, `unknown`,
+`silent` and `refused` preserve distinct local outcomes. A missing
+`response_id` or missing delivery evidence leaves the corresponding join
+or result unknown.
+
+Ordinary text source aliases expire 24 hours after admission. Media events can
+be retained for seven days, with response-read mappings still limited to
+24 hours. Unknown, expired and out-of-conversation sources return 404.
+A lookup does not extend retention or schedule execution.
+
+#### Reconcile the original Work item
+
+The read-only event-operations weekly report reads CMA's recent activity and
+saved snapshots, and paginates NyxID message history with `per_page=100&page=…`
+using the owner's local CLI session. Its join starts with the gateway event
+ID. The workflow still needs to consume the exact alias lookup and use an
+existing authorized Work writer to apply verified receipts to the original
+item. [Weekly report reader](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/blob/c6a98d09f954a01311b3d6b5f23be8907243f764/automation/community-event-ops/ledger.py)
+
+1. Verify the unattended consumer's actual credential on the exact route
+   using an authorized test Work item. The reader must be eligible for that
+   route and have existing owner or active organization membership access.
+   Keep the pending Work item if the consumer lacks that access. Specialist
+   and conversation keys keep their existing route restrictions. Use
+   credentials issued to the reader under its own identity.
+2. Use the saved Work key, route ID and verified `source_event_id` to fetch
+   the exact mapping within the retention window. Verify the alias echo and
+   inbound UUID, then save the mapping with the Work key. Keep an unresolved
+   item pending when the mapping is missing or the old server returns a page.
+3. With the existing gateway reader, match the inbound UUID to the event on
+   the intended channel. Select the designated consumer and exact
+   `response_id`, then check its answer receipt and platform message ID. Keep
+   an absent or ambiguous result unverified. Record the turn outcome and
+   delivery evidence independently so a confirmed explicit post or failure
+   notice does not count as the automatic answer.
+4. Apply the result to the original Work key. Use the source and exact
+   receipt identifiers to reuse the same evidence on later reads. Preserve
+   verified evidence when a later activity view omits the receipt. Consume
+   the same receipt twice and verify one Work item, one set of evidence, no
+   second send, and no increase in the completion count on the second pass.
+   Check that the next report reflects the reconciled result. [Receipt consumption](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/issues/108) · [Work update and replay](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/issues/112)
+
+Saving an alias mapping preserves the join for that Work item. Weekly receipt
+coverage depends on the gateway's retained capture and its reported coverage
+window. The current recent activity view returns up to 50 events, and its
+saved snapshots can leave gaps. Track durable history activation and weekly
+coverage separately.
+[CMA receipt history](https://github.com/ChronoAIProject/cma/issues/2188)
+
+#### Investigate a historical failed turn after delivery
+
+Keep the UTC occurrence time, original relay event UUID or verified source
+alias, designated CMA `response_id` (`resp_…`), and any confirmed platform
+message ID in the protected incident record. The event and response IDs
+identify the gateway occurrence. The source alias joins the workflow to the
+original inbound. The platform message ID identifies the observed send. For
+the cases on #2487, start with the retained evidence from the incident.
+[Incident report](https://github.com/ChronoAIProject/NyxID/issues/2487#issuecomment-6892205110) · [Follow-up evidence](https://github.com/ChronoAIProject/NyxID/issues/2487#issuecomment-6893592385)
+
+The NyxID trace tools require the internal **turn UUID v4**. In retained
+operator evidence, a `nyxbot_channel_answer_delivery` audit row can carry the
+source alias in `event_data.event_id` and the bound UUID in
+`event_data.turn_id`. An operator with existing access to retained provider
+and event metadata can also follow the exact provider response to its source
+event and read the event's bound `turn_id`. The relay source lookup returns
+the gateway response ID for receipt correlation.
+`X-NyxID-Trace-Id` can also supply the UUID when the response headers were
+written after admission. Before admission that header can carry a request
+ID. Use only a confirmed turn association.
+
+With that UUID, use **Admin → Audit log → Search field → Turn ID (exact)**
+or the existing admin `GET /api/v1/admin/audit-log?turn_id=<UUID>` and
+`GET /api/v1/admin/audit-log/count?turn_id=<UUID>` under current RBAC. Check
+that the response echoes `applied_turn_id`. For timing, give the same UUID or
+its 32-character hex form to `scripts/turn-trace.py --trace-id` with the
+authorized NDJSON exports. Use delivery and execution milestones separately.
+[Turn trace reader and bounds](TURN_TRACE.md#admin-reader)
+
+If the turn association has expired, old audit rows lack the turn UUID, or
+trace exports lack the terminal span or counterpart records, record that
+coverage gap. Trace metadata contains stage, outcome and timing when recorded.
+It cannot recover tool arguments, tool results or message content. Preserve
+any confirmed send and recorded failed turn, and leave the historical cause
+unresolved when the retained evidence cannot establish it.
+
 ### Reply-target receipts and dispatch lookup
 
 `POST /reply-targets/{ref}/messages` with exactly `409` and

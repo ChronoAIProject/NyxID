@@ -397,6 +397,28 @@ pub async fn live_specialist(
     Ok(agent)
 }
 
+/// Pin a personal NyxBot memory selector to the agent used for the write.
+/// Organization selectors have already been resolved by the caller.
+pub(crate) async fn normalize_memory_agent(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    args: &mut serde_json::Value,
+) -> AppResult<()> {
+    let Some(selector) = args.get("agent").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    if selector == chat.agent_name {
+        args["agent"] = chat.agent_id.clone().into();
+    } else if chat.is_orchestrator()
+        && args.get("org").is_none()
+        && Uuid::parse_str(selector).is_err()
+    {
+        let agent = live_specialist(db, &chat.user_id, selector).await?;
+        args["agent"] = agent.id.into();
+    }
+    Ok(())
+}
+
 /// Resolve a specialist that the acting person may delegate work to.
 ///
 /// Personal specialists keep their historical name/ID behaviour and always

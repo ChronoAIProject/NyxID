@@ -895,10 +895,28 @@ optional `failure.reason`; old rows and unknown reasons retain generic copy.
 Only native diagnostics populate it, never downstream tool text. Neither audit
 nor activity stores rejected note contents or secret matches. Storage/internal
 failures mean the write is unconfirmed: inspect notes before retrying, since the
-write may already have committed. A subsequent successful save does not erase a
-failed step or prove that all of its intended facts were recovered. Prompts require
-reporting unresolved facts and only confirming saves with successful receipts.
-There is no inferred compensation link between different calls.
+write may already have committed. A definite rejection eligible for a retry of
+the same operation can return
+`details.failed_activity_id`. To recover that intent in the same live turn and
+for the same agent, pass it in `recovery` with a 1-based `part` and a fixed
+`total` of 1–10. A split can only recover a failed new note. A replacement uses
+one part and the original replacement ID. NyxBot can address a personal
+specialist by its name or ID. The server resolves the name before writing.
+Validation and owner confirmation run before reserving a part. A part stays
+reserved while its outcome is running, committed or uncertain, and can be
+retried after a definite rejection. If the original activity has left the
+live turn when the exact approval is consumed, the authorized save runs
+independently and returns
+`recovery_status: unlinked_after_approval`. The settled web activity preserves
+the original failure and counts confirmed saves that NyxBot explicitly linked
+to it. The count describes write receipts. If a note committed before its
+activity receipt could be recorded, history shows that part as unconfirmed.
+Copy contains no note text. The agent must report unresolved parts using the
+tool receipts.
+
+During a rolling upgrade, an older replica can reject the new argument or
+settle a turn without preserving the new receipt. Older history still renders
+ordinary write outcomes. Verify linked recovery after the backend rollout.
 
 Owner/team appends use an atomic capacity fence; replacements return the atomic
 post-write snapshot, so later edits cannot change the receipt. Destroyed agents

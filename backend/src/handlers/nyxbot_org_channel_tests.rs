@@ -668,6 +668,7 @@ async fn cold_guest_model_setup(native: bool) {
     let input = seen[1]["input"].as_str().unwrap();
     assert!(input.contains("The linking administrator supplies transport only"));
     assert!(input.contains("Guest model and tool use is charged to the organization"));
+    assert!(input.contains("including writes that meet the tool's stated conditions"));
     assert!(
         input.contains(
             "Guest execution cannot use account tools, machines, saved logins or approvals"

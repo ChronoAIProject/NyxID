@@ -402,6 +402,345 @@ fn group_event(text: &str, id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn org_lark_provider_source_alias_resolves_under_the_route_read_authority() {
+    Box::pin(org_lark_source_result(false)).await;
+}
+
+#[tokio::test]
+async fn org_lark_detached_reply_lookup_distinguishes_admission_from_gateway_receipt() {
+    Box::pin(org_lark_source_result(true)).await;
+}
+
+async fn org_lark_source_result(detach_stream: bool) {
+    Box::pin(async {
+        use crate::{
+            crypto::jwt,
+            models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
+            services::{channel_platform::InboundMessage, channel_relay_service},
+        };
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let (state, calls, server) = setup("org_lark_source_result").await;
+        let _server = tokio_util::task::AbortOnDropHandle::new(server);
+        let (mut channel, key, _, org_id) = org_channel(&state, false).await;
+        assert_eq!(channel.user_id, OWNER);
+        assert_eq!(channel.bot_owner_id.as_deref(), Some(org_id.as_str()));
+        member(&state, &channel, &org_id).await;
+        let viewer = Uuid::new_v4();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&viewer.to_string(), UserType::Person))
+            .await
+            .unwrap();
+        state
+            .db
+            .collection("org_memberships")
+            .insert_one(crate::test_utils::test_membership(
+                &org_id,
+                &viewer.to_string(),
+                OrgRole::Viewer,
+                None,
+            ))
+            .await
+            .unwrap();
+        channel.platform = "lark".into();
+        channel.gateway_bot_id = Some("ou_fixture_bot".into());
+        channel.gateway_channel_id = Some("cmaeg1.ch.test".into());
+        let gateway = MockServer::start().await;
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = GATEWAY_SLUG.into();
+        service.base_url = gateway.uri();
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/channel-capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}),
+            ))
+            .mount(&gateway)
+            .await;
+        let reply_path = "/reply-targets/cmaeg1.rt.fixture/messages";
+        if detach_stream {
+            Mock::given(method("POST"))
+                .and(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "reply_target_ref": "cmaeg1.rt.fixture",
+                    "expires_at": (Utc::now() + ChronoDuration::hours(1)).timestamp(),
+                })))
+                .mount(&gateway)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(reply_path))
+                .respond_with(
+                    ResponseTemplate::new(409)
+                        .set_body_json(json!({"detail":"routed_reply_in_progress"})),
+                )
+                .mount(&gateway)
+                .await;
+        }
+        let route = channel.route_id.as_deref().unwrap();
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id": &channel.id}, &channel)
+            .await
+            .unwrap();
+        for (collection, id) in [
+            ("channel_bots", channel.channel_bot_id.as_str()),
+            ("channel_conversations", route),
+        ] {
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .update_one(doc! {"_id": id}, doc! {"$set": {"platform": "lark"}})
+                .await
+                .unwrap();
+        }
+        bind(&state, &key).await;
+        assert_eq!(
+            put_conversation(
+                State(state.clone()),
+                Path(("bnd_turns".into(), GROUP_PARTITION.into())),
+                bearer(&key),
+            )
+            .await
+            .status(),
+            StatusCode::OK,
+        );
+        let event_id = Uuid::new_v4().to_string();
+        let question = "A synthetic organization question";
+        let inbound = InboundMessage {
+            platform_message_id: "om_source_fixture".into(),
+            conversation_id: "org-shared-chat".into(),
+            conversation_type: "group".into(),
+            sender_platform_id: "7".into(),
+            sender_display_name: None,
+            content_type: "text".into(),
+            text: Some(question.into()),
+            attachments: vec![],
+            embedded_attachments: vec![],
+            embedded_attachments_omitted: 0,
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: json!({}),
+        };
+        let source = channel_relay_service::inbound_metadata(
+            &channel.channel_bot_id,
+            route,
+            &org_id,
+            "lark",
+            &inbound,
+            &channel.route_api_key_id,
+            &event_id,
+        );
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .insert_one(&source)
+            .await
+            .unwrap();
+        let mut request = group_event(question, &event_id);
+        request["event_context"]["activity"]["source"] =
+            json!({"type": "nyxid_relay", "platform": "lark", "route_id": route});
+        request["metadata"] = json!({
+            "cmaeg.channel": &sha256_hex("cmaeg1.ch.test")[..16], "cmaeg.event": event_id,
+            "cmaeg.partition":"0123456789abcdef", "cmaeg.actor":"7",
+        });
+        let response = respond(&state, &key, &request, &event_id).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_id = response.headers()["x-cma-response-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let mut stream = response.into_body();
+        let created = stream.frame().await.unwrap().unwrap().into_data().unwrap();
+        let created = String::from_utf8(created.to_vec()).unwrap();
+        let created: Value = serde_json::from_str(
+            created
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(created["type"], "response.created");
+        assert_eq!(created["response"]["id"], response_id);
+        assert_eq!(created["response"]["status"], "queued");
+        if detach_stream {
+            // Drop after acceptance, as the replica gateway does. Drive the
+            // normal delivery worker until it has recorded the routed 409.
+            drop(stream);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let events = state.db.collection::<bson::Document>(EVENTS);
+                loop {
+                    let event = events
+                        .find_one(doc! {"relay_message_id": &source.id})
+                        .await
+                        .unwrap()
+                        .expect("admitted relay event");
+                    if event
+                        .get_document("delivery")
+                        .ok()
+                        .and_then(|delivery| delivery.get_document("gateway_observation").ok())
+                        .is_some_and(|receipt| receipt.get_i32("status") == Ok(409))
+                    {
+                        break;
+                    }
+                    late_delivery::process(&state, event.get_str("_id").unwrap()).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("local writer must record gateway admission");
+        } else {
+            let rest = axum::body::to_bytes(stream, 64 * 1024).await.unwrap();
+            let rest = std::str::from_utf8(&rest).unwrap();
+            assert!(rest.contains("Here is your answer"), "{rest}");
+            let completed = rest
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(|data| serde_json::from_str::<Value>(data).unwrap())
+                .find(|frame| frame["type"] == "response.completed")
+                .unwrap();
+            assert_eq!(completed["response"]["id"], response_id);
+        }
+        let [call] = calls
+            .lock()
+            .await
+            .clone()
+            .try_into()
+            .expect("single provider run");
+        let contexts = turn_context_tests::contexts(&call);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["sender"]["classification"], "org_member");
+        assert_eq!(contexts[0]["identity"]["platform"], "lark");
+        let alias = contexts[0]["source_event_id"].as_str().unwrap();
+        assert_eq!(alias.len(), 64);
+        let token = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &viewer,
+            "openid account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(state.clone());
+        let reader = private.with_state(state.clone());
+        let read = || async {
+            let result = reader
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!(
+                        "/api/v1/channel-conversations/{route}/messages?source_event_id={alias}"
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = result.status();
+            let output = body_text(result).await;
+            assert_eq!(status, StatusCode::OK, "{output}");
+            serde_json::from_str::<Value>(&output).unwrap()
+        };
+        let mapping = read().await;
+        assert_eq!(mapping["source_event_id"], alias);
+        assert_eq!(mapping["inbound_message_id"], source.id);
+        assert_eq!(mapping["platform_message_id"], inbound.platform_message_id);
+        assert_eq!(mapping["sender_platform_id"], inbound.sender_platform_id);
+        assert_eq!(mapping["turn_status"], "completed");
+        assert_eq!(mapping["response_id"], response_id);
+        assert_eq!(
+            mapping["reply_status"],
+            if detach_stream {
+                "pending"
+            } else {
+                "handed_to_gateway"
+            }
+        );
+        assert!(mapping["reply_evidence"].is_null());
+        assert!(mapping["reply_kind"].is_null());
+        if detach_stream {
+            let before = gateway
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|request| request.url.path() == reply_path)
+                .collect::<Vec<_>>();
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].headers["idempotency-key"], alias);
+            assert_eq!(
+                before[0].body_json::<Value>().unwrap()["text"],
+                "Here is your answer"
+            );
+            gateway.reset().await;
+            Mock::given(method("POST"))
+                .and(path(reply_path))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
+                )
+                .mount(&gateway)
+                .await;
+            // Advance only the polling schedule. The receipt and terminal
+            // delivery state must come from the real worker.
+            state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .update_one(
+                    doc! {"_id": alias},
+                    doc! {"$set":{
+                        "delivery.receipt_due_at": bson::DateTime::from_millis(0),
+                    }},
+                )
+                .await
+                .unwrap();
+            late_delivery::sweep(&state).await.unwrap();
+            let after = gateway.received_requests().await.unwrap();
+            assert_eq!(after.len(), 1);
+            assert_eq!(after[0].url.path(), reply_path);
+            assert_eq!(after[0].headers["idempotency-key"], alias);
+            assert_eq!(before[0].body, after[0].body);
+            let observed = read().await;
+            assert_eq!(observed["response_id"], response_id);
+            assert_eq!(observed["turn_status"], "completed");
+            assert_eq!(observed["reply_status"], "confirmed");
+            assert_eq!(observed["reply_evidence"], "gateway_reply_receipt");
+            assert_eq!(observed["reply_kind"], "completed_turn_output");
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .count_documents(doc! {
+                    "reply_to_message_id": &source.id, "direction":"outbound",
+                })
+                .await
+                .unwrap(),
+            0,
+        );
+        crate::test_utils::drop_test_database(&state.db).await;
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn identity_2187_org_group_transcript_is_current_and_rendered_once_for_coalesced_sources() {
     let (state, calls, server) = setup("identity_2187_org_group_queue").await;
     let _server = tokio_util::task::AbortOnDropHandle::new(server);

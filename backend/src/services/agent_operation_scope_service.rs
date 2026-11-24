@@ -2030,19 +2030,38 @@ pub async fn filter_guest_catalog(
             continue;
         }
         let access = guest_level(&agent, &service.service_id, mcp_catalog_id(service));
-        service.endpoints.retain(|endpoint| {
+        service.endpoints.retain_mut(|endpoint| {
             let Ok(method) = reqwest::Method::from_bytes(endpoint.method.as_bytes()) else {
                 return false;
             };
-            let effects = mcp_service::possible_operation_effects(
-                &method,
-                service
-                    .durable_endpoint_metadata
-                    .get(&endpoint.endpoint_id)
-                    .copied()
-                    .unwrap_or_default(),
-            );
-            guest_level_allows(access, effects)
+            let metadata = service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .copied()
+                .unwrap_or_default();
+            let effects = mcp_service::possible_operation_effects(&method, metadata);
+            if !guest_level_allows(access, effects) {
+                return false;
+            }
+            if access == crate::models::assistant_agent::GuestAccess::Use
+                && metadata.destructive
+                && metadata.append_only
+                && let Some(query) = metadata.append_only_query.filter(|query| !query.is_empty())
+            {
+                // Chat search can truncate long descriptions when it omits the schema.
+                let mut description = String::new();
+                for (name, value) in query.iter().filter_map(|(name, value)| {
+                    value.as_str().map(|value| (name, value))
+                }) {
+                    description.push_str(&format!(
+                        "Guest access requires the query argument {name}={value}. Supply it once per request. "
+                    ));
+                }
+                description.push_str("The effective approval policy must also allow the write. ");
+                description.push_str(endpoint.description.as_deref().unwrap_or(&endpoint.name));
+                endpoint.description = Some(description);
+            }
+            true
         });
     }
     services.retain(|service| !service.endpoints.is_empty());
