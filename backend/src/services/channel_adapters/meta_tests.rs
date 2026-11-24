@@ -308,13 +308,28 @@ async fn signed_instagram_control_loss_survives_rewrap_and_rejects_a_replaced_si
             .unwrap();
         if replace {
             let live = get_bot(&state.db, &bot.id).await.unwrap();
-            let mut set =
-                doc! { APP: encrypted(keys.encrypt(b"new-signing-secret").await.unwrap()) };
-            let mut unset = bson::Document::new();
-            continuity::replacement(&live, &mut set, &mut unset).unwrap();
-            bots.update_one(doc! {"_id": &bot.id}, doc! {"$set": set, "$unset": unset})
+            let bytes = crate::services::channel_bot_record::encrypt(
+                &keys,
+                &live.id,
+                &live.user_id,
+                APP,
+                "new-signing-secret",
+            )
+            .await
+            .unwrap();
+            assert!(
+                continuity::update_credentials(
+                    &state.db,
+                    &keys,
+                    &adapter,
+                    &live,
+                    doc! {"_id": &bot.id},
+                    doc! {APP: encrypted(bytes)},
+                    doc! {},
+                )
                 .await
-                .unwrap();
+                .unwrap()
+            );
         } else {
             let rewrapped = continuity::rewrap_fixture(&state.db, &keys, &signed_bot, &[APP]).await;
             assert_ne!(
