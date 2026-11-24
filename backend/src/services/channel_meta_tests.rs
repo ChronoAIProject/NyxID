@@ -6644,7 +6644,10 @@ async fn overflow_installation(state: &crate::AppState, bot: &ChannelBot) -> Cha
         })
         .collect();
     bots.insert_many(earlier).await.unwrap();
-    target
+    bots.find_one(doc! {"_id":&target.id})
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
