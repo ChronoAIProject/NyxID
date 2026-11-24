@@ -1803,3 +1803,201 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
     assert_eq!(approval_requests.count_documents(doc! {}).await.unwrap(), 0);
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn workspace_booking_append_checks_the_connection_owners_policy_for_both_guest_turns() {
+    use crate::billing_integration_tests::{FakeLago, billing_service, create_usage_index};
+    use crate::models::assistant_conversation::TurnOrigin;
+    use crate::models::service_approval_config::{
+        ApprovalEffect, ApprovalMode, ApprovalRule, ApprovalVerb,
+    };
+    use crate::services::{
+        approval_service, assistant_agent_credential_service as credentials,
+        assistant_nyxagent as engine, destination_routing::tests as google,
+        feature_flag_service as flags, proxy_service::TARGET_HTTP_CLIENT_BUILDER,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let mut f = Fixture::new("guest_booking_append").await;
+    let db = f.org.state.db.clone();
+    google::seed(&db).await;
+    create_usage_index(&db).await;
+    f.org.state.billing = Arc::new(billing_service(&db, Arc::new(FakeLago::default()), 1000));
+    f.org.state.billing.ensure_wallet(&f.org.org).await.unwrap();
+    f.guests(vec![]).await;
+    ready(&mut f).await;
+    adopt(&f).await;
+    reload(&mut f).await;
+    flags::set_platform_override(
+        &db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.org.admin,
+    )
+    .await
+    .unwrap();
+
+    let person = &f.org.outsider;
+    let (personal_agent, _) = team::create_specialist(
+        &db,
+        &f.org.state.encryption_keys,
+        person,
+        f.org.request("booking"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let echo = google::Echo::start().await;
+    f.org.state.http_client = echo.client.clone();
+    let (_, router) = crate::routes::build_router_with_state(f.org.state.clone());
+    let router = router.with_state(f.org.state.clone());
+    let resource = "/v4/spreadsheets/event/values/%E7%99%BB%E8%AE%B0%21A%3AH:append";
+    let values = json!({"values":[["reservation"]]});
+    for (owner, admin, agent) in [
+        (person, person, &personal_agent.id),
+        (&f.org.org, &f.org.admin, &f.agent.id),
+    ] {
+        let workspace = google::connect(&db, owner, "api-google-workspace").await;
+        let catalog_id = workspace.catalog_service_id.as_deref().unwrap();
+        let ids = db
+            .collection::<Document>(crate::models::service_endpoint::COLLECTION_NAME)
+            .distinct(
+                "_id",
+                doc! {"service_id":catalog_id,"name":{"$in":[
+                "sheets_get_spreadsheet","sheets_get_values","sheets_append_values"]}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 3);
+        team::set_grants(
+            &db,
+            admin,
+            agent,
+            GrantChange::GuestOperations {
+                base: Box::new(GrantChange::Add(AgentGrants {
+                    service_ids: vec![workspace.id.clone()],
+                    ..Default::default()
+                })),
+                selections: [(
+                    workspace.id,
+                    serde_json::from_value(json!({
+                        "expected_revision":0,"endpoint_ids":ids
+                    }))
+                    .unwrap(),
+                )]
+                .into(),
+            },
+        )
+        .await
+        .unwrap();
+        let row = if owner == person {
+            let request: engine::TurnRequest =
+                serde_json::from_value(json!({"agent_id":agent,"text":"Book a seat"})).unwrap();
+            let mut start = engine::TurnStart::from(&request);
+            start.origin = TurnOrigin::Channel;
+            start.guest = true;
+            Box::pin(engine::begin_turn(
+                &db,
+                owner,
+                start,
+                &f.org.state.encryption_keys,
+            ))
+            .await
+            .unwrap()
+        } else {
+            Box::pin(channel_turn(&f, &f.guest("visitor").await, "Book a seat")).await
+        };
+        assert!(row.guest_turn);
+        assert_eq!(&row.user_id, owner);
+        let key =
+            credentials::load_for_conversation(&db, &f.org.state.encryption_keys, owner, &row.id)
+                .await
+                .unwrap()
+                .unwrap();
+        let append = async || {
+            let request = Request::post("/mcp")
+                .header("x-api-key", key.raw_key.as_str())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"api-google-workspace__sheets_append_values","arguments":{
+                        "spreadsheetId":"event","range":"登记!A:H","valueInputOption":"RAW",
+                        "insertDataOption":"INSERT_ROWS","body":values
+                    }}})
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = TARGET_HTTP_CLIENT_BUILDER
+                .scope(
+                    echo.client_builder.clone(),
+                    Box::pin(router.clone().oneshot(request)),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()["result"].clone()
+        };
+        let before = echo.calls.lock().unwrap().len();
+        let result = append().await;
+        assert_eq!(result["isError"], true);
+        let refusal: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            refusal,
+            crate::services::assistant_acknowledgement_service::guest_refusal()
+        );
+        assert_eq!(echo.calls.lock().unwrap().len(), before);
+
+        approval_service::set_service_approval_config(
+            &db,
+            owner,
+            catalog_id,
+            "Google Workspace",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(&[ApprovalRule {
+                mandatory_review: false,
+                methods: vec!["POST".into()],
+                resource_pattern: resource.into(),
+                verbs: vec![ApprovalVerb::Write],
+                effect: ApprovalEffect::AutoAllow,
+                mode: ApprovalMode::PerRequest,
+            }]),
+            Some(&ApprovalEffect::RequireApproval),
+        )
+        .await
+        .unwrap();
+        let result = append().await;
+        assert_eq!(result["isError"], false, "{}", result["content"][0]["text"]);
+        let calls = echo.calls.lock().unwrap();
+        assert_eq!(calls.len(), before + 1);
+        let call = calls.last().unwrap();
+        assert_eq!(call["host"], "sheets.googleapis.com");
+        let request = call["request"].as_str().unwrap();
+        assert!(request.starts_with(&format!("POST {resource}?")));
+        assert!(
+            request.contains("valueInputOption=RAW")
+                && request.contains("insertDataOption=INSERT_ROWS")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(call["body"].as_str().unwrap()).unwrap(),
+            values
+        );
+    }
+    assert_eq!(
+        db.collection::<Document>(crate::models::approval_request::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
+}

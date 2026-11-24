@@ -187,7 +187,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96"
+        "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -197,6 +197,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de",
         "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed",
         "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241",
+        "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96",
     ];
     for digest in [
         Some(live.as_str()),
@@ -205,6 +206,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
+        Some("1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d"),
         Some(previous_labels::CHANNEL_KEY_DIGEST),
         Some(previous_labels::EVENT_BINDING_DIGEST),
         Some("unknown"),
@@ -260,7 +262,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if includes_meta
                     || matches!(
                         value,
-                        previous_labels::CHANNEL_KEY_DIGEST
+                        previous_labels::GATEWAY_TRANSPORT_DIGEST
+                            | previous_labels::CHANNEL_KEY_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST
                             | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST

@@ -55,6 +55,7 @@ enum Adapter {
     NativeWhatsapp,
     NyxbotChannelKey,
     EventBinding,
+    GatewayTransport,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -288,7 +289,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "platform_entry_gateway_transports",
-        adapter: Adapter::Pending,
+        adapter: Adapter::GatewayTransport,
         fields: &["request_ciphertext"],
     },
     Entry {
@@ -576,7 +577,8 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
             ))),
         )?,
         Some(
-            previous_labels::EVENT_BINDING_DIGEST
+            previous_labels::GATEWAY_TRANSPORT_DIGEST
+            | previous_labels::EVENT_BINDING_DIGEST
             | previous_labels::CHANNEL_KEY_DIGEST
             | previous_labels::WHATSAPP_DIGEST
             | previous_labels::CHANNEL_BOT_DIGEST
@@ -779,6 +781,9 @@ async fn verify(
                 .await
         }
         Adapter::ChannelBot => super::channel_bot_record::verify(keys, row).await,
+        Adapter::GatewayTransport => {
+            super::platform_entry_gateway_service::verify_request(keys, row).await
+        }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
         Adapter::EventBinding => {
             super::nyxbot_event_binding_service::storage::verify(db, keys, row).await
@@ -910,6 +915,9 @@ async fn migrate(
                 .await
         }
         Adapter::ChannelBot => Box::pin(super::channel_bot_record::migrate(db, keys, row)).await,
+        Adapter::GatewayTransport => {
+            super::platform_entry_gateway_service::migrate_request(db, keys, row).await
+        }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
         Adapter::EventBinding => {
             super::nyxbot_event_binding_service::storage::migrate(db, keys, row).await
@@ -1465,6 +1473,7 @@ mod tests {
     mod channel_bots;
     mod channel_keys;
     mod event_bindings;
+    mod gateway_transport;
     mod registry;
     mod swaps;
     mod webhooks;
