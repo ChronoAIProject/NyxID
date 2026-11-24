@@ -860,6 +860,15 @@ async fn instagram_oauth_full_path_is_actor_bound_single_use_and_selects_only_se
 
 #[tokio::test]
 async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migration() {
+    prepared_instagram_installation(true).await;
+}
+
+#[tokio::test]
+async fn fresh_managed_inbox_preserves_signed_control_loss_across_a_shared_signer_rewrap() {
+    prepared_instagram_installation(false).await;
+}
+
+async fn prepared_instagram_installation(reconnect: bool) {
     use crate::models::platform_credential::COLLECTION_NAME as SHARED;
     use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
     use crate::services::{
@@ -874,14 +883,15 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
     configure(&state, &bot).await;
     instagram(&server).await;
     let bots = state.db.collection::<ChannelBot>(BOTS);
-    bots.update_one(
-        doc! {"_id": &bot.id},
-        doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":""}},
-    )
-    .await
-    .unwrap();
-    // The shared producer completed preparation while this inbox still used
-    // manual credentials. Reconnect must enroll it in the same transaction.
+    if reconnect {
+        bots.update_one(
+            doc! {"_id": &bot.id},
+            doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":""}},
+        )
+        .await
+        .unwrap();
+    }
+    // Another installation completed preparation before this inbox joined its shared signer.
     let mut other = bot.clone();
     other.id = uuid::Uuid::new_v4().to_string();
     other.platform_bot_id = "888".into();
@@ -902,7 +912,7 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
             &bot.user_id,
             "instagram",
             "Inbox",
-            Some(&bot.id),
+            reconnect.then_some(bot.id.as_str()),
         )
         .await
         .unwrap();
@@ -926,7 +936,7 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
         .finish(&bot.user_id, &start.session_id, "777", true)
         .await
         .unwrap();
-    assert_eq!(managed.id, bot.id);
+    assert_eq!(managed.id == bot.id, reconnect);
     assert_eq!(managed.credential_source, "platform");
     assert_eq!(
         settings
@@ -948,6 +958,24 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
             .map(String::as_str),
         Some(producer_id)
     );
+    let observed = crate::services::channel_verification_service::CredentialSnapshot::load(
+        &state.db, &adapter, &managed,
+    )
+    .await
+    .unwrap();
+    let secrets = observed
+        .secrets(&state.encryption_keys, &adapter)
+        .await
+        .unwrap();
+    let mut controls = Vec::new();
+    for sender in ["333", "444"] {
+        let body = serde_json::to_vec(&json!({"object":"instagram","entry":[{"id":"777","standby":[{"sender":{"id":sender},"recipient":{"id":"777"},"timestamp":Utc::now().timestamp_millis(),"message":{"mid":format!("mid-{sender}"),"text":"control lost"}}]}]})).unwrap();
+        let webhook = adapter
+            .prepare_webhook(&managed, Some(&secrets), &meta::tests::signed(&body), &body)
+            .await
+            .unwrap();
+        controls.push(webhook.body);
+    }
     let pin = EntryCredentialSnapshot::load(&state.db, &adapter, &managed)
         .await
         .unwrap()
@@ -971,7 +999,11 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
         .await
         .unwrap()
     );
-    let reloaded = bots.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
+    let reloaded = bots
+        .find_one(doc! {"_id": &managed.id})
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         EntryCredentialSnapshot::load(&state.db, &adapter, &reloaded)
             .await
@@ -979,6 +1011,53 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
             .fingerprint()
             .unwrap(),
         pin
+    );
+    adapter
+        .apply_webhook_state(&state.db, &managed, &controls[0], &observed)
+        .await
+        .unwrap();
+    let observations = state.db.collection::<bson::Document>(meta::CONTROLS);
+    let key = |sender: &str| {
+        format!(
+            "{}:{}",
+            managed.id,
+            meta::conversation("instagram", &managed.id, "777", sender)
+        )
+    };
+    assert!(
+        observations
+            .find_one(doc! {"identity_key":key("333"),"controlled":false})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let descriptor = adapter.platform_credentials().unwrap();
+    platform_credential_service::update(
+        &state.db,
+        &migration_keys,
+        &descriptor,
+        &bot.user_id,
+        &[(
+            "webhook_signing_secret".into(),
+            Some(Zeroizing::new("replacement-signing-key".into())),
+        )]
+        .into(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        adapter
+            .apply_webhook_state(&state.db, &managed, &controls[1], &observed)
+            .await
+            .is_err()
+    );
+    assert!(
+        observations
+            .find_one(doc! {"identity_key":key("444")})
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
