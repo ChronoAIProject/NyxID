@@ -46,3 +46,14 @@ export function conversationTypeLabel(t: string): string {
       return t;
   }
 }
+
+export function channelDeleteMessage(result?: { webhook_cleanup?: string; local_delivery_stopped?: boolean }) {
+  if (result?.local_delivery_stopped) {
+    return result.webhook_cleanup === "failed"
+      ? translateUi("Inbox delivery stopped. NyxID will retry removing the subscription.")
+      : translateUi("Inbox delivery stopped and the subscription was removed.");
+  }
+  return result?.webhook_cleanup === "failed"
+    ? translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard.")
+    : translateUi("Bot deleted");
+}

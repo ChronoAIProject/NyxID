@@ -1,6 +1,18 @@
-import type { ChannelBotDetail, ChannelPlatform, ChannelPlatformDescriptor, ChannelRegistrationField, CreateChannelBotRequest } from "@/types/channels";
+import type { ChannelBotItem, ChannelBotDetail, ChannelPlatform, ChannelPlatformDescriptor, ChannelRegistrationField, CreateChannelBotRequest } from "@/types/channels";
 
 export const TELEGRAM_MANAGER_DELETION_NOTE = "Bot creation and the manager webhook will remain available. The manager token stays in Admin → Platform Credentials → Telegram — bot creation.";
+
+export function isMetaInbox(platform: string) {
+  return platform === "messenger" || platform === "instagram";
+}
+
+export function channelDeletionNote(bot: ChannelBotItem, managedNote?: string) {
+  if (bot.credential_source === "telegram_manager") return TELEGRAM_MANAGER_DELETION_NOTE;
+  if (isMetaInbox(bot.platform) && bot.credential_source !== "platform") {
+    return "After unsubscribe, NyxID erases this inbox’s guest conversations, message records and delivery history.";
+  }
+  return bot.credential_source !== "user" ? managedNote : undefined;
+}
 
 export type ChannelCredentialField = Exclude<Extract<keyof CreateChannelBotRequest, string>, "platform" | "label" | "target_org_id">;
 export type ManagedFlow = "meta_embedded_signup" | "oauth_connection" | "meta_oauth";

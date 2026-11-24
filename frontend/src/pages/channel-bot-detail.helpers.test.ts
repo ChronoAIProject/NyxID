@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChannelBotStatus } from "@/types/channels";
 import {
+  channelDeleteMessage,
   conversationTypeLabel,
   statusBadgeVariant,
   statusLabel,
@@ -74,4 +75,13 @@ describe("conversationTypeLabel", () => {
   it("echoes unknown conversation types verbatim", () => {
     expect(conversationTypeLabel("device")).toBe("device");
   });
+});
+
+it.each([
+  [{ local_delivery_stopped: true, webhook_cleanup: "failed" }, "Inbox delivery stopped. NyxID will retry removing the subscription."],
+  [{ local_delivery_stopped: true, webhook_cleanup: "removed" }, "Inbox delivery stopped and the subscription was removed."],
+  [{ webhook_cleanup: "failed" }, "Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."],
+  [undefined, "Bot deleted"],
+] as const)("reports the deletion result for %j", (result, expected) => {
+  expect(channelDeleteMessage(result)).toBe(expected);
 });

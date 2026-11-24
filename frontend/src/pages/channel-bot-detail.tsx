@@ -33,7 +33,7 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { editableChannelFields, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/channel-platforms";
+import { channelDeletionNote, editableChannelFields, isMetaInbox } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
@@ -103,6 +103,7 @@ import type {
   VerifyChannelBotResponse,
 } from "@/types/channels";
 import {
+  channelDeleteMessage,
   conversationTypeLabel,
   statusBadgeVariant,
   statusLabel,
@@ -818,10 +819,6 @@ function EditBotNameDialog({
   );
 }
 
-function isMetaInbox(platform: string) {
-  return platform === "messenger" || platform === "instagram";
-}
-
 function MetaVerificationHint() {
   return <p role="status" className="text-13 text-muted-foreground">{translateUi("Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.")}</p>;
 }
@@ -881,7 +878,7 @@ function EditVerificationSection({
         ))}
         {(bot.platform === "whatsapp" || isMetaInbox(bot.platform)) ? (
           <p className="text-13 text-muted-foreground">{isMetaInbox(bot.platform) && bot.status === "suspended"
-            ? translateUi("After saving these credentials, ask an authorized operator to resume inbox delivery. Then run Verify Bot and confirm a new message and reply.")
+            ? translateUi("After saving, the inbox owner or organization admin can run {{command}} to resume and verify delivery. If the platform is suspended, ask a platform admin to resume it first. Then send a message and confirm its reply.", { command: `nyxid channel-bot delivery ${bot.id} --resume` })
             : translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
@@ -1104,11 +1101,9 @@ export function ChannelBotDetailPage() {
   async function handleDelete() {
     try {
       const result = await deleteMutation.mutateAsync(botId);
-      if (result?.webhook_cleanup === "failed") {
-        toast.warning(translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."));
-      } else {
-        toast.success(translateUi("Bot deleted"));
-      }
+      const message = channelDeleteMessage(result);
+      if (result?.webhook_cleanup === "failed") toast.warning(message);
+      else toast.success(message);
       void navigate({ to: "/channel-bots" });
     } catch (err) {
       toast.error(
@@ -1312,7 +1307,7 @@ export function ChannelBotDetailPage() {
       />
       {/* Delete Confirmation */}
       <DeleteBotDialog
-        deletionNote={bot.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
+        deletionNote={channelDeletionNote(bot, getPlatform(bot.platform).deletionNote)}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}

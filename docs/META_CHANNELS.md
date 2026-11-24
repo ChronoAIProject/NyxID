@@ -329,12 +329,19 @@ checked against both sides of the original cutoff before any provider effect.
 A later grant stays outside the request. For an older deletion job missing its
 cutoff, replay the identical signed request to the same app and deletion endpoint
 within 24 hours of its signed issue time. Check the original confirmation code
-for completion. After that window, the granting administrator can request
-deletion again in Meta. The fresh signed request has its own cutoff and
-confirmation code. Once it completes cleanup for the exact captured grant,
+for completion. After that window, leave the old target pending if other
+inboxes connected since the original request must survive. A new deletion
+request from the granting administrator authorizes erasure of **all eligible
+grants for that administrator and app through the new cutoff**, including
+intervening installations. Use this option only when the administrator intends
+that scope and Meta issues a new signed request. It has its own confirmation
+code. Once it completes cleanup for the exact captured grant,
 the worker can settle the older target using that grant’s durable completion
 proof. Check both confirmation codes. An older target without exact proof
-stays pending. Never substitute the time of the retry for the original cutoff.
+stays pending. Draft deauthorization-only jobs also require an identical signed
+replay within 24 hours to recover a missing cutoff. After expiry, a cutoff-less
+deauthorization job remains pending. Deletion proof applies only to deletion
+jobs. Never substitute the time of the retry for the original cutoff.
 Deauthorization transitions reread the live grant in their transaction and
 preserve a concurrent deletion request.
 Missing or malformed exact completion
@@ -567,7 +574,9 @@ silently retried after a possible send acknowledgement.
 Before replacing or clearing a managed App ID or login secret, close new
 enrollment for that platform, finish or cancel open setup sessions, and have
 the granting administrators revoke access and request deletion in Meta for
-retained grants and inboxes. Wait for the deletion confirmation statuses to
+retained grants and inboxes. With disposable review assets, verify whether Meta
+issues a distinct signed request when the administrator requests deletion again
+after app removal. Wait for the deletion confirmation statuses to
 complete. A disconnected managed inbox can still hold data subject to a later
 deletion request. NyxID keeps the login secret available while that app has
 outstanding obligations. Updating the webhook fields or saving the same

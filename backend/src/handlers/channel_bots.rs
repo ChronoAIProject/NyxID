@@ -912,6 +912,8 @@ impl From<crate::models::channel_bot::BotVerification> for BotVerificationRespon
 
 #[derive(Debug, Serialize)]
 pub struct DeleteChannelBotResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_delivery_stopped: Option<bool>,
     pub webhook_cleanup: Option<&'static str>,
 }
 
@@ -1752,6 +1754,8 @@ pub async fn delete_bot(
 
     if adapter.serializes_lifecycle() {
         return Ok(Json(DeleteChannelBotResponse {
+            local_delivery_stopped: crate::services::channel_adapters::meta::is_meta(&bot.platform)
+                .then_some(true),
             webhook_cleanup: managed_webhook_cleanup,
         })
         .into_response());

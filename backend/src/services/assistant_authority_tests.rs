@@ -1267,10 +1267,17 @@ async fn assistant_meta_delete_reports_local_stop_and_remote_cleanup() {
         );
     bots.insert_one(&bot).await.unwrap();
     let args = json!({"bot_id": &bot.id});
+    let summary = f
+        .tools()
+        .action_summary(&f.owner, "delete_channel_bot", &args)
+        .await
+        .unwrap();
+    assert!(summary.contains("guest conversations, message records and delivery history"));
     let failed = call(&f, "delete_channel_bot", args.clone()).await;
     assert_eq!(
         failed,
-        json!({"local_delivery_stopped": true, "webhook_cleanup": "failed"})
+        json!({"local_delivery_stopped": true, "webhook_cleanup": "failed",
+            "next_step": "NyxID has stopped delivery and will retry removing the inbox subscription."})
     );
     let stopped = bots.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
     assert!(!stopped.is_active);

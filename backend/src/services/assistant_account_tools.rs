@@ -1083,11 +1083,17 @@ impl AccountTools<'_> {
             }
             "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
-                format!(
+                let mut summary = format!(
                     "Delete {}channel bot '{}' and all its routes",
                     self.org_prefix(user, &bot.user_id).await?,
                     short(&bot.label)
-                )
+                );
+                if super::channel_adapters::meta::is_meta(&bot.platform)
+                    && bot.credential_source != "platform"
+                {
+                    summary.push_str(". After unsubscribe, NyxID erases this inbox's guest conversations, message records and delivery history.");
+                }
+                summary
             }
             "delete_channel_route" => {
                 let route = self.managed_route(user, text(args, "route_id")).await?;
@@ -1349,9 +1355,14 @@ impl AccountTools<'_> {
                             user,
                         )
                         .await?;
-                        return Ok(
-                            json!({"local_delivery_stopped": true, "webhook_cleanup": cleanup}),
-                        );
+                        let mut result =
+                            json!({"local_delivery_stopped": true, "webhook_cleanup": cleanup});
+                        if cleanup == Some("failed") {
+                            result["next_step"] = json!(
+                                "NyxID has stopped delivery and will retry removing the inbox subscription."
+                            );
+                        }
+                        return Ok(result);
                     }
                     channel_bot_service::delete_bot(
                         self.db,
