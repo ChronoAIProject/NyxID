@@ -381,6 +381,13 @@ source and grant. A shared home's asynchronous reply preference records the
 selecting bot, grant and generation on the conversation. Erasing that grant
 clears its preference. A later choice from another inbox or consent survives.
 
+Current-installation cleanup reuses ordinary retirement's dedicated route and
+agent-key revocation before removing the bot. Superseded-grant cleanup cannot
+retire those shared live keys. Tracked setup links retain their original minimal
+grant reference when associated or completed, under their existing link lifetime;
+cleanup removes only that grant's links (or a managed link's exact retained OAuth
+connection ID). It preserves a link belonging to another consent.
+
 Assistant history carrying grant proof uses this scoped worker even for a
 single consent. Owner DMs and queued message inputs
 retain the contexts that supplied their text; cleanup removes their exact

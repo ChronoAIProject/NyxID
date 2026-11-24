@@ -82,6 +82,10 @@ fn exact(scope: &Document) -> AppResult<Document> {
     )
 }
 
+fn setup_links(bot: &str, grant: &str) -> Document {
+    doc! {"bot_id":bot,"$or":[{"connection_id":grant},{"meta_grant.bot_id":bot,"meta_grant.grant_id":grant}]}
+}
+
 async fn eligible(
     db: &Database,
     tx: &mut ClientSession,
@@ -624,7 +628,13 @@ async fn erase_page(
         .get_str("grant_id")
         .map_err(|_| grants::incomplete())?;
     for row in &rows {
-        if collection == "assistant_messages" {
+        if collection == crate::models::channel_connect_link::COLLECTION_NAME {
+            if let Some(proof) = row.get("meta_grant").filter(|value| **value != Bson::Null) {
+                let proof: GrantRef =
+                    bson::from_bson(proof.clone()).map_err(|_| grants::incomplete())?;
+                reference_in_range(&proof, scope)?;
+            }
+        } else if collection == "assistant_messages" {
             single_grant_message(row, scope)?;
         } else if matches!(collection, MESSAGES | REPLIES | PLANS) {
             if row.get_str("channel_bot_id") != Ok(bot) {
@@ -1734,6 +1744,11 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
             doc! {"_id":grant,"bot_id":bot},
             17,
         ),
+        (
+            crate::models::channel_connect_link::COLLECTION_NAME,
+            setup_links(bot, grant),
+            17,
+        ),
     ] {
         if db
             .collection::<Document>(collection)
@@ -1793,6 +1808,7 @@ async fn retire_shared(
     db: &Database,
     tx: &mut ClientSession,
     scope: &Document,
+    progress: &Document,
     phase: i32,
 ) -> AppResult<Step> {
     let bot = scope.get_str("bot_id").map_err(|_| grants::incomplete())?;
@@ -1834,25 +1850,19 @@ async fn retire_shared(
             .await?;
         return Ok(Step::stay(doc! {"phase":phase}));
     }
-    let rows = page(
-        db,
-        tx,
-        CHANNELS,
-        doc! {"channel_bot_id":bot,"status":{"$in":["active","pending"]}},
-        &Document::new(),
-    )
-    .await?;
-    if rows.is_empty() {
-        return Ok(Step::next(phase));
+    let rows = page(db, tx, CHANNELS, doc! {"channel_bot_id":bot}, progress).await?;
+    for raw in &rows {
+        let row: crate::models::nyxbot_channel::NyxbotChannel =
+            bson::from_document(raw.clone()).map_err(|_| grants::incomplete())?;
+        crate::services::nyxbot_gateway_release_service::retire_keys_in_session(db, &row, tx)
+            .await?;
+        db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"channel_bot_id":bot},
+            doc! {"$set":{"status":"disconnected","owner_sender_ids":[],"gateway_no_progress":false},
+                "$unset":{"agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"",
+                    "link_code_hash":"","link_code_expires_at":""},
+                "$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64}}).session(&mut *tx).await?;
     }
-    let ids: Vec<_> = rows
-        .into_iter()
-        .filter_map(|row| row.get("_id").cloned())
-        .collect();
-    db.collection::<Document>(CHANNELS).update_many(doc! {"_id":{"$in":ids}},
-        doc! {"$set":{"status":"disconnected","owner_sender_ids":[]},"$unset":{"link_code_hash":"","link_code_expires_at":""},
-            "$inc":{"execution_policy_revision":1_i64}}).session(&mut *tx).await?;
-    Ok(Step::stay(doc! {"phase":phase}))
+    advance(progress, phase, &rows, false)
 }
 
 async fn step(
@@ -1905,6 +1915,18 @@ async fn step(
             .await
         }
         17 => {
+            let links = erase_page(
+                db,
+                tx,
+                scope,
+                crate::models::channel_connect_link::COLLECTION_NAME,
+                setup_links(bot, grant),
+                phase,
+            )
+            .await?;
+            if links.progress.get_i32("phase") == Ok(phase) {
+                return Ok(links);
+            }
             erase_page(
                 db,
                 tx,
@@ -1915,7 +1937,7 @@ async fn step(
             )
             .await
         }
-        18 => retire_shared(db, tx, scope, phase).await,
+        18 => retire_shared(db, tx, scope, progress, phase).await,
         19 => finish(db, tx, scope).await,
         _ => Err(grants::incomplete()),
     }
@@ -2027,6 +2049,16 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
                 .keys(doc! {"meta_grants.bot_id":1,"meta_grants.grant_id":1,"_id":1})
                 .build(),
         )
+        .await?;
+    db.collection::<Document>(crate::models::channel_connect_link::COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"bot_id":1,"connection_id":1,"_id":1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"bot_id":1,"meta_grant.bot_id":1,"meta_grant.grant_id":1,"_id":1})
+                .build(),
+        ])
         .await?;
     db.collection::<Document>(CHANNELS)
         .create_index(

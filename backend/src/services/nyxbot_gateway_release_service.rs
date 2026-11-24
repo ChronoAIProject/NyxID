@@ -666,6 +666,31 @@ pub(crate) async fn retire_references_in_session(
         .session(&mut *session)
         .await?;
 
+    retire_keys_in_session(db, row, session).await?;
+    db.collection::<Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": &row.user_id},
+            doc! {
+                "$inc": {"execution_policy_revision": 1_i64, "notification_epoch": 1_i64},
+                "$set": {"status": "disconnected", "owner_sender_ids": [], "last_error": reason,
+                    "gateway_no_progress": false, "updated_at": bson::DateTime::now()},
+                "$unset": {"gateway_setup_release_id": "", "agent_key_ciphertext": "",
+                    "pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+                    "link_code_hash": "", "link_code_expires_at": ""},
+            },
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(())
+}
+
+/// Revoke the dedicated route and agent credentials without broadening a
+/// grant-scoped content purge to the channel's other retained history.
+pub(crate) async fn retire_keys_in_session(
+    db: &Database,
+    row: &NyxbotChannel,
+    session: &mut ClientSession,
+) -> AppResult<()> {
     let owner = bot_owner(row).to_owned();
     let mut route_keys = std::collections::BTreeSet::new();
     route_keys.insert(row.route_api_key_id.clone());
@@ -693,20 +718,6 @@ pub(crate) async fn retire_references_in_session(
     {
         revoke_in_session(db, &row.user_id, key, session).await?;
     }
-    db.collection::<Document>(CHANNELS)
-        .update_one(
-            doc! {"_id": &row.id, "user_id": &row.user_id},
-            doc! {
-                "$inc": {"execution_policy_revision": 1_i64, "notification_epoch": 1_i64},
-                "$set": {"status": "disconnected", "owner_sender_ids": [], "last_error": reason,
-                    "gateway_no_progress": false, "updated_at": bson::DateTime::now()},
-                "$unset": {"gateway_setup_release_id": "", "agent_key_ciphertext": "",
-                    "pending_agent_api_key_id": "", "pending_route_api_key_id": "",
-                    "link_code_hash": "", "link_code_expires_at": ""},
-            },
-        )
-        .session(&mut *session)
-        .await?;
     Ok(())
 }
 
@@ -876,13 +887,7 @@ async fn retire_connection_checked(
                 .delete_many(doc! {"source.channel_id":&current.id}).session(&mut *session).await?;
             db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME).delete_many(
                 doc!{"task.channel_source.channel_id":&current.id}).session(&mut *session).await?;
-            for key in [Some(current.route_api_key_id.as_str()),current.pending_route_api_key_id.as_deref()].into_iter().flatten() {
-                super::channel_routing_service::retire_key_routes_in_session(&db,bot_owner(&current),&current.channel_bot_id,key,session).await?;
-                revoke_in_session(&db,bot_owner(&current),key,session).await?;
-            }
-            for key in [current.agent_api_key_id.as_deref(),current.pending_agent_api_key_id.as_deref()].into_iter().flatten() {
-                revoke_in_session(&db,&current.user_id,key,session).await?;
-            }
+            retire_keys_in_session(&db, &current, session).await?;
             if reason == ReleaseReason::OrgAccessLost {
                 audit(&db, session, &current.user_id, "nyxbot_channel_org_access_lost",
                     json!({"channel_agent_id":current.id,"platform":current.platform})).await?;

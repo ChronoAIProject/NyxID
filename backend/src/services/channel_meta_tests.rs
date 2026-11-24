@@ -2424,7 +2424,7 @@ async fn incomplete_subscription_recovers_completed_session_and_completes_only_i
         .await
         .unwrap();
     assert_eq!(recovered.status, "active");
-    assert_eq!(Some(recovered.id), installed.bot_id);
+    assert_eq!(Some(recovered.id.clone()), installed.bot_id);
     let link = super::super::channel_connect_link_service::get(&state.db, &link.link.id)
         .await
         .unwrap();
@@ -2432,6 +2432,103 @@ async fn incomplete_subscription_recovers_completed_session_and_completes_only_i
         link.status,
         crate::models::channel_connect_link::LinkStatus::Completed
     );
+    // The ordinary assignment owns dedicated credentials. Scoped current-grant
+    // cleanup must retire those as well as the completed, grant-bound link.
+    use crate::services::nyxbot_channel_connection_service as connections;
+    let agent =
+        crate::services::assistant_team_service::ensure_nyxbot(&state.db, &recovered.user_id)
+            .await
+            .unwrap();
+    let (channel, _) = connections::connect(
+        &state,
+        connections::ConnectionRequest {
+            owner: &recovered.user_id,
+            source_conversation_id: None,
+            bot_id: &recovered.id,
+            agent: &agent,
+            allow_existing: true,
+            restoration: false,
+            restoration_claim_id: None,
+            repair_channel: None,
+        },
+        &connections::RelayConnection,
+    )
+    .await
+    .unwrap();
+    let proof = scopes::reference(&recovered).unwrap();
+    let home = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    state
+        .db
+        .collection::<bson::Document>("assistant_conversations")
+        .insert_one(doc! {
+        "_id":&home,"user_id":&recovered.user_id,"title":"Owner home","active_turn":null})
+        .await
+        .unwrap();
+    state.db.collection::<bson::Document>("assistant_messages").insert_one(doc! {
+        "_id":uuid::Uuid::new_v4().to_string(),"user_id":&recovered.user_id,"conversation_id":&home,
+        "turn_id":"verified-owner-dm","role":"user","text":"Private inbox text","meta_grants":[bson::to_bson(&proof).unwrap()]
+    }).await.unwrap();
+    assert!(
+        scope_erasure::required(&state.db, &recovered.id, &proof.grant_id)
+            .await
+            .unwrap()
+    );
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/777/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .mount(&server)
+        .await;
+    let cutoff = bson::DateTime::from_chrono(Utc::now() + Duration::seconds(1));
+    for _ in 0..80 {
+        if scope_erasure::pass(&state, &s, &recovered.id, &proof.grant_id, cutoff)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+    }
+    assert!(
+        grants::completion_for(&state.db, &recovered.id, &proof.grant_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_connect_link::COLLECTION_NAME)
+            .find_one(doc! {"_id":&link.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for id in [
+        Some(channel.route_api_key_id.as_str()),
+        channel.agent_api_key_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let key = state
+            .db
+            .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!key.is_active);
+    }
+    let retired = state
+        .db
+        .collection::<crate::models::nyxbot_channel::NyxbotChannel>(
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retired.status, "disconnected");
+    assert!(retired.agent_key_ciphertext.is_none());
+    assert!(retired.link_code_hash.is_none());
 }
 
 #[tokio::test]
@@ -7394,7 +7491,8 @@ async fn transferred_page_signed_deletions_page_original_grants_in_both_orders_a
         let channel = uuid::Uuid::new_v4().to_string();
         state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc! {
             "_id":&channel,"channel_bot_id":&b.id,"user_id":&b.user_id,"status":"active","agent_id":"kept-specialist",
-            "private_chats":"everyone","owner_sender_ids":["333"]}).await.unwrap();
+            "private_chats":"everyone","owner_sender_ids":["333"],"platform":"messenger","bot_label":"Successor",
+            "transport":"direct","route_api_key_id":"","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
         let thread=scopes::record_thread(&state.db,&b.id,&b_message.id,doc! {"channel_id":&channel,"partition":"shared-private"},
             vec![doc! {"$set":{"_id":uuid::Uuid::new_v4().to_string(),"channel_id":&channel,"user_id":&b.user_id,"partition":"shared-private",
                 "last_message_id":&b_message.id,"last_relay_message_id":&b_message.id,"agent_id":"explicit-chat-specialist","members":"owner",
