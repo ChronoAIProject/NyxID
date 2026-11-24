@@ -76,19 +76,17 @@ fn part(platform: &str, format: &str, allow_pre_rendered: bool) -> OutboundReply
 }
 
 fn expected(topic: bool, formatted: bool) -> Value {
-    let mut body = json!({"chat_id":"-10022","reply_to_message_id":51});
+    let mut body = if formatted {
+        json!({"chat_id":"-10022","text":DISPLAY,"entities":[
+            {"type":"bold","offset":0,"length":4},
+            {"type":"text_link","url":"https://example.test/a_(b)","offset":5,"length":4},
+        ]})
+    } else {
+        json!({"chat_id":"-10022","text":SOURCE,"parse_mode":"Markdown"})
+    };
+    body["reply_to_message_id"] = json!(51);
     if topic {
         body["message_thread_id"] = json!(73);
-    }
-    if formatted {
-        body["text"] = json!(DISPLAY);
-        body["entities"] = json!([
-            {"type":"bold","offset":0,"length":4},
-            {"type":"text_link","offset":5,"length":4,"url":"https://example.test/a_(b)"},
-        ]);
-    } else {
-        body["text"] = json!(SOURCE);
-        body["parse_mode"] = json!("Markdown");
     }
     body
 }
@@ -208,7 +206,10 @@ async fn bound_telegram_keeps_refusals_definite_and_ambiguous_delivery_uncertain
                 if format_refused {
                     let mut plain = expected(topic, true);
                     plain.as_object_mut().unwrap().remove("entities");
-                    assert_eq!(requests[1].body, serde_json::to_vec(&plain).unwrap());
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&requests[1].body).unwrap(),
+                        plain
+                    );
                 }
             }
         }
