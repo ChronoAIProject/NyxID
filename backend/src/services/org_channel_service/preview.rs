@@ -65,6 +65,7 @@ impl Preview {
 pub(crate) async fn load(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
+    base_url: &str,
     actor: &str,
     bot_id: &str,
     agent_id: &str,
@@ -103,18 +104,41 @@ pub(crate) async fn load(
         .ok_or_else(denied)?;
     let channels = db.collection::<NyxbotChannel>("nyxbot_channels");
     let (previous, reused) = if let Some(id) = channel_id {
-        let row = management::load(db, actor, id, true).await?;
+        let mut row = management::load(db, actor, id, true).await?;
         if row.channel_bot_id != bot.id {
             return Err(denied());
         }
-        (Some(row), true)
+        let reused = if row.transport == "direct"
+            && super::super::channel_adapters::meta::is_meta(&row.platform)
+        {
+            super::super::nyxbot_channel_query_service::reusable_meta(
+                db,
+                &row.user_id,
+                &bot.user_id,
+                &row,
+                base_url,
+            )
+            .await?
+        } else {
+            true
+        };
+        if !reused {
+            row.status = "disconnected".into();
+        }
+        (Some(row), reused)
     } else {
         let active =
             super::super::nyxbot_channel_query_service::active_for_bot(db, actor, bot_id).await?;
         let reusable = match &active {
             Some(row) => {
-                super::super::nyxbot_channel_query_service::reusable(db, actor, &bot.user_id, row)
-                    .await?
+                super::super::nyxbot_channel_query_service::reusable_meta(
+                    db,
+                    actor,
+                    &bot.user_id,
+                    row,
+                    base_url,
+                )
+                .await?
             }
             None => false,
         };

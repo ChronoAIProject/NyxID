@@ -30,6 +30,7 @@ pub async fn preview(
         Box::pin(org::preview::load(
             &state.db,
             &state.encryption_keys,
+            &state.config.base_url,
             &actor,
             &input.bot_id,
             &input.agent_id,

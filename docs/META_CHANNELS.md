@@ -296,7 +296,9 @@ owner/parent/ID index supports 100-plan pages, and attribution reads project
 only the owner, source, key, ID and timestamp. Retained exact joins deliberately
 have no timestamp cutoff: a required timestamp does not establish chronology
 for historical or recovered metadata. This also erases precisely attributable
-legacy rows whose stored timestamps precede the current bot record. Erasing one inbox preserves sibling inbox plans.
+legacy rows whose stored timestamps precede the current bot record. Canonical
+older plans also try the indexed exact saved handoff before a date comparison
+can exclude genuinely unproven pre-bot history. Erasing one inbox preserves sibling inbox plans.
 A domain-separated keyed revocation
 fence and the opaque request status remain to prevent replay without retaining
 the provider subject or asset. Callback timestamps cover their entire
@@ -352,9 +354,16 @@ checks. Repair preserves the last committed guest exposure choice; it refuses
 if the checked connection changes or the acting administrator loses authority
 before retirement, including delivery-health or route recovery. Direct Meta
 customer setup checks its dedicated callback key and default together under the
-bot routing fence. It refuses competing defaults instead of replacing them;
-ordinary route replacement and explicit per-conversation overrides retain their
-existing behavior. Marked credentials are
+bot routing fence. Ordinary Connect, assistant Connect, organization restoration
+and preview use the same direct Meta default/key/callback proof. Activation
+rechecks that proof inside its transaction, including the single eligible
+fallback default. Setup refuses competing defaults and active unscoped wildcard
+routes before retiring an assignment. Reactivating a Meta default reconciles
+other defaults under the bot fence; Check refuses ambiguous historical defaults.
+The ordinary route API still supports explicit default replacement, and explicit
+per-conversation overrides retain their behavior. Route creation preserves
+storage, credential and routing error categories after failed-setup cleanup.
+Marked credentials are
 authenticated under their old owner and rebound to the destination in the same
 fenced ownership transfer, following the existing staged/strict record writer
 mode; fresh Meta consent is still required for delivery. A failed storage read is retryable setup failure and never

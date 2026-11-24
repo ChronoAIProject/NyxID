@@ -78,9 +78,6 @@ pub(crate) struct ConnectionRequest<'a> {
 /// The service owns connection policy, transactions and lifecycle for every path.
 #[async_trait::async_trait]
 pub(crate) trait ConnectionTransport: Send + Sync {
-    fn requires_unclaimed_default(&self) -> bool {
-        false
-    }
     async fn connect_gateway(
         &self,
         state: &AppState,
@@ -109,9 +106,6 @@ pub(crate) trait ConnectionTransport: Send + Sync {
 pub(crate) struct RelayConnection;
 #[async_trait::async_trait]
 impl ConnectionTransport for RelayConnection {
-    fn requires_unclaimed_default(&self) -> bool {
-        true
-    }
     async fn connect_gateway(
         &self,
         _: &AppState,
@@ -319,8 +313,9 @@ pub(crate) async fn connect(
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
     let bot: ChannelBot = accessible_bot(state, owner, bot_id).await?;
-    let guarded_default = effects.requires_unclaimed_default()
-        && super::channel_adapters::meta::is_meta(&bot.platform);
+    // Every NyxBot entry point uses the same direct Meta policy, including
+    // ordinary Connect, assistant tools and organization restoration.
+    let guarded_default = super::channel_adapters::meta::is_meta(&bot.platform);
     let org_binding =
         crate::services::org_channel_service::link_target(&state.db, owner, &bot, agent).await?;
     crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
@@ -654,6 +649,7 @@ pub(crate) async fn connect(
     } else {
         row
     };
+    let mut meta_route_error = None;
     let mut outcome = if gateway {
         effects
             .connect_gateway(
@@ -670,7 +666,7 @@ pub(crate) async fn connect(
     } else if guarded_default {
         #[cfg(test)]
         super::durable_wake_tests::after("meta_default_before_insert").await;
-        channel_routing_service::create_meta_default(
+        match channel_routing_service::create_meta_default(
             &state.db,
             bot_owner(&row),
             &bot.id,
@@ -679,11 +675,13 @@ pub(crate) async fn connect(
             &direct_callback,
         )
         .await
-        .map(|route| route.id)
-        .map_err(|error| match error {
-            AppError::Conflict(_) => "default_route_conflict",
-            _ => "route_create_failed",
-        })
+        {
+            Ok(route) => Ok(route.id),
+            Err(error) => {
+                meta_route_error = Some(error);
+                Err("meta_route_creation_failed")
+            }
+        }
     } else {
         connect_direct(state, &row, &bot).await
     };
@@ -730,14 +728,21 @@ pub(crate) async fn connect(
             {
                 return Err(AppError::ValidationError("activation_failed".into()));
             }
+            #[cfg(test)]
+            if guarded_default {
+                super::durable_wake_tests::after("meta_default_before_activation").await;
+            }
             let activation = crate::services::nyxbot_channel_continuity_service::activate(
                 &state.db,
                 owner,
                 &id,
-                &route_id,
-                rebuilt_from.as_ref().map(|row| row.id.as_str()),
-                agent.is_nyxbot(),
-                &sha256_hex(code.as_bytes()),
+                crate::services::nyxbot_channel_continuity_service::ActivationBinding {
+                    route_id: &route_id,
+                    predecessor_id: rebuilt_from.as_ref().map(|row| row.id.as_str()),
+                    default_agent: agent.is_nyxbot(),
+                    link_hash: &sha256_hex(code.as_bytes()),
+                    expected_callback: guarded_default.then_some(direct_callback.as_str()),
+                },
             )
             .await;
             if let Err(error) = activation {
@@ -804,31 +809,40 @@ pub(crate) async fn connect(
             Err(AppError::SecurityReadinessUnavailable)
         }
         Err(code) => {
-            let current = load_channel(state, owner, &id).await?;
-            let ids = releases::retire_connection(
-                state,
-                &current,
-                ReleaseReason::SetupFailed,
-                "failed",
-                Some(code),
-            )
-            .await?;
-            releases::try_inline(state, &ids).await;
-            audit(
-                state,
-                owner,
-                "nyxbot_channel_connect_failed",
-                gateway_diagnostic_audit(
-                    json!({
-                        "channel_agent_id": &id, "platform": &platform, "error_code": code,
-                    }),
+            let cleanup: AppResult<()> = async {
+                let current = load_channel(state, owner, &id).await?;
+                let ids = releases::retire_connection(
+                    state,
                     &current,
-                ),
-            )
-            .await;
-            if code == "default_route_conflict" {
-                return Err(AppError::Conflict("The default route changed during specialist setup. Review this bot's routing and try again".into()));
+                    ReleaseReason::SetupFailed,
+                    "failed",
+                    Some(code),
+                )
+                .await?;
+                releases::try_inline(state, &ids).await;
+                audit(
+                    state,
+                    owner,
+                    "nyxbot_channel_connect_failed",
+                    gateway_diagnostic_audit(
+                        json!({
+                            "channel_agent_id": &id, "platform": &platform, "error_code": code,
+                        }),
+                        &current,
+                    ),
+                )
+                .await;
+                Ok(())
             }
+            .await;
+            if let Some(error) = meta_route_error {
+                if let Err(cleanup_error) = cleanup {
+                    tracing::warn!(channel_id = %id, error = ?cleanup_error,
+                        "Failed Meta setup remains pending cleanup");
+                }
+                return Err(error);
+            }
+            cleanup?;
             Err(AppError::ValidationError(match code {
                 "gateway_provider_not_registered" => {
                     "The Agent Event Gateway has not registered NyxBot as a provider yet \

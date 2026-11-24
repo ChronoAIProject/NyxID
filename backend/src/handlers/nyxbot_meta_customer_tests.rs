@@ -387,6 +387,7 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         let preview = crate::services::org_channel_service::preview::load(
             &state.db,
             &state.encryption_keys,
+            &state.config.base_url,
             &other_admin,
             &fresh_id,
             &agent.id,
@@ -749,6 +750,28 @@ async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retire
             )
             .await
             .unwrap();
+        let expected_callback = crate::services::nyxbot_channel_query_service::direct_callback(
+            &state.config.base_url,
+            &prior.id,
+        );
+        state
+            .db
+            .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &prior.route_api_key_id},
+                doc! {"$set": {"callback_url": &expected_callback}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &prior.route_id},
+                doc! {"$set": {"platform": "instagram"}},
+            )
+            .await
+            .unwrap();
         let second = Uuid::new_v4().to_string();
         state
             .db
@@ -801,10 +824,13 @@ async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retire
                         &state.db,
                         OWNER,
                         &prior.id,
-                        prior.route_id.as_deref().unwrap(),
-                        None,
-                        false,
-                        "activated-owner-code",
+                        crate::services::nyxbot_channel_continuity_service::ActivationBinding {
+                            route_id: prior.route_id.as_deref().unwrap(),
+                            predecessor_id: None,
+                            default_agent: false,
+                            link_hash: "activated-owner-code",
+                            expected_callback: Some(&expected_callback),
+                        },
                     )
                     .await
                     .unwrap();

@@ -352,6 +352,7 @@ async fn org_guest_defaults_preview_is_metadata_only_and_performs_no_writes() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &f.agent.id,
@@ -368,6 +369,7 @@ async fn org_guest_defaults_preview_is_metadata_only_and_performs_no_writes() {
             preview::load(
                 &db,
                 &f.org.state.encryption_keys,
+                &f.org.state.config.base_url,
                 actor,
                 &f.bot.id,
                 &f.agent.id,
@@ -450,6 +452,7 @@ async fn org_guest_defaults_preview_matches_reuse_retarget_and_recovery() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &f.agent.id,
@@ -469,6 +472,7 @@ async fn org_guest_defaults_preview_matches_reuse_retarget_and_recovery() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &target.id,
@@ -507,6 +511,7 @@ async fn org_guest_defaults_preview_matches_reuse_retarget_and_recovery() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &f.agent.id,

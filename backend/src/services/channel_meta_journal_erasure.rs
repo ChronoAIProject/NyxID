@@ -169,10 +169,7 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
                 evidence.observe(receipt, &plan.user_id, "inbound_message_id");
             }
             if evidence.proven.is_none() && !evidence.conflicting {
-                let canonical = plan.logical_key.starts_with("saved-result:")
-                    && plan
-                        .created_at
-                        .is_none_or(|created| created >= bot.created_at);
+                let canonical = plan.logical_key.starts_with("saved-result:");
                 if !canonical && evidence.parent.is_none() {
                     // No exact join and no supported Meta saved-result key:
                     // retain this unrelated historical plan without guessing.
@@ -180,6 +177,14 @@ pub(crate) async fn erase_legacy(db: &Database, bot: &ChannelBot) -> AppResult<(
                 }
                 if let Some(target) = saved_target(db, plan, &owners, &bot.platform).await? {
                     evidence.prove(target);
+                } else if evidence.parent.is_none()
+                    && plan
+                        .created_at
+                        .is_some_and(|created| created < bot.created_at)
+                {
+                    // Exact handoff proof can recover older canonical plans.
+                    // Only genuinely unproven pre-bot history is excluded.
+                    continue;
                 }
             }
             match evidence.target() {
@@ -920,6 +925,80 @@ mod tests {
             .replace_one(doc! {"_id": &bot.id}, &*bot)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn predating_canonical_handoff_is_resolved_before_excluding_unproven_old_history() {
+        let (state, _, _server, mut bot) = fixture("instagram").await;
+        stop_for_erasure(&state, &mut bot).await;
+        let channel = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .insert_one(parent(&bot.user_id, &bot.id, &channel, "instagram"))
+            .await
+            .unwrap();
+        let origin = ChannelOrigin {
+            org_execution: None,
+            native_event_id: None,
+            thread: None,
+            nyxbot_channel_id: channel,
+            partition: "private-owner".into(),
+            platform: "instagram".into(),
+        };
+        let turn = uuid::Uuid::new_v4().to_string();
+        let known_key = channel_supplemental_delivery::saved_key(&turn, &origin);
+        let unknown_key =
+            channel_supplemental_delivery::saved_key(&uuid::Uuid::new_v4().to_string(), &origin);
+        for key in [&known_key, &unknown_key] {
+            let plan = channel_text_delivery::begin(
+                &state.db,
+                key,
+                &bot.user_id,
+                &uuid::Uuid::new_v4().to_string(),
+                "retained-provider-id",
+                1,
+            )
+            .await
+            .unwrap();
+            state.db.collection::<Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .update_one(doc! {"_id": &plan.id}, doc! {"$set": {
+                    "created_at": bson::DateTime::from_chrono(bot.created_at - chrono::Duration::days(1)),
+                    "parts.0.platform_message_id": "historical-provider-id"}}).await.unwrap();
+        }
+        state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "user_id": &bot.user_id,
+                "turn_id": &turn, "role": "assistant", "handoff_delivery": {"targets": [saved(&turn, &origin)]}})
+            .await.unwrap();
+        super::super::personal_erasure_service::erase_provider_inbox(
+            &state,
+            &bot.id,
+            &bot.meta_binding.as_ref().unwrap().grant_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            channel_text_delivery::load(&state.db, &known_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // No exact join or handoff ties this older plan to the deleted inbox.
+        assert!(
+            channel_text_delivery::load(&state.db, &unknown_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .db
+                .collection::<Document>("channel_meta_erasure_fences")
+                .find_one(doc! {"_id": &bot.id, "local_data_erased_at": {"$exists": true}})
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

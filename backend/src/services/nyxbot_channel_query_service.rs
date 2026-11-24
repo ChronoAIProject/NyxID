@@ -80,8 +80,8 @@ pub(crate) fn direct_callback(base_url: &str, channel_id: &str) -> String {
     )
 }
 
-/// Customer setup promises one dedicated default callback. Ordinary connection
-/// reuse and explicit per-chat overrides retain their established policies.
+/// All direct Meta setup paths promise one dedicated default callback.
+/// Explicit per-chat overrides and other platforms retain their policies.
 pub(crate) async fn reusable_meta(
     db: &Database,
     actor: &str,
@@ -102,11 +102,23 @@ pub(crate) async fn meta_default_matches(
     db: &Database,
     row: &NyxbotChannel,
     callback: &str,
-    mut tx: Option<&mut mongodb::ClientSession>,
+    tx: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<bool> {
     if row.status != "active" || row.delivery_status.as_deref() == Some("failing") {
         return Ok(false);
     }
+    meta_route_matches(db, row, callback, tx).await
+}
+
+/// The same committed route/key proof is used by reuse, repair and activation.
+/// Pending activation supplies its candidate route ID without pretending that
+/// the channel has already committed its active lifecycle state.
+pub(crate) async fn meta_route_matches(
+    db: &Database,
+    row: &NyxbotChannel,
+    callback: &str,
+    mut tx: Option<&mut mongodb::ClientSession>,
+) -> AppResult<bool> {
     let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
     let keys =
         db.collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME);
@@ -149,15 +161,29 @@ pub(crate) async fn meta_default_matches(
         .find_one(
             doc! {"_id": route, "user_id": owner, "channel_bot_id": &row.channel_bot_id,
             "platform": &row.platform, "is_active": true, "default_agent": true,
-            "agent_api_key_id": &row.route_api_key_id},
+            "retired_by_transfer": {"$ne": true}, "agent_api_key_id": &row.route_api_key_id},
         )
         .projection(doc! {"_id": 1});
-    Ok(if let Some(tx) = tx {
+    let found = if let Some(tx) = tx.as_deref_mut() {
         found.session(tx).await?
     } else {
         found.await?
+    };
+    if found.is_none() {
+        return Ok(false);
     }
-    .is_some())
+    let defaults = routes
+        .count_documents(doc! {
+            "channel_bot_id": &row.channel_bot_id, "user_id": owner,
+            "default_agent": true, "is_active": true, "retired_by_transfer": {"$ne": true},
+        })
+        .limit(2);
+    let count = if let Some(tx) = tx {
+        defaults.session(tx).await?
+    } else {
+        defaults.await?
+    };
+    Ok(count == 1)
 }
 
 /// Caller holds the bot write fence, shared with ordinary route mutations.
@@ -169,21 +195,24 @@ pub(crate) async fn require_no_competing_meta_default(
     row: &NyxbotChannel,
 ) -> AppResult<()> {
     let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
-    let mut filter = doc! {"channel_bot_id": &row.channel_bot_id, "user_id": owner,
-    "is_active": true, "default_agent": true};
+    let mut identity = vec![
+        bson::bson!({"user_id": {"$ne": owner}}),
+        bson::bson!({"agent_api_key_id": {"$ne": &row.route_api_key_id}}),
+    ];
     if let Some(route) = &row.route_id {
-        filter.insert(
-            "$or",
-            bson::bson!([
-                {"_id": {"$ne": route}},
-                {"agent_api_key_id": {"$ne": &row.route_api_key_id}}
-            ]),
-        );
-    } else {
-        // A crash after direct-route insertion may leave route_id unset. The
-        // connection's dedicated key still identifies its incomplete route.
-        filter.insert("agent_api_key_id", doc! {"$ne": &row.route_api_key_id});
+        identity.push(bson::bson!({"_id": {"$ne": route}}));
     }
+    // A crash may leave route_id unset, but the dedicated key still identifies
+    // that incomplete route. Protect any other active unscoped wildcard too:
+    // it occupies the unique tuple even when it is not a default or owner route.
+    let filter = doc! {"channel_bot_id": &row.channel_bot_id, "is_active": true,
+    "$and": [
+        {"$or": [
+            {"user_id": owner, "default_agent": true, "retired_by_transfer": {"$ne": true}},
+            {"platform_conversation_id": "*", "platform_sender_id": null}
+        ]},
+        {"$or": identity}
+    ]};
     let other = db
         .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
         .find_one(filter)
@@ -192,7 +221,7 @@ pub(crate) async fn require_no_competing_meta_default(
         .await?;
     if other.is_some() {
         return Err(AppError::Conflict(
-            "This bot has another default route. Review its routing before assigning a specialist"
+            "This bot has another default or unscoped wildcard route. Review its routing before assigning a specialist"
                 .into(),
         ));
     }

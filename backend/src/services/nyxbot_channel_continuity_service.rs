@@ -104,15 +104,28 @@ async fn restore(
     .await
 }
 
+pub(crate) struct ActivationBinding<'a> {
+    pub route_id: &'a str,
+    pub predecessor_id: Option<&'a str>,
+    pub default_agent: bool,
+    pub link_hash: &'a str,
+    pub expected_callback: Option<&'a str>,
+}
+
 pub(crate) async fn activate(
     db: &Database,
     owner_id: &str,
     id: &str,
-    route: &str,
-    explicit: Option<&str>,
-    default_agent: bool,
-    link_hash: &str,
+    binding: ActivationBinding<'_>,
 ) -> AppResult<()> {
+    let ActivationBinding {
+        route_id: route,
+        predecessor_id: explicit,
+        default_agent,
+        link_hash,
+        expected_callback,
+    } = binding;
+    let expected_callback = expected_callback.map(str::to_owned);
     let db = db.clone();
     let owner_id = owner_id.to_owned();
     let id = id.to_owned();
@@ -131,6 +144,16 @@ pub(crate) async fn activate(
             // Serialize with route retirement and key invalidation.
             super::channel_routing_service::fence_route_key(&db,&row.route_api_key_id,session).await?;
             if let Some(key)=row.agent_api_key_id.as_deref() {super::channel_routing_service::fence_route_key(&db,key,session).await?;}
+            if row.transport == "direct" && super::channel_adapters::meta::is_meta(&row.platform) {
+                let callback = expected_callback.as_deref().ok_or_else(conflict)?;
+                let mut candidate = row.clone();
+                candidate.route_id = Some(route.clone());
+                if !super::nyxbot_channel_query_service::meta_route_matches(
+                    &db, &candidate, callback, Some(&mut *session),
+                ).await? {
+                    return Err(AppError::Conflict("The inbox default or callback changed before activation".into()));
+                }
+            }
             let routed=db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME).update_one(
                 doc! {"_id":&route,"user_id":owner(&row),"channel_bot_id":&row.channel_bot_id,"agent_api_key_id":&row.route_api_key_id,"is_active":true},
                 doc! {"$set":{"updated_at":bson::DateTime::now()}}).session(&mut *session).await?;

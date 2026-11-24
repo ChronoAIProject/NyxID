@@ -1199,6 +1199,7 @@ async fn channel_connect_preview(
         Box::pin(crate::services::org_channel_service::preview::load(
             &state.db,
             &state.encryption_keys,
+            &state.config.base_url,
             owner,
             &bot_id,
             &agent.id,

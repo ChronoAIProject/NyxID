@@ -385,10 +385,12 @@ async fn insert_bot_conversation(
                         let key = key.ok_or_else(|| AppError::Conflict("The specialist callback changed during setup".into()))?;
                         ensure_route_agent(&key, &conversation.user_id)?;
                         if db.collection::<ChannelConversation>(COLLECTION_NAME).find_one(doc! {
-                            "channel_bot_id": bot_id, "user_id": &conversation.user_id,
-                            "default_agent": true, "is_active": true,
+                            "channel_bot_id": bot_id, "is_active": true, "$or": [
+                                {"user_id": &conversation.user_id, "default_agent": true, "retired_by_transfer": {"$ne": true}},
+                                {"platform_conversation_id": "*", "platform_sender_id": null}
+                            ],
                         }).session(&mut *session).await?.is_some() {
-                            return Err(AppError::Conflict("This bot has another default route".into()));
+                            return Err(AppError::Conflict("This bot has another default or unscoped wildcard route".into()));
                         }
                     } else if conversation.default_agent {
                         db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
@@ -635,7 +637,16 @@ async fn mutate_bot_conversation(
                 fence_route_key(&db, key, session).await?;
                 pin_fenced_key(&mut filter, &set, key);
             }
-            if default {
+            let reconcile_default = if !default
+                && super::channel_adapters::meta::is_meta(&current.platform)
+                && set.get_bool("is_active") == Ok(true)
+            {
+                let live = db.collection::<ChannelConversation>(COLLECTION_NAME)
+                    .find_one(filter.clone()).session(&mut *session).await?
+                    .ok_or_else(|| AppError::Conflict("Conversation changed before update".into()))?;
+                set.get_bool("default_agent").unwrap_or(live.default_agent)
+            } else { default };
+            if reconcile_default {
                 db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
                     doc! {"channel_bot_id": bot, "user_id": &current.user_id, "default_agent": true, "is_active": true, "_id": {"$ne": &current.id}},
                     doc! {"$set": {"default_agent": false, "updated_at": bson::DateTime::now()}}
