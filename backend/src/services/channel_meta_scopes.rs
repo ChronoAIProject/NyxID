@@ -389,6 +389,48 @@ pub(crate) async fn source_in_session(
     source_document_in_session(db, tx, &row).await
 }
 
+/// Descendant writers borrow authority from the retained original assistant
+/// message inside their own transaction. A source removed by erasure cannot
+/// be used to recreate feedback or artifact payloads afterwards.
+pub(crate) async fn fence_assistant_source(
+    db: &Database,
+    tx: &mut ClientSession,
+    source: &Document,
+) -> AppResult<()> {
+    let proofs: Vec<GrantRef> = match source.get("meta_grants") {
+        None | Some(bson::Bson::Null) => return Ok(()),
+        Some(value) => bson::from_bson(value.clone()).map_err(|_| super::grants::incomplete())?,
+    };
+    for proof in &proofs {
+        fence_reference(db, tx, proof, false).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn fence_assistant_turn(
+    db: &Database,
+    tx: &mut ClientSession,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+) -> AppResult<()> {
+    let mut cursor = db
+        .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .find(doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn})
+        .limit(101)
+        .session(&mut *tx)
+        .await?;
+    let mut count = 0;
+    while let Some(source) = cursor.next(&mut *tx).await.transpose()? {
+        count += 1;
+        if count > 100 {
+            return Err(super::grants::incomplete());
+        }
+        fence_assistant_source(db, tx, &source).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn source_document_in_session(
     db: &Database,
     tx: &mut ClientSession,
