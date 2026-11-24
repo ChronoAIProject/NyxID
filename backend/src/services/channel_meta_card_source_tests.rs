@@ -556,6 +556,17 @@ async fn stale_denial_pruning_preserves_unresolved_proof_then_admits_healthy_b()
         .await
         .unwrap();
     finish_source_turn(&f.state, &web, "Web answer").await;
+    // The event dispatcher retries queue pruning before it starts an event turn.
+    assert_eq!(
+        crate::services::channel_thread_follow_service::prune_queue(
+            db,
+            &f.bot.user_id,
+            &original.id,
+        )
+        .await
+        .unwrap(),
+        1
+    );
     let admitted = begin(&f, Some(&original.id), None, true).await;
     assert_eq!(
         admitted.active_turn.as_ref().unwrap().events[0].id,

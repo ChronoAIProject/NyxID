@@ -675,6 +675,7 @@ pub(crate) async fn retire_references_in_session(
                 "$set": {"status": "disconnected", "owner_sender_ids": [], "last_error": reason,
                     "gateway_no_progress": false, "updated_at": bson::DateTime::now()},
                 "$unset": {"gateway_setup_release_id": "", "agent_key_ciphertext": "",
+                    crate::services::nyxbot_channel_key::VERSION_PATH: "",
                     "pending_agent_api_key_id": "", "pending_route_api_key_id": "",
                     "link_code_hash": "", "link_code_expires_at": ""},
             },
