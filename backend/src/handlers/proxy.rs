@@ -45,6 +45,7 @@ use crate::services::{
     ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::turn_trace::{GuestServiceFailure, Stage};
 
 #[path = "proxy_ingress.rs"]
 pub(crate) mod ingress;
@@ -3344,6 +3345,13 @@ async fn preflight_proxy_deny_before_resolution(
     .await?;
 
     if denied {
+        if auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.is_org_channel_guest())
+        {
+            GuestServiceFailure::ApprovalDenied.record(Stage::Proxy, Some(403));
+        }
         crate::services::assistant_model_observer::denied_before_resolution(
             state,
             auth_user,
@@ -4789,6 +4797,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .assistant_chat
         .as_deref()
         .is_some_and(|chat| chat.guest || chat.confirmation_policy.is_some());
+    let org_channel_guest = auth_user
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.is_org_channel_guest());
     if operation_scoped {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
     }
@@ -4800,6 +4812,9 @@ async fn execute_resolved_proxy_inner<'a>(
             &body_bytes,
         )
     {
+        if org_channel_guest {
+            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+        }
         return Err(AppError::ApiKeyScopeForbidden(
             "Operation scopes, guest and webhook calls forbid method overrides".into(),
         ));
@@ -4831,7 +4846,12 @@ async fn execute_resolved_proxy_inner<'a>(
             all_headers
                 .get(axum::http::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
-        )?;
+        )
+        .inspect_err(|error| {
+            if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+                GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+            }
+        })?;
     }
     let operation_guest = box_proxy_future(|| {
         crate::services::agent_operation_scope_service::check_non_mcp_context(
@@ -4863,7 +4883,12 @@ async fn execute_resolved_proxy_inner<'a>(
             },
         )
     })
-    .await?;
+    .await
+    .inspect_err(|error| {
+        if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+        }
+    })?;
 
     if operation_guest {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
@@ -5187,7 +5212,17 @@ async fn execute_resolved_proxy_inner<'a>(
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,
-    )?;
+    )
+    .inspect_err(|_| {
+        if org_channel_guest {
+            let reason = if matches!(approval_outcome, approval_service::ApprovalOutcome::Denied) {
+                GuestServiceFailure::ApprovalDenied
+            } else {
+                GuestServiceFailure::ApprovalRequired
+            };
+            reason.record(Stage::Proxy, Some(403));
+        }
+    })?;
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -7730,6 +7765,13 @@ async fn execute_resolved_proxy_inner<'a>(
             }
             let downstream_response = match downstream_result {
                 Ok(Ok(response)) => {
+                    if org_channel_guest
+                        && (response.status().is_client_error()
+                            || response.status().is_server_error())
+                    {
+                        GuestServiceFailure::DownstreamHttpError
+                            .record(Stage::Proxy, Some(response.status().as_u16()));
+                    }
                     if let Some(model) = &model_request {
                         model.received_headers(response.status().as_u16());
                     }

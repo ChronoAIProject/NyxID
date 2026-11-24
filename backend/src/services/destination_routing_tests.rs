@@ -8,6 +8,7 @@ use crate::services::{
 use crate::test_utils::*;
 use mongodb::bson::{self, doc};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -17,6 +18,7 @@ pub(crate) struct Echo {
     pub client: reqwest::Client,
     pub client_builder: Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>,
     pub calls: Arc<Mutex<Vec<Value>>>,
+    pub fail_appends: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Echo {
@@ -26,6 +28,10 @@ impl Drop for Echo {
 }
 impl Echo {
     pub async fn start() -> Self {
+        Self::start_with_denied_workbook(None).await
+    }
+
+    pub async fn start_with_denied_workbook(denied_workbook: Option<&'static str>) -> Self {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let key = rcgen::generate_simple_self_signed(vec![
             "docs.googleapis.com".into(),
@@ -56,11 +62,14 @@ impl Echo {
         let client = client_builder().build().unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let captured = calls.clone();
+        let fail_appends = Arc::new(AtomicBool::new(false));
+        let force_failure = fail_appends.clone();
         let task = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let acceptor = acceptor.clone();
                 let calls = captured.clone();
+                let force_failure = force_failure.clone();
                 tokio::spawn(async move {
                     let mut connect = Vec::new();
                     while !connect.ends_with(b"\r\n\r\n") {
@@ -97,18 +106,37 @@ impl Echo {
                         .unwrap();
                     let value = json!({"host": host, "request": headers.lines().next().unwrap(), "headers": headers, "body": String::from_utf8_lossy(&body), "body_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body)});
                     let redirect = value["request"].as_str().unwrap().contains("/redirect:");
+                    let append_failed = value["request"].as_str().unwrap().contains(":append?")
+                        && force_failure.load(Ordering::Relaxed);
                     calls.lock().unwrap().push(value.clone());
                     let disabled = value["request"]
                         .as_str()
                         .unwrap()
                         .contains("service-disabled");
+                    let workbook_denied = host == "sheets.googleapis.com"
+                        && denied_workbook.is_some_and(|id| {
+                            value["request"]
+                                .as_str()
+                                .unwrap()
+                                .split_whitespace()
+                                .nth(1)
+                                .and_then(|path| path.strip_prefix("/v4/spreadsheets/"))
+                                .and_then(|path| path.split('/').next())
+                                == Some(id)
+                        });
                     let body = if disabled {
                         json!({"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"SERVICE_DISABLED","metadata":{"service":"docs.googleapis.com","consumer":"projects/test-project"}}]}}).to_string()
+                    } else if workbook_denied {
+                        json!({"error":{"code":403,"status":"PERMISSION_DENIED","message":"Fixture account has no access to this workbook"}}).to_string()
+                    } else if append_failed {
+                        json!({"error":{"code":500,"status":"INTERNAL"}}).to_string()
                     } else {
                         value.to_string()
                     };
-                    let status = if disabled {
+                    let status = if disabled || workbook_denied {
                         "403 Forbidden"
+                    } else if append_failed {
+                        "500 Internal Server Error"
                     } else if redirect {
                         "302 Found\r\nLocation: https://sheets.googleapis.com/redirected"
                     } else {
@@ -123,6 +151,7 @@ impl Echo {
             client,
             client_builder,
             calls,
+            fail_appends,
             task,
         }
     }

@@ -68,6 +68,7 @@ The closed schema contains:
 | `duration_ms`, `http_status`, `error_code`, `part_index` | Optional bounded unsigned numbers. Duration is omitted when unmeasured. |
 | `ingress_request_id`, `related_turn_id` | Optional server-issued UUID links; no source capability/platform ID. |
 | `gap_reason` | Optional `missing_parent`, `invalid_parent`, `mismatched_turn`. No claimed victim trace ID is emitted. |
+| `guest_service_failure` | Optional closed reason on an organization channel guest service failure. Correlated records use `mcp` or `proxy`. An uncorrelated record uses `ingress`, shares the gap's server request ID, and carries `gap_reason`. |
 
 No prompt, answer, reasoning, tool argument/result/name, content hash, media,
 raw error, header map, URL/path/query, credential/ciphertext, platform sender,
@@ -130,6 +131,42 @@ partial `audit_log_turn_trace` index on `(event_data.turn_id, created_at, _id)`
 for string turn IDs, a three-second query limit and a 10,000-row page window.
 Audit history is supplementary: it is not a complete timing trace. Old audits
 without turn metadata remain unchanged and are not retroactively correlated.
+
+### Organization guest Sheets append (#2704)
+
+Use the admitted turn UUID to read the protected NyxID trace. Look for a
+`mcp` or `proxy` milestone with `guest_service_failure`.
+
+- `approval_required` means the effective policy required an approval. Check
+  the connection owner's organization preference and the resolved catalog
+  service's override. Guests cannot request or reuse owner approvals.
+- `approval_denied` means policy blocked the operation outright.
+- `guest_operation_denied` means a guest access or operation check blocked
+  execution. For a Sheets append, check the effective operation access and
+  whether the submitted query had exactly one `insertDataOption=INSERT_ROWS`.
+  This option satisfies a guest operation restriction. Approval is a separate
+  check.
+- `invalid_tool_arguments` means MCP could not prepare the supplied inputs.
+- `downstream_http_error` records a downstream HTTP 4xx or 5xx as `failed`
+  with its status. A 5xx after dispatch leaves the write's effect unknown.
+  Confirm the provider's specific cause and any write using authorized evidence,
+  including the credential's file access and row readback when relevant.
+
+MCP also records the code in the existing tool activity's failure reason.
+Audit records can corroborate execution when present. If an authenticated
+callback has a propagation gap, search for its exact server request ID in the
+protected NDJSON when that ID is available. The gap and any observed failure
+share that ID. Keep those records unlinked from the turn report. Missing
+NyxID records leave tool execution unknown. This reason field covers observed
+decisions and HTTP responses. A timeout or internal error can leave only a
+generic failure record. Use the authorized NyxAgent or gateway trace to determine
+whether a tool attempt was made.
+
+The reported 07:37:25 and 07:39:36 UTC turns on 23 November 2026 lack authorized
+per-turn evidence for the tool attempt, final query, dispatch policy, and
+admission or downstream outcome. These diagnostics are prospective. Live
+acceptance also needs an authorized guest append with row readback and a
+denial on an unrelated workbook through the same connection.
 
 ## Resource budget and rollout
 
