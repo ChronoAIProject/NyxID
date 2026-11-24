@@ -5210,6 +5210,21 @@ async fn messenger_transfer_and_reconsent_preserve_public_id_and_capture_both_gr
         )
         .await
         .unwrap();
+        // Acceptance itself fences A; the scope page need not have run yet.
+        assert!(
+            journal::finish(
+                &state.db,
+                &late_a,
+                0,
+                &late_attempt,
+                crate::models::channel_text_delivery::TextPartState::Sent,
+                Some("before-page-a"),
+                None
+            )
+            .await
+            .is_err()
+        );
+        provider::reconcile_with_service(&state, &s).await.unwrap();
         let job = state
             .db
             .collection::<bson::Document>(provider::REQUESTS)
@@ -5478,6 +5493,110 @@ async fn unknown_grant_chronology_repaired_after_signed_cutoff_keeps_real_admiss
             .await
             .unwrap()
             .is_some()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn historical_grant_capture_pages_are_bounded_indexed_and_restartable() {
+    use futures::TryStreamExt;
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let identity = provider::grant_identity("instagram", "111", "900").unwrap();
+    let at = bson::DateTime::from_chrono(Utc::now() - Duration::days(1));
+    let scopes = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES);
+    let rows:Vec<_>=(0..1001).map(|_|doc! {
+        "_id":uuid::Uuid::new_v4().to_string(),"bot_id":uuid::Uuid::new_v4().to_string(),"grant_id":uuid::Uuid::new_v4().to_string(),
+        "identity":&identity,"platform":"instagram","app_id":"111","status":"sealed","outstanding":true,"erasure_requested":false,
+        "from_generation":1_i64,"to_generation":1_i64,"legacy_history":false,"binding_fingerprint":"retired-binding",
+        "authorized_at":at,"bot_created_at":at,"created_at":at,"sealed_at":at,
+    }).collect();
+    scopes.insert_many(rows).await.unwrap();
+    let s = service(&state, &server);
+    let signed = provider_request(json!(900), Utc::now().timestamp());
+    let response = accept_provider_request(&s, "instagram", &signed, false)
+        .await
+        .unwrap();
+    let code = response["confirmation_code"].as_str().unwrap();
+    let jobs = state.db.collection::<bson::Document>(provider::REQUESTS);
+    let initial = jobs.find_one(doc! {"_id":code}).await.unwrap().unwrap();
+    assert!(initial.get_array("targets").unwrap().len() <= 100);
+    assert_eq!(
+        initial
+            .get_document("scope_capture")
+            .unwrap()
+            .get_bool("done"),
+        Ok(false)
+    );
+    let first_ids: Vec<bson::Document> = scopes
+        .find(doc! {"identity":&identity,"outstanding":true})
+        .sort(doc! {"_id":1})
+        .limit(100)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    for after in [
+        None,
+        Some(first_ids.last().unwrap().get_str("_id").unwrap()),
+    ] {
+        let mut ids = doc! {"$nin":initial.get_document("scope_capture").unwrap().get_array("excluded").unwrap()};
+        if let Some(after) = after {
+            ids.insert("$gt", after);
+        }
+        let filter = doc! {"identity":&identity,"outstanding":true,"_id":ids};
+        let explain = state
+            .db
+            .run_command(
+                doc! {"explain":{"find":crate::models::channel_meta::GRANT_SCOPES,
+                "filter":filter,"sort":{"_id":1},"limit":100},"verbosity":"executionStats"},
+            )
+            .await
+            .unwrap();
+        let stats = explain.get_document("executionStats").unwrap();
+        let count = |field| {
+            stats
+                .get_i64(field)
+                .unwrap_or_else(|_| i64::from(stats.get_i32(field).unwrap()))
+        };
+        assert_eq!(count("nReturned"), 100);
+        assert!(
+            count("totalDocsExamined") <= 100 && count("totalKeysExamined") <= 103,
+            "{stats:?}"
+        );
+    }
+    let mut saw_cursor = false;
+    for _ in 0..32 {
+        provider::reconcile_with_service(&state, &s).await.unwrap();
+        let current = jobs.find_one(doc! {"_id":code}).await.unwrap().unwrap();
+        if current.get_str("status") == Ok("completed") {
+            break;
+        }
+        assert!(current.get_array("targets").unwrap().len() <= 100);
+        saw_cursor |= current
+            .get_document("scope_capture")
+            .unwrap()
+            .get_str("after")
+            .is_ok();
+        let replay = accept_provider_request(&s, "instagram", &signed, false)
+            .await
+            .unwrap();
+        assert_eq!(replay, response);
+    }
+    assert!(saw_cursor);
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "completed"
+    );
+    assert_eq!(
+        scopes
+            .count_documents(doc! {"identity":identity,"status":"sealed","outstanding":true})
+            .await
+            .unwrap(),
+        1001
     );
     assert!(server.received_requests().await.unwrap().is_empty());
 }

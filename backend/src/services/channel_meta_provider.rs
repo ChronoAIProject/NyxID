@@ -334,31 +334,34 @@ pub async fn accept_provider_request(
                         "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "identity": &identity},
                     },
                 ).upsert(true).session(&mut *tx).await?;
+                if *erase {
+                    db.collection::<bson::Document>("channel_meta_grant_authority").update_one(doc! {"identity":&identity},
+                        doc! {"$max":{"erasure_cutoff":bson::DateTime::from_chrono(*issued+Duration::seconds(1))}}).session(&mut *tx).await?;
+                }
                 db.collection::<bson::Document>("channel_meta_grant_authority")
                     .update_one(doc! {"identity":&identity},super::grants::authority_state()).session(&mut *tx).await?;
                 // Meta dates callbacks to the second. Cover the entire second
                 // deterministically rather than missing a millisecond grant.
                 let cutoff = bson::DateTime::from_chrono(*issued + Duration::seconds(1));
-                let sessions = doc! {
-                    "platform": platform, "app_id": app, "grant_subject_id": subject,
-                    "created_at": {"$lt": cutoff},
-                };
-                if *erase {
-                    db.collection::<OAuthSession>(SESSIONS).delete_many(sessions)
-                        .session(&mut *tx).await?;
-                } else {
-                    let mut pending = sessions;
-                    pending.insert("status", doc! {"$in": ["pending", "exchanging", "assets", "installing"]});
-                    db.collection::<OAuthSession>(SESSIONS).update_many(
-                        pending, doc! {"$set": {"status": "revoked"}, "$unset": {"assets_encrypted": ""}},
-                    ).session(&mut *tx).await?;
+                let sessions = doc! {"platform":platform,"app_id":app,"grant_subject_id":subject,"created_at":{"$lt":cutoff}};
+                let mut sessions=db.collection::<bson::Document>(SESSIONS).find(sessions).projection(doc! {"_id":1}).limit(101).session(&mut *tx).await?;
+                let sessions:Vec<bson::Document>=sessions.stream(&mut *tx).try_collect().await?;
+                let session_overflow=sessions.len()>100;
+                let ids:Vec<_>=sessions.iter().take(100).map(|row|row.get("_id").cloned()).collect();
+                if !ids.is_empty() {
+                    if *erase {db.collection::<OAuthSession>(SESSIONS).delete_many(doc! {"_id":{"$in":ids}}).session(&mut *tx).await?;}
+                    else {db.collection::<OAuthSession>(SESSIONS).update_many(doc! {"_id":{"$in":ids},"status":{"$in":["pending","exchanging","assets","installing"]}},
+                        doc! {"$set":{"status":"revoked"},"$unset":{"assets_encrypted":""}}).session(&mut *tx).await?;}
                 }
                 let mut cursor = db.collection::<bson::Document>(BOTS).find(doc! {
                     "platform":platform,"meta_binding.app_id":app,"meta_binding.grant_subject_id":subject,
-                }).session(&mut *tx).await?;
+                }).limit(101).session(&mut *tx).await?;
                 let bots: Vec<bson::Document> = cursor.stream(&mut *tx).try_collect().await?;
+                let mut compatibility_pending=bots.len()>100 || session_overflow;
                 let mut targets = Vec::new();
-                for raw in bots {
+                let mut seen=std::collections::BTreeSet::new();
+                let mut excluded_scopes=Vec::<String>::new();
+                for raw in bots.into_iter().take(100) {
                     let id = raw.get_str("_id").map_err(|_|invalid())?;
                     let binding = raw.get_document("meta_binding").map_err(|_|invalid())?;
                     let grant = binding.get_str("grant_id").map_err(|_|invalid())?;
@@ -370,44 +373,40 @@ pub async fn accept_provider_request(
                         }
                         Err(_) => {} // Exact identity, unresolved chronology: no destructive effect.
                     }
-                    targets.push(doc! {"bot_id":id,"grant_id":grant});
+                    let mut target=doc! {"bot_id":id,"grant_id":grant};
+                    if let Some(scope)=db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+                        .find_one(doc! {"bot_id":id,"grant_id":grant}).projection(doc! {"_id":1}).session(&mut *tx).await?
+                        && let Ok(scope_id)=scope.get_str("_id") {
+                        target.insert("scope_id",scope_id);
+                        excluded_scopes.push(scope_id.into());
+                    }
+                    seen.insert((id.to_owned(),grant.to_owned()));
+                    targets.push(target);
                 }
                 if *erase {
                     let mut retired = db.collection::<bson::Document>("channel_meta_erasure_fences")
                         .find(doc! {"retired_grant.identity":&identity})
-                        .projection(doc! {"retired_grant":1,"local_data_erased_at":1,"completed_grant_id":1}).session(&mut *tx).await?;
+                        .projection(doc! {"retired_grant":1,"local_data_erased_at":1,"completed_grant_id":1}).limit(101).session(&mut *tx).await?;
+                    let mut count=0;
                     while let Some(row) = retired.stream(&mut *tx).try_next().await? {
+                        count+=1;
+                        if count>100 {compatibility_pending=true;break;}
                         let id = row.get_str("_id").map_err(|_|invalid())?;
                         let grant = row.get_document("retired_grant").and_then(|r|r.get_str("grant_id")).map_err(|_|invalid())?;
                         let retired = row.get_document("retired_grant").map_err(|_|invalid())?;
                         if retired.get_datetime("authorized_at").is_ok_and(|at|at >= &cutoff) { continue; }
                         if super::grants::completed(&row,grant).unwrap_or(false) { continue; }
-                        if !targets.iter().any(|target|target.get_str("bot_id")==Ok(id) && target.get_str("grant_id")==Ok(grant)) {
+                        if seen.insert((id.to_owned(),grant.to_owned())) {
                             targets.push(doc! {"bot_id":id,"grant_id":grant});
                         }
-                    }
-                }
-                let mut scopes = db.collection::<crate::models::channel_meta::GrantScope>(crate::models::channel_meta::GRANT_SCOPES)
-                    .find(doc! {"identity":&identity,"outstanding":true}).session(&mut *tx).await?;
-                let captured:Vec<crate::models::channel_meta::GrantScope> = scopes.stream(&mut *tx).try_collect().await?;
-                for scope in captured {
-                    if scope.authorized_at.is_some_and(|at|bson::DateTime::from_chrono(at)>=cutoff) {continue;}
-                    let existing=targets.iter_mut().find(|target|target.get_str("bot_id")==Ok(scope.bot_id.as_str()) && target.get_str("grant_id")==Ok(scope.grant_id.as_str()));
-                    // Current installations use the bot's live, cutoff-checked
-                    // authorization. Sealed/retired scopes have independent proof.
-                    if scope.status=="current" && existing.is_none() {continue;}
-                    if let Some(target)=existing {target.insert("scope_id",&scope.id);} else {
-                        targets.push(doc! {"bot_id":&scope.bot_id,"grant_id":&scope.grant_id,"scope_id":&scope.id});
-                    }
-                    if *erase && scope.authorized_at.is_some() {
-                        db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id},
-                            doc! {"$set":{"erasure_requested":true},"$max":{"erasure_cutoff":cutoff},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
                     }
                 }
                 db.collection::<bson::Document>(REQUESTS).insert_one(doc! {
                     "_id": id, "request_hash": hash, "platform": platform,
                     "app_id": app,
                     "erase": erase, "signed_cutoff":cutoff, "status": "pending", "targets": targets,
+                    "scope_capture":{"identity":&identity,"done":false,"sessions_done":false,"excluded":excluded_scopes},
+                    "compatibility_pending":compatibility_pending,
                     "next_attempt_at": bson::DateTime::now(), "created_at": bson::DateTime::now(),
                 }).session(&mut *tx).await?;
                 Ok(id.clone())
@@ -456,12 +455,199 @@ pub(crate) async fn reconcile_with_service(
     Ok(())
 }
 
+/// Capped compatibility adoption for pre-scope draft records. Only an overflow
+/// uses this indexed app walk; new installations already have scope identity.
+/// The request retains keyed identity and cursors, never the raw subject.
+async fn capture_compatibility(
+    db: &mongodb::Database,
+    job: &bson::Document,
+    claim: &str,
+) -> AppResult<bson::Document> {
+    if job.get_bool("compatibility_pending") != Ok(true)
+        || !job.get_array("targets").map_err(|_| invalid())?.is_empty()
+    {
+        return Ok(job.clone());
+    }
+    super::super::transaction_service::run_db_only(db,&(db,job,claim),|tx,&(db,job,claim)| {
+        Box::pin(async move {
+            let capture=job.get_document("scope_capture").map_err(|_|invalid())?;
+            let identity=capture.get_str("identity").map_err(|_|invalid())?;
+            let platform=job.get_str("platform").map_err(|_|invalid())?;
+            let app=job.get_str("app_id").map_err(|_|invalid())?;
+            let retired=capture.get_str("compatibility_phase")==Ok("retired");
+            let sessions=capture.get_str("compatibility_phase")==Ok("sessions");
+            let mut filter=if retired {doc! {"retired_grant.identity":identity}} else if sessions {doc! {"platform":platform,"app_id":app}} else {doc! {"platform":platform,"meta_binding.app_id":app}};
+            if let Ok(after)=capture.get_str("compatibility_after") {filter.insert("_id",doc! {"$gt":after});}
+            let collection=if retired {"channel_meta_erasure_fences"} else if sessions {SESSIONS} else {BOTS};
+            let mut cursor=db.collection::<bson::Document>(collection).find(filter).sort(doc! {"_id":1}).limit(SCOPE_BATCH).session(&mut *tx).await?;
+            let rows:Vec<bson::Document>=cursor.stream(&mut *tx).try_collect().await?;
+            let mut targets=Vec::new();
+            if !retired {
+                db.collection::<bson::Document>("channel_meta_grant_authority").update_one(doc! {"identity":identity},doc! {"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+            }
+            for row in &rows {
+                if sessions {
+                    let Some(subject)=row.get_str("grant_subject_id").ok() else {continue;};
+                    if !subject.is_empty() && grant_identity(platform,app,subject)?==identity {
+                        db.collection::<bson::Document>(SESSIONS).update_one(doc! {"_id":row.get("_id").cloned(),"grant_subject_id":subject},
+                            doc! {"$set":{"grant_identity":identity}}).session(&mut *tx).await?;
+                    }
+                } else if retired {
+                    let context=row.get_document("retired_grant").map_err(|_|super::grants::incomplete())?;
+                    let grant=context.get_str("grant_id").map_err(|_|super::grants::incomplete())?;
+                    if super::grants::completed(row,grant)? {continue;}
+                    targets.push(doc! {"bot_id":row.get_str("_id").map_err(|_|invalid())?,"grant_id":grant});
+                } else {
+                    let binding=row.get_document("meta_binding").map_err(|_|super::grants::incomplete())?;
+                    let subject=binding.get_str("grant_subject_id").map_err(|_|super::grants::incomplete())?;
+                    if subject.is_empty() || grant_identity(platform,app,subject)?!=identity {continue;}
+                    let bot:ChannelBot=bson::from_document(row.clone()).map_err(|_|super::grants::incomplete())?;
+                    // Retirement/cutover contends on this bot before attribution
+                    // can disappear. No historical ownership is inferred here.
+                    let changed=db.collection::<ChannelBot>(BOTS).update_one(doc! {"_id":&bot.id,
+                        "meta_binding.grant_id":&binding.get_str("grant_id").map_err(|_|super::grants::incomplete())?,
+                        "meta_binding.generation":bot.meta_binding.as_ref().map(|binding|binding.generation)},
+                        doc! {"$inc":{"meta_observation_revision":1_i64}}).session(&mut *tx).await?;
+                    if changed.matched_count!=1 {return Err(conflict());}
+                    super::scopes::ensure_current(db,tx,&bot,false).await?;
+                }
+            }
+            let exhausted=rows.len()<SCOPE_BATCH as usize;
+            let mut fields=doc! {"targets":targets};
+            let mut unset=doc! {};
+            if exhausted && !retired && !sessions && job.get_bool("erase")==Ok(true) {
+                fields.insert("scope_capture.compatibility_phase","retired");
+                unset.insert("scope_capture.compatibility_after","");
+            } else if exhausted && !sessions {
+                fields.insert("scope_capture.compatibility_phase","sessions");
+                unset.insert("scope_capture.compatibility_after","");
+            } else if exhausted {
+                fields.insert("compatibility_pending",false);
+                unset.insert("scope_capture.compatibility_after","");
+                unset.insert("scope_capture.compatibility_phase","");
+            } else if let Some(last)=rows.last() {fields.insert("scope_capture.compatibility_after",last.get_str("_id").map_err(|_|invalid())?);}
+            let updated=db.collection::<bson::Document>(REQUESTS).find_one_and_update(doc! {
+                "_id":job.get("_id").cloned(),"claim_id":claim,"status":"pending","targets":{"$size":0},"scope_capture":capture,
+            },doc! {"$set":fields,"$unset":unset}).return_document(mongodb::options::ReturnDocument::After).session(tx).await?
+                .ok_or_else(conflict)?;
+            Ok(updated)
+        })
+    }).await
+}
+
+async fn capture_sessions(
+    db: &mongodb::Database,
+    job: &bson::Document,
+    claim: &str,
+) -> AppResult<bson::Document> {
+    if job.get_document("scope_capture").is_err()
+        || job
+            .get_document("scope_capture")
+            .is_ok_and(|capture| capture.get_bool("sessions_done") != Ok(false))
+    {
+        return Ok(job.clone());
+    }
+    super::super::transaction_service::run_db_only(db,&(db,job,claim),|tx,&(db,job,claim)| {
+        Box::pin(async move {
+            let capture=job.get_document("scope_capture").map_err(|_|invalid())?;
+            let mut filter=doc! {"grant_identity":capture.get_str("identity").map_err(|_|invalid())?};
+            if let Ok(after)=capture.get_str("sessions_after") {filter.insert("_id",doc! {"$gt":after});}
+            let mut cursor=db.collection::<bson::Document>(SESSIONS).find(filter).projection(doc! {"_id":1,"created_at":1,"status":1})
+                .sort(doc! {"_id":1}).limit(SCOPE_BATCH).session(&mut *tx).await?;
+            let rows:Vec<bson::Document>=cursor.stream(&mut *tx).try_collect().await?;
+            let cutoff=job.get_datetime("signed_cutoff").map_err(|_|super::grants::incomplete())?;
+            for row in &rows {
+                if row.get_datetime("created_at").map_err(|_|super::grants::incomplete())?>=cutoff {continue;}
+                let exact=doc! {"_id":row.get("_id").cloned(),"grant_identity":capture.get_str("identity").map_err(|_|invalid())?,"created_at":row.get("created_at").cloned()};
+                if job.get_bool("erase")==Ok(true) {db.collection::<bson::Document>(SESSIONS).delete_one(exact).session(&mut *tx).await?;}
+                else if matches!(row.get_str("status"),Ok("pending"|"exchanging"|"assets"|"installing")) {
+                    db.collection::<bson::Document>(SESSIONS).update_one(exact,doc! {"$set":{"status":"revoked"},"$unset":{"assets_encrypted":""}}).session(&mut *tx).await?;
+                }
+            }
+            let mut fields=doc! {"scope_capture.sessions_done":rows.len()<SCOPE_BATCH as usize};
+            if let Some(last)=rows.last() {fields.insert("scope_capture.sessions_after",last.get_str("_id").map_err(|_|invalid())?);}
+            db.collection::<bson::Document>(REQUESTS).find_one_and_update(doc! {"_id":job.get("_id").cloned(),"claim_id":claim,"scope_capture":capture},doc! {"$set":fields})
+                .return_document(mongodb::options::ReturnDocument::After).session(tx).await?.ok_or_else(conflict)
+        })
+    }).await
+}
+
+const SCOPE_BATCH: i64 = 100;
+pub(super) async fn capture_scopes(
+    db: &mongodb::Database,
+    job: &bson::Document,
+    claim: &str,
+) -> AppResult<bson::Document> {
+    let job = capture_compatibility(db, job, claim).await?;
+    if job.get_bool("compatibility_pending") == Ok(true) {
+        return Ok(job);
+    }
+    let job = capture_sessions(db, &job, claim).await?;
+    if job
+        .get_document("scope_capture")
+        .is_ok_and(|capture| capture.get_bool("sessions_done") == Ok(false))
+    {
+        return Ok(job);
+    }
+    let Some(capture) = job
+        .get_document("scope_capture")
+        .ok()
+        .filter(|capture| capture.get_bool("done") == Ok(false))
+    else {
+        return Ok(job.clone());
+    };
+    if !job.get_array("targets").map_err(|_| invalid())?.is_empty() {
+        return Ok(job.clone());
+    }
+    let identity = capture.get_str("identity").map_err(|_| invalid())?;
+    let cutoff = *job
+        .get_datetime("signed_cutoff")
+        .map_err(|_| super::grants::incomplete())?;
+    let context = (db, &job, claim, identity, cutoff);
+    super::super::transaction_service::run_db_only(db,&context,|tx,&(db,job,claim,identity,cutoff)| {
+        Box::pin(async move {
+            let capture=job.get_document("scope_capture").map_err(|_|invalid())?;
+            let mut id=doc! {"$nin":capture.get_array("excluded").cloned().unwrap_or_default()};
+            if let Ok(after)=capture.get_str("after") {id.insert("$gt",after);}
+            let mut cursor=db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+                .find(doc! {"identity":identity,"outstanding":true,"_id":id})
+                .sort(doc! {"_id":1}).limit(SCOPE_BATCH).session(&mut *tx).await?;
+            let rows:Vec<bson::Document>=cursor.stream(&mut *tx).try_collect().await?;
+            let mut targets=Vec::new();
+            for row in &rows {
+                if row.get_datetime("authorized_at").is_ok_and(|at|at>=&cutoff) {continue;}
+                let bot=row.get_str("bot_id").map_err(|_|super::grants::incomplete())?;
+                let grant=row.get_str("grant_id").map_err(|_|super::grants::incomplete())?;
+                let scope=row.get_str("_id").map_err(|_|super::grants::incomplete())?;
+                targets.push(doc! {"bot_id":bot,"grant_id":grant,"scope_id":scope});
+                // Unknown chronology is captured but never fenced destructively.
+                if job.get_bool("erase")==Ok(true) && row.get_datetime("authorized_at").is_ok() {
+                    let changed=db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+                        .update_one(doc! {"_id":scope,"authorized_at":row.get("authorized_at").cloned(),"outstanding":true},
+                            doc! {"$set":{"erasure_requested":true},"$max":{"erasure_cutoff":cutoff},"$inc":{"revision":1_i64}})
+                        .session(&mut *tx).await?;
+                    if changed.matched_count!=1 {return Err(super::grants::incomplete());}
+                }
+            }
+            let mut fields=doc! {"targets":targets,"scope_capture.done":rows.len()<SCOPE_BATCH as usize};
+            if let Some(last)=rows.last() {fields.insert("scope_capture.after",last.get_str("_id").map_err(|_|invalid())?);}
+            let changed=db.collection::<bson::Document>(REQUESTS).find_one_and_update(doc! {
+                "_id":job.get("_id").cloned(),"claim_id":claim,"status":"pending","targets":{"$size":0},
+                "scope_capture":capture,
+            },doc! {"$set":fields}).return_document(mongodb::options::ReturnDocument::After).session(tx).await?
+                .ok_or_else(conflict)?;
+            Ok(changed)
+        })
+    }).await
+}
+
 async fn reconcile_job(
     state: &crate::AppState,
     service: &MetaService<'_>,
     job: &bson::Document,
     claim: &str,
 ) -> AppResult<()> {
+    let job = capture_scopes(&state.db, job, claim).await?;
     let job_id = job.get_str("_id").map_err(|_| invalid())?;
     let erase = job.get_bool("erase").map_err(|_| invalid())?;
     let requests = state.db.collection::<bson::Document>(REQUESTS);
@@ -512,15 +698,32 @@ async fn reconcile_job(
             return Ok(());
         }
     }
+    if let Some(current) = requests.find_one(claimed.clone()).await?
+        && current.get_array("targets").is_ok_and(Vec::is_empty)
+    {
+        let captured = capture_scopes(&state.db, &current, claim).await?;
+        if captured
+            .get_array("targets")
+            .is_ok_and(|targets| !targets.is_empty())
+            || captured
+                .get_document("scope_capture")
+                .is_ok_and(|capture| capture.get_bool("done") == Ok(false))
+            || captured.get_bool("compatibility_pending") == Ok(true)
+        {
+            next_attempt = now;
+        }
+    }
     let mut empty = claimed.clone();
     empty.insert("targets", doc! {"$size": 0});
+    empty.insert("scope_capture.done", doc! {"$ne":false});
+    empty.insert("compatibility_pending", doc! {"$ne":true});
     let completed = requests
         .update_one(
             empty,
             doc! {
                 "$set": {"status": "completed", "completed_at": bson::DateTime::now(),
                     "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::days(90))},
-                "$unset": {"targets": "", "claim_id": "", "next_attempt_at": ""}
+                "$unset": {"targets": "", "claim_id": "", "next_attempt_at": "", "scope_capture":"", "compatibility_pending":""}
             },
         )
         .await?;
@@ -571,6 +774,17 @@ async fn reconcile_target(
                 .get_datetime("authorized_at")
                 .map_err(|_| super::grants::incomplete())?;
             if authorized >= cutoff {
+                // A verified repair can exclude every request that claimed
+                // this scope. Release only when the latest captured erasure
+                // cutoff is also excluded; another request keeps its fence.
+                if erase {
+                    let id = row
+                        .get_str("_id")
+                        .map_err(|_| super::grants::incomplete())?;
+                    state.db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {
+                        "_id":id,"authorized_at":authorized,"erasure_cutoff":{"$type":"date","$lte":authorized},
+                    },doc! {"$set":{"erasure_requested":false},"$unset":{"erasure_cutoff":""},"$inc":{"revision":1_i64}}).await?;
+                }
                 return Ok(());
             }
         }
