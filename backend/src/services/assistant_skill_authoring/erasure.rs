@@ -59,11 +59,10 @@ pub(crate) async fn erase_page(
             .find_one(doc! {"_id":&claim.proposal_id})
             .session(&mut *tx)
             .await?
+            && !retire_proposal(db, tx, &raw, &claim, owner, agent).await?
         {
-            if !retire_proposal(db, tx, &raw, &claim, owner, agent).await? {
-                pending = true;
-                continue;
-            }
+            pending = true;
+            continue;
         }
         if db
             .collection::<bson::Document>(CLAIMS)
@@ -280,8 +279,8 @@ async fn retire_proposal(
         {
             return Err(incomplete());
         }
-    } else if proposal.authoring_origin.is_some() {
-        if db
+    } else if proposal.authoring_origin.is_some()
+        && db
             .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
             .update_one(
                 doc! {"_id":&proposal.id,"authoring_origin":raw.get("authoring_origin").cloned()},
@@ -291,9 +290,8 @@ async fn retire_proposal(
             .await?
             .matched_count
             != 1
-        {
-            return Err(incomplete());
-        }
+    {
+        return Err(incomplete());
     }
     Ok(true)
 }
