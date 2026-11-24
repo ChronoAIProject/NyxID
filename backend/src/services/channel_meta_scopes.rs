@@ -314,7 +314,7 @@ pub(crate) async fn fence_reference(
             .return_document(mongodb::options::ReturnDocument::After)
             .session(&mut *tx)
             .await?
-            .ok_or_else(super::grants::incomplete)?;
+            .ok_or_else(|| super::meta::unreachable("credential_authority_changed"))?;
         ensure_current(db, tx, &live, false).await?;
     }
     let scope = db

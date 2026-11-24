@@ -1096,6 +1096,12 @@ async fn multipart_fence(scenario: &str) {
     assert!(journal.parts[0].status == PartStatus::Accepted);
     assert_eq!(journal.parts[0].platform_message_ids, ["prefix-accepted"]);
     assert!(journal.parts[1].status == PartStatus::Failed);
+    assert_eq!(
+        journal.parts[1].failure_code,
+        Some(unreachable(reason).error_code())
+    );
+    assert!(journal.parts[1].outbound_message_id.is_none());
+    assert!(journal.parts[1].platform_message_ids.is_empty());
     server.verify().await;
 }
 

@@ -174,7 +174,7 @@ impl Delivery {
     pub async fn attempting(&mut self, db: &mongodb::Database, index: usize) -> AppResult<()> {
         let previous = self.parts[index].status;
         self.parts[index].status = PartStatus::Uncertain;
-        if let Err(error) = self.save_part(db, index, true).await {
+        if let Err(error) = self.save_part(db, index, PartStatus::NotAttempted).await {
             self.parts[index].status = previous;
             return Err(error);
         }
@@ -205,7 +205,7 @@ impl Delivery {
         if let Some(Some(operation)) = self.operations.get_mut(index) {
             operation.finish(crate::turn_trace::Outcome::Confirmed, None, None);
         }
-        self.save_part(db, index, false).await
+        self.save_part(db, index, PartStatus::Uncertain).await
     }
 
     pub async fn failed(
@@ -215,7 +215,11 @@ impl Delivery {
         error: &AppError,
     ) -> AppResult<()> {
         let part = &mut self.parts[index];
-        let fresh = part.status == PartStatus::NotAttempted;
+        let expected = if part.status == PartStatus::NotAttempted {
+            PartStatus::NotAttempted
+        } else {
+            PartStatus::Uncertain
+        };
         if part.status == PartStatus::NotAttempted
             || (self.telegram && super::telegram_formatting::definite_refusal(error))
         {
@@ -233,7 +237,7 @@ impl Delivery {
                 Some(error.error_code()),
             );
         }
-        self.save_part(db, index, fresh).await?;
+        self.save_part(db, index, expected).await?;
         if self.telegram {
             super::channel_reply_notice::failed(db, &self.id, &self.bot_id, &self.inbound_id)
                 .await?;
@@ -241,15 +245,30 @@ impl Delivery {
         Ok(())
     }
 
-    async fn save_part(&self, db: &mongodb::Database, index: usize, fresh: bool) -> AppResult<()> {
+    async fn save_part(
+        &self,
+        db: &mongodb::Database,
+        index: usize,
+        expected: PartStatus,
+    ) -> AppResult<()> {
         let fields = bson::to_document(&self.parts[index]).map_err(|_| unconfirmed())?;
         let fields: bson::Document = fields
             .into_iter()
             .map(|(key, value)| (format!("parts.{index}.{key}"), value))
             .collect();
         let mut filter = doc! {"_id":&self.id,"complete":false};
-        if self.meta_grant.is_some() && !fresh {
-            filter.insert(format!("parts.{index}.status"), "uncertain");
+        // Starting an attempt requires a live generation. Recording a
+        // definite refusal on the existing receipt needs only its own grant.
+        let fresh = expected == PartStatus::NotAttempted
+            && self.parts[index].status == PartStatus::Uncertain;
+        if let Some(grant) = &self.meta_grant {
+            filter.insert("meta_grant.bot_id", &grant.bot_id);
+            filter.insert("meta_grant.grant_id", &grant.grant_id);
+            filter.insert("meta_grant.generation", grant.generation);
+            filter.insert(
+                format!("parts.{index}.status"),
+                bson::to_bson(&expected).map_err(|_| unconfirmed())?,
+            );
         }
         let result = super::channel_meta_service::scopes::update_record(
             db,
@@ -408,7 +427,7 @@ pub async fn send_parts(
                 // An issued Meta attempt has one terminal transition. failed()
                 // publishes both the observation and the provider's refusal code.
                 if delivery.meta_grant.is_none() {
-                    delivery.save_part(db, index, false).await?;
+                    delivery.save_part(db, index, PartStatus::Uncertain).await?;
                 }
                 return Err(error);
             }
