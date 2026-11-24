@@ -806,17 +806,17 @@ pub async fn create_approval_request(
             created_at: now,
         };
 
-        match collection.insert_one(&request).await {
+        match super::erasure_admission::insert_owned(db, REQUESTS, user_id, &request).await {
             Ok(_) => {
                 inserted_request = Some(request);
                 break;
             }
-            Err(e) if is_duplicate_key_error(&e) => {
+            Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
                 // Concurrent insert race: another request inserted/processed first.
                 // Retry once to read the pending row or create a new row if no longer pending.
                 continue;
             }
-            Err(e) => return Err(AppError::DatabaseError(e)),
+            Err(error) => return Err(error),
         }
     }
 
@@ -1081,10 +1081,7 @@ pub async fn create_tool_approval_request(
         created_at: now,
     };
 
-    collection
-        .insert_one(&request)
-        .await
-        .map_err(AppError::DatabaseError)?;
+    super::erasure_admission::insert_owned(db, REQUESTS, user_id, &request).await?;
 
     // Send notification through existing pipeline. Tool approvals are
     // always personal (see `from_org_policy: false` above), so no org
@@ -3445,6 +3442,92 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn new_approval_requests_respect_account_erasure_at_persistence() {
+        use crate::models::user::UserType;
+        use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
+        let db = connect_transaction_test_database("approval_erasure_admission").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+
+        let service_request = |requester| {
+            create_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "test-service",
+                "Test service",
+                "test-service",
+                "api_key",
+                requester,
+                None,
+                ApprovalRequestOperation::from_descriptor(&test_operation(), None),
+                ApprovalMode::PerRequest,
+                300,
+                vec![owner.clone()],
+                false,
+            )
+        };
+        let tool_request = |requester| {
+            create_tool_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "test_tool",
+                None,
+                None,
+                false,
+                "api_key",
+                requester,
+                None,
+                ApprovalOptions::default(),
+            )
+        };
+        assert_eq!(
+            service_request("before-erasure").await.unwrap().status,
+            "pending"
+        );
+        assert_eq!(
+            tool_request("before-erasure").await.unwrap().status,
+            "pending"
+        );
+        super::super::personal_erasure_service::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        let filter = doc! {"user_id": &owner};
+        let requests = db.collection::<Document>(REQUESTS);
+        let channels = db.collection::<Document>(CHANNELS);
+        let before = requests.count_documents(filter.clone()).await.unwrap();
+        channels.delete_many(filter.clone()).await.unwrap();
+
+        assert!(matches!(
+            service_request("after-erasure").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            tool_request("after-erasure").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            requests.count_documents(filter.clone()).await.unwrap(),
+            before
+        );
+        assert_eq!(channels.count_documents(filter).await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -353,6 +353,7 @@ pub async fn redeem(
                     session_id: tokens.session_id.clone(), access_expires_in: tokens.access_expires_in, resource_uris: tokens.resource_uris.clone()}),
                     Some(tokens.session_id.clone()), None)
             } else if let Some(handoff) = &handoff {
+                agent::fence_delivery_owners(db, &row.user_id, &handoff.api_key.owner_id, session).await?;
                 let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {
                     "_id": row.device_request_id.as_deref(), "approved_user_id": &row.user_id,
                     "mfa_policy_revision": &row.mfa_policy_revision, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
@@ -460,6 +461,7 @@ pub async fn browser_handoff(
         let db = &db_owned; let row = &row_owned;
         let result: AppResult<()> = async {
             app_policy::fence(db, &row.user_id, row.mfa_policy_revision.as_deref(), session).await?;
+            super::erasure_admission::fence_in_session(db, &row.user_id, session).await?;
             let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {"_id": &request.id,
                 "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
                 doc! {"$set": {"expires_at": bson::DateTime::from_chrono(expires_at)}, "$inc": {"handoff_version": 1}}).session(&mut *session).await?;

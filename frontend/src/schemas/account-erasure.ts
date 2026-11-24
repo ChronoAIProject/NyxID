@@ -16,6 +16,10 @@ export const accountErasureSchema = z.object({
   completed_at: z.string().nullable(),
   effects: erasureEffectsSchema.optional(),
   next_effect_after: z.string().nullable().optional(),
+  retained: z.array(z.object({
+    collection: z.string().min(1),
+    reason: z.string().min(1),
+  }).strict()).optional(),
   domains: z.array(z.object({
     domain: z.string(),
     retry_generation: z.number().int().nonnegative().optional(),

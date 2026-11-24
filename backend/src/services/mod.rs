@@ -166,6 +166,7 @@ pub mod machine_external_source_service;
 pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
+mod mcp_session_admission;
 pub mod mfa_service;
 pub mod mobile_social_service;
 pub mod node_credential_delivery;
