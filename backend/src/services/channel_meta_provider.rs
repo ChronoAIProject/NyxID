@@ -132,11 +132,29 @@ async fn retire_account_inbox_in_session(
                 doc! {"identity":&identity},
                 doc! {"$inc":{"revision":1_i64},
                 "$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"identity":&identity,
-                    "platform":&bot.platform,"app_id":&binding.app_id}},
+                    "platform":&bot.platform,"app_id":&binding.app_id,"outstanding":true}},
             )
             .upsert(true)
             .session(&mut *tx)
             .await?;
+        if let Some(authorized) = binding.authorized_at {
+            let second =
+                chrono::DateTime::from_timestamp(authorized.timestamp(), 0).ok_or_else(invalid)?;
+            db.collection::<bson::Document>("channel_meta_grant_authority")
+                .update_one(
+                    doc! {"identity":&identity},
+                    doc! {"$max":{"last_authorized_at":bson::DateTime::from_chrono(second)}},
+                )
+                .session(&mut *tx)
+                .await?;
+            db.collection::<bson::Document>("channel_meta_grant_authority")
+                .update_one(
+                    doc! {"identity":&identity},
+                    super::grants::authority_state(),
+                )
+                .session(&mut *tx)
+                .await?;
+        }
         let account = db
             .collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
             .find_one(doc! {"user_id":owner})
@@ -154,14 +172,26 @@ async fn retire_account_inbox_in_session(
         };
         let mut retired = bson::to_document(&retired).map_err(|_| invalid())?;
         retired.insert("app_id", &binding.app_id);
-        db.collection::<bson::Document>("channel_meta_erasure_fences")
+        let changed = db.collection::<bson::Document>("channel_meta_erasure_fences")
             .update_one(
-                doc! {"_id":id,"local_data_erased_at":{"$exists":false}},
+                doc! {"_id":id,"local_data_erased_at":{"$exists":false},"completed_grant_id":{"$exists":false}},
                 doc! {"$set":{"requested_at":bson::DateTime::now(),
                 "retired_grant":retired}},
             )
             .session(&mut *tx)
             .await?;
+        if changed.matched_count != 1 {
+            let proof = db
+                .collection::<bson::Document>("channel_meta_erasure_fences")
+                .find_one(doc! {"_id":id})
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(super::grants::incomplete)?;
+            if !super::grants::completed(&proof, &binding.grant_id)? {
+                return Err(super::grants::incomplete());
+            }
+            super::grants::clear_completed_retired(db, tx, &proof).await?;
+        }
     }
     for (collection, filter) in [
         (meta::CONTROLS, doc! {"bot_id":id}),
@@ -214,7 +244,7 @@ pub(crate) async fn fence_grant_in_session(
             doc! {"identity": &identity},
             doc! {
                 "$inc": {"revision": 1_i64},
-                "$set": {"platform": platform, "app_id": app},
+                "$set": {"platform": platform, "app_id": app,"outstanding":true},
                 "$max": {"last_authorized_at": bson::DateTime::from_chrono(started_second)},
                 "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "identity": &identity},
             },
@@ -285,6 +315,8 @@ pub async fn accept_provider_request(
                         "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "identity": &identity},
                     },
                 ).upsert(true).session(&mut *tx).await?;
+                db.collection::<bson::Document>("channel_meta_grant_authority")
+                    .update_one(doc! {"identity":&identity},super::grants::authority_state()).session(&mut *tx).await?;
                 // Meta dates callbacks to the second. Cover the entire second
                 // deterministically rather than missing a millisecond grant.
                 let cutoff = bson::DateTime::from_chrono(*issued + Duration::seconds(1));
@@ -302,61 +334,35 @@ pub async fn accept_provider_request(
                         pending, doc! {"$set": {"status": "revoked"}, "$unset": {"assets_encrypted": ""}},
                     ).session(&mut *tx).await?;
                 }
-                let mut cursor = db.collection::<ChannelBot>(BOTS).find(doc! {
-                    "platform": platform, "meta_binding.app_id": app,
-                    "meta_binding.grant_subject_id": subject,
-                    "$or":[{"meta_binding.authorized_at":{"$lt":cutoff}},
-                        {"meta_binding.authorized_at":null}],
+                let mut cursor = db.collection::<bson::Document>(BOTS).find(doc! {
+                    "platform":platform,"meta_binding.app_id":app,"meta_binding.grant_subject_id":subject,
                 }).session(&mut *tx).await?;
-                let bots: Vec<ChannelBot> = cursor.stream(&mut *tx).try_collect().await?;
+                let bots: Vec<bson::Document> = cursor.stream(&mut *tx).try_collect().await?;
                 let mut targets = Vec::new();
-                for bot in bots {
-                    let binding = bot.meta_binding.as_ref().ok_or_else(invalid)?;
-                    let generation = binding.generation;
-                    let advance = bot.is_active && !binding.provider_revoked;
-                    let keep_identity = !*erase && bot.is_active;
-                    let subscription = if keep_identity && binding.operator_suspended {
-                        "suspended"
-                    } else if keep_identity {
-                        "reconnect_required"
-                    } else if binding.subscription == "removed" {
-                        "removed"
-                    } else {
-                        "removal_pending"
-                    };
-                    let mut update = doc! {"$set": {
-                        "is_active": keep_identity,
-                        "status": if keep_identity && binding.operator_suspended {"suspended"} else if keep_identity {"failed"} else {"inactive"},
-                        "webhook_registered": false,
-                        "meta_binding.provider_revoked": binding.provider_revoked || !*erase,
-                        "meta_binding.erasure_requested": binding.erasure_requested || *erase,
-                        "meta_binding.grant_reconnect_required": binding.grant_reconnect_required || !*erase,
-                        "meta_binding.subscription": subscription,
-                        "meta_binding.next_reconcile_at": bson::DateTime::now(),
-                        "updated_at": bson::DateTime::now(),
-                    }};
-                    if advance {
-                        update.insert("$inc", doc! {"meta_binding.generation": 1_i64});
+                for raw in bots {
+                    let id = raw.get_str("_id").map_err(|_|invalid())?;
+                    let binding = raw.get_document("meta_binding").map_err(|_|invalid())?;
+                    let grant = binding.get_str("grant_id").map_err(|_|invalid())?;
+                    match binding.get_datetime("authorized_at") {
+                        Ok(at) if at >= &cutoff => continue,
+                        Ok(_) => {
+                            let bot: ChannelBot = bson::from_document(raw.clone()).map_err(|_|invalid())?;
+                            apply_callback_state(db,tx,&bot,*erase).await?;
+                        }
+                        Err(_) => {} // Exact identity, unresolved chronology: no destructive effect.
                     }
-                    let changed = db.collection::<ChannelBot>(BOTS).update_one(
-                        doc! {"_id": &bot.id, "meta_binding.generation": generation}, update,
-                    ).session(&mut *tx).await?;
-                    if changed.matched_count != 1 { return Err(conflict()); }
-                    targets.push(doc! {
-                        "bot_id": &bot.id, "grant_id": &binding.grant_id,
-                        "generation": generation + i64::from(advance),
-                    });
+                    targets.push(doc! {"bot_id":id,"grant_id":grant});
                 }
                 if *erase {
                     let mut retired = db.collection::<bson::Document>("channel_meta_erasure_fences")
-                        .find(doc! {"retired_grant.identity":&identity,
-                            "$or":[{"retired_grant.authorized_at":{"$lt":cutoff}},
-                                {"retired_grant.authorized_at":null}],
-                            "local_data_erased_at":{"$exists":false}})
-                        .projection(doc! {"retired_grant.grant_id":1}).session(&mut *tx).await?;
+                        .find(doc! {"retired_grant.identity":&identity})
+                        .projection(doc! {"retired_grant":1,"local_data_erased_at":1,"completed_grant_id":1}).session(&mut *tx).await?;
                     while let Some(row) = retired.stream(&mut *tx).try_next().await? {
                         let id = row.get_str("_id").map_err(|_|invalid())?;
                         let grant = row.get_document("retired_grant").and_then(|r|r.get_str("grant_id")).map_err(|_|invalid())?;
+                        let retired = row.get_document("retired_grant").map_err(|_|invalid())?;
+                        if retired.get_datetime("authorized_at").is_ok_and(|at|at >= &cutoff) { continue; }
+                        if super::grants::completed(&row,grant).unwrap_or(false) { continue; }
                         if !targets.iter().any(|target|target.get_str("bot_id")==Ok(id) && target.get_str("grant_id")==Ok(grant)) {
                             targets.push(doc! {"bot_id":id,"grant_id":grant});
                         }
@@ -365,7 +371,7 @@ pub async fn accept_provider_request(
                 db.collection::<bson::Document>(REQUESTS).insert_one(doc! {
                     "_id": id, "request_hash": hash, "platform": platform,
                     "app_id": app,
-                    "erase": erase, "status": "pending", "targets": targets,
+                    "erase": erase, "signed_cutoff":cutoff, "status": "pending", "targets": targets,
                     "next_attempt_at": bson::DateTime::now(), "created_at": bson::DateTime::now(),
                 }).session(&mut *tx).await?;
                 Ok(id.clone())
@@ -396,6 +402,7 @@ pub(crate) async fn reconcile_with_service(
     state: &crate::AppState,
     service: &MetaService<'_>,
 ) -> AppResult<()> {
+    super::grants::reconcile_authority_state(service.db).await?;
     for _ in 0..2 {
         let claim = uuid::Uuid::new_v4().to_string();
         let Some(job)=state.db.collection::<bson::Document>(REQUESTS).find_one_and_update(
@@ -445,7 +452,17 @@ async fn reconcile_job(
         let identity = doc! {"bot_id": bot_id, "grant_id": grant_id};
         let mut filter = claimed.clone();
         filter.insert("targets", doc! {"$elemMatch": &identity});
-        let update = match reconcile_target(state, service, erase, bot_id, grant_id).await {
+        let update = match reconcile_target(
+            state,
+            service,
+            erase,
+            bot_id,
+            grant_id,
+            job.get_datetime("signed_cutoff")
+                .map_err(|_| super::grants::incomplete())?,
+        )
+        .await
+        {
             Ok(()) => doc! {"$pull": {"targets": identity}},
             Err(error) => {
                 tracing::warn!(
@@ -488,7 +505,57 @@ async fn reconcile_target(
     erase: bool,
     bot_id: &str,
     grant_id: &str,
+    cutoff: &bson::DateTime,
 ) -> AppResult<()> {
+    let raw = state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .find_one(doc! {"_id":bot_id})
+        .await?;
+    if let Some(raw) = &raw {
+        let binding = raw
+            .get_document("meta_binding")
+            .map_err(|_| super::grants::incomplete())?;
+        if binding.get_str("grant_id") == Ok(grant_id) {
+            let authorized = binding
+                .get_datetime("authorized_at")
+                .map_err(|_| super::grants::incomplete())?;
+            if authorized >= cutoff {
+                return Ok(());
+            }
+            let bot: ChannelBot =
+                bson::from_document(raw.clone()).map_err(|_| super::grants::incomplete())?;
+            super::super::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, &bot, erase),
+                |tx, &(db, bot, erase)| {
+                    Box::pin(async move { apply_callback_state(db, tx, bot, erase).await })
+                },
+            )
+            .await?;
+        }
+    } else if erase {
+        let proof = state
+            .db
+            .collection::<bson::Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"_id":bot_id})
+            .await?
+            .ok_or_else(super::grants::incomplete)?;
+        if !super::grants::completed(&proof, grant_id)? {
+            let retired = proof
+                .get_document("retired_grant")
+                .map_err(|_| super::grants::incomplete())?;
+            if retired.get_str("grant_id") != Ok(grant_id) {
+                return Err(super::grants::incomplete());
+            }
+            let authorized = retired
+                .get_datetime("authorized_at")
+                .map_err(|_| super::grants::incomplete())?;
+            if authorized >= cutoff {
+                return Ok(());
+            }
+        }
+    }
     let bot = state
         .db
         .collection::<ChannelBot>(BOTS)
@@ -553,6 +620,54 @@ async fn reconcile_target(
                 .await?;
         }
         _ => {} // A successor grant is outside this request's authority.
+    }
+    Ok(())
+}
+
+/// Caller has proved the exact grant lies before the authenticated cutoff.
+/// Capture and delayed chronology recovery use the same local transition.
+async fn apply_callback_state(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    bot: &ChannelBot,
+    erase: bool,
+) -> AppResult<()> {
+    let binding = bot.meta_binding.as_ref().ok_or_else(invalid)?;
+    let advance = bot.is_active && !binding.provider_revoked;
+    let keep = !erase && bot.is_active;
+    let subscription = if keep && binding.operator_suspended {
+        "suspended"
+    } else if keep {
+        "reconnect_required"
+    } else if binding.subscription == "removed" {
+        "removed"
+    } else {
+        "removal_pending"
+    };
+    let mut update = doc! {"$set":{
+    "is_active":keep,"status":if keep && binding.operator_suspended {"suspended"} else if keep {"failed"} else {"inactive"},
+    "webhook_registered":false,"meta_binding.provider_revoked":binding.provider_revoked || !erase,
+    "meta_binding.erasure_requested":binding.erasure_requested || erase,
+    "meta_binding.grant_reconnect_required":binding.grant_reconnect_required || !erase,
+    "meta_binding.subscription":subscription,"meta_binding.next_reconcile_at":bson::DateTime::now(),
+    "updated_at":bson::DateTime::now()}};
+    if advance {
+        update.insert("$inc", doc! {"meta_binding.generation":1_i64});
+    }
+    if db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id":&bot.id,
+            "meta_binding.grant_id":&binding.grant_id,"meta_binding.generation":binding.generation,
+            "meta_binding.authorized_at":binding.authorized_at.map(bson::DateTime::from_chrono)},
+            update,
+        )
+        .session(&mut *tx)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(conflict());
     }
     Ok(())
 }

@@ -1339,16 +1339,28 @@ impl AccountTools<'_> {
                 let adapter =
                     channel_adapters::resolve_adapter(&bot.platform, self.token_exchange_cache)?;
                 if name == "delete_channel_bot" {
-                    channel_bot_service::delete_bot(
-                        self.db,
-                        self.config,
-                        self.http,
-                        self.keys,
-                        adapter.as_ref(),
-                        &bot.id,
-                        owner,
-                    )
-                    .await?;
+                    if super::channel_adapters::meta::is_meta(&bot.platform) {
+                        channel_bot_service::delete_meta_bot(
+                            self.db,
+                            self.config,
+                            self.http,
+                            self.keys,
+                            &bot,
+                            user,
+                        )
+                        .await?;
+                    } else {
+                        channel_bot_service::delete_bot(
+                            self.db,
+                            self.config,
+                            self.http,
+                            self.keys,
+                            adapter.as_ref(),
+                            &bot.id,
+                            owner,
+                        )
+                        .await?;
+                    }
                     Ok(json!({"deleted": true}))
                 } else {
                     let bot = channel_bot_service::update_bot_as_actor(

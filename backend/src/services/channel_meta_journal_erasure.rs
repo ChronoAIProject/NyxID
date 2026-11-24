@@ -257,7 +257,7 @@ async fn erase_attributed(
                     "_id": &plan.id, "user_id": &plan.user_id,
                     "source_id": &plan.source_id, "logical_key": &plan.logical_key,
                 }),
-                Some(Target::Bot(id)) if !erase => {
+                Some(Target::Bot(id)) => {
                     // Preserve positive sibling proof before its finite-lived
                     // source disappears, on the original journal itself.
                     attribute.entry(id).or_default().push(doc! {
@@ -348,23 +348,35 @@ async fn saved_target(
             // Destination identity does not depend on provenance fields such
             // as platform. Establish an exact match before validating them.
             #[derive(serde::Deserialize)]
+            struct DestinationThread {
+                child_id: String,
+                generation: i64,
+                channel_generation: i64,
+                agent_id: String,
+            }
+            #[derive(serde::Deserialize)]
             struct Destination {
                 nyxbot_channel_id: String,
                 partition: String,
-                thread: Option<Box<crate::models::channel_thread_follow::ThreadTurnBinding>>,
+                thread: Option<DestinationThread>,
             }
             let Ok(identity) = bson::from_document::<Destination>(origin.clone()) else {
                 continue;
             };
-            let identity = crate::models::assistant_conversation::ChannelOrigin {
-                nyxbot_channel_id: identity.nyxbot_channel_id,
-                partition: identity.partition,
-                thread: identity.thread,
-                platform: String::new(),
-                native_event_id: None,
-                org_execution: None,
-            };
-            if super::channel_supplemental_delivery::saved_key(turn, &identity) != plan.logical_key
+            let binding = identity.thread.as_ref().map(|thread| {
+                (
+                    thread.child_id.as_str(),
+                    thread.generation,
+                    thread.channel_generation,
+                    thread.agent_id.as_str(),
+                )
+            });
+            if super::channel_supplemental_delivery::saved_destination_key(
+                turn,
+                &identity.nyxbot_channel_id,
+                &identity.partition,
+                binding,
+            ) != plan.logical_key
             {
                 continue;
             }
@@ -373,8 +385,15 @@ async fn saved_target(
             >(origin.clone()) else {
                 return Ok(SavedTarget::Incomplete);
             };
-            if super::channel_supplemental_delivery::saved_key(turn, &origin) != plan.logical_key {
-                continue;
+            if super::channel_adapters::resolve_adapter(
+                &origin.platform,
+                &std::sync::Arc::new(
+                    super::provider_token_exchange_service::TokenExchangeCache::new(),
+                ),
+            )
+            .is_err()
+            {
+                return Ok(SavedTarget::Incomplete);
             }
             if saved
                 .get_document("source")
@@ -1040,10 +1059,13 @@ mod tests {
 
     #[tokio::test]
     async fn exact_predating_destination_with_missing_or_mismatched_nested_turn_stays_pending() {
-        for (nested, missing_platform) in [
-            (None, false),
-            (Some("different-turn"), false),
-            (Some("exact"), true),
+        for fault in [
+            "nested-missing",
+            "nested-different",
+            "platform-missing",
+            "platform-empty",
+            "platform-unknown",
+            "thread-provenance",
         ] {
             let (state, _, _server, mut bot) = fixture("instagram").await;
             stop_for_erasure(&state, &mut bot).await;
@@ -1057,7 +1079,20 @@ mod tests {
             let origin = ChannelOrigin {
                 org_execution: None,
                 native_event_id: None,
-                thread: None,
+                thread: (fault == "thread-provenance").then(|| {
+                    Box::new(crate::models::channel_thread_follow::ThreadTurnBinding {
+                        sender_kind: None,
+                        child_id: uuid::Uuid::new_v4().to_string(),
+                        source_message_id: "original".into(),
+                        sender_id: "sender".into(),
+                        guest: true,
+                        revision: 1,
+                        generation: 1,
+                        channel_generation: 1,
+                        agent_id: uuid::Uuid::new_v4().to_string(),
+                        queued: false,
+                    })
+                }),
                 nyxbot_channel_id: channel,
                 partition: "private-owner".into(),
                 platform: "instagram".into(),
@@ -1078,18 +1113,42 @@ mod tests {
                 .update_one(doc! {"_id":&receipt.id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(bot.created_at-chrono::Duration::days(1)),
                     "parts.0.platform_message_id":"retained-provider-id"}}).await.unwrap();
             let mut target = saved(&turn, &origin);
-            target.get_document_mut("source").unwrap().remove("turn_id");
-            if let Some(nested) = nested {
-                target
-                    .get_document_mut("source")
-                    .unwrap()
-                    .insert("turn_id", if nested == "exact" { &turn } else { nested });
-            }
-            if missing_platform {
-                target
-                    .get_document_mut("origin")
-                    .unwrap()
-                    .remove("platform");
+            match fault {
+                "nested-missing" => {
+                    target.get_document_mut("source").unwrap().remove("turn_id");
+                }
+                "nested-different" => {
+                    target
+                        .get_document_mut("source")
+                        .unwrap()
+                        .insert("turn_id", "different");
+                }
+                "platform-missing" => {
+                    target
+                        .get_document_mut("origin")
+                        .unwrap()
+                        .remove("platform");
+                }
+                "platform-empty" => {
+                    target
+                        .get_document_mut("origin")
+                        .unwrap()
+                        .insert("platform", "");
+                }
+                "platform-unknown" => {
+                    target
+                        .get_document_mut("origin")
+                        .unwrap()
+                        .insert("platform", "unknown-platform");
+                }
+                _ => {
+                    target
+                        .get_document_mut("origin")
+                        .unwrap()
+                        .get_document_mut("thread")
+                        .unwrap()
+                        .remove("sender_id");
+                }
             }
             let message = uuid::Uuid::new_v4().to_string();
             state
@@ -1129,8 +1188,7 @@ mod tests {
                 .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
                 .update_one(
                     doc! {"_id":&message},
-                    doc! {"$set":{"handoff_delivery.targets.0.source.turn_id":&turn,
-                    "handoff_delivery.targets.0.origin.platform":"instagram"}},
+                    doc! {"$set":{"handoff_delivery.targets.0":saved(&turn,&origin)}},
                 )
                 .await
                 .unwrap();

@@ -1714,9 +1714,20 @@ pub async fn delete_bot(
     let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
-    let managed_webhook_cleanup =
+    let managed_webhook_cleanup = if crate::services::channel_adapters::meta::is_meta(&bot.platform)
+    {
+        channel_bot_service::delete_bot_with_state_as_actor(
+            &state,
+            adapter.as_ref(),
+            &bot_id,
+            &owner_id,
+            &actor,
+        )
+        .await?
+    } else {
         channel_bot_service::delete_bot_with_state(&state, adapter.as_ref(), &bot_id, &owner_id)
-            .await?;
+            .await?
+    };
 
     emit_event(
         state.telemetry.as_deref(),

@@ -3557,116 +3557,135 @@ async fn disconnect_retires_contextual_token_and_decoder_marker_together() {
 
 #[tokio::test]
 async fn manual_account_retirement_sweeper_preserves_transferred_history_without_explicit_delete() {
-    use crate::services::ownership_transfer_service as transfer;
-    let (state, _, server, mut bot) = fixture("instagram").await;
-    configure(&state, &bot).await;
-    bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
-    bot.credential_source = "user".into();
-    state
-        .db
-        .collection::<ChannelBot>(BOTS)
-        .replace_one(doc! {"_id":&bot.id}, &bot)
-        .await
-        .unwrap();
-    let recipient = uuid::Uuid::new_v4().to_string();
-    state
-        .db
-        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-        .insert_one(crate::test_utils::test_user(
-            &recipient,
-            crate::models::user::UserType::Person,
-        ))
-        .await
-        .unwrap();
-    let source = uuid::Uuid::new_v4().to_string();
-    state
-        .db
-        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
-        .insert_one(doc! {"_id":&source,"user_id":&bot.user_id,"channel_bot_id":&bot.id})
-        .await
-        .unwrap();
-    let receipt = super::super::channel_text_delivery::begin(
-        &state.db,
-        "manual-former-history",
-        &bot.user_id,
-        &source,
-        "receipt",
-        1,
-    )
-    .await
-    .unwrap();
-    let preview = transfer::preview(
-        &state.db,
-        &bot.user_id,
-        transfer::ResourceKind::ChannelBot,
-        &bot.id,
-        &recipient,
-        5,
-    )
-    .await
-    .unwrap();
-    transfer::transfer_with_keys(
-        &state.db,
-        Some(&state.encryption_keys),
-        transfer::TransferCommand {
-            actor: &bot.user_id,
-            api_key_id: None,
-            first_party_human: true,
-            kind: transfer::ResourceKind::ChannelBot,
-            resource_id: &bot.id,
-            destination: &recipient,
-            request_id: &uuid::Uuid::new_v4().to_string(),
-            expected_version: &preview.version,
-            capacity: 5,
-        },
-    )
-    .await
-    .unwrap();
-    // Confirm remote removal using the existing test provider before account cleanup.
-    Mock::given(method("DELETE"))
-        .and(path("/v25.0/222/subscribed_apps"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let live = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
-    service(&state, &server).disconnect(&live).await.unwrap();
-    super::super::durable_wake_tests::resume_after(
-        "meta_account_before_retirement",
-        erase_personal_owner(&state, &recipient),
-        async {
-            let s = service(&state, &server);
-            state
-                .db
-                .collection::<bson::Document>(BOTS)
-                .update_one(
-                    doc! {"_id":&bot.id},
-                    doc! {"$set":{"meta_binding.next_reconcile_at":bson::DateTime::now()}},
-                )
-                .await
-                .unwrap();
-            sweep_service(&state, &s).await.unwrap();
-            assert!(
-                super::super::channel_text_delivery::load(&state.db, "manual-former-history")
-                    .await
-                    .unwrap()
-                    .is_some()
-            );
-        },
-    )
-    .await;
-    assert!(
+    for explicit_delete in [false, true] {
+        use crate::services::ownership_transfer_service as transfer;
+        let (state, _, server, mut bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+        bot.credential_source = "user".into();
         state
             .db
-            .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
-            .find_one(doc! {"_id":receipt.id,"channel_bot_id":&bot.id})
+            .collection::<ChannelBot>(BOTS)
+            .replace_one(doc! {"_id":&bot.id}, &bot)
             .await
-            .unwrap()
-            .is_some()
-    );
-    server.verify().await;
+            .unwrap();
+        let recipient = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &recipient,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let source = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&source,"user_id":&bot.user_id,"channel_bot_id":&bot.id})
+            .await
+            .unwrap();
+        let receipt = super::super::channel_text_delivery::begin(
+            &state.db,
+            "manual-former-history",
+            &bot.user_id,
+            &source,
+            "receipt",
+            1,
+        )
+        .await
+        .unwrap();
+        let preview = transfer::preview(
+            &state.db,
+            &bot.user_id,
+            transfer::ResourceKind::ChannelBot,
+            &bot.id,
+            &recipient,
+            5,
+        )
+        .await
+        .unwrap();
+        transfer::transfer_with_keys(
+            &state.db,
+            Some(&state.encryption_keys),
+            transfer::TransferCommand {
+                actor: &bot.user_id,
+                api_key_id: None,
+                first_party_human: true,
+                kind: transfer::ResourceKind::ChannelBot,
+                resource_id: &bot.id,
+                destination: &recipient,
+                request_id: &uuid::Uuid::new_v4().to_string(),
+                expected_version: &preview.version,
+                capacity: 5,
+            },
+        )
+        .await
+        .unwrap();
+        // Confirm remote removal using the existing test provider before account cleanup.
+        Mock::given(method("DELETE"))
+            .and(path("/v25.0/222/subscribed_apps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let live = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        service(&state, &server).disconnect(&live).await.unwrap();
+        if explicit_delete {
+            let stopped = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+                .await
+                .unwrap();
+            super::super::channel_bot_service::delete_meta_bot(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                &state.encryption_keys,
+                &stopped,
+                &recipient,
+            )
+            .await
+            .unwrap();
+        }
+        super::super::durable_wake_tests::resume_after(
+            "meta_account_after_disconnect",
+            erase_personal_owner(&state, &recipient),
+            async {
+                let s = service(&state, &server);
+                state
+                    .db
+                    .collection::<bson::Document>(BOTS)
+                    .update_one(
+                        doc! {"_id":&bot.id},
+                        doc! {"$set":{"meta_binding.next_reconcile_at":bson::DateTime::now()}},
+                    )
+                    .await
+                    .unwrap();
+                sweep_service(&state, &s).await.unwrap();
+                assert_eq!(
+                    super::super::channel_text_delivery::load(&state.db, "manual-former-history")
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    explicit_delete
+                );
+            },
+        )
+        .await;
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .find_one(doc! {"_id":receipt.id,"channel_bot_id":&bot.id})
+                .await
+                .unwrap()
+                .is_none(),
+            explicit_delete
+        );
+        server.verify().await;
+    }
 }
 
 #[tokio::test]
@@ -3721,4 +3740,526 @@ async fn unknown_managed_grant_chronology_and_malformed_completion_never_acknowl
         .await,
         Err(AppError::Conflict(_))
     ));
+}
+
+#[tokio::test]
+async fn signed_callback_chronology_repair_rechecks_both_sides_before_effects() {
+    for erase in [false, true] {
+        for later in [false, true] {
+            let (state, _, server, bot) = fixture("instagram").await;
+            configure(&state, &bot).await;
+            let bots = state.db.collection::<bson::Document>(BOTS);
+            // Both missing and wrong-type retained dates are unresolved, never empty success.
+            if later {
+                bots.update_one(
+                    doc! {"_id":&bot.id},
+                    doc! {"$set":{"meta_binding.authorized_at":"unknown"}},
+                )
+                .await
+                .unwrap();
+            } else {
+                bots.update_one(
+                    doc! {"_id":&bot.id},
+                    doc! {"$unset":{"meta_binding.authorized_at":""}},
+                )
+                .await
+                .unwrap();
+            }
+            let s = service(&state, &server);
+            let issued = Utc::now().timestamp();
+            let accepted = accept_provider_request(
+                &s,
+                "instagram",
+                &provider_request(json!(900), issued),
+                erase,
+            )
+            .await
+            .unwrap();
+            let code = accepted["confirmation_code"].as_str().unwrap();
+            provider::reconcile_with_service(&state, &s).await.unwrap();
+            // The ordinary sweep cannot receive a callback-induced removal/revocation state.
+            let _ = sweep_service(&state, &s).await;
+            let pending = bots.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+            assert_eq!(pending.get_bool("is_active"), Ok(true));
+            assert_eq!(
+                pending
+                    .get_document("meta_binding")
+                    .unwrap()
+                    .get_bool("provider_revoked"),
+                Ok(false)
+            );
+            assert_eq!(
+                pending.get_binary_generic("bot_token_encrypted").unwrap(),
+                &bot.bot_token_encrypted
+            );
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.method.as_str() != "DELETE")
+            );
+            let request = state
+                .db
+                .collection::<bson::Document>(provider::REQUESTS)
+                .find_one(doc! {"_id":code})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.get_str("status"), Ok("pending"));
+            let cutoff = request.get_datetime("signed_cutoff").unwrap().to_chrono();
+            let repaired = if later {
+                cutoff + Duration::seconds(1)
+            } else {
+                cutoff - Duration::seconds(1)
+            };
+            bots.update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{"meta_binding.authorized_at":bson::DateTime::from_chrono(repaired)}},
+            )
+            .await
+            .unwrap();
+            if erase && !later {
+                Mock::given(method("DELETE"))
+                    .and(path("/v25.0/222/subscribed_apps"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            state.db.collection::<bson::Document>(provider::REQUESTS).update_one(doc! {"_id":code},
+                doc! {"$set":{"next_attempt_at":bson::DateTime::now(),"targets.0.retry_at":bson::DateTime::now()}}).await.unwrap();
+            provider::reconcile_with_service(&state, &s).await.unwrap();
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(provider::REQUESTS)
+                    .find_one(doc! {"_id":code})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_str("status"),
+                Ok("completed")
+            );
+            let remaining = bots.find_one(doc! {"_id":&bot.id}).await.unwrap();
+            if later {
+                let remaining = remaining.unwrap();
+                assert_eq!(remaining.get_bool("is_active"), Ok(true));
+                assert_eq!(
+                    remaining.get_binary_generic("bot_token_encrypted").unwrap(),
+                    &bot.bot_token_encrypted
+                );
+            } else if erase {
+                assert!(remaining.is_none());
+            } else {
+                assert!(
+                    remaining
+                        .unwrap()
+                        .get_binary_generic("bot_token_encrypted")
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            server.verify().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_completion_requires_a_matched_typed_exact_fence_and_replay_clears_stale_scope() {
+    let (state, _, _server, mut bot) = fixture("instagram").await;
+    bot.is_active = false;
+    bot.meta_binding.as_mut().unwrap().subscription = "removed".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    let grant = &bot.meta_binding.as_ref().unwrap().grant_id;
+    let fences = state
+        .db
+        .collection::<bson::Document>("channel_meta_erasure_fences");
+    super::super::durable_wake_tests::resume_after(
+        "meta_provider_before_completion",
+        async {
+            assert!(matches!(
+                super::super::personal_erasure_service::erase_provider_inbox(
+                    &state, &bot.id, grant
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+        },
+        async {
+            fences.delete_one(doc! {"_id":&bot.id}).await.unwrap();
+        },
+    )
+    .await;
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+        .await
+        .unwrap();
+    fences
+        .update_one(
+            doc! {"_id":&bot.id},
+            doc! {"$set":{"retired_grant":{"grant_id":grant}}},
+        )
+        .await
+        .unwrap();
+    super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+        .await
+        .unwrap();
+    assert!(
+        !fences
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("retired_grant")
+    );
+    for malformed in [
+        bson::Bson::Null,
+        bson::Bson::Int32(42),
+        bson::Bson::String("other-grant".into()),
+    ] {
+        fences
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{"completed_grant_id":malformed}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::super::personal_erasure_service::erase_provider_inbox(&state, &bot.id, grant)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn transferred_manual_inbox_requires_verified_token_and_explicit_routing_confirmation() {
+    use crate::services::{channel_bot_service as bots, ownership_transfer_service as transfer};
+    for held in [false, true] {
+        let (state, adapter, server, mut bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .replace_one(doc! {"_id":&bot.id}, &bot)
+            .await
+            .unwrap();
+        if held {
+            set_bot_delivery(&state.db, &bot, &bot.user_id, false)
+                .await
+                .unwrap();
+        }
+        let recipient = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &recipient,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        flags::set_platform_override(
+            &state.db,
+            "channels:instagram",
+            &FlagTarget::User(recipient.clone()),
+            true,
+            &recipient,
+        )
+        .await
+        .unwrap();
+        let preview = transfer::preview(
+            &state.db,
+            &bot.user_id,
+            transfer::ResourceKind::ChannelBot,
+            &bot.id,
+            &recipient,
+            5,
+        )
+        .await
+        .unwrap();
+        transfer::transfer_with_keys(
+            &state.db,
+            Some(&state.encryption_keys),
+            transfer::TransferCommand {
+                actor: &bot.user_id,
+                api_key_id: None,
+                first_party_human: true,
+                kind: transfer::ResourceKind::ChannelBot,
+                resource_id: &bot.id,
+                destination: &recipient,
+                request_id: &uuid::Uuid::new_v4().to_string(),
+                expected_version: &preview.version,
+                capacity: 5,
+            },
+        )
+        .await
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v25.0/me"))
+            .and(header("authorization", "Bearer replacement-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"user_id":"222","username":"professional","account_type":"Business"}),
+            ))
+            .expect(3)
+            .mount(&server)
+            .await;
+        subscriptions(&server, "222").await;
+        let before = bots::get_bot(&state.db, &bot.id).await.unwrap();
+        assert!(
+            !before
+                .meta_binding
+                .as_ref()
+                .unwrap()
+                .exclusive_routing_verified
+        );
+        for confirm in [false, true] {
+            let updated = bots::update_bot_as_actor(
+                &state.db,
+                &state.encryption_keys,
+                &state.http_client,
+                &adapter,
+                &bot.id,
+                bots::UpdateBotAuthority {
+                    actor_id: &recipient,
+                    owner_id: &recipient,
+                },
+                bots::UpdateBotParams {
+                    x_events: None,
+                    bot_token: Some("replacement-token"),
+                    label: None,
+                    verification_token: confirm.then_some("exclusive"),
+                    encrypt_key: bots::SecretPatch::Unchanged,
+                    app_id: None,
+                    app_secret: None,
+                },
+            )
+            .await;
+            if !confirm {
+                assert!(matches!(updated, Err(AppError::ValidationError(_))));
+                let retained = bots::get_bot(&state.db, &bot.id).await.unwrap();
+                assert_eq!(
+                    retained.meta_binding.as_ref().unwrap().generation,
+                    before.meta_binding.as_ref().unwrap().generation
+                );
+                assert!(
+                    retained
+                        .meta_binding
+                        .as_ref()
+                        .unwrap()
+                        .grant_reconnect_required
+                );
+                continue;
+            }
+            let mut repaired = updated.unwrap();
+            let binding = repaired.meta_binding.as_ref().unwrap();
+            assert_eq!(repaired.id, bot.id);
+            assert!(binding.exclusive_routing_verified && !binding.grant_reconnect_required);
+            assert_eq!(binding.operator_suspended, held);
+            assert!(binding.events_since.unwrap() >= before.updated_at);
+            let s = service(&state, &server);
+            if held {
+                assert!(s.verify(&repaired).await.is_err());
+                set_bot_delivery(&state.db, &repaired, &recipient, true)
+                    .await
+                    .unwrap();
+                repaired = bots::get_bot(&state.db, &bot.id).await.unwrap();
+            }
+            s.verify(&repaired).await.unwrap();
+            assert_eq!(
+                bots::get_bot(&state.db, &bot.id)
+                    .await
+                    .unwrap()
+                    .meta_binding
+                    .unwrap()
+                    .subscription,
+                "active"
+            );
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn removed_manual_retry_requires_positive_delete_evidence_for_the_same_installation() {
+    let (state, _, server, mut bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    bot.is_active = false;
+    bot.meta_binding.as_mut().unwrap().subscription = "removed".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    assert!(
+        !grants::manual_purge_authorized(&state.db, &bot)
+            .await
+            .unwrap()
+    );
+    super::super::audit_service::log_actor_event(
+        state.db.clone(),
+        &super::super::audit_service::AuditActor {
+            user_id: bot.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        "channel_bot_deleted",
+        Some(json!({"bot_id":bot.id,"platform":bot.platform,
+        "owner_user_id":bot.user_id,"managed_webhook_cleanup":"removed"})),
+    )
+    .await
+    .unwrap();
+    assert!(
+        grants::manual_purge_authorized(&state.db, &bot)
+            .await
+            .unwrap()
+    );
+    sweep_service(&state, &service(&state, &server))
+        .await
+        .unwrap();
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn app_drain_negative_lookup_is_indexed_after_bounded_authority_state_recovery() {
+    use futures::TryStreamExt;
+    let (state, _, _, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let authority = state
+        .db
+        .collection::<bson::Document>("channel_meta_grant_authority");
+    let now = bson::DateTime::now();
+    let rows: Vec<_> = (0..1200)
+        .map(|i| {
+            doc! {"_id":uuid::Uuid::new_v4().to_string(),
+            "identity":format!("retained-{i}"),"platform":"instagram","app_id":"111",
+            "revoked_at":now,"last_authorized_at":now,"outstanding":false}
+        })
+        .collect();
+    authority.insert_many(rows).await.unwrap();
+    // Earlier feature records are reconciled in bounded pages, on their original rows.
+    for i in 0..125 {
+        authority
+            .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),
+            "identity":format!("legacy-derived-{i}"),"platform":"instagram","app_id":"111",
+            "revoked_at":now,"last_authorized_at":now})
+            .await
+            .unwrap();
+    }
+    grants::reconcile_authority_state(&state.db).await.unwrap();
+    assert_eq!(
+        authority
+            .count_documents(doc! {"outstanding":{"$exists":false}})
+            .await
+            .unwrap(),
+        25
+    );
+    grants::reconcile_authority_state(&state.db).await.unwrap();
+    let filter =
+        doc! {"platform":"instagram","app_id":"111","outstanding":{"$in":[true,bson::Bson::Null]}};
+    assert!(authority.find_one(filter.clone()).await.unwrap().is_none());
+    let explain = state
+        .db
+        .run_command(doc! {"explain":{"find":"channel_meta_grant_authority",
+        "filter":filter,"projection":{"_id":1},"limit":1},"verbosity":"executionStats"})
+        .await
+        .unwrap();
+    let stats = explain.get_document("executionStats").unwrap();
+    let count = |field| {
+        stats
+            .get_i64(field)
+            .unwrap_or_else(|_| i64::from(stats.get_i32(field).unwrap()))
+    };
+    assert_eq!(count("nReturned"), 0);
+    assert!(
+        count("totalDocsExamined") <= 2 && count("totalKeysExamined") <= 4,
+        "{stats:?}"
+    );
+    assert_eq!(
+        authority
+            .find(doc! {"outstanding":false})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .len(),
+        1325
+    );
+}
+
+#[tokio::test]
+async fn manual_delete_snapshot_cannot_stop_or_purge_a_reconnected_managed_grant() {
+    let (state, adapter, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let successor_grant = uuid::Uuid::new_v4().to_string();
+    super::super::durable_wake_tests::resume_after(
+        "meta_delete_before_stop",
+        async {
+            assert!(matches!(
+                super::super::channel_bot_service::delete_bot_with_state_as_actor(
+                    &state,
+                    &adapter,
+                    &bot.id,
+                    &bot.user_id,
+                    &bot.user_id
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+        },
+        async {
+            state.db.collection::<bson::Document>(BOTS).update_one(doc! {"_id":&bot.id},doc! {
+            "$set":{"credential_source":"platform","meta_binding.grant_id":&successor_grant},
+            "$inc":{"meta_binding.generation":1_i64}}).await.unwrap();
+        },
+    )
+    .await;
+    let retained = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id":&bot.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.is_active);
+    assert_eq!(retained.meta_binding.unwrap().grant_id, successor_grant);
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

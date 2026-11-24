@@ -26,13 +26,20 @@ pub(crate) async fn erase_provider_inbox(
             .find_one(doc! {"_id":bot_id})
             .await?;
         if let Some(proof) = &proof {
-            if proof.get_datetime("local_data_erased_at").is_ok()
-                && match proof.get("completed_grant_id") {
-                    None => true, // Compatibility with an absent legacy field.
-                    Some(bson::Bson::String(id)) => id == grant_id,
-                    Some(_) => false,
-                }
-            {
+            if super::super::channel_meta_service::grants::completed(proof, grant_id)? {
+                let args = (state.db.clone(), proof.clone());
+                super::super::transaction_service::run_db_only(
+                    &state.db,
+                    &args,
+                    |tx, (db, proof)| {
+                        Box::pin(
+                            super::super::channel_meta_service::grants::clear_completed_retired(
+                                db, tx, proof,
+                            ),
+                        )
+                    },
+                )
+                .await?;
                 return Ok(());
             }
             if let Ok(context) = proof.get_document("retired_grant") {
@@ -190,6 +197,8 @@ pub(crate) async fn erase_provider_inbox(
         .await?;
     super::super::org_channel_service::defaults::erase(&state.db, doc! {"channel_bot_id": bot_id})
         .await?;
+    #[cfg(test)]
+    super::super::durable_wake_tests::after("meta_provider_before_completion").await;
     let args = (state.db.clone(), bot_id.to_owned(), grant_id.to_owned());
     super::super::transaction_service::run_db_only(&state.db, &args, |tx, (db, bot, grant)| {
         Box::pin(complete_provider_inbox(db, bot, grant, tx))
@@ -205,7 +214,8 @@ async fn complete_provider_inbox(
     grant: &str,
     tx: &mut ClientSession,
 ) -> AppResult<()> {
-    db.collection::<Document>("channel_meta_erasure_fences")
+    let changed = db
+        .collection::<Document>("channel_meta_erasure_fences")
         .update_one(
             doc! {"_id":bot},
             doc! {
@@ -214,6 +224,9 @@ async fn complete_provider_inbox(
         )
         .session(&mut *tx)
         .await?;
+    if changed.matched_count != 1 {
+        return Err(super::super::channel_meta_service::grants::incomplete());
+    }
     let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
     let deleted = bots
         .delete_one(doc! {"_id":bot,"is_active":false,
