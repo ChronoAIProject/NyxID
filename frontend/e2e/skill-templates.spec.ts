@@ -54,6 +54,7 @@ async function fixture(page: Page, options: {
   launchError?: number;
   loseLaunchResponse?: boolean;
   queued?: boolean;
+  outline?: boolean;
   skillCount?: number;
   existing?: Partial<typeof pin>;
   profileGate?: Promise<void>;
@@ -152,6 +153,13 @@ async function fixture(page: Page, options: {
         reference: { ...pin, skill_id: template.skillId, name: template.slug, version, sha256 },
         description: "Published skill",
         size_bytes: 400,
+        ...(options.outline ? {
+          outline: {
+            overview: "Review the argument before polishing the prose.",
+            steps: [{ id: "argument", title: "Inspect the argument", text: "Identify missing evidence.", asks_you: true }],
+          },
+          author: { kind: "person", name: "Research Team" },
+        } : {}),
       });
     }
     if (path === "/assistant/nyxagent/agents") {
@@ -278,7 +286,7 @@ test("new social accounts confirm their display name before the selected workflo
   await page.getByRole("button", { name: "Create an account" }).click();
   await page.getByRole("button", { name: "Continue with Google" }).click();
   await expect(page.getByRole("heading", { name: "Choose your NyxID display name" })).toBeVisible({ timeout: 15_000 });
-  expect(state.writes).toEqual([]);
+  expect(state.launches).toEqual([]);
   await page.getByRole("textbox", { name: "Display name" }).fill("New owner");
   await page.getByRole("button", { name: "Save and continue" }).click();
   await expect(page.getByText("Please share your draft.")).toBeVisible({ timeout: 15_000 });
@@ -395,10 +403,10 @@ test("two tabs preserve separate selections and neither can claim the other tabâ
   expect((await context.cookies()).filter(({ name }) => name.startsWith("nyxid_skill_setup_"))).toHaveLength(2);
 
   await page.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(page.getByRole("region", { name: "Skill overview" }).getByRole("heading", { name: "Strengthen a research paper" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Skill overview" }).getByRole("heading", { name: "Strengthen a research paper" })).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => first.launches[0]?.slug).toBe(research.slug);
   await otherTab.getByRole("button", { name: "Continue with Google" }).click();
-  await expect(otherTab.getByRole("region", { name: "Skill overview" }).getByRole("heading", { name: "Audit research claims" })).toBeVisible();
+  await expect(otherTab.getByRole("region", { name: "Skill overview" }).getByRole("heading", { name: "Audit research claims" })).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => second.launches[0]?.slug).toBe(claims.slug);
   expect(first.turns).toEqual([]);
   expect(second.turns).toEqual([]);
@@ -493,6 +501,18 @@ test("an account-bound legacy gallery URL starts in the regular chat", async ({ 
   await page.goto(`/assistant?skill=${research.slug}&skillSetup=${skillSetup}`);
   await expect(page.getByText("Please share your draft.")).toBeVisible();
   expect(state.launches).toEqual([{ slug: research.slug, setupId: skillSetup }]);
+  expect(state.turns).toEqual([]);
+});
+
+test("a verified package outline and publisher appear inside the conversation", async ({ page }) => {
+  const state = await fixture(page, { outline: true });
+  await page.goto(`/assistant?skill=${research.slug}`);
+  await page.getByRole("button", { name: "Start skill" }).click();
+  await expect(page.getByText("Review the argument before polishing the prose.")).toBeVisible();
+  await expect(page.getByText("By Research Team")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Steps" })).toContainText("Inspect the argument");
+  await expect(composerInput(page)).toBeEmpty();
+  expect(state.launches).toHaveLength(1);
   expect(state.turns).toEqual([]);
 });
 
