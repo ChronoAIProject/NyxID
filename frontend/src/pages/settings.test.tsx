@@ -1,4 +1,5 @@
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
+import { appI18n } from "@/i18n";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -178,6 +179,12 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
       expect(review).toHaveTextContent("Name: Reader → Updated Reader");
+      try {
+        await act(() => appI18n.changeLanguage("zh-CN").then(() => undefined));
+        expect(review).toHaveTextContent("名称: Reader → Updated Reader");
+      } finally {
+        await act(() => appI18n.changeLanguage("en").then(() => undefined));
+      }
       expect(review).not.toHaveTextContent(securityUser.email);
       await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
       await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
@@ -255,6 +262,14 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
       expect(review).toHaveTextContent("Password: Current password → Changed");
+      try {
+        await act(() => appI18n.changeLanguage("zh-CN").then(() => undefined));
+        expect(review).toHaveTextContent("密码: 当前密码 → 已更改");
+        expect(review).not.toHaveTextContent("Password");
+        expect(review).not.toHaveTextContent("short");
+      } finally {
+        await act(() => appI18n.changeLanguage("en").then(() => undefined));
+      }
       expect(review).not.toHaveTextContent("short");
       await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
       expect(await screen.findByText("Password must be at least 8 UTF-8 bytes")).toBeVisible();

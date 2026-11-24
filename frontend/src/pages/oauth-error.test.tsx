@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +11,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { OAuthErrorPage } from "./oauth-error";
+import { appI18n } from "@/i18n";
 
 function setSearch(query: string) {
   window.history.pushState({}, "", `/oauth/error${query}`);
@@ -20,7 +21,9 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  cleanup();
+  await appI18n.changeLanguage("en");
   window.history.pushState({}, "", "/");
 });
 
@@ -62,6 +65,18 @@ describe("OAuthErrorPage", () => {
     expect(
       screen.getByText("An unexpected error occurred during authorization."),
     ).toBeInTheDocument();
+  });
+
+  it("localizes a live fallback while preserving provider details and codes", async () => {
+    setSearch("?code=custom_code");
+    const view = render(<OAuthErrorPage />);
+    await act(() => appI18n.changeLanguage("zh-CN").then(() => undefined));
+    expect(screen.getByText("授权错误")).toBeInTheDocument();
+    expect(screen.getByText("授权时出现意外错误。")).toBeInTheDocument();
+    expect(screen.getByText("custom_code")).toBeInTheDocument();
+    setSearch("?code=custom_code&message=Provider-specific%20detail");
+    view.rerender(<OAuthErrorPage />);
+    expect(screen.getByText("Provider-specific detail")).toBeInTheDocument();
   });
 
   it("links a missing required service to the existing connection flow", async () => {

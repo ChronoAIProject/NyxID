@@ -53,19 +53,25 @@ export function ChangeReview({ entries, save, disabled, children }: {
   readonly children: (review: () => void) => ReactNode;
 }) {
   useUiTranslation();
-  const [review, setReview] = useState<{ label: string; changes: readonly FormChange[] }[] | null>(null);
+  const [review, setReview] = useState<{ id?: string; label: string; changes: readonly FormChange[] }[] | null>(null);
   const [saving, setSaving] = useState(false);
   const latest = useRef(entries);
   useLayoutEffect(() => { latest.current = entries; });
   return <>
-    {children(() => { const dirty = entries.filter((entry) => entry.dirty); if (dirty.length && !saving) setReview(dirty.map((entry) => ({ label: entry.label, changes: entry.changes?.() ?? [] }))); })}
+    {children(() => { const dirty = entries.filter((entry) => entry.dirty); if (dirty.length && !saving) setReview(dirty.map((entry) => ({ id: entry.id, label: entry.label, changes: entry.changes?.() ?? [] }))); })}
     <Dialog open={review !== null} onOpenChange={(open) => { if (!open && !saving) setReview(null); }}>
       <DialogContent scrollMode="body" className="bg-background">
         <DialogHeader><DialogTitle>{translateUi("Review changes")}</DialogTitle><DialogDescription>{translateUi("Check what will be saved before continuing.")}</DialogDescription></DialogHeader>
         <DialogBody className="space-y-6 py-4"><DrawerSectionInfoContext value={false}>
-          {review?.map((section, index) => <GroupedList key={`${section.label}-${index}`} title={section.label.charAt(0).toLocaleUpperCase() + section.label.slice(1)}>
-            {section.changes.length ? section.changes.map((change, index) => <Change key={`${change.label}-${index}`} change={change} />) : <GroupedRow title={translateUi("Save changes to this section")} />}
-          </GroupedList>)}
+          {review?.map((section, index) => {
+            const current = section.id ? entries.find((entry) => entry.id === section.id) : entries.length === 1 ? entries[0] : undefined;
+            const title = current?.label ?? section.label;
+            return (
+              <GroupedList key={section.id ?? index} title={title.charAt(0).toLocaleUpperCase() + title.slice(1)}>
+                {section.changes.length ? section.changes.map((change, index) => <Change key={index} change={change} />) : <GroupedRow title={translateUi("Save changes to this section")} />}
+              </GroupedList>
+            );
+          })}
         </DrawerSectionInfoContext></DialogBody>
         <DialogFooter className="border-t border-border/50 bg-background">
           <Button type="button" variant="ghost" disabled={saving} onClick={() => setReview(null)}>{translateUi("Keep editing")}</Button>

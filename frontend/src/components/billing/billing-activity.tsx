@@ -24,8 +24,8 @@ import { number } from "@/lib/billing-display";
 import type { ApiKeyUsage } from "@/types/api";
 
 const chartConfig = {
-  requests: { label: "Requests", color: "var(--billing-chart-accent)" },
-  errors: { label: "Errors", color: "var(--color-destructive)" },
+  requests: { get label() { return translateUi("Requests"); }, color: "var(--billing-chart-accent)" },
+  errors: { get label() { return translateUi("Errors"); }, color: "var(--color-destructive)" },
 } satisfies ChartConfig;
 
 function dateLabel(date: string) {
