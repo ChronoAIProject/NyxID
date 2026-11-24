@@ -1247,7 +1247,8 @@ async fn push_failure_event(
         )
         .find_one(
             if let Some(ack_id) = publication.acknowledgement_id.as_deref() {
-                doc! {"_id":ack_id,"user_id":&row.owner_id}
+                doc! {"_id":ack_id,"user_id":&row.owner_id,"tool_name":TOOL,
+                "authored_skill.proposal_id":&row.id,"authored_skill.revision":row.revision}
             } else {
                 doc! {"user_id":&row.owner_id,"tool_name":TOOL,
                 "authored_skill.proposal_id":&row.id,
@@ -1257,13 +1258,13 @@ async fn push_failure_event(
         .sort(doc! {"created_at":-1})
         .session(&mut *session)
         .await?;
-    let (conversation, routing, invocation_id) = if let Some(ack) = ack {
-        (ack.conversation_id, ack.routing, ack.invocation_id)
+    let (conversation, routing, invocation_id, contexts) = if let Some(ack) = ack {
+        (ack.conversation_id, ack.routing, ack.invocation_id, ack.meta_contexts)
     } else if let Some(claim) = db
         .collection::<DraftOrigin>(
             crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
         )
-        .find_one(doc! {"claim.proposal_id": &row.id, "owner_id": &row.owner_id})
+        .find_one(doc! {"claim.proposal_id": &row.id, "owner_id": &row.owner_id, "agent_id": &row.agent_id})
         .session(&mut *session)
         .await?
     {
@@ -1271,10 +1272,19 @@ async fn push_failure_event(
             claim.claim.conversation_id,
             claim.claim.routing,
             claim.claim.invocation_id,
+            claim.claim.meta_contexts,
         )
     } else {
         return Ok(());
     };
+    // A definitive validation failure can settle after consent ends. Its
+    // optional repair notice still requires the original delivery authority.
+    for context in &contexts {
+        if !super::async_service_operation::meta_lineage::current(db, session, context).await? {
+            return Ok(());
+        }
+    }
+    super::async_service_operation::meta_lineage::fence(db, session, &contexts, true).await?;
     let event_id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!(
@@ -1317,6 +1327,7 @@ async fn push_failure_event(
     event = crate::models::assistant_acknowledgement::bind_continuation(routing.as_ref(), event)
         .for_invocation(invocation_id.as_deref());
     event.id = event_id;
+    event.channel_contexts = contexts;
     push_publication_event(db, session, &conversation, &row.owner_id, &event).await
 }
 

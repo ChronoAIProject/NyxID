@@ -121,6 +121,62 @@ async fn deleting_drafting_grant_retires_original_claim_and_unstarted_proposal_a
 }
 
 #[tokio::test]
+async fn deleting_draft_grant_removes_its_queued_repair_notice_and_preserves_web_notice() {
+    let f = fixture("meta_draft_repair_notice").await;
+    let server = setup_ornn(&f).await;
+    let (bot, chat) = meta_turn(&f).await;
+    let first = draft_in_chat(&f, &chat).await.unwrap();
+    let db = &f.state.db;
+    let card = db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+        .find_one(doc! {"_id":first["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    let grant = meta::scopes::reference(&bot).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data":{"valid":false,"violations":[{"rule":"allowed-root-items"}]}}),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(finish(&f, card, true).await,
+        Err(AppError::Conflict(code)) if code == "ornn_validation_failed"));
+    let home = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    let notice = home
+        .pending_events
+        .iter()
+        .find(|event| event.kind == "skill_publication")
+        .unwrap();
+    assert_eq!(notice.channel_contexts.len(), 1);
+    assert_eq!(notice.channel_contexts[0].meta_grant.as_ref(), Some(&grant));
+    let unrelated = crate::services::assistant_team_service::event(
+        "notice",
+        "Independent web notice".into(),
+        None,
+    );
+    engine::push_events(db, &f.owner, &f.row.id, vec![unrelated.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(erase(&f, &bot).await);
+    let home = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    assert!(
+        home.pending_events
+            .iter()
+            .all(|event| event.id != notice.id)
+    );
+    assert!(
+        home.pending_events
+            .iter()
+            .any(|event| event.id == unrelated.id)
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn deleting_drafting_grant_preserves_verified_publication_but_retires_original_claim() {
     let f = fixture("meta_draft_published_erasure").await;
     let server = setup_ornn(&f).await;
