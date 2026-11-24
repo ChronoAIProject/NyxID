@@ -1056,6 +1056,9 @@ impl MetaService<'_> {
                     "_id": bot_id, "user_id": &s.owner_id, "is_active": true,
                     "platform_bot_id": asset, "meta_binding.generation": s.expected_generation,
                 }).session(&mut *tx).await?.ok_or_else(conflict)?;
+                if old.credential_source != "platform" {
+                    super::channel_signing_migration::fence_registration(db, tx).await?;
+                }
                 let preserve_suspension = old
                     .meta_binding
                     .as_ref()
@@ -1354,6 +1357,61 @@ impl MetaService<'_> {
         }
         Ok(())
     }
+    /// Apply a confirmed provider response to its original grant. Rewrap may
+    /// change every envelope during HTTP. Authenticate the token's logical pin
+    /// in the transaction that replaces it, so storage retries stay local.
+    async fn publish_token_result(
+        &self,
+        observed: &ChannelBot,
+        mut filter: bson::Document,
+        set: bson::Document,
+    ) -> AppResult<()> {
+        use super::channel_credential_continuity::{TOKEN, field_pin, replacement};
+        let binding = observed.meta_binding.as_ref().ok_or_else(conflict)?;
+        filter.extend(doc! {
+            "_id": &observed.id, "user_id": &observed.user_id, "platform": &observed.platform,
+            "platform_bot_id": &observed.platform_bot_id, "meta_binding.grant_id": &binding.grant_id,
+            "meta_binding.app_id": &binding.app_id, "meta_binding.token_fingerprint": &binding.token_fingerprint,
+        });
+        let expected_pin = field_pin(observed, TOKEN)?;
+        let args = (
+            self.db.collection::<ChannelBot>(BOTS),
+            filter,
+            expected_pin,
+            observed.ownership_version,
+            set,
+        );
+        super::transaction_service::run_db_only(
+            self.db,
+            &args,
+            |tx, (bots, filter, pin, ownership_version, set)| {
+                Box::pin(async move {
+                    let live = bots
+                        .find_one(filter.clone())
+                        .session(&mut *tx)
+                        .await?
+                        .ok_or_else(conflict)?;
+                    if live.ownership_version != *ownership_version
+                        || field_pin(&live, TOKEN)? != *pin
+                    {
+                        return Err(conflict());
+                    }
+                    let mut set = set.clone();
+                    let mut unset = doc! {"secret_context_versions.bot_token_encrypted": ""};
+                    replacement(&live, &mut set, &mut unset)?;
+                    let result = bots
+                        .update_one(doc! {"_id": &live.id}, doc! {"$set": set, "$unset": unset})
+                        .session(&mut *tx)
+                        .await?;
+                    if result.matched_count != 1 {
+                        return Err(conflict());
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .await
+    }
     pub async fn disconnect(&self, bot: &ChannelBot) -> AppResult<()> {
         super::channel_connection_webhook_service::serialized(
             self.db,
@@ -1440,25 +1498,16 @@ impl MetaService<'_> {
                 }
             }
         }
-        let (filter, update) = credential_update(
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_disconnect_provider_confirmed").await;
+        self.publish_token_result(
             &current,
-            doc! {"_id":&bot.id, "is_active":false,
+            doc! {"is_active":false, "meta_binding.subscription":"removal_pending",
             "meta_binding.generation":if current.is_active {generation+1} else {generation}},
             doc! {"meta_binding.subscription":"removed", "bot_token_encrypted":binary(Vec::new()),
             "updated_at":bson::DateTime::now()},
-            doc! {"secret_context_versions.bot_token_encrypted":""},
-        )?;
-        if self
-            .db
-            .collection::<ChannelBot>(BOTS)
-            .update_one(filter, update)
-            .await?
-            .matched_count
-            != 1
-        {
-            return Err(conflict());
-        }
-        Ok(())
+        )
+        .await
     }
     pub async fn refresh(&self, bot: &ChannelBot) -> AppResult<()> {
         let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
@@ -1549,31 +1598,19 @@ impl MetaService<'_> {
             .as_i64()
             .filter(|seconds| *seconds > 0 && *seconds <= 366 * 86400)
             .ok_or_else(conflict)?;
-        let (filter, update) = credential_update(
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_refresh_provider_confirmed").await;
+        self.publish_token_result(
             &current,
-            doc! {
-                "_id": &bot.id, "is_active": true, "user_id": &bot.user_id,
-                "platform_bot_id": &bot.platform_bot_id,
-                "meta_binding.generation": binding.generation,
-                "meta_binding.token_fingerprint": &binding.token_fingerprint,
-            },
+            doc! {"is_active":true, "meta_binding.generation":binding.generation,
+                "meta_binding.subscription":&live.subscription},
             doc! {
                 "bot_token_encrypted": binary(self.keys.encrypt(fresh.as_bytes()).await?),
                 "meta_binding.token_fingerprint": meta::token_fingerprint(&fresh),
                 "meta_binding.expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(ttl)),
                 "updated_at": bson::DateTime::now(),
             },
-            doc! {"secret_context_versions.bot_token_encrypted": ""},
-        )?;
-        let changed = self
-            .db
-            .collection::<ChannelBot>(BOTS)
-            .update_one(filter, update)
-            .await?;
-        if changed.matched_count != 1 {
-            return Err(conflict());
-        }
-        Ok(())
+        ).await
     }
     async fn reconnect_required(&self, bot: &ChannelBot) -> AppResult<()> {
         let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;

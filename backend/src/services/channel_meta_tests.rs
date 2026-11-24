@@ -852,6 +852,63 @@ async fn instagram_oauth_full_path_is_actor_bound_single_use_and_selects_only_se
 }
 
 #[tokio::test]
+async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migration() {
+    use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    instagram(&server).await;
+    let bots = state.db.collection::<ChannelBot>(BOTS);
+    bots.update_one(
+        doc! {"_id": &bot.id},
+        doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":""}},
+    )
+    .await
+    .unwrap();
+    let s = service(&state, &server);
+    let start = s
+        .start(
+            &bot.user_id,
+            &bot.user_id,
+            "instagram",
+            "Inbox",
+            Some(&bot.id),
+        )
+        .await
+        .unwrap();
+    s.exchange(
+        &bot.user_id,
+        "instagram",
+        &state_value(&start),
+        Some("consent"),
+    )
+    .await
+    .unwrap();
+    let settings = state.db.collection::<bson::Document>(SETTINGS);
+    let id = doc! {"_id": PLATFORM_SETTINGS_ID};
+    let before = settings
+        .find_one(id.clone())
+        .await
+        .unwrap()
+        .and_then(|row| row.get_i64("channel_bot_registration_revision").ok())
+        .unwrap_or(0);
+    let managed = s
+        .finish(&bot.user_id, &start.session_id, "777", true)
+        .await
+        .unwrap();
+    assert_eq!(managed.id, bot.id);
+    assert_eq!(managed.credential_source, "platform");
+    assert_eq!(
+        settings
+            .find_one(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("channel_bot_registration_revision"),
+        Ok(before + 1)
+    );
+}
+
+#[tokio::test]
 async fn interrupted_installation_claim_resumes_same_identity_and_competing_finishes_do_not_orphan_bots()
  {
     let (state, _, server, bot) = fixture("instagram").await;
@@ -1922,6 +1979,92 @@ async fn deauthorization_then_deletion_works_after_the_token_was_retired_in_the_
 }
 
 #[tokio::test]
+async fn prepared_meta_credentials_transfer_before_and_after_signed_deauthorization() {
+    use crate::services::{
+        channel_credential_continuity::{self as continuity, TOKEN},
+        ownership_transfer_service::{ResourceKind, TransferCommand, preview, transfer_with_keys},
+    };
+    for revoked in [false, true] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        let mut keys = crate::test_utils::test_encryption_keys();
+        keys.set_contextual_record_writes(true);
+        let db = &state.db;
+        let bots = db.collection::<bson::Document>(BOTS);
+        let secret = "webhook_secret_encrypted";
+        bots.update_one(
+            doc! {"_id": &bot.id},
+            doc! {"$set": {
+                "credential_source":"platform",
+                secret: binary(keys.encrypt(b"webhook-secret").await.unwrap()),
+            }},
+        )
+        .await
+        .unwrap();
+        let prepared = continuity::rewrap_fixture(db, &keys, &bot, &[TOKEN]).await;
+        assert!(continuity::verified(&prepared).unwrap().is_some());
+        if revoked {
+            let s = service(&state, &server);
+            let request = provider_request(json!("900"), Utc::now().timestamp());
+            accept_provider_request(&s, "instagram", &request, false)
+                .await
+                .unwrap();
+            provider::reconcile_with_service(&state, &s).await.unwrap();
+            let retired = continuity::rewrap_fixture(db, &keys, &bot, &[TOKEN, secret]).await;
+            assert!(continuity::has_empty_token(&retired));
+            assert!(continuity::verified(&retired).unwrap().is_some());
+        }
+        let destination = uuid::Uuid::new_v4().to_string();
+        db_insert_org_admin(db, &destination, &bot.user_id).await;
+        let kind = ResourceKind::ChannelBot;
+        let reviewed = preview(db, &bot.user_id, kind, &bot.id, &destination, 5)
+            .await
+            .unwrap();
+        let request = uuid::Uuid::new_v4().to_string();
+        transfer_with_keys(
+            db,
+            Some(&keys),
+            TransferCommand {
+                actor: &bot.user_id,
+                api_key_id: None,
+                first_party_human: true,
+                kind,
+                resource_id: &bot.id,
+                destination: &destination,
+                request_id: &request,
+                expected_version: &reviewed.version,
+                capacity: 5,
+            },
+        )
+        .await
+        .unwrap();
+        let moved = super::super::channel_bot_service::get_bot(db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(moved.user_id, destination);
+        assert!(continuity::verified(&moved).unwrap().is_some());
+        assert_eq!(moved.bot_token_encrypted.is_empty(), revoked);
+        assert_eq!(moved.secret_context_versions.contains_key(TOKEN), !revoked);
+        assert!(
+            moved
+                .meta_binding
+                .as_ref()
+                .unwrap()
+                .grant_reconnect_required
+        );
+        if !revoked {
+            assert_eq!(
+                super::super::channel_bot_service::decrypt_bot_token(&keys, &moved)
+                    .await
+                    .unwrap()
+                    .as_str(),
+                "fixture-token"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn revocation_invalidates_fetched_candidates_and_fences_an_exchange_without_a_known_subject()
 {
     for revoke_before_exchange in [false, true] {
@@ -2224,21 +2367,12 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
     ).await.unwrap();
     let mut rewrap_keys = crate::test_utils::test_encryption_keys();
     rewrap_keys.set_contextual_record_writes(true);
-    let due = super::super::channel_credential_continuity::rewrap_fixture(
-        &state.db,
-        &rewrap_keys,
-        &bot,
-        &["bot_token_encrypted"],
-    )
-    .await;
+    let due = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
     let before =
-        super::super::channel_credential_continuity::field_pin(&bot, "bot_token_encrypted")
-            .unwrap();
-    assert_eq!(
         super::super::channel_credential_continuity::field_pin(&due, "bot_token_encrypted")
-            .unwrap(),
-        before
-    );
+            .unwrap();
     Mock::given(method("GET"))
         .and(path("/refresh_access_token"))
         .and(query_param("grant_type", "ig_refresh_token"))
@@ -2254,7 +2388,30 @@ async fn instagram_refresh_extends_before_expiry_and_never_renews_a_healthy_or_e
         .and(header("authorization", "Bearer refreshed-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"user_id":"222","username":"professional","account_type":"Media_Creator"}]})))
         .expect(1).mount(&server).await;
-    s.refresh(&due).await.unwrap();
+    super::super::durable_wake_tests::resume_after(
+        "meta_refresh_provider_confirmed",
+        async {
+            s.refresh(&due).await.unwrap();
+        },
+        async {
+            let rewrapped = super::super::channel_credential_continuity::rewrap_fixture(
+                &state.db,
+                &rewrap_keys,
+                &due,
+                &["bot_token_encrypted"],
+            )
+            .await;
+            assert_eq!(
+                super::super::channel_credential_continuity::field_pin(
+                    &rewrapped,
+                    "bot_token_encrypted"
+                )
+                .unwrap(),
+                before
+            );
+        },
+    )
+    .await;
     let fresh = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
@@ -3339,13 +3496,8 @@ async fn ownerless_scoped_metadata_erases_only_without_an_unattributed_saved_rep
 async fn disconnect_retires_contextual_token_and_decoder_marker_together() {
     let (state, _, server, bot) = fixture("instagram").await;
     configure(&state, &bot).await;
-    super::super::channel_registration::bind_fixture_fields(
-        &state.db,
-        &state.encryption_keys,
-        &bot.id,
-        &["bot_token_encrypted"],
-    )
-    .await;
+    let mut rewrap_keys = crate::test_utils::test_encryption_keys();
+    rewrap_keys.set_contextual_record_writes(true);
     Mock::given(method("DELETE"))
         .and(path("/v25.0/222/subscribed_apps"))
         .and(header("authorization", "Bearer fixture-token"))
@@ -3356,7 +3508,23 @@ async fn disconnect_retires_contextual_token_and_decoder_marker_together() {
     let current = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
-    service(&state, &server).disconnect(&current).await.unwrap();
+    let s = service(&state, &server);
+    super::super::durable_wake_tests::resume_after(
+        "meta_disconnect_provider_confirmed",
+        async {
+            s.disconnect(&current).await.unwrap();
+        },
+        async {
+            super::super::channel_credential_continuity::rewrap_fixture(
+                &state.db,
+                &rewrap_keys,
+                &current,
+                &["bot_token_encrypted"],
+            )
+            .await;
+        },
+    )
+    .await;
     let retired = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();

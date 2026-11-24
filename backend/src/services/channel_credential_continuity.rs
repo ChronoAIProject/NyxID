@@ -119,6 +119,20 @@ pub(super) fn select(
         .unwrap_or(dependencies)
 }
 
+/// A token can live outside this record or have been retired by the Meta worker.
+/// A live managed token and every context-marked token must still authenticate.
+pub(super) fn has_empty_token(bot: &ChannelBot) -> bool {
+    bot.bot_token_encrypted.is_empty()
+        && !bot.secret_context_versions.contains_key(TOKEN)
+        && (matches!(
+            bot.credential_source.as_str(),
+            "connection" | "telegram_manager"
+        ) || (super::channel_adapters::meta::is_meta(&bot.platform)
+            && bot.meta_binding.as_ref().is_some_and(|binding| {
+                binding.provider_revoked || (!bot.is_active && binding.subscription == "removed")
+            })))
+}
+
 pub(super) fn field_pin(bot: &ChannelBot, field: &str) -> AppResult<String> {
     let bytes = super::channel_registration::stored_secret(bot, field)?.ok_or_else(invalid)?;
     if let Some(evidence) = verified(bot)? {
@@ -229,15 +243,7 @@ pub(super) async fn publish_rewrap(
         target.extend(set.clone());
         let updated: ChannelBot = bson::from_document(target).map_err(|_| invalid())?;
         for name in FIELDS {
-            if name == TOKEN
-                && bot.bot_token_encrypted.is_empty()
-                && matches!(
-                    bot.credential_source.as_str(),
-                    "connection" | "telegram_manager"
-                )
-                && !bot.secret_context_versions.contains_key(name)
-                && !set.contains_key(name)
-            {
+            if name == TOKEN && has_empty_token(&bot) && !set.contains_key(name) {
                 continue;
             }
             let before = super::channel_registration::open_secret(keys, &bot, name).await?;
@@ -336,14 +342,7 @@ pub(super) async fn transfer(
         evidence
             .generations
             .insert(name.into(), uuid::Uuid::new_v4().to_string());
-        if name == TOKEN
-            && bot.bot_token_encrypted.is_empty()
-            && matches!(
-                bot.credential_source.as_str(),
-                "connection" | "telegram_manager"
-            )
-            && !bot.secret_context_versions.contains_key(name)
-        {
+        if name == TOKEN && has_empty_token(bot) {
             continue;
         }
         if let Some(plain) = super::channel_registration::open_secret(keys, bot, name).await? {

@@ -80,7 +80,7 @@ async fn reference(
                     .get_str("platform")
                     .is_ok_and(super::super::channel_adapters::meta::is_meta)
         })
-        .and_then(|_| base_url)
+        .and(base_url)
         .zip(channel_id.as_deref())
         .map(|(base, id)| super::super::nyxbot_channel_query_service::direct_callback(base, id));
     Ok(WakeReference::Watch(Box::new(WatchWake {

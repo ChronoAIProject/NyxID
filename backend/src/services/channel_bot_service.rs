@@ -809,7 +809,7 @@ async fn insert_registered_bot_inner(
     let meta_session = meta_session.cloned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = async {
-            db.collection::<bson::Document>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$inc": {"channel_bot_registration_revision": 1_i64}}).session(&mut *session).await?;
+            super::channel_signing_migration::fence_registration(&db, session).await?;
             let approved_setup = if let Some(request) = &captured_request {
                 super::platform_provisioning_service::fence_request(&db, request, true, session).await?
             } else {

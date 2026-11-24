@@ -7,6 +7,21 @@ use bson::{Bson, Document, doc};
 use mongodb::{ClientSession, Database};
 use std::sync::Arc;
 
+pub(super) async fn fence_registration(
+    db: &Database,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    db.collection::<Document>(platform_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": platform_settings::PLATFORM_SETTINGS_ID},
+            doc! {"$inc": {"channel_bot_registration_revision": 1_i64}},
+        )
+        .upsert(true)
+        .session(session)
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn guard(
     db: &Database,
     session: &mut ClientSession,
@@ -62,14 +77,7 @@ pub(super) async fn guard(
     if consumers.is_empty() {
         return Ok(());
     }
-    db.collection::<Document>(platform_settings::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":platform_settings::PLATFORM_SETTINGS_ID},
-            doc! {"$inc":{"channel_bot_registration_revision":1_i64}},
-        )
-        .upsert(true)
-        .session(&mut *session)
-        .await?;
+    fence_registration(db, session).await?;
     if db
         .collection::<Document>(channel_bot::COLLECTION_NAME)
         .find_one(doc! {"$or":consumers})

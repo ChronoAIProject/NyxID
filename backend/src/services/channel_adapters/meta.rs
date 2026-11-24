@@ -835,6 +835,14 @@ const APP_SECRET: RegistrationField = RegistrationField {
     hint: Some("The app secret that signs this inbox's webhooks."),
 };
 
+fn manual_signer_pin(bot: &ChannelBot) -> AppResult<Option<String>> {
+    use super::super::channel_credential_continuity::{APP, field_pin};
+    bot.app_secret_encrypted
+        .as_ref()
+        .map(|_| field_pin(bot, APP))
+        .transpose()
+}
+
 async fn apply_webhook_state_inner(
     inbox: Inbox,
     db: &mongodb::Database,
@@ -884,7 +892,7 @@ async fn apply_webhook_state_inner(
         || live.platform_bot_id != bot.platform_bot_id
         || live.app_id != bot.app_id
         || live.credential_source != bot.credential_source
-        || live.app_secret_encrypted != bot.app_secret_encrypted
+        || manual_signer_pin(&live)? != manual_signer_pin(bot)?
         || current.grant_id != observed.grant_id
         || current.app_id != observed.app_id
         || current.events_since.map(|at| at.timestamp_millis())

@@ -1013,7 +1013,7 @@ pub async fn transfer_with_keys(
                 }
             }
             if let Some((source, _)) = &credential_rebind {
-                let mut exact = if kind == ResourceKind::ChannelBot && source.get_document("credential_continuity").is_err() {
+                let mut exact = if kind == ResourceKind::ChannelBot {
                     super::channel_registration::transfer_source_predicate(source)
                 } else {
                     super::record_storage::exact_document_predicate(source)

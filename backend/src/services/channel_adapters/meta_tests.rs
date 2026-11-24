@@ -240,6 +240,75 @@ fn future_provider_timestamps_are_rejected_without_clock_skew_tolerance() {
 }
 
 #[tokio::test]
+async fn signed_instagram_control_loss_survives_rewrap_and_rejects_a_replaced_signer() {
+    use crate::services::{
+        channel_bot_service::get_bot,
+        channel_credential_continuity::{self as continuity, APP},
+        channel_verification_service::CredentialSnapshot,
+    };
+    let (state, adapter, _, bot) = fixture("instagram").await;
+    let bots = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(true);
+    let encrypted = |bytes| bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic,
+        bytes,
+    };
+    bots.update_one(
+        doc! {"_id": &bot.id},
+        doc! {"$set": { APP: encrypted(keys.encrypt(b"fixture-signing-secret").await.unwrap()) }},
+    )
+    .await
+    .unwrap();
+    let signed_bot = get_bot(&state.db, &bot.id).await.unwrap();
+    let observed = CredentialSnapshot::local(&signed_bot);
+    let secrets = PlatformVerifySecrets::from([("app_secret", "fixture-signing-secret")]);
+    for (sender, replace) in [("333", false), ("444", true)] {
+        let body = payload(
+            adapter.inbox,
+            vec![json!({"id":"222", "standby":[event("222",sender,"loss")]})],
+        );
+        let prepared = adapter
+            .prepare_webhook(&signed_bot, Some(&secrets), &signed(&body), &body)
+            .await
+            .unwrap();
+        if replace {
+            let live = get_bot(&state.db, &bot.id).await.unwrap();
+            let mut set =
+                doc! { APP: encrypted(keys.encrypt(b"new-signing-secret").await.unwrap()) };
+            let mut unset = bson::Document::new();
+            continuity::replacement(&live, &mut set, &mut unset).unwrap();
+            bots.update_one(doc! {"_id": &bot.id}, doc! {"$set": set, "$unset": unset})
+                .await
+                .unwrap();
+        } else {
+            let rewrapped = continuity::rewrap_fixture(&state.db, &keys, &signed_bot, &[APP]).await;
+            assert_ne!(
+                rewrapped.app_secret_encrypted,
+                signed_bot.app_secret_encrypted
+            );
+        }
+        let projection = adapter
+            .apply_webhook_state(&state.db, &signed_bot, &prepared.body, &observed)
+            .await;
+        let chat = conversation("instagram", &bot.id, "222", sender);
+        if replace {
+            assert!(projection.is_err());
+            assert!(require_ingress(&state.db, &signed_bot, &chat).await.is_ok());
+        } else {
+            projection.unwrap();
+            assert!(
+                require_ingress(&state.db, &signed_bot, &chat)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn mixed_standby_only_blocks_its_exact_asset_and_participant() {
     let (state, a, _, bot) = fixture("instagram").await;
     let body = payload(

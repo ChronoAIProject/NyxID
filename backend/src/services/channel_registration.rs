@@ -252,6 +252,7 @@ pub(crate) fn transfer_source_predicate(source: &bson::Document) -> bson::Docume
         source,
         &[
             "user_id",
+            "ownership_version",
             "credential_continuity",
             "secret_context_versions",
             "bot_token_encrypted",
