@@ -577,12 +577,15 @@ async fn key_authority_request_command_counts() {
         );
         let expected = match case {
             Case::Child => 7,
-            Case::Rotate => 26,
+            // The successor insert passes the personal erasure fence (#2859).
+            Case::Rotate => 29,
             Case::Delete => 23,
             Case::Operations => 17,
-            Case::Provision => 69,
+            // Provisioned key inserts pass the personal erasure fence (#2859).
+            Case::Provision => 73,
             Case::Grant => 4,
-            Case::Create => 16,
+            // The new key insert passes the personal erasure fence (#2859).
+            Case::Create => 19,
             Case::Pause => 3,
             Case::Revoke => 13,
         };
