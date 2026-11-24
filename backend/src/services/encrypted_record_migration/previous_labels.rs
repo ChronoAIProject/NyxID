@@ -210,3 +210,6 @@ pub(super) const CHANNEL_BOT_DIGEST: &str =
 
 pub(super) const WHATSAPP_DIGEST: &str =
     "6c328214696d6e4cdbb50c0b9aa5ef852c20e6e480fd2203ed6002b48477a50b";
+
+pub(super) const CHANNEL_KEY_DIGEST: &str =
+    "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9";

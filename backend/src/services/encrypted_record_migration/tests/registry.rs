@@ -27,10 +27,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"request_ciphertext": &bytes},
         ),
         (
-            nyxbot_event_binding::COLLECTION_NAME,
-            doc! {"provider_key_ciphertext": &bytes, "producer_secret_ciphertext": &bytes},
-        ),
-        (
             auth_device_code::V2_COLLECTION_NAME,
             doc! {"agent_key_grant": bson::to_document(&grant).unwrap()},
         ),
@@ -190,7 +186,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9"
+        "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108"
     );
     for digest in [
         Some(live.as_str()),
@@ -199,6 +195,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
+        Some(previous_labels::CHANNEL_KEY_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -240,7 +237,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::WHATSAPP_DIGEST
+                        previous_labels::CHANNEL_KEY_DIGEST
+                            | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST
                             | previous_labels::OAUTH_WEBHOOK_DIGEST
                             | previous_labels::RECONCILED_DIGEST

@@ -28,6 +28,8 @@ def main():
                         help="exercise retained enrollment migration and token replacement after writer rollback")
     parser.add_argument("--gateway-key", action="store_true",
                         help="exercise managed channel-key replacement, removal and retained migration")
+    parser.add_argument("--event-bindings", action="store_true",
+                        help="check metadata-only serving and storage verification for two retained credentials")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -112,21 +114,25 @@ def main():
         run("candidate", "reject", "old", writes=True, legacy=False)
         for mutation in args.mutations:
             run("candidate", mutation, "current", writes=True)
-        run("base", "read" if args.channel_writers else "reject", "current")
+        if args.event_bindings:
+            run("candidate", "verify", "current", writes=True, legacy=False)
+            run("base", "metadata", "current")
+        else:
+            run("base", "read" if args.channel_writers else "reject", "current")
         run("candidate", "read", "current")
         if args.reader_preparation:
             return
-        if args.whatsapp or args.gateway_key:
+        if args.whatsapp or args.gateway_key or args.event_bindings:
             run("candidate", "migrate", "old", writes=True)
             run("candidate", "read", "old", legacy=False)
-            run("base", "reject", "old")
+            run("base", "metadata" if args.event_bindings else "reject", "old")
             run("candidate", "replace", "current")
             run("base", "read", "current")
             run("candidate", "replace", "current", writes=True)
             run("candidate", "clear", "current")
             run("base", "read", "current")
         registry_test = args.test
-        if args.whatsapp or args.gateway_key:
+        if args.whatsapp or args.gateway_key or args.event_bindings:
             registry_test = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
         if args.channel_writers:
             run("candidate", "replace", "current", writes=True)
