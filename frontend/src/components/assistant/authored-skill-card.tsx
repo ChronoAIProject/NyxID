@@ -39,7 +39,9 @@ function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
   return (
     <>
       <p role="alert" className="text-14 text-destructive">
-        {translateUi(publicationFailureText(data.failure_code, data.status, "authored"))}
+        {data.failure_code === "nyxid_refused" && data.failure_stage === "publish" && data.actions.includes("retry")
+          ? translateUi("NyxID stopped the upload before sending it to Ornn. Check that your Ornn connection allows publication, then retry this draft.")
+          : translateUi(publicationFailureText(data.failure_code, data.status, "authored"))}
       </p>
       {data.failure_rules.length ? (
         <ul className="list-disc pl-5 text-13 text-muted-foreground">
@@ -275,6 +277,11 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     {data ? (
       <>
         <FailureDetails data={data} />
+        {actions.includes("check") && !data.base_scripts_not_copied ? (
+          <p className="text-13 text-muted-foreground">
+            {translateUi("You can ask NyxBot to start a new skill draft. NyxID will not publish this draft twice.")}
+          </p>
+        ) : null}
         <ScopeSection
           data={data}
           id={scopeId}
