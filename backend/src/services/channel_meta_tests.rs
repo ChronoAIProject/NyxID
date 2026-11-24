@@ -7567,3 +7567,358 @@ async fn initial_and_retired_callback_queries_use_subject_and_cursor_indexes_wit
     }
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn http_manual_delete_reports_stopped_during_paged_cleanup_and_sweeper_finishes_exact_scope()
+{
+    use crate::models::channel_meta::GRANT_SCOPES;
+    use axum::extract::{Path, State};
+    let (state, _, server, mut bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    bot.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    let current = super::super::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, &bot),
+        |tx, &(db, bot)| Box::pin(scopes::ensure_current(db, tx, bot, true)),
+    )
+    .await
+    .unwrap();
+    // Exercise the existing history-bearing manual branch defensively. Normal
+    // token PATCH keeps the same manual consent; it does not invent this older
+    // scope or authorize its deletion.
+    let mut prior = bson::to_document(&current).unwrap();
+    let prior_grant = uuid::Uuid::new_v4().to_string();
+    prior.insert("_id", uuid::Uuid::new_v4().to_string());
+    prior.insert("grant_id", &prior_grant);
+    prior.insert("status", "sealed");
+    prior.insert("from_generation", 0_i64);
+    prior.insert("to_generation", 0_i64);
+    state
+        .db
+        .collection::<bson::Document>(GRANT_SCOPES)
+        .insert_one(prior)
+        .await
+        .unwrap();
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Confirm provider removal through the real service. HTTP Delete below is
+    // the normal stopped retry, not a direct call to the scoped eraser.
+    let s = service(&state, &server);
+    s.disconnect(&bot).await.unwrap();
+    let response = crate::handlers::channel_bots::delete_bot(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(&bot.user_id),
+        Default::default(),
+        Path(bot.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(response.local_delivery_stopped, Some(true));
+    assert_eq!(response.webhook_cleanup, Some("removed"));
+    assert!(
+        !grants::completion_for(&state.db, &bot.id, &current.grant_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id,"is_active":false})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for _ in 0..16 {
+        if grants::completion_for(&state.db, &bot.id, &current.grant_id)
+            .await
+            .unwrap()
+        {
+            break;
+        }
+        state
+            .db
+            .collection::<bson::Document>(BOTS)
+            .update_one(
+                doc! {"_id":&bot.id},
+                vec![doc! {"$set":{"meta_binding.next_reconcile_at":"$$NOW"}}],
+            )
+            .await
+            .unwrap();
+        sweep_service(&state, &s).await.unwrap();
+    }
+    assert!(
+        grants::completion_for(&state.db, &bot.id, &current.grant_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !grants::completion_for(&state.db, &bot.id, &prior_grant)
+            .await
+            .unwrap()
+    );
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn manual_to_managed_conversion_retains_subjectless_history_for_its_original_owner_only() {
+    let (state, adapter, server, mut a, key) = scoped_reply_fixture().await;
+    a.credential_source = "user".into();
+    a.meta_binding.as_mut().unwrap().grant_subject_id.clear();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&a.id}, &a)
+        .await
+        .unwrap();
+    let a_message = admit_page_message(
+        &state,
+        &adapter,
+        &a,
+        &key,
+        "mid.manual-before-oauth",
+        "fixture-token",
+    )
+    .await;
+    let (a_reply, _) = send_page_reply(&state, &adapter, &a, &a_message, "fixture-token")
+        .await
+        .unwrap();
+    let a_plan = super::super::channel_text_delivery::begin_bound(
+        &state.db,
+        "manual-before-oauth",
+        &a,
+        &a_message.id,
+        "manual-hash",
+        1,
+    )
+    .await
+    .unwrap();
+    let b = reconsent_transferred_page(&state, &server, &a).await;
+    assert_eq!(a.id, b.id);
+    assert_eq!(b.credential_source, "platform");
+    let b_key = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&b_key,"user_id":&b.user_id,"is_active":true})
+        .await
+        .unwrap();
+    let b_message = admit_page_message(
+        &state,
+        &adapter,
+        &b,
+        &b_key,
+        "mid.managed-after-manual",
+        "page-token-b",
+    )
+    .await;
+    let (b_reply, _) = send_page_reply(&state, &adapter, &b, &b_message, "page-token-b")
+        .await
+        .unwrap();
+    let s = service(&state, &server);
+    let signed = provider_request(json!(901), Utc::now().timestamp());
+    let accepted = accept_provider_request(&s, "messenger", &signed, true)
+        .await
+        .unwrap();
+    drain_provider_request(&state, &s, accepted["confirmation_code"].as_str().unwrap()).await;
+    let a_grant = &a.meta_binding.as_ref().unwrap().grant_id;
+    let b_grant = &b.meta_binding.as_ref().unwrap().grant_id;
+    assert!(
+        grants::completion_for(&state.db, &b.id, b_grant)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !grants::completion_for(&state.db, &a.id, a_grant)
+            .await
+            .unwrap()
+    );
+    let manual = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .find_one(doc! {"bot_id":&a.id,"grant_id":a_grant})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        manual
+            .get("identity")
+            .is_none_or(|value| matches!(value, bson::Bson::Null))
+    );
+    assert_eq!(manual.get_bool("outstanding"), Ok(false));
+    let messages = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+    for id in [&a_message.id, &a_reply.id] {
+        assert!(messages.find_one(doc! {"_id":id}).await.unwrap().is_some());
+    }
+    for id in [&b_message.id, &b_reply.id] {
+        assert!(messages.find_one(doc! {"_id":id}).await.unwrap().is_none());
+    }
+    // The new owner's account erasure cannot erase the former owner's manual
+    // records. The former owner's own account inventory removes those records.
+    erase_personal_owner(&state, &b.user_id).await;
+    assert!(
+        messages
+            .find_one(doc! {"_id":&a_message.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let plans = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME);
+    assert!(
+        plans
+            .find_one(doc! {"_id":&a_plan.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    erase_personal_owner(&state, &a.user_id).await;
+    for id in [&a_message.id, &a_reply.id] {
+        assert!(messages.find_one(doc! {"_id":id}).await.unwrap().is_none());
+    }
+    assert!(
+        plans
+            .find_one(doc! {"_id":&a_plan.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Personal inventory cleanup does not pretend a provider completed a
+    // subjectless installation or invent a wider inbox Delete instruction.
+    assert!(
+        !grants::completion_for(&state.db, &a.id, a_grant)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn managed_http_delete_stop_can_overlap_signed_scoped_cleanup_without_manual_purge_authority()
+{
+    use axum::extract::{Path, State};
+    let (state, adapter, server, a, key) = scoped_reply_fixture().await;
+    let a_message = admit_page_message(
+        &state,
+        &adapter,
+        &a,
+        &key,
+        "mid.before-stop-race",
+        "fixture-token",
+    )
+    .await;
+    let b = reconsent_transferred_page(&state, &server, &a).await;
+    let b_key = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&b_key,"user_id":&b.user_id,"is_active":true})
+        .await
+        .unwrap();
+    let b_message = admit_page_message(
+        &state,
+        &adapter,
+        &b,
+        &b_key,
+        "mid.before-managed-stop",
+        "page-token-b",
+    )
+    .await;
+    let grant = &b.meta_binding.as_ref().unwrap().grant_id;
+    super::super::durable_wake_tests::resume_after(
+        "meta_delete_after_authorization",
+        async {
+            let response = crate::handlers::channel_bots::delete_bot(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&b.user_id),
+                Default::default(),
+                Path(b.id.clone()),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(response.local_delivery_stopped, Some(true));
+            assert_eq!(response.webhook_cleanup, Some("removed"));
+        },
+        async {
+            let s = service(&state, &server);
+            let accepted = accept_provider_request(
+                &s,
+                "messenger",
+                &provider_request(json!(901), Utc::now().timestamp()),
+                true,
+            )
+            .await
+            .unwrap();
+            let stopped = super::super::channel_bot_service::get_bot(&state.db, &b.id)
+                .await
+                .unwrap();
+            assert!(
+                !grants::manual_purge_authorized(&state.db, &stopped)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                state
+                    .db
+                    .collection::<bson::Document>(BOTS)
+                    .find_one(doc! {"_id":&b.id,"meta_manual_purge":{"$exists":true}})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drain_provider_request(&state, &s, accepted["confirmation_code"].as_str().unwrap())
+                .await;
+        },
+    )
+    .await;
+    assert!(
+        grants::completion_for(&state.db, &b.id, grant)
+            .await
+            .unwrap()
+    );
+    let messages = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+    assert!(
+        messages
+            .find_one(doc! {"_id":&b_message.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        messages
+            .find_one(doc! {"_id":&a_message.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !grants::completion_for(&state.db, &a.id, &a.meta_binding.as_ref().unwrap().grant_id)
+            .await
+            .unwrap()
+    );
+}

@@ -345,6 +345,9 @@ async fn source_grant(
     {
         return Err(grants::incomplete());
     }
+    if let Some(stamped) = &stamped {
+        validate_reference(db, tx, stamped).await?;
+    }
     if let Some(field) = field {
         let source = match row.get(field) {
             None | Some(Bson::Null) => return stamped.map(Some).ok_or_else(grants::incomplete),
@@ -385,6 +388,48 @@ async fn source_grant(
     } else {
         scopes::source_document_in_session(db, tx, row).await
     }
+}
+
+/// Original tags survive finite-lived joins, but their generation must still
+/// belong to the independently retained installation. A typed tag alone cannot
+/// extend a consent's range after its source has expired.
+async fn validate_reference(
+    db: &Database,
+    tx: &mut ClientSession,
+    proof: &GrantRef,
+) -> AppResult<()> {
+    let scope = db
+        .collection::<Document>(GRANT_SCOPES)
+        .find_one(doc! {"bot_id":&proof.bot_id,"grant_id":&proof.grant_id})
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(grants::incomplete)?;
+    reference_in_range(proof, &scope)
+}
+
+fn reference_in_range(proof: &GrantRef, scope: &Document) -> AppResult<()> {
+    let from = scope
+        .get_i64("from_generation")
+        .map_err(|_| grants::incomplete())?;
+    let through = match scope.get("to_generation") {
+        None | Some(Bson::Null) => None,
+        Some(Bson::Int64(value)) => Some(*value),
+        _ => return Err(grants::incomplete()),
+    };
+    if proof.bot_id.is_empty()
+        || scope.get_str("bot_id") != Ok(proof.bot_id.as_str())
+        || scope.get_str("grant_id") != Ok(proof.grant_id.as_str())
+        || from < 0
+        || proof.generation < from
+        || through.is_some_and(|through| through < from || proof.generation > through)
+        || !matches!(
+            scope.get_str("status"),
+            Ok("current" | "sealed" | "retired")
+        )
+    {
+        return Err(grants::incomplete());
+    }
+    Ok(())
 }
 
 async fn attribute(
@@ -780,7 +825,21 @@ async fn erase_guest(
                 single_grant_message(&witness, scope)?
             };
             if stage != 0 {
-                db.collection::<Document>(collection).update_one(doc! {"_id":record.get("_id").cloned(),"conversation_id":id,"user_id":owner},
+                match record.get("meta_grant") {
+                    None | Some(Bson::Null) => {}
+                    Some(value) => {
+                        let stored: GrantRef =
+                            bson::from_bson(value.clone()).map_err(|_| grants::incomplete())?;
+                        reference_in_range(&stored, scope)?;
+                        // This original child already carries authority. Do
+                        // not replace it with a different turn's witness.
+                        if stored != proof {
+                            return Err(grants::incomplete());
+                        }
+                        continue;
+                    }
+                }
+                db.collection::<Document>(collection).update_one(doc! {"_id":record.get("_id").cloned(),"conversation_id":id,"user_id":owner,"meta_grant":null},
                     doc! {"$set":{"meta_grant":bson::to_bson(&proof).map_err(|_|grants::incomplete())?}}).session(&mut *tx).await?;
             }
         }
@@ -821,21 +880,8 @@ fn single_grant_message(row: &Document, scope: &Document) -> AppResult<GrantRef>
     )
     .map_err(|_| grants::incomplete())?;
     let first = proofs.first().ok_or_else(grants::incomplete)?;
-    let from = scope
-        .get_i64("from_generation")
-        .map_err(|_| grants::incomplete())?;
-    let through = match scope.get("to_generation") {
-        None | Some(Bson::Null) => None,
-        Some(Bson::Int64(value)) => Some(*value),
-        _ => return Err(grants::incomplete()),
-    };
-    if proofs.iter().any(|proof| {
-        proof.bot_id != scope.get_str("bot_id").unwrap_or_default()
-            || proof.grant_id != scope.get_str("grant_id").unwrap_or_default()
-            || proof.generation < from
-            || through.is_some_and(|through| proof.generation > through)
-    }) {
-        return Err(grants::incomplete());
+    for proof in &proofs {
+        reference_in_range(proof, scope)?;
     }
     Ok(first.clone())
 }
@@ -1113,7 +1159,12 @@ async fn erase_checkpoint(
     let mut action_changed = false;
     for field in ["completed_actions", "failed_actions"] {
         let mut actions = Vec::new();
-        for action in row.get_array(field).cloned().unwrap_or_default() {
+        let stored = match row.get(field) {
+            None => &[][..],
+            Some(Bson::Array(actions)) => actions.as_slice(),
+            _ => return Err(grants::incomplete()),
+        };
+        for action in stored {
             let action_source = action
                 .as_document()
                 .and_then(|action| action.get_str("turn_id").ok())
@@ -1122,7 +1173,7 @@ async fn erase_checkpoint(
             if action_source == turn {
                 action_changed = true;
             } else {
-                actions.push(action);
+                actions.push(action.clone());
             }
         }
         fields.insert(field, actions);
@@ -1166,6 +1217,64 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
     let grant = scope
         .get_str("grant_id")
         .map_err(|_| grants::incomplete())?;
+    // The scope write in the caller serializes this positive inventory with
+    // every admitted writer. Revisit the responsible phase for an exact
+    // straggler instead of certifying completion or wedging at phase 19.
+    for (collection, phase) in [
+        (MESSAGES, 11),
+        (REPLIES, 8),
+        (PLANS, 9),
+        (EVENTS, 10),
+        (THREADS, 7),
+        ("assistant_conversations", 5),
+        (crate::models::org_channel::LINKS, 12),
+        (crate::models::org_channel::CHALLENGES, 13),
+        (crate::models::org_channel::LANES, 14),
+    ] {
+        if db
+            .collection::<Document>(collection)
+            .find_one(exact(scope)?)
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(Step::stay(doc! {"phase":phase}));
+        }
+    }
+    for (collection, filter, phase) in [
+        (
+            "assistant_messages",
+            doc! {"meta_grants":{"$elemMatch":{"bot_id":bot,"grant_id":grant}}},
+            6,
+        ),
+        (
+            super::meta::CONTROLS,
+            doc! {"bot_id":bot,"meta_grant_id":grant},
+            15,
+        ),
+        (
+            crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME,
+            doc! {"channel_bot_id":bot,"meta_grant_id":grant},
+            16,
+        ),
+        (
+            crate::models::channel_meta::SESSIONS,
+            doc! {"_id":grant,"bot_id":bot},
+            17,
+        ),
+    ] {
+        if db
+            .collection::<Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(Step::stay(doc! {"phase":phase}));
+        }
+    }
     if let Some(parent) = db
         .collection::<ChannelBot>(BOTS)
         .find_one(doc! {"_id":bot})
@@ -1193,38 +1302,6 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
         if db.collection::<ChannelBot>(BOTS).delete_one(doc! {"_id":bot,"is_active":false,"meta_binding.grant_id":grant,
             "meta_binding.generation":parent.meta_binding.as_ref().map(|binding|binding.generation),"meta_binding.subscription":"removed"})
             .session(&mut *tx).await?.deleted_count!=1 {return Err(grants::incomplete())}
-    }
-    for collection in [
-        MESSAGES,
-        REPLIES,
-        PLANS,
-        EVENTS,
-        THREADS,
-        "assistant_conversations",
-        crate::models::org_channel::LINKS,
-        crate::models::org_channel::CHALLENGES,
-        crate::models::org_channel::LANES,
-    ] {
-        if db
-            .collection::<Document>(collection)
-            .find_one(exact(scope)?)
-            .projection(doc! {"_id":1})
-            .session(&mut *tx)
-            .await?
-            .is_some()
-        {
-            return Err(grants::incomplete());
-        }
-    }
-    if db
-        .collection::<Document>("assistant_messages")
-        .find_one(doc! {"meta_grants":{"$elemMatch":{"bot_id":bot,"grant_id":grant}}})
-        .projection(doc! {"_id":1})
-        .session(&mut *tx)
-        .await?
-        .is_some()
-    {
-        return Err(grants::incomplete());
     }
     scopes::mark_complete(db, tx, bot, grant).await?;
     db.collection::<Document>("channel_meta_erasure_fences")

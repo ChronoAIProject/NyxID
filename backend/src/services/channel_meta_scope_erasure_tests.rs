@@ -52,7 +52,17 @@ fn message(
 
 #[tokio::test]
 async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_history() {
-    for evidence in ["same", "untagged", "foreign", "malformed", "orphan-child"] {
+    for evidence in [
+        "same",
+        "untagged",
+        "foreign",
+        "malformed",
+        "orphan-child",
+        "child-same",
+        "child-foreign",
+        "child-range",
+        "child-malformed",
+    ] {
         let f = fixture().await;
         let db = &f.state.db;
         let grant = scopes::reference(&f.bot).unwrap();
@@ -85,6 +95,25 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
             db.collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME).insert_one(doc! {
                 "_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,"conversation_id":id,"turn_id":"unproven-old-turn"}).await.unwrap();
         }
+        let child = if evidence.starts_with("child-") {
+            let mut proof = grant.clone();
+            if evidence == "child-foreign" {
+                proof.grant_id = uuid::Uuid::new_v4().to_string();
+            } else if evidence == "child-range" {
+                proof.generation = -1;
+            }
+            let row = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.bot.user_id,
+            "conversation_id":id,"turn_id":"a-turn","meta_grant":if evidence=="child-malformed" {
+                Bson::String("contradictory proof".into())
+            } else {bson::to_bson(&proof).unwrap()}};
+            db.collection::<Document>(crate::models::assistant_tool_result::COLLECTION_NAME)
+                .insert_one(&row)
+                .await
+                .unwrap();
+            Some(row)
+        } else {
+            None
+        };
         // Neither a missing finite-lived source nor absence of an explicit B
         // tag certifies that a legacy turn belongs to A.
         db.collection::<Document>(MESSAGES)
@@ -117,16 +146,29 @@ async fn guest_cascade_requires_positive_proof_for_untagged_mixed_and_ttl_histor
                 break;
             }
         }
-        assert_eq!(refused, evidence != "same");
+        let completes = matches!(evidence, "same" | "child-same");
+        assert_eq!(refused, !completes);
         assert_eq!(
             db.collection::<Document>("assistant_conversations")
                 .find_one(doc! {"_id":id})
                 .await
                 .unwrap()
                 .is_none(),
-            evidence == "same"
+            completes
         );
         if refused {
+            if let Some(child) = child {
+                assert_eq!(
+                    db.collection::<Document>(
+                        crate::models::assistant_tool_result::COLLECTION_NAME
+                    )
+                    .find_one(doc! {"_id":child.get("_id").cloned()})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                    child
+                );
+            }
             assert_eq!(
                 db.collection::<Document>("assistant_messages")
                     .find_one(doc! {"_id":first.get("_id").cloned()})
@@ -146,7 +188,14 @@ async fn newer_checkpoint_keeps_independent_b_contents_after_source_expiry_and_r
     use crate::models::{
         assistant_checkpoint::COLLECTION_NAME as CHECKPOINTS, assistant_message::AssistantMessage,
     };
-    for mode in ["independent", "inherited", "unknown", "malformed"] {
+    for mode in [
+        "independent",
+        "inherited",
+        "unknown",
+        "malformed",
+        "completed-malformed",
+        "failed-malformed",
+    ] {
         let f = fixture().await;
         let db = &f.state.db;
         let a = scopes::reference(&f.bot).unwrap();
@@ -225,6 +274,17 @@ async fn newer_checkpoint_keeps_independent_b_contents_after_source_expiry_and_r
                 .await
                 .unwrap();
         }
+        if matches!(mode, "completed-malformed" | "failed-malformed") {
+            let field = if mode == "completed-malformed" {
+                "completed_actions"
+            } else {
+                "failed_actions"
+            };
+            checkpoints
+                .update_one(doc! {"_id":id}, doc! {"$set":{field:"not an action array"}})
+                .await
+                .unwrap();
+        }
         let before = checkpoints
             .find_one(doc! {"_id":id})
             .await
@@ -249,7 +309,10 @@ async fn newer_checkpoint_keeps_independent_b_contents_after_source_expiry_and_r
             .await
             .unwrap()
             .unwrap();
-        if matches!(mode, "unknown" | "malformed") {
+        if matches!(
+            mode,
+            "unknown" | "malformed" | "completed-malformed" | "failed-malformed"
+        ) {
             assert!(result.is_err());
             assert_eq!(before, after);
         } else {
@@ -555,5 +618,166 @@ async fn original_parent_provenance_audit_pages_include_non_null_tags_without_hi
             count("totalKeysExamined")
         );
     }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_source_receipts_require_the_retained_scope_range_before_audit_or_deletion() {
+    for generation in [2_i64, 4, 6] {
+        let f = fixture().await;
+        let db = &f.state.db;
+        let mut scope = f.scope.clone();
+        scope.insert("from_generation", 3_i64);
+        scope.insert("to_generation", 5_i64);
+        scope.insert("status", "sealed");
+        db.collection::<Document>(GRANT_SCOPES)
+            .replace_one(doc! {"_id":scope.get("_id").cloned()}, &scope)
+            .await
+            .unwrap();
+        let mut proof = scopes::reference(&f.bot).unwrap();
+        proof.generation = generation;
+        let row = doc! {"_id":uuid::Uuid::new_v4().to_string(),"channel_bot_id":&f.bot.id,
+        "user_id":&f.bot.user_id,"source_id":"expired-original-inbound",
+        "meta_grant":bson::to_bson(&proof).unwrap()};
+        let mut b = proof.clone();
+        b.grant_id = uuid::Uuid::new_v4().to_string();
+        b.generation = 6;
+        let mut b_scope = scope.clone();
+        b_scope.insert("_id", uuid::Uuid::new_v4().to_string());
+        b_scope.insert("grant_id", &b.grant_id);
+        b_scope.insert("from_generation", 6_i64);
+        b_scope.insert("to_generation", Bson::Null);
+        b_scope.insert("status", "current");
+        db.collection::<Document>(GRANT_SCOPES)
+            .insert_one(b_scope)
+            .await
+            .unwrap();
+        let mut sibling = row.clone();
+        sibling.insert("_id", uuid::Uuid::new_v4().to_string());
+        sibling.insert("meta_grant", bson::to_bson(&b).unwrap());
+        let plans = db.collection::<Document>(PLANS);
+        plans
+            .insert_many([row.clone(), sibling.clone()])
+            .await
+            .unwrap();
+        let audited = transaction_service::run_db_only(db, &(db, &scope), |tx, &(db, scope)| {
+            Box::pin(async move { attribute(db, tx, scope, &doc! {"phase":2}, 2).await })
+        })
+        .await
+        .unwrap();
+        assert_eq!(audited.repair, generation != 4);
+        let result = transaction_service::run_db_only(db, &(db, &scope), |tx, &(db, scope)| {
+            Box::pin(async move { erase_page(db, tx, scope, PLANS, exact(scope)?, 9).await })
+        })
+        .await;
+        assert_eq!(result.is_ok(), generation == 4);
+        assert_eq!(
+            plans
+                .find_one(doc! {"_id":row.get("_id").cloned()})
+                .await
+                .unwrap()
+                .is_none(),
+            generation == 4
+        );
+        assert_eq!(
+            plans
+                .find_one(doc! {"_id":sibling.get("_id").cloned()})
+                .await
+                .unwrap()
+                .unwrap(),
+            sibling
+        );
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn final_positive_inventory_rewinds_behind_the_scope_fence_and_finishes_bounded_stragglers() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    let proof = scopes::reference(&f.bot).unwrap();
+    db.collection::<Document>(BOTS)
+        .update_one(
+            doc! {"_id":&f.bot.id},
+            doc! {"$set":{"is_active":false,"meta_binding.subscription":"removed"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"erasure_requested":true,"purge":{"phase":19}}},
+        )
+        .await
+        .unwrap();
+    let rows: Vec<_> = (0..101).map(|_| doc! {"_id":uuid::Uuid::new_v4().to_string(),"channel_bot_id":&f.bot.id,
+        "user_id":&f.bot.user_id,"source_id":"expired-inbound","meta_grant":bson::to_bson(&proof).unwrap()}).collect();
+    db.collection::<Document>(PLANS)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let service = MetaService::from(&f.state);
+    let cutoff = bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::seconds(1));
+    assert!(
+        !pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff)
+            .await
+            .unwrap()
+    );
+    let rewound = db
+        .collection::<Document>(GRANT_SCOPES)
+        .find_one(doc! {"_id":f.scope.get("_id").cloned()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rewound.get_document("purge").unwrap().get_i32("phase"),
+        Ok(9)
+    );
+    assert!(!grants::completed(&rewound, &proof.grant_id).unwrap());
+    assert!(
+        db.collection::<Document>(BOTS)
+            .find_one(doc! {"_id":&f.bot.id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // The next transaction deletes at most one page, and keeps the parent and
+    // exact authority available for a restart before the remaining row.
+    assert!(
+        !pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        db.collection::<Document>(PLANS)
+            .count_documents(doc! {"channel_bot_id":&f.bot.id})
+            .await
+            .unwrap(),
+        1
+    );
+    let mut done = false;
+    for _ in 0..32 {
+        if pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff)
+            .await
+            .unwrap()
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done);
+    assert!(
+        grants::completion_for(db, &f.bot.id, &proof.grant_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.collection::<Document>(BOTS)
+            .find_one(doc! {"_id":&f.bot.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(f.server.received_requests().await.unwrap().is_empty());
     db.drop().await.unwrap();
 }

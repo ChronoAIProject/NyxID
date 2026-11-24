@@ -348,10 +348,30 @@ persistence also takes the message owner's personal-erasure barrier, including
 settlement against a retired scope; another owner's retirement does not widen
 that erasure authority.
 
+Manual credentials have no signed-provider subject. Converting a manual inbox
+to managed OAuth seals its manual history without authorizing its erasure. The
+new login's signed deletion covers only its own managed grant; it does not
+purge the preceding manual history. Existing account and conversation deletion
+retain their owner scope: the original owner's personal inventory removes
+their manual records, while a recipient's account deletion preserves a former
+owner's records. Managed HTTP Delete stops delivery and the subscription; it
+does not create a manual purge instruction. An explicit manual Delete captures
+only the observed owner, credential source, grant and generation. These purge
+authorities are disjoint for supported registrations. Extending a later owner
+Delete to sealed subjectless history requires a separate product decision.
+
+For a history-bearing manual Delete, a successful stopped/removed response can
+precede completion of local erasure. The captured instruction remains durable
+and the sweeper continues its bounded pages; evidence errors remain errors.
+Final positive inventory revisits the corresponding cleanup phase before
+removing the parent or recording completion, so an exact recoverable straggler
+does not wedge the job at its final check.
+
 The provider worker erases an individual grant through indexed pages of 100,
 with its collection and record cursors on the existing scope. It audits records
 by their original bot or channel parent, including non-null grant tags, and
-compares any surviving inbound proof before deletion. Contradictory or malformed
+compares any surviving inbound proof before deletion. A tag whose source has
+expired must still match its independently retained generation range. Contradictory or malformed
 attribution keeps that target pending. Positive provenance stays on the original
 records before their finite-lived sources disappear. Only deletion of the exact
 current grant can remove the live subscription and bot; deleting a superseded
@@ -360,7 +380,8 @@ verification. A thread pointer is cleared only while it still names the erased
 source and grant.
 
 An ordinary guest-conversation cascade requires positive grant proof for every
-retained turn and its children. Untagged or mixed legacy history stays pending.
+retained turn and its children. Existing contradictory child proof is preserved
+for repair. Untagged or mixed legacy history stays pending.
 Shared owner history is erased by exact turn and child references. Checkpoints
 retain a goal's origin turn and a bounded set of content-source turn IDs on the
 original checkpoint, under its existing account/conversation lifetime. Cleanup
