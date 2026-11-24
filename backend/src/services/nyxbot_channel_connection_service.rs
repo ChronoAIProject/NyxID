@@ -778,7 +778,11 @@ pub(crate) async fn connect(
                     // The commit may have succeeded. A failed reread leaves the
                     // durable reservation to recovery, never destructive rollback.
                     let current = load_channel(state, owner, &id).await?;
-                    if current.status != "active" {
+                    if current.status != "active"
+                        || (!guarded_default
+                            && current.link_code_hash.as_deref()
+                                != Some(&sha256_hex(code.as_bytes())))
+                    {
                         let ids = releases::retire_connection(
                             state,
                             &current,

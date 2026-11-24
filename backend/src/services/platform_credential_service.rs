@@ -583,9 +583,7 @@ async fn require_drained_meta_app(
         .max_time(std::time::Duration::from_secs(5))
         .session(&mut *tx)
         .await?;
-    if let Some(retired) = retired
-        && !super::channel_meta_service::grants::clear_completed_retired(db, tx, &retired).await?
-    {
+    if retired.is_some() {
         return Err(AppError::Conflict("Complete the retired Meta grant's signed deletion before changing its application ID or login secret".into()));
     }
     Ok(())
@@ -757,6 +755,10 @@ pub async fn update(
         None => doc! {"_id":&id,"provider":descriptor.provider},
     };
     let db = super::transaction_service::durable_database(db);
+    if let Some(app) = drain_app {
+        super::channel_meta_service::grants::reconcile_retired_app(&db, descriptor.provider, app)
+            .await?;
+    }
     let context = (
         &db,
         &filter,

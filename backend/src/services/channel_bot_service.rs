@@ -2445,6 +2445,17 @@ pub async fn delete_bot_with_state_as_actor(
     actor: &str,
 ) -> AppResult<Option<&'static str>> {
     let bot = get_bot_for_user(&state.db, bot_id, user_id).await?;
+    delete_bot_observed_with_state(state, adapter, &bot, actor).await
+}
+
+pub(crate) async fn delete_bot_observed_with_state(
+    state: &crate::AppState,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    actor: &str,
+) -> AppResult<Option<&'static str>> {
+    let bot_id = bot.id.as_str();
+    let user_id = bot.user_id.as_str();
     let manual_meta = super::channel_adapters::meta::is_meta(&bot.platform)
         && bot.credential_source != "platform";
     let result = if super::channel_adapters::meta::is_meta(&bot.platform) {
@@ -2453,7 +2464,7 @@ pub async fn delete_bot_with_state_as_actor(
             &state.config,
             &state.http_client,
             &state.encryption_keys,
-            &bot,
+            bot,
             actor,
         )
         .await?
@@ -2470,7 +2481,23 @@ pub async fn delete_bot_with_state_as_actor(
         .await?
     };
     if manual_meta && result == Some("removed") {
-        let current = get_bot_for_user(&state.db, bot_id, user_id).await?;
+        let current = match get_bot_for_user(&state.db, bot_id, user_id).await {
+            Ok(current) => current,
+            Err(AppError::ChannelBotNotFound(_))
+                if super::channel_meta_service::grants::completion_for(
+                    &state.db,
+                    bot_id,
+                    &bot.meta_binding
+                        .as_ref()
+                        .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                        .grant_id,
+                )
+                .await? =>
+            {
+                return Ok(Some("removed"));
+            }
+            Err(error) => return Err(error),
+        };
         if current.credential_source != bot.credential_source
             || current
                 .meta_binding
@@ -2503,32 +2530,15 @@ pub(crate) async fn delete_meta_bot(
     bot: &ChannelBot,
     actor: &str,
 ) -> AppResult<Option<&'static str>> {
-    let stopped = super::channel_meta_service::grants::stop_for_delete(db, actor, bot).await?;
-    let service = super::channel_meta_service::MetaService {
+    super::channel_meta_service::MetaService {
         db,
         config,
         http: http_client,
         keys: encryption_keys,
         endpoints: Default::default(),
-    };
-    let result = service.disconnect(&stopped).await;
-    let current = get_bot_for_user(db, &bot.id, &bot.user_id).await?;
-    if current.is_active {
-        return Err(result.err().unwrap_or_else(|| {
-            AppError::Conflict("Inbox could not be stopped; refresh before deleting".into())
-        }));
     }
-    let removed = current
-        .meta_binding
-        .as_ref()
-        .is_some_and(|binding| binding.subscription == "removed");
-    db.collection::<bson::Document>(CONVERSATIONS)
-        .update_many(
-            doc! {"channel_bot_id":&bot.id},
-            doc! {"$set":{"is_active":false,"updated_at":bson::DateTime::now()}},
-        )
-        .await?;
-    Ok(Some(if removed { "removed" } else { "failed" }))
+    .delete_snapshot(actor, bot)
+    .await
 }
 
 async fn delete_bot_dispatch(
@@ -2911,6 +2921,8 @@ pub(crate) async fn erase_personal_bot(
                 doc! {"$set":{"meta_account_retiring":true}},
             )
             .await?;
+        let manual_purge =
+            super::channel_meta_service::grants::manual_purge_authorized(db, &bot).await?;
         super::channel_meta_service::MetaService {
             db,
             config,
@@ -2922,8 +2934,26 @@ pub(crate) async fn erase_personal_bot(
         .await?;
         #[cfg(test)]
         super::durable_wake_tests::after("meta_account_after_disconnect").await;
-        let stopped = get_bot_for_user(db, bot_id, owner).await?;
-        if super::channel_meta_service::grants::manual_purge_authorized(db, &stopped).await? {
+        let stopped = match get_bot_for_user(db, bot_id, owner).await {
+            Ok(stopped) => stopped,
+            Err(AppError::ChannelBotNotFound(_))
+                if super::channel_meta_service::grants::completion_for(
+                    db,
+                    bot_id,
+                    &bot.meta_binding
+                        .as_ref()
+                        .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                        .grant_id,
+                )
+                .await? =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if manual_purge
+            || super::channel_meta_service::grants::manual_purge_authorized(db, &stopped).await?
+        {
             let grant = &stopped
                 .meta_binding
                 .as_ref()

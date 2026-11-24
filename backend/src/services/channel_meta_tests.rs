@@ -4482,3 +4482,290 @@ async fn legacy_absent_grant_can_refresh_and_disconnect_but_malformed_grant_cann
         server.verify().await;
     }
 }
+
+#[tokio::test]
+async fn delayed_deauthorization_transition_preserves_a_same_generation_signed_deletion() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let signed = provider_request(json!(900), Utc::now().timestamp());
+    let s = service(&state, &server);
+    accept_provider_request(&s, "instagram", &signed, false)
+        .await
+        .unwrap();
+    let generation = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap()
+        .meta_binding
+        .unwrap()
+        .generation;
+    super::super::durable_wake_tests::resume_after("meta_provider_before_transition",async {
+        provider::reconcile_with_service(&state,&s).await.unwrap();
+    },async {
+        let request=accept_provider_request(&s,"instagram",&signed,true).await.unwrap();
+        state.db.collection::<bson::Document>(provider::REQUESTS).update_one(doc! {"_id":request["confirmation_code"].as_str().unwrap()},
+            doc! {"$set":{"next_attempt_at":bson::DateTime::from_chrono(Utc::now()+Duration::days(1))}}).await.unwrap();
+    }).await;
+    let stopped = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(!stopped.is_active);
+    let binding = stopped.meta_binding.unwrap();
+    assert!(binding.erasure_requested);
+    assert_eq!(binding.generation, generation);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn authenticated_replay_restores_legacy_cutoff_and_exact_completed_proof_settles_without_it()
+{
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    let s = service(&state, &server);
+    let signed = provider_request(json!(900), Utc::now().timestamp());
+    let response = accept_provider_request(&s, "instagram", &signed, true)
+        .await
+        .unwrap();
+    let code = response["confirmation_code"].as_str().unwrap();
+    let jobs = state.db.collection::<bson::Document>(provider::REQUESTS);
+    jobs.update_one(doc! {"_id":code}, doc! {"$unset":{"signed_cutoff":""}})
+        .await
+        .unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "pending"
+    );
+    let replay = accept_provider_request(&s, "instagram", &signed, true)
+        .await
+        .unwrap();
+    assert_eq!(replay, response);
+    assert!(
+        jobs.find_one(doc! {"_id":code})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("signed_cutoff")
+            .is_ok()
+    );
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    jobs.update_one(doc! {"_id":code},doc! {"$set":{"next_attempt_at":bson::DateTime::now(),"targets.0.retry_at":bson::DateTime::now()}}).await.unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "completed"
+    );
+    jobs.update_one(doc! {"_id":code},doc! {"$set":{"status":"pending","next_attempt_at":bson::DateTime::now(),
+        "targets":[{"bot_id":&bot.id,"grant_id":&bot.meta_binding.as_ref().unwrap().grant_id}]},"$unset":{"signed_cutoff":"","expires_at":""}}).await.unwrap();
+    provider::reconcile_with_service(&state, &s).await.unwrap();
+    assert_eq!(
+        request_status(&state.db, "instagram", code).await.unwrap()["status"],
+        "completed"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn public_manual_delete_preserves_authorized_snapshot_and_accepts_concurrent_exact_completion()
+ {
+    use axum::{
+        extract::{Path, State},
+        response::IntoResponse,
+    };
+    for concurrent_purge in [false, true] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        let bots = state.db.collection::<bson::Document>(BOTS);
+        let site = if concurrent_purge {
+            "meta_delete_after_stop"
+        } else {
+            "meta_delete_after_authorization"
+        };
+        if concurrent_purge {
+            bots.update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{"is_active":false,"meta_binding.subscription":"removed"},
+                "$unset":{"meta_binding.grant_id":""}},
+            )
+            .await
+            .unwrap();
+        }
+        let successor = uuid::Uuid::new_v4().to_string();
+        super::super::durable_wake_tests::resume_after(site,async {
+            let result=crate::handlers::channel_bots::delete_bot(State(state.clone()),crate::test_utils::test_auth_user(&bot.user_id),
+                Default::default(),Path(bot.id.clone())).await;
+            if concurrent_purge {assert_eq!(result.unwrap().into_response().status(),axum::http::StatusCode::OK);}
+            else {assert!(matches!(result,Err(AppError::Conflict(_))));}
+        },async {
+            if concurrent_purge {
+                let stopped=super::super::channel_bot_service::get_bot(&state.db,&bot.id).await.unwrap();
+                assert_eq!(stopped.meta_binding.as_ref().unwrap().grant_id,"");
+                assert!(grants::manual_purge_authorized(&state.db,&stopped).await.unwrap());
+                super::super::personal_erasure_service::erase_provider_inbox(&state,&bot.id,"").await.unwrap();
+            } else {
+                bots.update_one(doc! {"_id":&bot.id},doc! {"$set":{"credential_source":"platform","meta_binding.grant_id":&successor},"$inc":{"meta_binding.generation":1_i64}}).await.unwrap();
+            }
+        }).await;
+        if !concurrent_purge {
+            assert!(
+                bots.find_one(
+                    doc! {"_id":&bot.id,"is_active":true,"meta_binding.grant_id":successor}
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn app_rotation_checks_remaining_retired_inboxes_after_clearing_completed_proof() {
+    let (state, _, _, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .delete_one(doc! {"_id":&bot.id})
+        .await
+        .unwrap();
+    let fences = state
+        .db
+        .collection::<bson::Document>("channel_meta_erasure_fences");
+    let complete = uuid::Uuid::new_v4().to_string();
+    let pending = uuid::Uuid::new_v4().to_string();
+    let sibling = uuid::Uuid::new_v4().to_string();
+    for (id, app, done) in [
+        (&complete, "111", true),
+        (&pending, "111", false),
+        (&sibling, "different-app", false),
+    ] {
+        let mut row = doc! {"_id":id,"retired_grant":{"grant_id":id,"identity":format!("keyed-{id}"),
+        "platform":"instagram","app_id":app,"account_erasure_id":uuid::Uuid::new_v4().to_string(),
+        "bot_created_at":bson::DateTime::now(),"authorized_at":bson::DateTime::now()}};
+        if done {
+            row.insert("local_data_erased_at", bson::DateTime::now());
+            row.insert("completed_grant_id", id.clone());
+        }
+        fences.insert_one(row).await.unwrap();
+    }
+    let descriptor = adapter("instagram")
+        .unwrap()
+        .platform_credentials()
+        .unwrap();
+    let fields = [(
+        "client_secret".into(),
+        Some(Zeroizing::new("rotated-secret".into())),
+    )]
+    .into_iter()
+    .collect();
+    assert!(matches!(
+        super::super::platform_credential_service::update(
+            &state.db,
+            &state.encryption_keys,
+            &descriptor,
+            &bot.user_id,
+            &fields,
+            false
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert!(
+        !fences
+            .find_one(doc! {"_id":&complete})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("retired_grant")
+    );
+    assert!(
+        fences
+            .find_one(doc! {"_id":&pending})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("retired_grant")
+    );
+    fences.update_one(doc! {"_id":&pending},doc! {"$set":{"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":&pending}}).await.unwrap();
+    super::super::platform_credential_service::update(
+        &state.db,
+        &state.encryption_keys,
+        &descriptor,
+        &bot.user_id,
+        &fields,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        fences
+            .find_one(doc! {"_id":sibling})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("retired_grant")
+    );
+}
+
+#[tokio::test]
+async fn manual_delete_audit_is_captured_before_successful_remote_retry_changes_updated_at() {
+    let (state, _, server, mut bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    bot.is_active = false;
+    bot.meta_binding.as_mut().unwrap().subscription = "removal_pending".into();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    super::super::audit_service::log_actor_event(
+        state.db.clone(),
+        &super::super::audit_service::AuditActor {
+            user_id: bot.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        "channel_bot_deleted",
+        Some(json!({"bot_id":bot.id,"platform":bot.platform,
+        "owner_user_id":bot.user_id,"managed_webhook_cleanup":"failed"})),
+    )
+    .await
+    .unwrap();
+    Mock::given(method("DELETE"))
+        .and(path("/v25.0/222/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    sweep_service(&state, &service(&state, &server))
+        .await
+        .unwrap();
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id":&bot.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        grants::completion_for(
+            &state.db,
+            &bot.id,
+            &bot.meta_binding.as_ref().unwrap().grant_id
+        )
+        .await
+        .unwrap()
+    );
+    server.verify().await;
+}

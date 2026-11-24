@@ -59,7 +59,7 @@ pub(crate) async fn stop_for_delete(
             let binding = observed.meta_binding.as_ref().ok_or_else(incomplete)?;
             let generation = binding.generation + i64::from(observed.is_active);
             let mut fields = doc! {"is_active":false,"status":"inactive","webhook_registered":false,
-                "meta_binding.generation":generation,"updated_at":bson::DateTime::now()};
+                "meta_binding.generation":generation,"meta_binding.grant_id":&binding.grant_id,"updated_at":bson::DateTime::now()};
             if binding.subscription != "removed" { fields.insert("meta_binding.subscription","removal_pending"); }
             fields.insert("meta_binding.next_reconcile_at",bson::DateTime::now());
             if observed.credential_source != "platform" {
@@ -67,11 +67,13 @@ pub(crate) async fn stop_for_delete(
                     "credential_source":&observed.credential_source,"grant_id":&binding.grant_id,
                     "generation":generation,"requested_at":bson::DateTime::now()});
             }
+            let mut filter = doc! {"_id":&observed.id,"user_id":&observed.user_id,
+                "platform":&observed.platform,"platform_bot_id":&observed.platform_bot_id,
+                "credential_source":&observed.credential_source,"ownership_version":observed.ownership_version,
+                "is_active":observed.is_active,"meta_binding.generation":binding.generation};
+            filter.extend(grant_filter(&binding.grant_id));
             db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-                .find_one_and_update(doc! {"_id":&observed.id,"user_id":&observed.user_id,
-                    "credential_source":&observed.credential_source,"ownership_version":observed.ownership_version,
-                    "is_active":observed.is_active,"meta_binding.grant_id":&binding.grant_id,
-                    "meta_binding.generation":binding.generation},doc! {"$set":fields})
+                .find_one_and_update(filter,doc! {"$set":fields})
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::Conflict("Inbox grant changed; refresh before deleting".into()))
         })
@@ -183,4 +185,42 @@ pub(crate) fn grant_filter(grant: &str) -> Document {
     } else {
         doc! {"meta_binding.grant_id":grant}
     }
+}
+
+pub(crate) async fn completion_for(
+    db: &mongodb::Database,
+    bot: &str,
+    grant: &str,
+) -> AppResult<bool> {
+    match db
+        .collection::<Document>("channel_meta_erasure_fences")
+        .find_one(doc! {"_id":bot})
+        .await?
+    {
+        Some(row) => completed(&row, grant),
+        None => Ok(false),
+    }
+}
+
+/// Remove only proved completed context in bounded independent commits. The
+/// credential transaction still refuses every remaining app obligation.
+pub(crate) async fn reconcile_retired_app(
+    db: &mongodb::Database,
+    platform: &str,
+    app: &str,
+) -> AppResult<()> {
+    for _ in 0..100 {
+        let Some(row) = db.collection::<Document>("channel_meta_erasure_fences")
+            .find_one(doc! {"retired_grant.platform":platform,"retired_grant.app_id":{"$in":[app,bson::Bson::Null]}})
+            .max_time(std::time::Duration::from_secs(5)).await? else { return Ok(()); };
+        let changed =
+            super::super::transaction_service::run_db_only(db, &(db, &row), |tx, &(db, row)| {
+                Box::pin(clear_completed_retired(db, tx, row))
+            })
+            .await?;
+        if !changed {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
