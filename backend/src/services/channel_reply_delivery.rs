@@ -13,6 +13,7 @@ pub const MAX_REPLY_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_REPLY_PARTS: usize = 64;
 
 pub struct Delivery {
+    meta_grant: Option<crate::models::channel_meta::GrantRef>,
     id: String,
     bot_id: String,
     inbound_id: String,
@@ -117,14 +118,11 @@ impl Delivery {
             ));
         }
         Ok(ChannelReplyDelivery {
-            meta_grant: super::channel_adapters::meta::is_meta(&bot.platform)
-                .then(|| bot.meta_binding.as_ref())
-                .flatten()
-                .map(|binding| crate::models::channel_meta::GrantRef {
-                    bot_id: bot.id.clone(),
-                    grant_id: binding.grant_id.clone(),
-                    generation: binding.generation,
-                }),
+            meta_grant: if super::channel_adapters::meta::is_meta(&bot.platform) {
+                Some(super::channel_meta_service::scopes::reference(bot)?)
+            } else {
+                None
+            },
             id,
             user_id: bot.user_id.clone(),
             channel_bot_id: bot.id.clone(),
@@ -149,6 +147,7 @@ impl Delivery {
         let count = record.parts.len();
         let trace = crate::turn_trace::TurnContext::current();
         Self {
+            meta_grant: record.meta_grant,
             id: record.id,
             bot_id: bot.id.clone(),
             inbound_id: record.inbound_message_id,
@@ -174,7 +173,7 @@ impl Delivery {
 
     pub async fn attempting(&mut self, db: &mongodb::Database, index: usize) -> AppResult<()> {
         self.parts[index].status = PartStatus::Uncertain;
-        self.save_part(db, index).await?;
+        self.save_part(db, index, true).await?;
         self.trace_attempt(index);
         Ok(())
     }
@@ -202,7 +201,7 @@ impl Delivery {
         if let Some(Some(operation)) = self.operations.get_mut(index) {
             operation.finish(crate::turn_trace::Outcome::Confirmed, None, None);
         }
-        self.save_part(db, index).await
+        self.save_part(db, index, false).await
     }
 
     pub async fn failed(
@@ -212,6 +211,7 @@ impl Delivery {
         error: &AppError,
     ) -> AppResult<()> {
         let part = &mut self.parts[index];
+        let fresh = part.status == PartStatus::NotAttempted;
         if part.status == PartStatus::NotAttempted
             || (self.telegram && super::telegram_formatting::definite_refusal(error))
         {
@@ -229,7 +229,7 @@ impl Delivery {
                 Some(error.error_code()),
             );
         }
-        self.save_part(db, index).await?;
+        self.save_part(db, index, fresh).await?;
         if self.telegram {
             super::channel_reply_notice::failed(db, &self.id, &self.bot_id, &self.inbound_id)
                 .await?;
@@ -246,22 +246,28 @@ impl Delivery {
     ) -> AppResult<()> {
         self.parts[index].platform_message_ids = ids;
         self.parts[index].outbound_message_id = Some(outbound_message_id.into());
-        self.save_part(db, index).await
+        self.save_part(db, index, false).await
     }
 
-    async fn save_part(&self, db: &mongodb::Database, index: usize) -> AppResult<()> {
+    async fn save_part(&self, db: &mongodb::Database, index: usize, fresh: bool) -> AppResult<()> {
         let fields = bson::to_document(&self.parts[index]).map_err(|_| unconfirmed())?;
         let fields: bson::Document = fields
             .into_iter()
             .map(|(key, value)| (format!("parts.{index}.{key}"), value))
             .collect();
-        let result = db
-            .collection::<ChannelReplyDelivery>(COLLECTION_NAME)
-            .update_one(
-                doc! {"_id": &self.id, "complete": false},
-                doc! {"$set": fields},
-            )
-            .await?;
+        let mut filter = doc! {"_id":&self.id,"complete":false};
+        if self.meta_grant.is_some() && !fresh {
+            filter.insert(format!("parts.{index}.status"), "uncertain");
+        }
+        let result = super::channel_meta_service::scopes::update_record(
+            db,
+            self.meta_grant.as_ref(),
+            fresh,
+            COLLECTION_NAME,
+            filter,
+            doc! {"$set":fields},
+        )
+        .await?;
         if result.matched_count != 1 {
             return Err(unconfirmed());
         }
@@ -276,13 +282,15 @@ impl Delivery {
         {
             return Err(unconfirmed());
         }
-        let result = db
-            .collection::<ChannelReplyDelivery>(COLLECTION_NAME)
-            .update_one(
-                doc! {"_id": &self.id, "complete": false},
-                doc! {"$set": {"complete": true}},
-            )
-            .await?;
+        let result = super::channel_meta_service::scopes::update_record(
+            db,
+            self.meta_grant.as_ref(),
+            false,
+            COLLECTION_NAME,
+            doc! {"_id":&self.id,"complete":false},
+            doc! {"$set":{"complete":true}},
+        )
+        .await?;
         if result.matched_count != 1 {
             return Err(unconfirmed());
         }

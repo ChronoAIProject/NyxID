@@ -353,6 +353,13 @@ impl MetaService<'_> {
         } else {
             None
         };
+        if existing.as_ref().is_some_and(|bot| {
+            bot.meta_binding
+                .as_ref()
+                .is_some_and(|binding| binding.erasure_requested)
+        }) {
+            return Err(AppError::Conflict("This inbox has a pending provider deletion. Wait for its deletion status to complete, then connect it as a new installation.".into()));
+        }
         if let Err(error) =
             super::channel_adapters::meta_managed::require_enrollment(self.db, actor, platform)
                 .await
@@ -963,6 +970,7 @@ impl MetaService<'_> {
             authorized_at: Some(s.created_at),
             events_since: Some(Utc::now()),
             generation: s.expected_generation.unwrap_or(0) + 1,
+            grant_start_generation: s.expected_generation.unwrap_or(0) + 1,
             token_fingerprint: meta::token_fingerprint(&asset.token),
             grant_actor_id: actor.into(),
             grant_subject_id: asset.grant_subject_id,
@@ -1074,14 +1082,9 @@ impl MetaService<'_> {
                     binding.subscription = "suspended".into();
                 }
                 scopes::cutover(db,tx,&old,&binding).await?;
-                // A reconnect is a new provider grant. Retire participant
-                // control observations from the old generation while the
-                // parent installation lock is held; the next inbound event
-                // must establish fresh provider proof for this grant.
-                db.collection::<bson::Document>(meta::CONTROLS)
-                    .delete_many(doc! {"bot_id": bot_id})
-                    .session(&mut *tx)
-                    .await?;
+                // Participant observations remain on their original rows. Their
+                // admitted grant/range prevents a prior grant from authorizing B;
+                // B replaces a participant row only after fresh provider proof.
                 let (filter, update) = credential_update(
                     &old,
                     doc! {"_id": bot_id, "user_id": &s.owner_id, "is_active": true,
@@ -1766,7 +1769,8 @@ pub(crate) async fn sweep_service(
             if result.is_ok() && bot.credential_source != "platform"
                 && manual_purge
                 && let Ok(live) = super::channel_bot_service::get_bot(service.db, &bot.id).await
-                && live.meta_binding.as_ref().is_some_and(|binding| binding.subscription == "removed")
+                && live.meta_binding.as_ref().is_some_and(|binding| binding.subscription == "removed"
+                    && bot.meta_binding.as_ref().is_some_and(|captured|captured.grant_id==binding.grant_id && captured.generation==binding.generation))
             {
                 let grant_id = live.meta_binding.as_ref().map(|binding| binding.grant_id.as_str()).unwrap_or_default();
                 if let Err(error) = super::personal_erasure_service::erase_provider_inbox(state, &bot.id, grant_id).await {

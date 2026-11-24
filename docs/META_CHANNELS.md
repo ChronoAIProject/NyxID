@@ -332,8 +332,10 @@ owner list or message/receipt content. Original inbound metadata, multipart
 plans and reply receipts retain their admitted grant reference. A prior scope
 remains discoverable independently of the current binding and account lifetime;
 its outstanding app obligation is released only by exact provider completion.
-Completed scope proof remains for signed replay, without a terminal TTL. This
-additional bookkeeping is excluded from personal export and is registered as
+After cleanup the scope drops its subject/binding fingerprints, App ID,
+generation bounds and attribution timestamps. Only opaque bot/grant identity,
+typed completion proof and replay state remain, without a terminal TTL.
+Subjectless manual account retirement removes its unused scope. This additional bookkeeping is excluded from personal export and is registered as
 erasure bookkeeping in the personal-data inventory.
 
 Signed requests retain their authenticated authorization cutoff. A missing or

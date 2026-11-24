@@ -55,6 +55,12 @@ pub(crate) async fn stop_for_delete(
     super::super::durable_wake_tests::after("meta_delete_before_stop").await;
     super::super::transaction_service::run_db_only(db,&(db,actor,observed),|tx,&(db,actor,observed)|{
         Box::pin(async move {
+            let binding=observed.meta_binding.as_ref().ok_or_else(incomplete)?;
+            if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":&observed.id}).session(&mut *tx).await?.is_none() {
+                let proof=db.collection::<Document>("channel_meta_erasure_fences").find_one(doc! {"_id":&observed.id}).session(&mut *tx).await?.ok_or_else(incomplete)?;
+                if completed(&proof,&binding.grant_id)? {return Ok(observed.clone());}
+                return Err(incomplete());
+            }
             super::MetaService::fence_installation_authority(db,tx,actor,&observed.user_id,&observed.platform,false).await?;
             let binding = observed.meta_binding.as_ref().ok_or_else(incomplete)?;
             let generation = binding.generation + i64::from(observed.is_active);
@@ -72,10 +78,12 @@ pub(crate) async fn stop_for_delete(
                 "credential_source":&observed.credential_source,"ownership_version":observed.ownership_version,
                 "is_active":observed.is_active,"meta_binding.generation":binding.generation};
             filter.extend(grant_filter(&binding.grant_id));
-            db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            let stopped=db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
                 .find_one_and_update(filter,doc! {"$set":fields})
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
-                .ok_or_else(||AppError::Conflict("Inbox grant changed; refresh before deleting".into()))
+                .ok_or_else(||AppError::Conflict("Inbox grant changed; refresh before deleting".into()))?;
+            super::scopes::ensure_current(db,tx,&stopped,false).await?;
+            Ok(stopped)
         })
     }).await
 }
@@ -97,6 +105,16 @@ pub(crate) async fn manual_purge_authorized(
     }).projection(doc! {"_id":1}).await?.is_some();
     if authorized {
         return Ok(true);
+    }
+    // A completed concurrent sweep may remove the parent after the caller's
+    // first reread. Only exact typed proof for this captured grant settles it.
+    if db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&bot.id})
+        .await?
+        .is_none()
+    {
+        return completion_for(db, &bot.id, &binding.grant_id).await;
     }
     recover_manual_delete(db, bot).await
 }
@@ -211,7 +229,8 @@ pub(crate) async fn reconcile_retired_app(
 ) -> AppResult<()> {
     for _ in 0..100 {
         let Some(row) = db.collection::<Document>("channel_meta_erasure_fences")
-            .find_one(doc! {"retired_grant.platform":platform,"retired_grant.app_id":{"$in":[app,bson::Bson::Null]}})
+            .find_one(doc! {"retired_grant.platform":platform,"retired_grant.app_id":{"$in":[app,bson::Bson::Null]},
+                "local_data_erased_at":{"$type":"date"},"completed_grant_id":{"$type":"string"}})
             .max_time(std::time::Duration::from_secs(5)).await? else { return Ok(()); };
         let changed =
             super::super::transaction_service::run_db_only(db, &(db, &row), |tx, &(db, row)| {

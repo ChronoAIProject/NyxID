@@ -400,9 +400,24 @@ pub async fn store_outbound_message(
             &args,
             |tx, (db, message, channel_bot_id, platform)| {
                 Box::pin(async move {
-                    fence_meta_observation(db, tx, channel_bot_id, platform, false).await?;
-                    db.collection::<ChannelMessage>(COLLECTION_NAME)
-                        .insert_one(message)
+                    let mut document=bson::to_document(message).map_err(|_|AppError::Internal("Message metadata unavailable".into()))?;
+                    if let Some(source)=message.reply_to_message_id.as_deref() {
+                        let source_row=db.collection::<bson::Document>(COLLECTION_NAME).find_one(doc! {
+                            "_id":source,"channel_bot_id":channel_bot_id,"user_id":&message.user_id,"direction":"inbound","platform":platform,
+                        }).session(&mut *tx).await?.ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                        let grant=super::channel_meta_service::scopes::source_in_session(db,tx,source).await?
+                            .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                        if grant.bot_id!=*channel_bot_id || source_row.get_str("user_id")!=Ok(message.user_id.as_str()) {
+                            return Err(super::channel_meta_service::grants::incomplete());
+                        }
+                        super::channel_meta_service::scopes::fence_reference(db,tx,&grant,false).await?;
+                        document.insert("meta_grant",bson::to_bson(&grant).map_err(|_|super::channel_meta_service::grants::incomplete())?);
+                    } else {
+                        // Ordinary unbound controls retain their existing bot-wide fence.
+                        fence_meta_observation(db, tx, channel_bot_id, platform, false).await?;
+                    }
+                    db.collection::<bson::Document>(COLLECTION_NAME)
+                        .insert_one(document)
                         .session(&mut *tx)
                         .await?;
                     Ok(())

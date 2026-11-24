@@ -249,6 +249,9 @@ pub struct MetaCredentialBinding {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub events_since: Option<DateTime<Utc>>,
     pub generation: i64,
+    /// First delivery generation of this consent; operational holds keep it.
+    #[serde(default)]
+    pub grant_start_generation: i64,
     pub token_fingerprint: String,
     pub grant_actor_id: String,
     pub grant_subject_id: String,

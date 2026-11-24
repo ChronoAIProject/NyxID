@@ -828,6 +828,16 @@ pub async fn delete(
         return Ok(());
     }
     let db = super::transaction_service::durable_database(db);
+    if super::channel_adapters::meta::is_meta(descriptor.provider)
+        && let Some(row) = db
+            .collection::<PlatformCredential>(COLLECTION_NAME)
+            .find_one(doc! {"provider":descriptor.provider})
+            .await?
+        && let Some(app) = row.fields.get("app_id")
+    {
+        super::channel_meta_service::grants::reconcile_retired_app(&db, descriptor.provider, app)
+            .await?;
+    }
     super::transaction_service::run_db_only(&db, &(&db, descriptor.provider), |tx, context| {
         let &(db, provider) = context;
         Box::pin(async move {

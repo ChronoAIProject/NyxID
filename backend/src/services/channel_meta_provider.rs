@@ -102,8 +102,20 @@ async fn retire_account_inbox_in_session(
     };
     let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
     let scope = super::scopes::ensure_current(db, tx, &bot, false).await?;
-    db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id,"status":"current"},
-        doc! {"$set":{"status":"retired","to_generation":binding.generation,"sealed_at":bson::DateTime::now()}}).session(&mut *tx).await?;
+    if binding.grant_subject_id.is_empty() {
+        // No provider subject can claim this manual installation. Account
+        // retirement needs no permanent managed grant or scope obligation.
+        db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+            .delete_one(doc! {"_id":&scope.id,"identity":null,"outstanding":false})
+            .session(&mut *tx)
+            .await?;
+    } else {
+        let changed=db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id,"status":"current"},
+            doc! {"$set":{"status":"retired","to_generation":binding.generation,"sealed_at":bson::DateTime::now()}}).session(&mut *tx).await?;
+        if changed.matched_count != 1 && scope.status != "completed" {
+            return Err(conflict());
+        }
+    }
     db.collection::<bson::Document>("channel_meta_erasure_fences")
         .update_one(
             doc! {"_id":id},
@@ -387,9 +399,9 @@ pub async fn accept_provider_request(
                     if let Some(target)=existing {target.insert("scope_id",&scope.id);} else {
                         targets.push(doc! {"bot_id":&scope.bot_id,"grant_id":&scope.grant_id,"scope_id":&scope.id});
                     }
-                    if *erase {
+                    if *erase && scope.authorized_at.is_some() {
                         db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id},
-                            doc! {"$set":{"erasure_requested":true},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+                            doc! {"$set":{"erasure_requested":true},"$max":{"erasure_cutoff":cutoff},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
                     }
                 }
                 db.collection::<bson::Document>(REQUESTS).insert_one(doc! {
@@ -532,23 +544,41 @@ async fn reconcile_target(
     cutoff: Option<&bson::DateTime>,
     scope_id: Option<&str>,
 ) -> AppResult<()> {
+    // Earlier queued jobs may omit scope_id. Resolve the captured bot/grant
+    // before deciding whether any whole-inbox eraser is authorized.
+    let mut scope_filter = doc! {"bot_id":bot_id,"grant_id":grant_id};
     if let Some(id) = scope_id {
-        let scope = state
-            .db
-            .collection::<crate::models::channel_meta::GrantScope>(
-                crate::models::channel_meta::GRANT_SCOPES,
-            )
-            .find_one(doc! {"_id":id,"bot_id":bot_id,"grant_id":grant_id})
-            .await?
-            .ok_or_else(super::grants::incomplete)?;
-        if scope.status == "completed" {
-            return Ok(());
+        scope_filter.insert("_id", id);
+    }
+    let scope = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .find_one(scope_filter)
+        .await?;
+    if scope_id.is_some() && scope.is_none() {
+        return Err(super::grants::incomplete());
+    }
+    if let Some(row) = &scope {
+        if row.get_str("status") == Ok("completed") {
+            return if super::grants::completed(row, grant_id)? {
+                Ok(())
+            } else {
+                Err(super::grants::incomplete())
+            };
         }
-        if super::scopes::has_history(&state.db, bot_id).await? {
-            // The scoped eraser owns multi-grant records. Never fall through
-            // to a whole-inbox purge or acknowledge unprocessed prior data.
-            return Err(super::grants::incomplete());
+        if let Some(cutoff) = cutoff {
+            let authorized = row
+                .get_datetime("authorized_at")
+                .map_err(|_| super::grants::incomplete())?;
+            if authorized >= cutoff {
+                return Ok(());
+            }
         }
+    }
+    if erase && super::scopes::has_history(&state.db, bot_id).await? {
+        // The scoped eraser owns multi-grant records. Never fall through
+        // to a whole-inbox purge or acknowledge unprocessed prior data.
+        return Err(super::grants::incomplete());
     }
     let cutoff = if let Some(cutoff) = cutoff {
         cutoff
@@ -715,10 +745,25 @@ async fn apply_callback_state(
     let authorized = binding
         .authorized_at
         .ok_or_else(super::grants::incomplete)?;
-    if bson::DateTime::from_chrono(authorized) >= *cutoff {
+    let scope = super::scopes::ensure_current(db, tx, &bot, false).await?;
+    let authorized = bson::DateTime::from_chrono(authorized);
+    db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":&scope.id},
+            doc! {"$set":{"authorized_at":authorized}},
+        )
+        .session(&mut *tx)
+        .await?;
+    if authorized >= *cutoff {
+        db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id,
+            "erasure_cutoff":{"$type":"date","$lte":authorized}},
+            doc! {"$set":{"erasure_requested":false},"$unset":{"erasure_cutoff":""},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
         return Ok(false);
     }
-    super::scopes::ensure_current(db, tx, &bot, false).await?;
+    if erase {
+        db.collection::<bson::Document>(crate::models::channel_meta::GRANT_SCOPES).update_one(doc! {"_id":&scope.id},
+            doc! {"$set":{"erasure_requested":true},"$max":{"erasure_cutoff":cutoff},"$inc":{"revision":1_i64}}).session(&mut *tx).await?;
+    }
     let advance = bot.is_active && !binding.provider_revoked;
     let keep = !erase && !binding.erasure_requested && bot.is_active;
     let subscription = if keep && binding.operator_suspended {

@@ -60,6 +60,7 @@ pub(crate) async fn fixture(
         authorized_at: Some(Utc::now()),
         events_since: None,
         generation: 1,
+        grant_start_generation: 1,
         token_fingerprint: token_fingerprint("fixture-token"),
         grant_actor_id: owner.clone(),
         grant_subject_id: "900".into(),
@@ -96,7 +97,7 @@ pub(crate) async fn fixture(
     (state, adapter, server, bot)
 }
 
-async fn original(state: &crate::AppState, bot: &ChannelBot) -> ChannelMessage {
+pub(crate) async fn original(state: &crate::AppState, bot: &ChannelBot) -> ChannelMessage {
     let inbound = parse_event(
         if bot.platform == "messenger" {
             Inbox::Messenger
@@ -1408,11 +1409,18 @@ async fn saved_meta_reply_journals_erase_legacy_sources_and_fence_late_creation_
             .insert_one(&sibling)
             .await
             .unwrap();
+        let sibling_source = original(&state, &sibling).await;
+        state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(&sibling_source)
+            .await
+            .unwrap();
         journal::begin_bound(
             &state.db,
             "sibling-result",
             &sibling,
-            "sibling-source",
+            &sibling_source.id,
             "sibling",
             1,
         )

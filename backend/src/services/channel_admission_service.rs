@@ -103,7 +103,8 @@ async fn admit_fenced(
                         let chat = message.platform_conversation_id.as_deref().unwrap_or_default();
                         let control = db.collection::<Document>(super::channel_adapters::meta::CONTROLS).update_one(
                             doc! {"identity_key":format!("{}:{chat}",message.channel_bot_id.as_deref().unwrap_or_default()),
-                                "controlled":true,"generation":authority.generation},
+                                "controlled":true,"generation":authority.generation,
+                                "$and":[super::channel_adapters::meta::control_scope(live.meta_binding.as_ref().ok_or_else(||mongodb::error::Error::custom("Meta binding unavailable"))?)]},
                             doc! {"$inc":{"admission_revision":1_i64}},
                         ).session(&mut *session).await?;
                         if control.matched_count != 1 {return Ok(false);}
