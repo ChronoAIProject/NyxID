@@ -328,41 +328,6 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
 }
 
 #[cfg(test)]
-pub(crate) async fn bind_fixture_fields(
-    db: &mongodb::Database,
-    keys: &EncryptionKeys,
-    id: &str,
-    fields: &[&str],
-) {
-    use bson::{Document, doc};
-    let collection = crate::models::channel_bot::COLLECTION_NAME;
-    let rows = db.collection::<Document>(collection);
-    let row = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
-    let owner = row.get_str("user_id").unwrap();
-    let mut set = Document::new();
-    for &field in fields {
-        let plain = keys
-            .decrypt(row.get_binary_generic(field).unwrap())
-            .await
-            .unwrap();
-        let path = [field];
-        let context =
-            crate::crypto::record_field::RecordContext::new(collection, id, owner, &path).unwrap();
-        set.insert(
-            field,
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: keys.encrypt_record(&plain, &context).await.unwrap(),
-            },
-        );
-        set.insert(format!("secret_context_versions.{field}"), 3);
-    }
-    rows.update_one(doc! {"_id":id}, doc! {"$set":set})
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::channel_adapters::resolve_adapter;

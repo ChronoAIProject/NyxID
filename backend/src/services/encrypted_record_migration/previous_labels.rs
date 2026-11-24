@@ -140,6 +140,9 @@ pub(super) const LABELS: &[super::FieldLabels] = &[
 
 // #2896 replaced three entries and appended seven. Keep this view independent
 // of future live-registry edits so retained counters keep their original names.
+pub(super) const OAUTH_WEBHOOK_DIGEST: &str =
+    "b87c6a8c242ec34ae73c327f2ff7ed8ab332f07985afb8ed50ce2693d6270892";
+
 pub(super) const RECONCILED_DIGEST: &str =
     "97d55ec8edff7d0599c59dc342e6a46fb5d580650d4be4b6e9cad693773d3b4c";
 pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {

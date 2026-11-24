@@ -192,11 +192,15 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let runs = db.collection::<Document>(RUNS);
     let original = runs.find_one(doc! {"_id":RUN_ID}).await.unwrap().unwrap();
     let live = registry_digest();
-    assert_ne!(live, previous_labels::DIGEST);
+    assert_eq!(
+        live,
+        "fdb9b9bb2bba7447d7cef07e588e6c1d1ce9461af13bd17be7664d0a47dc1f12"
+    );
     for digest in [
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
         Some(previous_labels::RECONCILED_DIGEST),
+        Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some("unknown"),
         None,
     ] {
@@ -234,11 +238,19 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 "target_ciphertext",
                 "delivery_credential_encrypted",
             )),
-            Some(value) if value == live || value == previous_labels::RECONCILED_DIGEST => Some((
-                "mobile_social_deliveries",
-                "ciphertext",
-                "agent_key_grant.delivery_credential_encrypted",
-            )),
+            Some(value)
+                if value == live
+                    || matches!(
+                        value,
+                        previous_labels::OAUTH_WEBHOOK_DIGEST | previous_labels::RECONCILED_DIGEST
+                    ) =>
+            {
+                Some((
+                    "mobile_social_deliveries",
+                    "ciphertext",
+                    "agent_key_grant.delivery_credential_encrypted",
+                ))
+            }
             _ => None,
         };
         if let Some((collection, field, grant)) = expected {
