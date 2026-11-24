@@ -867,7 +867,10 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
         platform_entry_credentials::EntryCredentialSnapshot,
     };
     crate::test_utils::init_test_audit_chain_hmac_key();
-    let (state, adapter, server, bot) = fixture("instagram").await;
+    let (mut state, adapter, server, bot) = fixture("instagram").await;
+    let mut legacy_keys = crate::test_utils::test_encryption_keys();
+    legacy_keys.set_contextual_record_writes(false);
+    state.encryption_keys = std::sync::Arc::new(legacy_keys);
     configure(&state, &bot).await;
     instagram(&server).await;
     let bots = state.db.collection::<ChannelBot>(BOTS);
@@ -958,8 +961,7 @@ async fn converting_a_manual_inbox_to_managed_fences_signing_credential_migratio
             .get_bool("complete")
             .unwrap()
     );
-    let mut migration_keys = crate::test_utils::test_encryption_keys();
-    migration_keys.set_contextual_record_writes(true);
+    let migration_keys = crate::test_utils::test_encryption_keys();
     assert!(
         platform_credential_service::migrate_storage_snapshot(
             &state.db,
