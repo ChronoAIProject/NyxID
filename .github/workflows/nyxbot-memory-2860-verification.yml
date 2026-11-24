@@ -1,0 +1,40 @@
+name: NyxBot memory verification for PR 2860
+on:
+  push:
+    branches: [qa/nyxbot-2860-memory-012d5ad9]
+permissions:
+  contents: read
+jobs:
+  memory-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUST_MIN_STACK: 8388608
+      NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 012d5ad9f1a48506cdb32329f572a1343d147590
+          persist-credentials: false
+      - name: Verify the PR revision
+        run: test "$(git rev-parse HEAD)" = 012d5ad9f1a48506cdb32329f572a1343d147590
+      - name: Install system dependencies
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: ./.github/actions/ci-rust-cache
+        with:
+          backend-reserve: 'true'
+          save-if: 'false'
+          shared-key: backend-build
+          incremental: 'false'
+      - name: Prepare backend compile memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Compile the backend test binary
+        run: cargo test --locked -p nyxid --lib --no-run
+      - name: Start the disposable MongoDB replica set
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Run the native memory contract suite
+        run: cargo test --locked -p nyxid --lib memory_write_tests:: -- --test-threads=2
