@@ -838,6 +838,9 @@ async fn retire_connection_checked(
                 super::channel_bot_service::fence_owner_management(
                     &db, session, actor, bot_owner(&current),
                 ).await?;
+                super::platform_bot_authority::fence_personal_routes(
+                    &db, &current.channel_bot_id, bot_owner(&current), session,
+                ).await?;
                 // The write below contends with activation/relinking. Revalidate
                 // the exact repair snapshot on every transaction retry before
                 // retiring any route, key, follow or gateway release.
