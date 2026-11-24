@@ -4263,3 +4263,210 @@ async fn manual_delete_snapshot_cannot_stop_or_purge_a_reconnected_managed_grant
     );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn verify_and_refresh_share_the_asset_lease_and_preserve_same_token_expiry() {
+    for same_token in [false, true] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        state.db.collection::<bson::Document>(BOTS).update_one(doc! {"_id":&bot.id},doc! {"$set":{
+            "meta_binding.subscription":"pending","meta_binding.expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::days(2))}}).await.unwrap();
+        let due = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        let refreshed_token = if same_token {
+            "fixture-token"
+        } else {
+            "refreshed-token"
+        };
+        Mock::given(method("GET"))
+            .and(path("/refresh_access_token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token":refreshed_token,"expires_in":5184000})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        for token in ["fixture-token", "refreshed-token"] {
+            Mock::given(method("GET"))
+                .and(path("/v25.0/me"))
+                .and(header("authorization", format!("Bearer {token}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"user_id":"222","username":"professional","account_type":"Business"}),
+                ))
+                .mount(&server)
+                .await;
+        }
+        subscriptions(&server, "222").await;
+        let s = service(&state, &server);
+        super::super::durable_wake_tests::resume_after(
+            "meta_refresh_provider_confirmed",
+            async {
+                s.refresh(&due).await.unwrap();
+            },
+            async {
+                // A normal Verify must lose the busy asset lease at this exact boundary.
+                assert!(matches!(s.verify(&due).await, Err(AppError::Conflict(_))));
+            },
+        )
+        .await;
+        let fresh = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        let extended = fresh.meta_binding.as_ref().unwrap().expires_at.unwrap();
+        assert!(extended > Utc::now() + Duration::days(59));
+        s.verify(&due).await.unwrap();
+        let active = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(active.meta_binding.as_ref().unwrap().subscription, "active");
+        assert_eq!(
+            active.meta_binding.as_ref().unwrap().expires_at,
+            Some(extended)
+        );
+        // A delayed failure for the old logical token cannot stop the successor.
+        if !same_token {
+            s.reconnect_required(&due).await.unwrap();
+            assert!(
+                !super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+                    .await
+                    .unwrap()
+                    .meta_binding
+                    .unwrap()
+                    .grant_reconnect_required
+            );
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn invalid_token_verify_holds_the_same_asset_fence_as_refresh() {
+    let (state, _, server, bot) = fixture("instagram").await;
+    configure(&state, &bot).await;
+    state.db.collection::<bson::Document>(BOTS).update_one(doc! {"_id":&bot.id},doc! {
+        "$set":{"meta_binding.expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::days(2))}}).await.unwrap();
+    let due = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v25.0/me"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error":{"code":190,"message":"expired"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let s = service(&state, &server);
+    super::super::durable_wake_tests::resume_after(
+        "meta_verify_token_rejected",
+        async {
+            assert!(s.verify(&due).await.is_err());
+        },
+        async {
+            assert!(matches!(s.refresh(&due).await, Err(AppError::Conflict(_))));
+        },
+    )
+    .await;
+    let stopped = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(stopped.meta_binding.unwrap().grant_reconnect_required);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/refresh_access_token")
+    );
+}
+
+#[tokio::test]
+async fn legacy_absent_grant_can_refresh_and_disconnect_but_malformed_grant_cannot_publish() {
+    for malformed in [false, true] {
+        let (state, _, server, bot) = fixture("instagram").await;
+        configure(&state, &bot).await;
+        let bots = state.db.collection::<bson::Document>(BOTS);
+        bots.update_one(doc! {"_id":&bot.id},doc! {"$unset":{"meta_binding.grant_id":""},
+            "$set":{"meta_binding.expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::days(2))}}).await.unwrap();
+        let due = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert!(due.meta_binding.as_ref().unwrap().grant_id.is_empty());
+        Mock::given(method("GET"))
+            .and(path("/refresh_access_token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token":"fresh-token","expires_in":5184000})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v25.0/me"))
+            .and(header("authorization", "Bearer fresh-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"user_id":"222","username":"professional","account_type":"Business"}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let s = service(&state, &server);
+        if malformed {
+            super::super::durable_wake_tests::resume_after(
+                "meta_refresh_provider_confirmed",
+                async {
+                    assert!(matches!(s.refresh(&due).await, Err(AppError::Conflict(_))));
+                },
+                async {
+                    bots.update_one(
+                        doc! {"_id":&bot.id},
+                        doc! {"$set":{"meta_binding.grant_id":bson::Bson::Null}},
+                    )
+                    .await
+                    .unwrap();
+                },
+            )
+            .await;
+            assert_eq!(
+                bots.find_one(doc! {"_id":&bot.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_binary_generic("bot_token_encrypted")
+                    .unwrap(),
+                &bot.bot_token_encrypted
+            );
+        } else {
+            s.refresh(&due).await.unwrap();
+            let fresh = super::super::channel_bot_service::get_bot(&state.db, &bot.id)
+                .await
+                .unwrap();
+            Mock::given(method("DELETE"))
+                .and(path("/v25.0/222/subscribed_apps"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            s.disconnect(&fresh).await.unwrap();
+            let removed = bots.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+            assert_eq!(
+                removed
+                    .get_document("meta_binding")
+                    .unwrap()
+                    .get_str("subscription"),
+                Ok("removed")
+            );
+            assert!(
+                !removed
+                    .get_document("meta_binding")
+                    .unwrap()
+                    .contains_key("grant_id")
+            );
+        }
+        server.verify().await;
+    }
+}

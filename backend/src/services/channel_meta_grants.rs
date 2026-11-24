@@ -174,3 +174,13 @@ async fn recover_manual_delete(
         })
     }).await
 }
+
+/// The model's empty legacy grant accepts absence, never a present malformed
+/// value. Callers retain owner, asset, generation and logical credential fences.
+pub(crate) fn grant_filter(grant: &str) -> Document {
+    if grant.is_empty() {
+        doc! {"$or":[{"meta_binding.grant_id":""},{"meta_binding.grant_id":{"$exists":false}}]}
+    } else {
+        doc! {"meta_binding.grant_id":grant}
+    }
+}

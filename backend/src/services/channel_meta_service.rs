@@ -1186,6 +1186,8 @@ impl MetaService<'_> {
             platform_secrets: None,
         };
         if let Err(error) = a.verify_bot_token(self.http, &credentials).await {
+            #[cfg(test)]
+            super::durable_wake_tests::after("meta_verify_token_rejected").await;
             if matches!(&error, AppError::ChannelConversationNotReachable(reason) if reason == "meta:reconnect_required")
             {
                 self.reconnect_required(bot).await?;
@@ -1333,12 +1335,9 @@ impl MetaService<'_> {
         };
         if bot.platform == "messenger" {
             verify_fields.insert("meta_binding.expires_at", bson::Bson::Null);
-        } else if let Some(expires_at) = binding.expires_at {
-            verify_fields.insert(
-                "meta_binding.expires_at",
-                bson::DateTime::from_chrono(expires_at),
-            );
         }
+        // Instagram verification observes the credential; it does not publish
+        // an old expiry over a concurrent same-token lifetime extension.
         let result = self
             .db
             .collection::<ChannelBot>(BOTS)
@@ -1370,9 +1369,10 @@ impl MetaService<'_> {
         let binding = observed.meta_binding.as_ref().ok_or_else(conflict)?;
         filter.extend(doc! {
             "_id": &observed.id, "user_id": &observed.user_id, "platform": &observed.platform,
-            "platform_bot_id": &observed.platform_bot_id, "meta_binding.grant_id": &binding.grant_id,
+            "platform_bot_id": &observed.platform_bot_id,
             "meta_binding.app_id": &binding.app_id, "meta_binding.token_fingerprint": &binding.token_fingerprint,
         });
+        filter.extend(grants::grant_filter(&binding.grant_id));
         let expected_pin = field_pin(observed, TOKEN)?;
         let args = (
             self.db.collection::<ChannelBot>(BOTS),
@@ -1510,6 +1510,35 @@ impl MetaService<'_> {
         .await
     }
     pub async fn refresh(&self, bot: &ChannelBot) -> AppResult<()> {
+        super::channel_connection_webhook_service::serialized(
+            self.db,
+            &format!("meta-asset:{}:{}", bot.platform, bot.platform_bot_id),
+            self.refresh_guarded(bot),
+        )
+        .await
+    }
+
+    async fn refresh_guarded(&self, bot: &ChannelBot) -> AppResult<()> {
+        let current = super::channel_bot_service::get_bot(self.db, &bot.id).await?;
+        if current.user_id != bot.user_id
+            || current.platform_bot_id != bot.platform_bot_id
+            || current.meta_binding.as_ref().map(|binding| {
+                (
+                    binding.generation,
+                    &binding.grant_id,
+                    &binding.token_fingerprint,
+                )
+            }) != bot.meta_binding.as_ref().map(|binding| {
+                (
+                    binding.generation,
+                    &binding.grant_id,
+                    &binding.token_fingerprint,
+                )
+            })
+        {
+            return Err(conflict());
+        }
+        let bot = &current;
         let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
         if bot.platform != "instagram"
             || !bot.is_active
@@ -1525,12 +1554,7 @@ impl MetaService<'_> {
         if binding.expires_at.is_some_and(|e| e <= Utc::now()) {
             return self.reconnect_required(bot).await;
         }
-        super::channel_connection_webhook_service::serialized(
-            self.db,
-            &format!("instagram-refresh:{}", bot.id),
-            self.refresh_inner(bot),
-        )
-        .await
+        self.refresh_inner(bot).await
     }
 
     async fn refresh_inner(&self, bot: &ChannelBot) -> AppResult<()> {
@@ -1614,13 +1638,15 @@ impl MetaService<'_> {
     }
     async fn reconnect_required(&self, bot: &ChannelBot) -> AppResult<()> {
         let binding = bot.meta_binding.as_ref().ok_or_else(conflict)?;
+        let mut filter = doc! {"_id":&bot.id,"user_id":&bot.user_id,
+        "platform_bot_id":&bot.platform_bot_id,"is_active":true,
+        "meta_binding.generation":binding.generation,"meta_binding.token_fingerprint":&binding.token_fingerprint,
+        "meta_binding.grant_reconnect_required":{"$ne":true}};
+        filter.extend(grants::grant_filter(&binding.grant_id));
         self.db
             .collection::<ChannelBot>(BOTS)
             .update_one(
-                doc! {"_id":&bot.id,
-                "is_active":true,
-                "meta_binding.generation":binding.generation,
-                "meta_binding.grant_reconnect_required":{"$ne":true}},
+                filter,
                 doc! {"$inc":{"meta_binding.generation":1},
                 "$set":{"status": if binding.operator_suspended { "suspended" } else { "failed" },
                 "webhook_registered":false,
