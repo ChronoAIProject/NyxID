@@ -239,12 +239,17 @@ pub(crate) async fn select(
     }
     Ok(Selection {
         input_id,
-        creation_turn_id: captured.map(str::to_owned).or_else(|| {
-            conversation
-                .active_turn
-                .as_ref()
-                .map(|turn| turn.turn_id.clone())
-        }),
+        // An app-created review can explicitly have no creation turn. Its
+        // saved absence must survive renewal while another inbox is active.
+        creation_turn_id: match origin {
+            Some(origin) => origin.creation_turn_id.clone(),
+            None => captured.map(str::to_owned).or_else(|| {
+                conversation
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.turn_id.clone())
+            }),
+        },
         requested_turn_id: requested,
         contexts,
         excerpt: initiating.map(|input| {
