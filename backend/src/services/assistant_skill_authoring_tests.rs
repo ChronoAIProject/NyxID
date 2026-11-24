@@ -5039,9 +5039,21 @@ async fn queued_meta_skill_claim_preserves_b_input_and_proof_on_public_creation_
     let later = engine::begin_turn(db, &f.owner, &request, &f.state.encryption_keys)
         .await
         .unwrap();
-    let later_chat =
-        crate::services::assistant_authority_tests::chat_for_row(&f.state, &f.owner, &later).await;
-    let recovered = draft_in_chat(&f, &later_chat).await.unwrap();
+    let caller = another_authoring_chat(&f).await;
+    let activity = engine::activity_started_for_turn(
+        db,
+        &f.owner,
+        &caller.conversation_id,
+        caller.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let recovered = crate::services::machine_activity_service::ACTIVITY_ID
+        .scope(Some(activity.clone()), draft_in_chat(&f, &caller))
+        .await
+        .unwrap();
     let recovered = cards
         .find_one(doc! {"_id":recovered["acknowledgement_id"].as_str().unwrap()})
         .await
@@ -5052,6 +5064,32 @@ async fn queued_meta_skill_claim_preserves_b_input_and_proof_on_public_creation_
     assert_eq!(
         bson::to_bson(&recovered.meta_contexts).unwrap(),
         bson::to_bson(&card.meta_contexts).unwrap()
+    );
+    let caller_row = engine::get(db, &f.owner, &caller.conversation_id)
+        .await
+        .unwrap();
+    assert!(
+        caller_row
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|entry| entry.id == activity
+                && entry
+                    .decision
+                    .as_ref()
+                    .is_some_and(|decision| decision.id == recovered.id))
+    );
+    let original_home = engine::get(db, &f.owner, &later.id).await.unwrap();
+    assert!(
+        !original_home
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|entry| entry.id == activity)
     );
     finish(&f.state, &later).await;
     db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&a.id},doc! {"$set":{"is_active":false,"meta_binding.provider_revoked":true,"meta_binding.subscription":"removed"}}).await.unwrap();
