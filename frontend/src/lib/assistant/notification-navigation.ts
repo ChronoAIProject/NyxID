@@ -26,6 +26,7 @@ export function openNotificationLink(href: string): void {
 
 const ROUTE_SEARCH_KEYS: Record<AssistantShellRoute, readonly string[]> = {
   "/assistant": ["c", "g", "agent", "card", "details"],
+  "/assistant/learn": [],
   "/assistant/plugins": ["tab", "agentId"],
   "/assistant/approvals": [],
   "/assistant/automations": ["agent", "setup"],

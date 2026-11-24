@@ -477,6 +477,16 @@ const assistantRoute = createRoute({
   component: AssistantPage,
 });
 
+const assistantLearnRoute = createRoute({
+  path: "/assistant/learn",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/learn"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/learn"),
+  getParentRoute: () => rootRoute,
+  validateSearch: withAccountPanelSearch(() => ({})),
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="learn" />,
+});
+
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
@@ -1353,6 +1363,7 @@ const routeTree = rootRoute.addChildren([
   sshTerminalRoute,
   machineDesktopRoute,
   assistantRoute,
+  assistantLearnRoute,
   assistantPluginsRoute,
   assistantApprovalsRoute,
   assistantAutomationsRoute,

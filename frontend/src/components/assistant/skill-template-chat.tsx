@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Link, useRouter } from "@tanstack/react-router";
+import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { claimSkillSetup, readOpenTemplateDraft, saveOpenTemplateDraft } from "@/lib/assistant/skill-template-handoff";
-import type { SkillTemplate } from "@/lib/assistant/skill-templates";
+import { formatTemplateStarter, type SkillTemplate } from "@/lib/assistant/skill-templates";
 import type { AgentSkill } from "@/schemas/agent-skills";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -61,6 +61,8 @@ function SkillTemplatePreview({ template, available, setupId, onOpen }: {
   const { t } = useUiTranslation();
   useApplyTheme("assistant");
   const router = useRouter();
+  const fromLearn = useRouterState({ select: (state) => state.location.state.skillTemplateLearnOrigin === true });
+  const gallery = fromLearn ? "/assistant/learn" : "/testing";
   const owner = useAuthStore((state) => state.user?.id);
   const preview = useSkillPreview(available ? template.skillId : undefined, template.version);
   const attach = useAttachTemplateSkill();
@@ -83,11 +85,7 @@ function SkillTemplatePreview({ template, available, setupId, onOpen }: {
       parseAssistantSearch(location.search).skill === template.slug;
   }
 
-  const starter = t("Use the Ornn skill {{skill}} (version {{version}}) for this task. {{starter}}", {
-    skill: template.slug,
-    version: template.version,
-    starter: template.starter(),
-  });
+  const starter = formatTemplateStarter(template);
   const verified = !preview.isError && matchesTemplate(preview.data?.reference, template);
 
   async function start(restoringAgentId?: string) {
@@ -182,7 +180,11 @@ function SkillTemplatePreview({ template, available, setupId, onOpen }: {
     <div className="min-h-dvh bg-background text-foreground">
       <header className="border-b border-hairline">
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
-          <Button asChild variant="ghost"><Link to="/testing" search={{ skill: template.slug }}><ArrowLeft aria-hidden="true" />{t("Skill templates")}</Link></Button>
+          <Button asChild variant="ghost">
+            <Link to={gallery} search={fromLearn ? {} : { skill: template.slug }}>
+              <ArrowLeft aria-hidden="true" />{fromLearn ? t("Learn") : t("Skill templates")}
+            </Link>
+          </Button>
           <Link to="/assistant" search={{}} className="flex items-center gap-2 rounded type-button focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary">
             <NyxidIcon className="size-5" alt="" /> {t("NyxBot")}
           </Link>
@@ -205,7 +207,7 @@ function SkillTemplatePreview({ template, available, setupId, onOpen }: {
               {issue === "preview_temporary" ? (
                 <Button onClick={() => { setFailure(undefined); void preview.refetch(); }} isLoading={preview.isFetching}>{t("Retry verification")}</Button>
               ) : issue === "preview_access" || issue === "preview_mismatch" ? (
-                <Button asChild><Link to="/testing">{t("Choose another template")}</Link></Button>
+                <Button asChild><Link to={gallery}>{t("Choose another template")}</Link></Button>
               ) : (
                 <Button variant="primary" onClick={() => void start()} isLoading={starting} disabled={!verified || starting}>
                   {failure ? t("Try again") : t("Open NyxBot")}

@@ -35,6 +35,7 @@ import { ChatKindIcon } from "@/components/assistant/nyxbot-channel-chats";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import {
   Activity,
+  BookOpen,
   Box,
   Building2,
   ChevronRight,
@@ -999,6 +1000,13 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
   );
 }
 
+const learnDestination = {
+  view: "learn",
+  to: "/assistant/learn",
+  get label() { return translateUi("Learn"); },
+  icon: BookOpen,
+} as const;
+
 export function AssistantSidebar({
   conversations,
   activeConversationId,
@@ -1016,6 +1024,7 @@ export function AssistantSidebar({
   readonly activeConversationId: string | undefined;
   readonly activeView?:
     | "chat"
+    | "learn"
     | "plugins"
     | "approvals"
     | "automations"
@@ -1193,6 +1202,7 @@ export function AssistantSidebar({
         )}
         {(
           [
+            learnDestination,
             {
               view: "automations",
               to: "/assistant/automations",
@@ -1214,7 +1224,7 @@ export function AssistantSidebar({
             data-tour={item.view}
             aria-current={activeView === item.view ? "page" : undefined}
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors",
+              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-input-focus",
               activeView === item.view
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -1434,7 +1444,7 @@ function RenameChatInline({
 }
 
 const RAIL_BUTTON =
-  "ui-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
+  "ui-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-input-focus data-[state=open]:bg-overlay data-[state=open]:text-foreground";
 
 /** One rail icon with its name in a tooltip. */
 function RailItem({ label, children }: { readonly label: string; readonly children: ReactNode }) {
@@ -1466,7 +1476,7 @@ function SidebarRail({
   readonly onNewChat: () => void;
   readonly agents?: SidebarAgents;
   readonly groups?: SidebarGroups;
-  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines" | "sandboxes";
+  readonly activeView: "chat" | "learn" | "plugins" | "approvals" | "automations" | "machines" | "sandboxes";
   readonly activeConversationId: string | undefined;
   readonly pendingApprovals: number;
   readonly accountOpen: boolean;
@@ -1478,6 +1488,7 @@ function SidebarRail({
   const iconClass = (active: boolean) => cn("h-4 w-4", active && "text-nyx-secondary-400");
   const linkClass = (active: boolean) => cn(RAIL_BUTTON, active && "bg-overlay-strong text-foreground");
   const destinations = [
+    learnDestination,
     { view: "automations", to: "/assistant/automations", get label() { return translateUi("Automations"); }, icon: AutomationsGlyph },
     { view: "machines", to: "/assistant/machines", get label() { return translateUi("Machines"); }, icon: MachinesGlyph },
     ...(cmaEnabled ? [{ view: "sandboxes", to: "/assistant/sandboxes", label: "Sandboxes", icon: Box }] as const : []),

@@ -1,5 +1,6 @@
 export const ASSISTANT_SHELL_ROUTES = [
   "/assistant",
+  "/assistant/learn",
   "/assistant/plugins",
   "/assistant/approvals",
   "/assistant/automations",
