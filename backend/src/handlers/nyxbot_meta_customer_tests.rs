@@ -445,7 +445,7 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         let after_error = load_channel(&state, OWNER, fresh_channel).await.unwrap();
         assert_eq!(after_error.org_specialist, closed.org_specialist);
         assert_eq!(after_error.private_chats, closed.private_chats);
-        let other = crate::services::assistant_team_service::create_specialist_for(
+        let (other, _) = crate::services::assistant_team_service::create_specialist_for(
             &state.db,
             &state.encryption_keys,
             OWNER,
@@ -466,7 +466,7 @@ async fn meta_org_customer_checks_preserve_committed_exposure_and_failed_enable_
         )
         .await
         .unwrap()
-        .0;
+        .expect("organization specialist created");
         let (status, assigned) = action(&router, &token, &fresh_id, &other.id, "assign").await;
         assert_eq!(status, StatusCode::OK, "{assigned}");
         assert_eq!(assigned["agent_id"], other.id);

@@ -895,8 +895,8 @@ async fn publish_activation(
     };
     // Equal unique-index predicates plus $setOnInsert make concurrent
     // heartbeats converge on one immutable first activation timestamp.
-    let update = db
-        .collection::<SecurityCapabilityActivation>(ROLLOUTS)
+    let activations = db.collection::<SecurityCapabilityActivation>(ROLLOUTS);
+    let update = activations
         .update_one(
             doc! {"record_kind": RECORD_KIND, "capability": capability},
             doc! {"$setOnInsert": bson::to_document(&record)
