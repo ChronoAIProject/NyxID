@@ -110,6 +110,8 @@ pub struct AgentEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelTurnContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_grant: Option<super::channel_meta::GrantRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_completeness: Option<super::channel_message::TextCompleteness>,
     /// Exact server-validated organization source, retained independently of
     /// mutable reply preferences and revalidated before rendering model input.
@@ -844,6 +846,10 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// A visitor session belongs to one provider consent. Owner homes use
+    /// per-turn provenance and never acquire this whole-conversation parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_grant: Option<super::channel_meta::GrantRef>,
     /// Hot-path hint only. Receipt cleanup never depends on this marker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub automation_v2: bool,
@@ -951,6 +957,9 @@ pub struct AssistantConversation {
     /// go. Cleared when the owner writes in the NyxID app.
     #[serde(default)]
     pub reply_channel: Option<ChannelOrigin>,
+    /// The consent that selected the current asynchronous reply destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_channel_meta_grant: Option<super::channel_meta::GrantRef>,
     /// Chats still owed the newest turn's answer (they asked the same
     /// question while it ran); taken once by the settlement hook.
     #[serde(default)]

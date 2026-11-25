@@ -54,7 +54,7 @@ fn credential_filter(bot: &ChannelBot) -> AppResult<Document> {
     Ok(filter)
 }
 
-pub(crate) struct CredentialSnapshot {
+pub struct CredentialSnapshot {
     bot: ChannelBot,
     platform: Option<PlatformCredentialSnapshot>,
 }
@@ -161,6 +161,41 @@ impl CredentialSnapshot {
         let bytes = bson::to_vec(&fields)
             .map_err(|_| AppError::Internal("Unable to encode credential check".into()))?;
         Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
+    pub(crate) async fn fence_meta_webhook_signer(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        use super::channel_signing_migration::{SIGNING_PREPARATION_FIELD, generations};
+        use crate::models::platform_credential::COLLECTION_NAME;
+        if self.bot.credential_source != "platform" {
+            return Ok(true);
+        }
+        let platform = self.platform.as_ref().ok_or_else(changed)?;
+        let app = self.bot.app_id.as_deref().ok_or_else(changed)?;
+        let field = "webhook_signing_secret";
+        let expected = platform
+            .primary_generations
+            .get(field)
+            .ok_or_else(changed)?;
+        let mut filter = doc! {
+            "_id": &platform.id, "provider": &self.bot.platform, "fields.app_id": app,
+            "secrets.webhook_signing_secret": {"$type": "binData"},
+        };
+        if platform.prepared_sources.contains_key(COLLECTION_NAME) {
+            filter.insert(SIGNING_PREPARATION_FIELD, doc! {"$exists":true});
+        }
+        let source = db
+            .collection::<Document>(COLLECTION_NAME)
+            .find_one_and_update(filter, doc! {"$inc":{"channel_observation_version":1_i64}})
+            .session(session)
+            .await?;
+        let Some(source) = source else {
+            return Ok(false);
+        };
+        Ok(generations(COLLECTION_NAME, &source)?.get(field) == Some(expected))
     }
 
     pub(crate) async fn send_token(

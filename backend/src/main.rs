@@ -1788,6 +1788,25 @@ async fn server_run(cli: Cli) {
         });
     }
 
+    {
+        let meta_state = state.clone();
+        services::shutdown::process().spawn_worker(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(60));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let Some(_work) = services::shutdown::process().tick(&mut ticks).await else {
+                    break;
+                };
+                if let Err(error) = services::channel_meta_service::sweep(&meta_state).await {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Meta inbox lifecycle reconciliation deferred"
+                    );
+                }
+            }
+        });
+    }
+
     let discord_shutdown = tokio_util::sync::CancellationToken::new();
     let discord_worker = services::shutdown::process().spawn_worker(
         services::discord_gateway::run(state.clone(), discord_shutdown.clone()),

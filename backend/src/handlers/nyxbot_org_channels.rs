@@ -78,11 +78,28 @@ pub(super) async fn inbound(
         return Ok(Inbound::Silent("refused_sender"));
     }
     let private = chat.kind.as_deref() == Some("private");
+    let grant = if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+        Some(
+            crate::services::channel_meta_service::scopes::event_reference(&state.db, event)
+                .await?
+                .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?,
+        )
+    } else {
+        None
+    };
     if private
         && sender.owner_eligible
         && sender.original_message
         && sender.kind == ThreadSenderKind::Human
-        && org::links::receive(&state.db, row, sender.id, text, sender.display_name).await?
+        && org::links::receive_for_grant(
+            &state.db,
+            row,
+            sender.id,
+            text,
+            sender.display_name,
+            grant.as_ref(),
+        )
+        .await?
     {
         return Ok(Inbound::Reply(
             "Return to NyxID and confirm this chat account in your own session to finish linking."

@@ -3187,6 +3187,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     crate::services::channel_reply_delivery::ensure_indexes(db).await?;
+    crate::services::channel_meta_service::ensure_indexes(db).await?;
     crate::services::channel_text_delivery::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──

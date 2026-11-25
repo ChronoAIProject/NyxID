@@ -37,6 +37,9 @@ pub struct WatchWake {
     pub source_id: Option<String>,
     pub bot_id: Option<String>,
     pub channel_id: Option<String>,
+    /// Server-computed at hosted settlement; never supplied by the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_callback: Option<String>,
     pub agent_id: Option<String>,
     pub reason: Option<String>,
     pub source_status: Option<String>,

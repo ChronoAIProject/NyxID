@@ -2666,7 +2666,7 @@ async fn nyxbot_queued_direct_source_admission_preserves_original_anchor_for_tex
         work.source_event_ids = vec![f.event.id.clone()];
         work.reply_to = vec![f.event.delivery.as_ref().unwrap().origin.clone()];
         assert!(
-            delivery::enqueue(&f.state.db, OWNER, &conversation, work, None)
+            delivery::enqueue(&f.state.db, OWNER, &conversation, work, None, false)
                 .await
                 .unwrap()
         );
@@ -2805,7 +2805,8 @@ async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_so
                 OWNER,
                 conversation,
                 super::source_queue_tests::work(&source, &format!("question {i}")),
-                None
+                None,
+                false
             )
             .await
             .unwrap()

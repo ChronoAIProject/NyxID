@@ -29,6 +29,7 @@ use wiremock::{
 fn proposal(started: bool) -> AssistantAgentLearningProposal {
     let now = Utc::now();
     AssistantAgentLearningProposal {
+        authoring_origin: None,
         source: Default::default(),
         id: Uuid::new_v4().to_string(),
         agent_id: "agent".into(),
@@ -1731,6 +1732,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
         .insert_one(AssistantAgentLearningProposal {
+            authoring_origin: None,
             source: Default::default(),
             id: id.clone(),
             agent_id: agent.id.clone(),
@@ -1868,6 +1870,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            meta_contexts: Vec::new(),
             activity_execution: None,
             automation_work: None,
             execution_task: None,
@@ -2254,6 +2257,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            meta_contexts: Vec::new(),
             activity_execution: None,
             automation_work: None,
             execution_task: None,

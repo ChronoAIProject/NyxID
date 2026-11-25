@@ -528,6 +528,16 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG,
+    FeatureFlagDef {
+        key: "channels:messenger",
+        description: "Allow the acting person to connect Messenger inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
+    FeatureFlagDef {
+        key: "channels:instagram",
+        description: "Allow the acting person to connect Instagram professional inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
     INVITATION_CODE_FLAG,
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
@@ -598,6 +608,16 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG,
+    FeatureFlagDef {
+        key: "channels:messenger",
+        description: "Allow the acting person to connect Messenger inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
+    FeatureFlagDef {
+        key: "channels:instagram",
+        description: "Allow the acting person to connect Instagram professional inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
     INVITATION_CODE_FLAG,
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
@@ -736,6 +756,30 @@ pub async fn get_definition(db: &mongodb::Database, key: &str) -> AppResult<Flag
         .await?
         .map(Into::into)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{key}'")))
+}
+
+/// Serialize Meta enrollment changes with OAuth installation commits.  The
+/// channel flags are built-ins and therefore have no definition row to lock;
+/// this one shared platform fence is the mutation row used by both the admin
+/// flag writer and the installer.  It is intentionally platform-wide rather
+/// than per-person, so a disable cannot race one actor's final commit.
+pub(crate) async fn fence_meta_enrollment_in_session(
+    db: &mongodb::Database,
+    platform: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if !matches!(platform, "messenger" | "instagram") {
+        return Ok(());
+    }
+    db.collection::<bson::Document>("feature_flag_enrollment_fences")
+        .update_one(
+            doc! {"_id": format!("channels:{platform}")},
+            doc! {"$inc": {"revision": 1_i64}},
+        )
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    Ok(())
 }
 
 pub fn validate_flag_key(key: &str) -> AppResult<()> {

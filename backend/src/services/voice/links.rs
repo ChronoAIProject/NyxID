@@ -1435,6 +1435,8 @@ mod publication_tests {
                 && !recap.contains("nyx_clk_")
         );
         let checkpoint = crate::models::assistant_checkpoint::AssistantCheckpoint {
+            source_turn_ids: None,
+            goal_turn_id: None,
             conversation_id: thread.id.clone(),
             user_id: call.user_id.clone(),
             turn_id: "old".into(),

@@ -411,6 +411,7 @@ pub async fn create(
         )
         .await?;
     let candidate = AssistantAgentLearningProposal {
+        authoring_origin: None,
         source: ProposalSource::Authored,
         id,
         agent_id: agent.id.clone(),
@@ -513,6 +514,9 @@ pub async fn create(
 
 #[path = "assistant_skill_authoring_claims.rs"]
 mod claims;
+pub(crate) mod erasure;
+pub use claims::renew;
+pub(crate) use claims::{fence_proposal_in_session, saved_origin};
 
 /// Ornn checks the exact package before the owner is asked to review it, so
 /// a refused format returns to the author as fixable rule identifiers. Only
@@ -712,6 +716,7 @@ async fn submit_owner_draft(
             )
             .await?;
         let row = AssistantAgentLearningProposal {
+            authoring_origin: None,
             source: ProposalSource::Authored,
             id: id.clone(),
             agent_id: agent.id.clone(),
@@ -781,25 +786,59 @@ async fn submit_owner_draft(
             return Err(failure.error);
         }
     };
+    // App Edit is independently authored, including when the home's latest
+    // input came from an inbox. Do not select that input as its source.
+    let app_origin = acks::RequestOrigin {
+        initiating_input_id: None,
+        meta_contexts: Vec::new(),
+        invocation_id: None,
+        creation_turn_id: None,
+        requested_turn_id: None,
+        voice_request_id: None,
+        trigger_run_id: None,
+        routing: Some(crate::models::assistant_acknowledgement::CardRouting::NotInvolved),
+    };
     if !chat.guest
         && acks::effective_access_mode(&state.db, chat).await?
             == crate::models::assistant_settings::AccessMode::Autopilot
     {
-        return publish_automatically(state, chat, &agent, &id, &binding, reader).await;
+        return publish_automatically_from_origin(
+            state,
+            chat,
+            &agent,
+            &id,
+            &binding,
+            reader,
+            Some(&app_origin),
+        )
+        .await;
     }
-    let card = acks::request(
+    acks::expire(&state.db, &chat.user_id, &chat.conversation_id).await?;
+    let (card, activity) = super::transaction_service::run_db_only(
         &state.db,
-        chat,
-        acks::Request {
-            kind: "action",
-            service: None,
-            tool: Some(review::TOOL),
-            arguments: Some(&binding),
-            summary: CARD_SUMMARY,
-            platform: false,
+        &(&state.db, chat, &binding, &app_origin),
+        |session, &(db, chat, binding, origin)| {
+            Box::pin(acks::request_in_session(
+                db,
+                chat,
+                acks::Request {
+                    kind: "action",
+                    service: None,
+                    tool: Some(review::TOOL),
+                    arguments: Some(binding),
+                    summary: CARD_SUMMARY,
+                    platform: false,
+                },
+                Some(origin),
+                chat.approval_options(),
+                session,
+            ))
         },
     )
     .await?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
     Ok(draft_result(state, &card, &id, &agent.id))
 }
 
@@ -813,6 +852,52 @@ pub async fn publish_automatically(
     binding: &Value,
     reader: &impl super::agent_skill_service::OrnnReader,
 ) -> AppResult<Value> {
+    publish_automatically_from_origin(state, chat, agent, id, binding, reader, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn renew_automatically(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    original_id: &str,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
+    let origin = claims::prepare_automatic_renewal(&state.db, chat, original_id, binding).await?;
+    let mut source_chat = chat.clone();
+    source_chat.turn_id = origin.creation_turn_id.clone();
+    source_chat.invocation_id = origin.invocation_id.clone();
+    source_chat.automation_work = None;
+    source_chat.execution_task = None;
+    source_chat.report_to = origin
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.report_to())
+        .map(str::to_owned);
+    publish_automatically_from_origin(
+        state,
+        &source_chat,
+        agent,
+        id,
+        binding,
+        reader,
+        Some(&origin),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_automatically_from_origin(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+    origin: Option<&acks::RequestOrigin>,
+) -> AppResult<Value> {
     let proposal = state
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
@@ -825,6 +910,31 @@ pub async fn publish_automatically(
         .map(|p| p.name.as_str())
         .unwrap_or("authored skill")
         .to_owned();
+    // A Full-access retry can arrive in a different chat while reusing an
+    // existing draft. The publication caller and the content's source home
+    // are independently captured; receipts follow the original content.
+    let saved = proposal.authoring_origin.as_ref();
+    let saved_origin = saved.map(claims::origin);
+    let receipt_origin = origin.or(saved_origin.as_ref());
+    let mut receipt_chat = chat.clone();
+    if let Some(saved) = saved {
+        if saved.proposal_id != proposal.id {
+            return Err(AppError::Conflict("Skill draft changed".into()));
+        }
+        receipt_chat.conversation_id = saved.conversation_id.clone();
+        receipt_chat.api_key_id = saved.api_key_id.clone();
+    }
+    if let Some(origin) = receipt_origin {
+        receipt_chat.turn_id = origin.creation_turn_id.clone();
+        receipt_chat.invocation_id = origin.invocation_id.clone();
+        receipt_chat.automation_work = None;
+        receipt_chat.execution_task = None;
+        receipt_chat.report_to = origin
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.report_to())
+            .map(str::to_owned);
+    }
     let mut result = Box::pin(review::approve_automatically(
         state,
         chat,
@@ -860,9 +970,9 @@ pub async fn publish_automatically(
             ));
         }
     }
-    acks::record_auto_allowed_with_link(
+    acks::record_auto_allowed_with_origin(
         &state.db,
-        chat,
+        &receipt_chat,
         review::TOOL,
         binding,
         &acks::AutoAllowed {
@@ -872,6 +982,7 @@ pub async fn publish_automatically(
         },
         &summary,
         Some(&url),
+        receipt_origin,
     )
     .await;
     result["proposal_id"] = id.into();

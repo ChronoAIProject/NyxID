@@ -149,6 +149,10 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
           })}
         />
       )}
+      {["messenger", "instagram"].includes(data.platform) && <>
+        <Row label={translateUi("Last successful agent callback")} value={when(d.inbound_outcomes?.callback_accepted?.at ?? null)} />
+        <Row label={translateUi("Failed agent callbacks")} value={String(d.inbound_outcomes?.callback_failed?.count ?? 0)} />
+      </>}
       {inboundOutcomes.length > 0 && (
         <details>
           <summary className="cursor-pointer type-secondary text-muted-foreground">

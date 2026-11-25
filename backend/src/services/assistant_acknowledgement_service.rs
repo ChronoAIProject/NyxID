@@ -741,17 +741,61 @@ pub async fn record_auto_allowed_for_activity(
     link: Option<&str>,
     activity_id: Option<String>,
 ) {
+    record_auto_allowed_from_origin(db, chat, tool, args, auto, summary, link, activity_id, None)
+        .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_auto_allowed_with_origin(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+    origin: Option<&RequestOrigin>,
+) {
+    record_auto_allowed_from_origin(
+        db,
+        chat,
+        tool,
+        args,
+        auto,
+        summary,
+        link,
+        super::machine_activity_service::activity_id(),
+        origin,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_auto_allowed_from_origin(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+    activity_id: Option<String>,
+    origin: Option<&RequestOrigin>,
+) {
     if chat.guest {
         return;
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        meta_contexts: origin
+            .map(|source| source.meta_contexts.clone())
+            .unwrap_or_default(),
         activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id,
-        invocation_id: None,
+        invocation_id: origin.and_then(|source| source.invocation_id.clone()),
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
         user_id: chat.user_id.clone(),
@@ -783,19 +827,21 @@ pub async fn record_auto_allowed_for_activity(
         operation_selection: None,
         operation_contract_digest: None,
         skill_selection: None,
-        requested_turn_id: chat.turn_id.clone(),
-        creation_turn_id: chat.turn_id.clone(),
-        voice_request_id: None,
+        requested_turn_id: origin
+            .map(|source| source.requested_turn_id.clone())
+            .unwrap_or_else(|| chat.turn_id.clone()),
+        creation_turn_id: origin
+            .map(|source| source.creation_turn_id.clone())
+            .unwrap_or_else(|| chat.turn_id.clone()),
+        voice_request_id: origin.and_then(|source| source.voice_request_id.clone()),
         continuation_receipt_id: None,
-        trigger_run_id: None,
+        trigger_run_id: origin.and_then(|source| source.trigger_run_id.clone()),
         request_excerpt: None,
         reason: None,
         machine_context: None,
-        routing: None,
+        routing: origin.and_then(|source| source.routing.clone()),
     };
-    if db
-        .collection::<AssistantAcknowledgement>(ACKS)
-        .insert_one(&row)
+    if source::insert_receipt_with_origin(db, chat, &row, origin)
         .await
         .is_err()
     {
@@ -2400,6 +2446,8 @@ pub async fn request_tracked(
 /// must not bind the original confirmation to a later voice or trigger turn.
 #[derive(Clone)]
 pub struct RequestOrigin {
+    pub initiating_input_id: Option<String>,
+    pub meta_contexts: Vec<crate::models::assistant_conversation::ChannelTurnContext>,
     pub invocation_id: Option<String>,
     pub requested_turn_id: Option<String>,
     pub creation_turn_id: Option<String>,
@@ -2415,20 +2463,21 @@ pub struct RequestOrigin {
 /// authority fence, deduplication and voice-confirmation bookkeeping.
 /// Pass the initiating caller's approval capability separately from a recovered
 /// origin's authority, which may now describe an unrelated active turn.
-pub async fn request_in_session(
+pub(crate) async fn request_in_session(
     db: &Database,
     chat: &ChatAuthority,
     request: Request<'_>,
     origin: Option<&RequestOrigin>,
     approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
-) -> AppResult<AssistantAcknowledgement> {
+) -> AppResult<(
+    AssistantAcknowledgement,
+    Option<super::assistant_activity_decision::ActivityBinding>,
+)> {
     let candidate = prepare_request_candidate(db, chat, request, None, None).await?;
-    Ok(
-        request_candidate_in_session(db, chat, &candidate, origin, approval, session)
-            .await?
-            .0,
-    )
+    let (row, _, binding) =
+        request_candidate_in_session(db, chat, &candidate, origin, approval, session).await?;
+    Ok((row, binding))
 }
 
 async fn request_tracked_with_machine_context(
@@ -2445,7 +2494,7 @@ async fn request_tracked_with_machine_context(
     let db = db.clone();
     let chat = chat.clone();
     let mut session = db.client().start_session().await?;
-    let (row, created) = session
+    let (row, created, binding) = session
         .start_transaction()
         .and_run2(async move |session| {
             let operation = Box::pin(request_candidate_in_session(
@@ -2461,6 +2510,9 @@ async fn request_tracked_with_machine_context(
         })
         .await
         .map_err(mutations::map_transaction_error)?;
+    if let Some(binding) = binding {
+        binding.publish_after_commit();
+    }
     if created && row.kind != "action" {
         audit_access_requested(&audit_db, &audit_chat, &row).await;
     }
@@ -2514,6 +2566,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        meta_contexts: Vec::new(),
         activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
@@ -2610,21 +2663,41 @@ async fn request_candidate_in_session(
     origin: Option<&RequestOrigin>,
     approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
-) -> AppResult<(AssistantAcknowledgement, bool)> {
+) -> AppResult<(
+    AssistantAcknowledgement,
+    bool,
+    Option<super::assistant_activity_decision::ActivityBinding>,
+)> {
     let result = Box::pin(request_candidate_inner(
         db, chat, candidate, origin, approval, session,
     ))
     .await?;
-    super::assistant_activity_decision::bind(
-        db,
-        chat,
-        "acknowledgement",
-        &result.0.id,
-        false,
-        Some(session),
-    )
-    .await?;
-    Ok(result)
+    // A durable origin is validated in its own home. Its recovering caller
+    // binds the MCP activity after commit using the caller's actual turn.
+    let binding = if origin.is_some() {
+        None
+    } else if !result.0.meta_contexts.is_empty() {
+        super::assistant_activity_decision::bind_meta_in_session(
+            db,
+            chat,
+            "acknowledgement",
+            &result.0.id,
+            session,
+        )
+        .await?
+    } else {
+        super::assistant_activity_decision::bind(
+            db,
+            chat,
+            "acknowledgement",
+            &result.0.id,
+            false,
+            Some(session),
+        )
+        .await?;
+        None
+    };
+    Ok((result.0, result.1, binding))
 }
 
 async fn request_candidate_inner(
@@ -2638,6 +2711,8 @@ async fn request_candidate_inner(
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
     let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    let selected = source::select(db, session, chat, &conversation, origin, orchestrated).await?;
+    source::fence_selection(db, session, &selected).await?;
     if access
         .as_ref()
         .and_then(|a| a.channel())
@@ -2684,27 +2759,7 @@ async fn request_candidate_inner(
     approval.require_request_support()?;
     let mut row = candidate.clone();
     row.routing = routing;
-    // Ordinary denials stay bound to the initiating user/orchestrator
-    // message across event turns. Only trigger runs use the active turn.
-    let mut initiating_filter = doc! {
-        "conversation_id": &conversation.id, "user_id": &chat.user_id,
-        "role": {"$in": ["user", "orchestrator"]},
-        "steering": bson::Bson::Null,
-        "execution_pending": {"$ne": true},
-    };
-    if let Some(seq) = conversation
-        .active_turn
-        .as_ref()
-        .and_then(|t| t.initiating_message_seq)
-    {
-        initiating_filter.insert("seq", doc! {"$lte": seq});
-    }
-    let started_by = db
-        .collection::<AssistantMessage>(MESSAGES)
-        .find_one(initiating_filter)
-        .sort(doc! {"seq": -1})
-        .session(&mut *session)
-        .await?;
+    row.meta_contexts = selected.contexts;
     row.invocation_id = origin
         .map(|o| o.invocation_id.clone())
         .unwrap_or_else(|| chat.invocation_id.clone());
@@ -2723,43 +2778,31 @@ async fn request_candidate_inner(
             return Err(AppError::AssistantTurnRequired);
         }
     }
-    row.creation_turn_id = conversation
-        .active_turn
-        .as_ref()
-        .map(|turn| turn.turn_id.clone());
-    row.requested_turn_id = conversation
-        .active_turn
-        .as_ref()
-        .filter(|turn| turn.trigger_run_id.is_some() || turn.automation_work.is_some())
-        .map(|turn| turn.turn_id.clone())
-        .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
-    row.voice_request_id = conversation
-        .active_turn
-        .as_ref()
-        .and_then(|t| t.voice_request_id.clone());
-    row.trigger_run_id = conversation
-        .active_turn
-        .as_ref()
-        .and_then(|turn| turn.trigger_run_id.clone());
-    if let Some(origin) = origin {
-        row.requested_turn_id = origin.requested_turn_id.clone();
-        row.creation_turn_id = origin.creation_turn_id.clone();
-        row.voice_request_id = origin.voice_request_id.clone();
-        row.trigger_run_id = origin.trigger_run_id.clone();
-    }
-    if row.decider == "orchestrator" {
-        row.request_excerpt = started_by.map(|message| {
-            format!(
-                "{} said: {}",
-                message.role,
-                super::assistant_nyxagent::excerpt(&message.text, 600)
-            )
+    row.creation_turn_id = selected.creation_turn_id;
+    row.requested_turn_id = selected.requested_turn_id;
+    row.voice_request_id = origin
+        .map(|origin| origin.voice_request_id.clone())
+        .unwrap_or_else(|| {
+            conversation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.voice_request_id.clone())
         });
+    row.trigger_run_id = origin
+        .map(|origin| origin.trigger_run_id.clone())
+        .unwrap_or_else(|| {
+            conversation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.trigger_run_id.clone())
+        });
+    if row.decider == "orchestrator" {
+        row.request_excerpt = selected.excerpt;
     }
     // A pending or denied duplicate is reused only when the same decider
     // would see it with the same NyxBot routing: work assigned from two
     // NyxBot threads, or direct work after an assignment, gets its own card.
-    let filter = doc! {"conversation_id": &chat.conversation_id,
+    let mut filter = doc! {"conversation_id": &chat.conversation_id,
     "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
     "service_id": &row.service_id, "tool_name": &row.tool_name,
     "arguments_digest": &row.arguments_digest,
@@ -2767,6 +2810,15 @@ async fn request_candidate_inner(
     "decider": &row.decider, "routing": routing_bson(row.routing.as_ref()),
     "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
         {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
+    if row.meta_contexts.is_empty() {
+        filter.insert("meta_contexts.0", doc! {"$exists":false});
+    } else {
+        filter.insert(
+            "meta_contexts",
+            bson::to_bson(&row.meta_contexts)
+                .map_err(|_| super::channel_meta_service::grants::incomplete())?,
+        );
+    }
     // A valid allowed action can be reused only by explicitly presenting its id.
     if let Some(mut existing) = db
         .collection::<AssistantAcknowledgement>(ACKS)
@@ -4008,3 +4060,6 @@ mod reply_selection_tests {
 #[cfg(test)]
 #[path = "assistant_invisible_card_tests.rs"]
 mod invisible_card_tests;
+
+#[path = "assistant_acknowledgement_source.rs"]
+pub(crate) mod source;

@@ -114,14 +114,35 @@ pub async fn states_for_messages(
         .await
 }
 
+/// Read the stored grant marker together with the reply already required for
+/// feedback eligibility. Legacy channel and event turns can also need proof.
+#[derive(Clone, Deserialize)]
+pub struct FeedbackSource {
+    #[serde(flatten)]
+    pub message: AssistantMessage,
+    #[serde(default)]
+    meta_grants: Option<bson::Bson>,
+}
+
+impl FeedbackSource {
+    pub fn needs_grant_check(&self) -> bool {
+        use crate::models::assistant_conversation::TurnOrigin;
+        self.meta_grants.is_some()
+            || matches!(
+                self.message.origin,
+                None | Some(TurnOrigin::Channel | TurnOrigin::Event)
+            )
+    }
+}
+
 /// Single-row lookup keeps eligibility bounded for long-lived conversations.
 pub async fn conversation_message(
     db: &Database,
     user_id: &str,
     conversation_id: &str,
     message_id: &str,
-) -> mongodb::error::Result<Option<AssistantMessage>> {
-    db.collection::<AssistantMessage>(MESSAGE_COLLECTION)
+) -> mongodb::error::Result<Option<FeedbackSource>> {
+    db.collection::<FeedbackSource>(MESSAGE_COLLECTION)
         .find_one(doc! {"_id": message_id, "conversation_id": conversation_id, "user_id": user_id})
         .await
 }
@@ -140,6 +161,7 @@ pub async fn group_message(
 pub struct FeedbackWrite {
     pub user_id: String,
     pub message_id: String,
+    pub check_source_grant: bool,
     pub conversation_id: Option<String>,
     pub group_id: Option<String>,
     pub turn_id: Option<String>,
@@ -194,6 +216,8 @@ pub async fn upsert_feedback(
     write: FeedbackWrite,
 ) -> crate::errors::AppResult<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
     #[cfg(test)]
+    super::durable_wake_tests::after("meta_feedback_before_write").await;
+    #[cfg(test)]
     if let Ok(pause) = FEEDBACK_WRITE_PAUSE.try_with(Clone::clone) {
         pause.entered.notify_one();
         pause.release.notified().await;
@@ -222,15 +246,36 @@ pub async fn upsert_feedback(
         "$set": set,
         "$setOnInsert": {"_id": &new_id, "created_at": bson::DateTime::from_chrono(now)},
     };
-    let context = (db.clone(), write.user_id.clone(), filter, update);
+    let context = (
+        db.clone(),
+        write.user_id.clone(),
+        filter,
+        update,
+        write
+            .conversation_id
+            .clone()
+            .filter(|_| write.check_source_grant),
+        write.message_id.clone(),
+        write.turn_id.clone(),
+    );
     let mut retries = 0;
     let previous = loop {
         let result = super::transaction_service::run_db_only(
             db,
             &context,
-            |tx, (db, owner, filter, update)| {
+            |tx, (db, owner, filter, update, conversation, message, turn)| {
                 Box::pin(async move {
                     fence_feedback_owner(db, owner, tx).await?;
+                    if let Some(conversation) = conversation {
+                        let source = db.collection::<bson::Document>(MESSAGE_COLLECTION)
+                            .find_one(doc! {"_id":message,"user_id":owner,"conversation_id":conversation,"turn_id":turn})
+                            .session(&mut *tx).await?
+                            .ok_or_else(|| crate::errors::AppError::NotFound("message not found".into()))?;
+                        super::channel_meta_service::scopes::fence_assistant_source(db,tx,&source).await.map_err(|error| match error {
+                            crate::errors::AppError::Conflict(_) => crate::errors::AppError::Conflict("This reply is unavailable for feedback.".into()),
+                            other => other,
+                        })?;
+                    }
                     Ok(db
                         .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
                         .find_one_and_update(filter.clone(), update.clone())
@@ -539,6 +584,7 @@ mod lifecycle_tests {
         FeedbackWrite {
             user_id: owner.into(),
             message_id: "held-reply".into(),
+            check_source_grant: false,
             conversation_id: None,
             group_id: None,
             turn_id: None,

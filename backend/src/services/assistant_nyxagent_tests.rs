@@ -769,6 +769,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     assert!(prompt.contains(SCHEDULE_PROMPT));
     assert!(prompt.len() <= base.len() + 16384);
     context.set_checkpoint(Some(AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "checkpoint-turn".into(),
@@ -1527,6 +1529,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        meta_grant: None,
         title_language: None,
         automation_v2: false,
         artifact_head: None,
@@ -1647,6 +1650,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
+        reply_channel_meta_grant: None,
         deliver_also: Vec::new(),
     }
 }
@@ -6890,6 +6894,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        meta_contexts: Vec::new(),
         artifact_catalog_service_id: None,
         artifact_mode: None,
         artifact_result: None,
@@ -9362,6 +9367,8 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
 
 fn token_checkpoint(row: &AssistantConversation) -> AssistantCheckpoint {
     AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "turn".into(),

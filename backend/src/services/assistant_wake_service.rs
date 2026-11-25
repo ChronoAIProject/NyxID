@@ -133,6 +133,7 @@ async fn render(
                 source_id,
                 bot_id,
                 channel_id,
+                expected_callback,
                 agent_id,
                 reason,
                 source_status,
@@ -237,7 +238,7 @@ async fn render(
                         ));
                     }
                     let step=match (channel_id.as_deref(),bot_id.as_deref(),agent_id.as_deref()) {
-                        (Some(channel),Some(bot),Some(agent))=>watch::verification(db,owner,channel,bot,agent,tx).await?,
+                        (Some(channel),Some(bot),Some(agent))=>watch::verification(db,owner,channel,bot,agent,tx,expected_callback.as_deref()).await?,
                         _=>"Check current channel status before continuing; linking was not confirmed.".into(),
                     };
                     let platform = identifier(

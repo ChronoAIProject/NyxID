@@ -99,7 +99,8 @@ async fn activated_org_channel_link_enable_and_adopt_serve_overlap_and_reject_un
                 enabled: true,
                 service_ids: None,
                 daily_credits: None,
-            }
+            },
+            None
         )
         .await,
         Err(AppError::SecurityReadinessUnavailable)
@@ -358,6 +359,7 @@ async fn cutover_new_binding_is_off_and_uses_grants_on_enable_old_put_is_inert()
         &f.channel,
         serde_json::from_value(json!({"enabled":true,"service_ids":[],"daily_credits":"0"}))
             .unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -381,6 +383,7 @@ async fn cutover_new_binding_is_off_and_uses_grants_on_enable_old_put_is_inert()
             json!({"enabled":true,"service_ids":["ungranted"],"daily_credits":"999"}),
         )
         .unwrap(),
+        None,
     )
     .await
     .unwrap();

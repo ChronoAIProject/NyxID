@@ -459,7 +459,7 @@ async fn convert_locked(
             // upstream binding and every channel reply/turn capability.
             conversations.update_many(filter, doc! {"$set": {
                 "platform_cleanup_pending": true, "channel": bson::Bson::Null,
-                "reply_channel": bson::Bson::Null, "deliver_also": [],
+                "reply_channel": bson::Bson::Null, "reply_channel_meta_grant": bson::Bson::Null, "deliver_also": [],
                 "nyxagent_session_id": bson::Bson::Null, "nyxagent_instruction_binding": bson::Bson::Null,
                 "nyxagent_last_response_id": bson::Bson::Null,
                 "context_reset_at": bson::DateTime::from_chrono(now), "context_reset_reason": "platform_conversion"

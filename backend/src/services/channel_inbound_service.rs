@@ -2,6 +2,7 @@
 
 use super::channel_inbound_diagnostics::{self as diagnostics, Outcome};
 use crate::AppState;
+use crate::errors::AppError;
 use crate::services::{channel_relay_service, channel_routing_service};
 use crate::telemetry::{
     TelemetryClient, TelemetryContext, TelemetryEvent, emit_event, should_sample_event,
@@ -132,6 +133,34 @@ async fn process_messages(
     let mut complete = true;
     let mut stamped = false;
     for inbound in messages {
+        let authorization = adapter
+            .authorize_inbound(
+                state.db,
+                state.http_client,
+                state.encryption_keys,
+                bot,
+                inbound,
+            )
+            .await;
+        if let Err(error) = authorization {
+            let transient = super::channel_adapters::meta::is_meta(&bot.platform)
+                && (matches!(
+                    error,
+                    AppError::RateLimited | AppError::RateLimitedWithRetry { .. }
+                ) || matches!(&error, AppError::ChannelPlatformError(message)
+                        if message.contains("could not complete") || message.contains("HTTP 5") || message.contains("interrupted")));
+            diagnostics::record(
+                state.db,
+                bot,
+                if transient {
+                    Outcome::MetaControlUnavailable
+                } else {
+                    Outcome::AdmissionRefused
+                },
+            )
+            .await;
+            continue;
+        }
         let activity = adapter.activity_metadata(inbound);
         let notification = activity
             .as_ref()
@@ -269,6 +298,13 @@ async fn process_messages(
             &uuid::Uuid::new_v4().to_string(),
         );
         metadata.activity = activity.clone();
+        if super::channel_adapters::meta::is_meta(&bot.platform) {
+            metadata.meta_authority = Some(super::channel_adapters::meta::authority(
+                bot,
+                inbound,
+                state.config.jwt_relay_reply_ttl_secs,
+            )?);
+        }
         // Socket-derived Discord facts accompany every admitted route. Other
         // adapters retain the existing flag-gated direct NyxBot projection.
         let mut telegram = None;
@@ -325,7 +361,9 @@ async fn process_messages(
         let stored_message = match stored {
             Ok(Some(message)) => message,
             Ok(None) => {
-                if !matches!(bot.platform.as_str(), "x" | "whatsapp") {
+                if !matches!(bot.platform.as_str(), "x" | "whatsapp")
+                    && !super::channel_adapters::meta::is_meta(&bot.platform)
+                {
                     continue;
                 }
                 let collection = if notification {
@@ -437,6 +475,7 @@ async fn process_messages(
         // Public posts and manager setup messages do not prove the sender's
         // NyxID identity. Their agents receive reply authority only.
         let user_access_token = if notification
+            || super::channel_adapters::meta::is_meta(&bot.platform)
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
@@ -546,6 +585,18 @@ async fn process_messages(
             }
         }
 
+        if super::channel_adapters::meta::is_meta(&bot.platform)
+            && super::channel_adapters::meta::require_ingress(
+                state.db,
+                bot,
+                &inbound.conversation_id,
+            )
+            .await
+            .is_err()
+        {
+            diagnostics::record(state.db, bot, Outcome::AdmissionRefused).await;
+            continue;
+        }
         // Forward to the agent's callback URL
         let key_is_current =
             channel_routing_service::load_callback_key(state.db, &route, &bot.user_id)
