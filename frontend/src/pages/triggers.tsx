@@ -630,7 +630,7 @@ export function TriggersPage() {
       <OneTimeSecretDialog
         open={secretOpen}
         onOpenChange={setSecretOpen}
-        title={secretTitle}
+        title={translateUi(secretTitle)}
         description={translateUi("These values are shown only once. Copy and store them securely now.")}
         values={secretValues}
       />

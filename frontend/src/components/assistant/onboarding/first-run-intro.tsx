@@ -1,3 +1,4 @@
+import { onboardingText } from "../../../../../shared/onboardingCopy";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import {
@@ -265,8 +266,8 @@ export function FirstRunIntro({
                 />
                 <Points
                   items={[
-                    "Chat here, on your phone, or in Telegram, Slack and other chat apps.",
-                    "It uses only the services you connect, through NyxID.",
+                    translateUi("Chat here, on your phone, or in Telegram, Slack and other chat apps."),
+                    translateUi("It uses only the services you connect, through NyxID."),
                   ]}
                 />
               </StepHeading>
@@ -281,8 +282,8 @@ export function FirstRunIntro({
                 />
                 <Points
                   items={[
-                    "A role and scope you set: only the services and access you grant.",
-                    "Chat with one directly, ask NyxBot to delegate, or put several in a crew.",
+                    translateUi("A role and scope you set: only the services and access you grant."),
+                    translateUi("Chat with one directly, ask NyxBot to delegate, or put several in a crew."),
                   ]}
                 />
               </StepHeading>
@@ -348,9 +349,9 @@ function Welcome({
 }) {
   useUiTranslation();
   const points = [
-    { icon: Sparkles, text: "A chief of staff that works across your apps" },
-    { icon: UsersRound, text: "Specialists with one job each, under your rules" },
-    { icon: ShieldCheck, text: "Nothing sensitive happens without your say-so" },
+    { icon: Sparkles, text: translateUi("A chief of staff that works across your apps") },
+    { icon: UsersRound, text: translateUi("Specialists with one job each, under your rules") },
+    { icon: ShieldCheck, text: translateUi("Nothing sensitive happens without your say-so") },
   ];
   return (
     <div className="flex min-h-full flex-col items-center justify-center gap-6 py-10 text-center md:py-16">
@@ -415,8 +416,8 @@ function Progress({
         <button
           key={step}
           type="button"
-          title={STEP_LABELS[step]}
-          aria-label={translateUi("Step {{value1}} of {{value2}}: {{value3}}", { value1: position + 1, value2: STEPS.length, value3: STEP_LABELS[step] })}
+          title={translateUi(STEP_LABELS[step])}
+          aria-label={translateUi("Step {{value1}} of {{value2}}: {{value3}}", { value1: position + 1, value2: STEPS.length, value3: translateUi(STEP_LABELS[step]) })}
           aria-current={position === index ? "step" : undefined}
           onClick={() => onSelect(position)}
           data-icon-button=""
@@ -499,7 +500,7 @@ function ChoiceGrid({
   readonly onToggle: (id: string) => void;
   readonly multi?: boolean;
 }) {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
   const visible = shown ? choices.filter((choice) => shown.has(choice.id)) : choices;
   const nodes = useRef(new Map<string, HTMLElement>());
   const places = useRef(new Map<string, { x: number; y: number }>());
@@ -552,7 +553,7 @@ function ChoiceGrid({
               )}
             >
               <ChoiceIcon name={choice.icon} active={active} />
-              <span className="min-w-0 break-words">{choice.label}</span>
+              <span className="min-w-0 break-words">{onboardingText(i18n.resolvedLanguage, choice.label)}</span>
               {active ? <Check aria-hidden="true" className="size-3" /> : null}
             </button>
           </span>

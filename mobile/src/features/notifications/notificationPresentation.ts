@@ -126,7 +126,7 @@ export function notificationAccessibilityLabel(
   const count = notificationCountLabel(item.count);
   if (count) parts.push(count);
   if (notificationPending(item)) parts.push(translateApp("needs your decision"));
-  if (!item.read) parts.push("unread");
+  if (!item.read) parts.push(translateApp("unread"));
   return parts.join(", ");
 }
 

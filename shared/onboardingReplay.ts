@@ -1,3 +1,5 @@
+import { onboardingText } from "./onboardingCopy";
+
 /** Portable fixture timeline shared by the web and native onboarding replays.
  * No transport, credentials or native/browser APIs are involved. */
 export interface ReplayMessage {
@@ -93,9 +95,9 @@ function ask(text: string): Beat[] {
   return beats;
 }
 
-function reply(content: string, wait = 1100): Beat[] {
+function reply(content: string, working: string, wait = 1100): Beat[] {
   return [
-    { wait: 250, apply: (scene) => ({ ...scene, working: "Working…" }) },
+    { wait: 250, apply: (scene) => ({ ...scene, working }) },
     {
       wait,
       apply: (scene) => ({
@@ -149,47 +151,46 @@ const DEFAULT_SAMPLE = {
 
 const lastId = (scene: Scene) => scene.messages.at(-1)?.id ?? "";
 
-export function chiefScript(topics: readonly string[]): Beat[] {
+function chiefScript(topics: readonly string[], t: (source: string) => string): Beat[] {
   const sample =
     topics.map((topic) => SAMPLES[topic]).find(Boolean) ?? DEFAULT_SAMPLE;
   return [
     { wait: 500, apply: () => EMPTY },
-    ...ask(sample.ask),
-    ...reply(sample.reply, 1300),
+    ...ask(t(sample.ask)),
+    ...reply(t(sample.reply), t("Working…"), 1300),
   ];
 }
 
-export const SPECIALISTS: Beat[] = [
-  { wait: 500, apply: () => EMPTY },
-  ...ask("Ask the researcher for urgent issues"),
-  ...reply("I'll hand this to Research and report back.", 900),
-  {
-    wait: 500,
-    apply: (scene) => ({
-      ...scene,
-      specialist: { after: lastId(scene), state: "working" },
-    }),
-  },
-  {
-    wait: 1800,
-    apply: (scene) => ({
-      ...scene,
-      specialist: scene.specialist && { ...scene.specialist, state: "done" },
-    }),
-  },
-  ...reply(
-    "Research found 3 urgent issues: **#12**, **#15** and **#18**. Want me to assign them?",
-    900,
-  ),
-];
+function specialistScript(t: (source: string) => string): Beat[] {
+  return [
+    { wait: 500, apply: () => EMPTY },
+    ...ask(t("Ask the researcher for urgent issues")),
+    ...reply(t("I'll hand this to Research and report back."), t("Working…"), 900),
+    {
+      wait: 500,
+      apply: (scene) => ({
+        ...scene,
+        specialist: { after: lastId(scene), state: "working" },
+      }),
+    },
+    {
+      wait: 1800,
+      apply: (scene) => ({
+        ...scene,
+        specialist: scene.specialist && { ...scene.specialist, state: "done" },
+      }),
+    },
+    ...reply(t("Research found 3 urgent issues: **#12**, **#15** and **#18**. Want me to assign them?"), t("Working…"), 900),
+  ];
+}
 
-function card(status: ReplayAcknowledgement["status"]): ReplayAcknowledgement {
+function card(status: ReplayAcknowledgement["status"], summary: string): ReplayAcknowledgement {
   const now = new Date().toISOString();
   return {
     id: "00000000-0000-4000-8000-000000000001",
     kind: "action",
     status,
-    summary: "Delete agent key 'ci-bot'",
+    summary,
     decider: "user",
     decided_by: status === "pending" ? null : "user",
     reason: null,
@@ -202,50 +203,54 @@ function card(status: ReplayAcknowledgement["status"]): ReplayAcknowledgement {
   };
 }
 
-export const CONTROL: Beat[] = [
-  { wait: 500, apply: () => EMPTY },
-  ...ask("Delete agent key ci-bot"),
-  ...reply("Deleting a key can't be undone, so I need your OK first.", 900),
-  {
-    wait: 400,
-    apply: (scene) => ({
-      ...scene,
-      card: { after: lastId(scene), row: card("pending") },
-    }),
-  },
-  {
-    wait: 1900,
-    apply: (scene) => ({
-      ...scene,
-      card: scene.card && { ...scene.card, row: card("allowed") },
-    }),
-  },
-  {
-    wait: 700,
-    apply: (scene) => ({
-      ...scene,
-      messages: [
-        ...scene.messages,
-        message("user", "", {
-          continuation_of: "00000000-0000-4000-8000-000000000001",
-        }),
-      ],
-    }),
-  },
-  ...reply("Done: the agent key **ci-bot** is deleted.", 900),
-];
+function controlScript(t: (source: string) => string): Beat[] {
+  return [
+    { wait: 500, apply: () => EMPTY },
+    ...ask(t("Delete agent key ci-bot")),
+    ...reply(t("Deleting a key can't be undone, so I need your OK first."), t("Working…"), 900),
+    {
+      wait: 400,
+      apply: (scene) => ({
+        ...scene,
+        card: { after: lastId(scene), row: card("pending", t("Delete agent key 'ci-bot'")) },
+      }),
+    },
+    {
+      wait: 1900,
+      apply: (scene) => ({
+        ...scene,
+        card: scene.card && { ...scene.card, row: card("allowed", t("Delete agent key 'ci-bot'")) },
+      }),
+    },
+    {
+      wait: 700,
+      apply: (scene) => ({
+        ...scene,
+        messages: [
+          ...scene.messages,
+          message("user", "", {
+            continuation_of: "00000000-0000-4000-8000-000000000001",
+          }),
+        ],
+      }),
+    },
+    ...reply(t("Done: the agent key **ci-bot** is deleted."), t("Working…"), 900),
+  ];
+}
 
 export const PAUSE_AFTER_MS = 3500;
 
 export function replayScript(
   kind: LiveReplayKind,
   topics: readonly string[] = [],
+  language = "en",
 ): readonly Beat[] {
+  const t = (source: string) => onboardingText(language, source);
   return kind === "chief-of-staff"
-    ? chiefScript(topics)
+    ? chiefScript(topics, t)
     : kind === "specialists"
-      ? SPECIALISTS
-      : CONTROL;
+      ? specialistScript(t)
+      : controlScript(t);
 }
 export function finalScene(beats: readonly Beat[]) {
   return beats.reduce((scene, beat) => beat.apply(scene), EMPTY);

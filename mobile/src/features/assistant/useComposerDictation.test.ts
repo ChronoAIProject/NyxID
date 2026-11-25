@@ -102,6 +102,7 @@ function setup({
   readChosen = async () => chosen,
   continuous = true,
   platform = "ios",
+  platformVersion = 34,
   preferred,
   supported = ["en-GB", "en-US"],
   installed = [],
@@ -110,6 +111,7 @@ function setup({
   readChosen?: () => Promise<string | undefined>;
   continuous?: boolean;
   platform?: "ios" | "android";
+  platformVersion?: number | string;
   preferred?: string[];
   supported?: string[];
   installed?: string[];
@@ -124,6 +126,12 @@ function setup({
   const silentDurations: number[] = [];
   let time = 10_000;
   const native = recognizer(events);
+  const startTimes: number[] = [];
+  const nativeStart = native.start;
+  native.start = (options) => {
+    startTimes.push(time - 10_000);
+    nativeStart(options);
+  };
   native.getSupportedLocales = async () => ({
     locales: supported,
     installedLocales: installed,
@@ -148,7 +156,7 @@ function setup({
         deviceLanguages: () => preferred ?? ["en-GB"],
       },
       "react-native": {
-        Platform: { OS: platform },
+        Platform: { OS: platform, Version: platformVersion },
         Linking: {
           openSettings: async () => {
             events.push("settings");
@@ -213,6 +221,12 @@ function setup({
       fileURLToPath(new URL("./voice/voicePermission.ts", import.meta.url)),
     ),
   );
+  h.mock(
+    "./voice/recognitionLocales",
+    h.load(
+      fileURLToPath(new URL("./voice/recognitionLocales.ts", import.meta.url)),
+    ),
+  );
   const module = h.load(
     fileURLToPath(new URL("./useComposerDictation.ts", import.meta.url)),
   );
@@ -231,6 +245,7 @@ function setup({
     events,
     inserted,
     silentDurations,
+    startTimes,
     translate: (next: (phrase: string) => string) => {
       translate = next;
       h.render();
@@ -283,7 +298,7 @@ test("native dictation starts Apple recognition in the phone's language without 
     volumeChangeEventOptions: { enabled: true, intervalMillis: 90 },
   });
   assert.equal(typeof x.locales[0]![0], "string");
-  assert.deepEqual(x.locales[0]![1], ["en-GB", "en-US"]);
+  assert.deepEqual([...x.locales[0]![1]], ["en-GB", "en-US"]);
   assert.equal(x.h.value().phase, "listening");
   assert.equal(x.h.value().recording, true);
   x.h.unmount();
@@ -628,7 +643,11 @@ test("dictation errors follow the app language without restarting capture or dro
 test("interim words are replaced, final segments append, and finishing inserts once into the draft", async () => {
   const x = setup();
   await x.begin();
-  assert.equal(systemStatusActivityActive(), false, "recognizer setup alone does not signal capture");
+  assert.equal(
+    systemStatusActivityActive(),
+    false,
+    "recognizer setup alone does not signal capture",
+  );
   x.emit("audiostart");
   assert.equal(systemStatusActivityActive(), true);
   x.result("Book a");
@@ -1022,19 +1041,28 @@ async function dictationWithPicker(chosen: string) {
     pending = result.then(() => {});
     return result;
   }
-  const picker = hookHarness<ReturnType<typeof import("./voice/useDictationLanguage").useDictationLanguage>>({
+  const picker = hookHarness<
+    ReturnType<
+      typeof import("./voice/useDictationLanguage").useDictationLanguage
+    >
+  >({
     "../../../i18n/deviceLanguages": { deviceLanguages: () => ["en-GB"] },
     "@react-native-async-storage/async-storage": {
       getItem: (key: string) => ordered(() => storage.get(key) ?? null),
-      setItem: (key: string, value: string) => ordered(() => storage.set(key, value)),
+      setItem: (key: string, value: string) =>
+        ordered(() => storage.set(key, value)),
       removeItem: (key: string) => ordered(() => storage.delete(key)),
     },
     "react-native": { Platform: { OS: "ios" } },
     "expo-speech-recognition": {
-      ExpoSpeechRecognitionModule: { getSupportedLocales: async () => ({ locales: supported }) },
+      ExpoSpeechRecognitionModule: {
+        getSupportedLocales: async () => ({ locales: supported }),
+      },
     },
   });
-  const language = picker.load(fileURLToPath(new URL("./voice/dictationLanguage.ts", import.meta.url))) as typeof import("./voice/dictationLanguage");
+  const language = picker.load(
+    fileURLToPath(new URL("./voice/dictationLanguage.ts", import.meta.url)),
+  ) as typeof import("./voice/dictationLanguage");
   picker.mock("./dictationLanguage", language);
   picker.mock("./resolveDictationLanguage", { resolveDictationLanguage });
   const x = setup({ supported, readChosen: language.savedDictationLanguage });
@@ -1046,7 +1074,10 @@ async function dictationWithPicker(chosen: string) {
   return { ...x, picker };
 }
 
-for (const [from, to] of [["zh-CN", "en-GB"], ["en-GB", "zh-CN"]] as const) {
+for (const [from, to] of [
+  ["zh-CN", "en-GB"],
+  ["en-GB", "zh-CN"],
+] as const) {
   test(`changing preference from ${from} to ${to} preserves the current draft and starts the next recognizer in the last chosen language`, async () => {
     const x = await dictationWithPicker(from);
     await x.begin();
@@ -1622,6 +1653,9 @@ for (const [code, message] of [
   test(`Android ${code} errors offer retry without inventing denied permission`, async () => {
     const x = setup({ platform: "android" });
     await x.begin();
+    // Inside grace, a speechstart without words is recoverable. This table
+    // exercises terminal feedback and Retry after that window has elapsed.
+    if (code === "speech-timeout") x.advance(15000);
     x.emit("error", { error: code });
     x.emit("end");
     await x.h.settle();
@@ -1635,13 +1669,13 @@ for (const [code, message] of [
   });
 }
 
-test("Android unavailable language list offers Retry rather than an empty picker on a native language error", async () => {
+test("Android unavailable language list offers the recoverable language picker on a native language error", async () => {
   const x = setup({ platform: "android", supported: [] });
   await x.begin();
   x.emit("error", { error: "language-not-supported" });
-  assert.equal(x.h.value().chooseLanguage, false);
+  assert.equal(x.h.value().chooseLanguage, true);
   assert.equal(x.h.value().permissionDenied, false);
-  assert.match(x.h.value().error!, /try again/i);
+  assert.match(x.h.value().error!, /Choose another language/);
   x.h.unmount();
 });
 
@@ -1681,7 +1715,6 @@ for (const supported of [[], undefined]) {
   });
 }
 
-
 test("N11 retained no-speech notice follows real zh-CN and zh-TW catalogs", async () => {
   const x = setup();
   await x.begin();
@@ -1694,7 +1727,531 @@ test("N11 retained no-speech notice follows real zh-CN and zh-TW catalogs", asyn
     x.translate((source) => translate(language, source));
     assert.equal(x.h.value().error, translate(language, phrase));
     if (language !== "en") assert.notEqual(x.h.value().error, phrase);
-    assert.deepEqual(x.events, events, "language change does not restart recognition");
+    assert.deepEqual(
+      x.events,
+      events,
+      "language change does not restart recognition",
+    );
   }
   x.h.unmount();
 });
+
+test("Android's early 4.3s no-speech events restart with 250ms gaps and a bounded grace window", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({
+    platform: "android",
+    chosen: "zh-CN",
+    supported: ["zh-CN"],
+  });
+  await x.begin();
+  for (let i = 0; i < 4; i++) {
+    x.advance(4300);
+    t.mock.timers.tick(4300);
+    x.emit("speechstart");
+    x.emit("error", { error: i % 2 ? "speech-timeout" : "no-speech" });
+    x.emit("end");
+    if (i === 3) break;
+    assert.equal(x.h.value().phase, "listening");
+    assert.equal(x.h.value().error, undefined);
+    assert.equal(x.events.filter((e) => e === "start").length, i + 1);
+    x.advance(249);
+    t.mock.timers.tick(249);
+    assert.equal(x.events.filter((e) => e === "start").length, i + 1);
+    x.advance(1);
+    t.mock.timers.tick(1);
+    x.h.flush();
+    assert.equal(x.h.value().phase, "listening");
+    x.emit("start");
+  }
+  assert.deepEqual(x.startTimes, [0, 4550, 9100, 13650]);
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /No speech/);
+  assert.deepEqual(x.inserted, []);
+  x.advance(60000);
+  t.mock.timers.tick(60000);
+  assert.equal(x.startTimes.length, 4);
+  x.h.unmount();
+});
+for (const transition of [
+  "stop",
+  "discard",
+  "background",
+  "account",
+  "chat",
+  "sheet",
+  "focus",
+  "unmount",
+] as const) {
+  test(`Android silence recovery cannot restart after ${transition}`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const x = setup({ platform: "android" });
+    await x.begin();
+    x.advance(4300);
+    t.mock.timers.tick(4300);
+    x.emit("error", { error: "no-speech" });
+    x.emit("end");
+    if (transition === "stop") x.h.value().stop();
+    else if (transition === "discard") x.h.value().discard();
+    else if (transition === "background") x.app("background");
+    else if (transition === "unmount") x.h.unmount();
+    else x.change(transition);
+    x.advance(10000);
+    t.mock.timers.tick(10000);
+    x.h.flush();
+    assert.equal(x.events.filter((e) => e === "start").length, 1);
+    assert.deepEqual(x.inserted, []);
+    let cleanup = false;
+    x.ownership.claimVoiceAudioSession().release(() => {
+      cleanup = true;
+    });
+    assert.equal(
+      cleanup,
+      true,
+      "cancelling backoff releases the prior audio owner",
+    );
+    x.h.unmount();
+  });
+}
+test("speech during a restarted Android attempt inserts exactly once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.advance(4300);
+  t.mock.timers.tick(4300);
+  x.emit("error", { error: "no-speech" });
+  x.emit("end");
+  x.advance(250);
+  t.mock.timers.tick(250);
+  x.emit("start");
+  x.result("after the pause", true);
+  x.emit("end");
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["after the pause"]);
+  x.h.unmount();
+});
+test("a bare Android speechstart does not block a service-confirmed no-speech restart", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("speechstart");
+  x.advance(4300);
+  t.mock.timers.tick(4300);
+  x.emit("error", { error: "no-speech" });
+  x.emit("end");
+  x.advance(250);
+  t.mock.timers.tick(250);
+  assert.equal(x.startTimes.length, 2);
+  x.emit("start");
+  x.h.value().stop();
+  x.emit("end");
+  x.h.unmount();
+});
+for (const continuous of [true, false]) {
+  test(`transcribed words never restart or insert twice (continuous=${continuous})`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const x = setup({ platform: "android", continuous });
+    await x.begin();
+    x.result("interim words");
+    x.emit("error", { error: "no-speech" });
+    x.emit("end");
+    x.emit("end");
+    x.advance(60000);
+    t.mock.timers.tick(60000);
+    assert.equal(x.startTimes.length, 1);
+    assert.equal(x.h.value().active, false);
+    assert.deepEqual(x.inserted, continuous ? ["interim words"] : []);
+    x.h.unmount();
+  });
+}
+test("a later network error wins over an earlier recoverable no-speech error", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("error", { error: "no-speech" });
+  x.emit("error", { error: "network" });
+  x.emit("end");
+  x.advance(10000);
+  t.mock.timers.tick(10000);
+  x.h.flush();
+  assert.equal(x.events.filter((e) => e === "start").length, 1);
+  assert.match(x.h.value().error!, /connection/);
+  x.h.unmount();
+});
+test("a queued silence retry that runs after the grace deadline does not reopen the microphone", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("error", { error: "no-speech" });
+  x.emit("end");
+  x.advance(20000);
+  t.mock.timers.tick(20000);
+  x.h.flush();
+  assert.equal(x.events.filter((e) => e === "start").length, 1);
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /No speech/);
+  x.h.unmount();
+});
+test("a provider no-speech without end is aborted by the terminal watchdog", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("error", { error: "no-speech" });
+  x.advance(1500);
+  t.mock.timers.tick(1500);
+  x.h.flush();
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /No speech/);
+  assert.equal(x.events.filter((e) => e === "start").length, 1);
+  assert.ok(x.events.includes("abort"));
+  x.emit("end");
+  x.h.unmount();
+});
+test("Android queries and starts the selected service without switching to another on-device provider", async () => {
+  const x = setup({
+    platform: "android",
+    chosen: "zh-CN",
+    supported: ["zh-CN"],
+    installed: ["zh-CN"],
+  });
+  Object.assign(x.native, {
+    getDefaultRecognitionService: () => ({ packageName: "qa.recognizer" }),
+  });
+  await x.begin();
+  assert.equal(
+    x.native.options?.androidRecognitionServicePackage,
+    "qa.recognizer",
+  );
+  assert.equal(x.native.options?.requiresOnDeviceRecognition, false);
+  assert.equal(
+    (x.native.options?.androidIntentOptions as Record<string, unknown>)
+      .EXTRA_PREFER_OFFLINE,
+    true,
+  );
+  x.h.unmount();
+});
+test("crew utterances keep native silence defaults instead of composer grace intent extras", async () => {
+  const x = setup({ platform: "android", continuous: false });
+  await x.begin();
+  assert.equal(
+    (x.native.options?.androidIntentOptions as Record<string, unknown>)
+      .EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,
+    undefined,
+  );
+  x.h.unmount();
+});
+
+for (const platformVersion of [32, 33, 34, "33"]) {
+  for (const continuous of [true, false]) {
+    test(`Android API ${platformVersion}, continuous=${continuous}: only applicable intent extras override Expo defaults`, async () => {
+      const x = setup({ platform: "android", platformVersion, continuous });
+      await x.begin();
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(x.native.options?.androidIntentOptions)),
+        {
+          EXTRA_PREFER_OFFLINE: false,
+          ...(continuous && Number(platformVersion) >= 33
+            ? { EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 15000 }
+            : {}),
+        },
+      );
+      x.emit("error", { error: "no-speech" });
+      if (!continuous) {
+        x.emit("end");
+        assert.equal(x.startTimes.length, 1, "crew utterances never restart");
+        assert.equal(x.h.value().active, false);
+      }
+      x.h.unmount();
+      x.emit("end");
+    });
+  }
+}
+
+function assertAudioReleased(x: ReturnType<typeof setup>) {
+  let released = false;
+  x.ownership.claimVoiceAudioSession().release(() => {
+    released = true;
+  });
+  assert.equal(
+    released,
+    true,
+    "the recognizer no longer owns the audio session",
+  );
+  assert.equal(systemStatusActivityActive(), false, "capture status has ended");
+}
+
+for (const transition of [
+  "stop",
+  "background",
+  "unmount",
+  "account",
+  "focus",
+] as const) {
+  for (const live of [false, true]) {
+    test(`${transition} during ${live ? "a restarted live session" : "the silence restart gap"} releases capture and cannot restart later`, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const x = setup({ platform: "android" });
+      let draft = "Existing draft";
+      x.props.onInsert = (text) => {
+        x.inserted.push(text);
+        draft += ` ${text}`;
+      };
+      x.h.render();
+      await x.begin();
+      x.emit("audiostart");
+      assert.equal(systemStatusActivityActive(), true);
+      x.advance(4300);
+      t.mock.timers.tick(4300);
+      x.emit("error", { error: "no-speech" });
+      x.emit("end");
+      if (live) {
+        x.advance(250);
+        t.mock.timers.tick(250);
+        x.emit("start");
+        x.emit("audiostart");
+        x.result("new words");
+      }
+      if (transition === "stop") x.h.value().stop();
+      else if (transition === "background") x.app("background");
+      else if (transition === "unmount") x.h.unmount();
+      else x.change(transition);
+      x.emit("end");
+      x.emit("end");
+      x.advance(1500);
+      t.mock.timers.tick(1500);
+      x.h.flush();
+      const keptWords = live && transition === "stop";
+      assert.deepEqual(x.inserted, keptWords ? ["new words"] : []);
+      assert.equal(
+        draft,
+        keptWords ? "Existing draft new words" : "Existing draft",
+      );
+      if (transition !== "unmount") {
+        assert.equal(x.h.value().active, false);
+        assert.equal(x.h.value().phase, "idle");
+        assert.equal(x.h.value().error, undefined);
+      }
+      assert.equal(x.startTimes.length, live ? 2 : 1);
+      assertAudioReleased(x);
+      const events = [...x.events];
+      x.advance(60000);
+      t.mock.timers.tick(60000);
+      x.h.flush();
+      assert.deepEqual(
+        x.events,
+        events,
+        "no remaining timer performs native work",
+      );
+      x.h.unmount();
+    });
+  }
+}
+
+test("a service failing after 500ms cannot start sessions less than five seconds apart", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  for (let i = 0; i < 3; i++) {
+    x.advance(500);
+    t.mock.timers.tick(500);
+    x.emit("error", { error: "no-speech" });
+    x.emit("end");
+    x.advance(4499);
+    t.mock.timers.tick(4499);
+    assert.equal(x.startTimes.length, i + 1);
+    x.advance(1);
+    t.mock.timers.tick(1);
+    x.h.flush();
+    if (i < 2) x.emit("start");
+  }
+  assert.deepEqual(x.startTimes, [0, 5000, 10000]);
+  assert.match(x.h.value().error!, /No speech/);
+  assert.equal(x.h.value().active, false);
+  assertAudioReleased(x);
+  x.h.unmount();
+});
+
+test("native end with less than a second of grace left settles without another start", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("audiostart");
+  x.advance(14100);
+  t.mock.timers.tick(14100);
+  x.emit("error", { error: "no-speech" });
+  x.emit("end");
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /No speech/);
+  assertAudioReleased(x);
+  x.advance(60000);
+  t.mock.timers.tick(60000);
+  assert.equal(x.startTimes.length, 1);
+  x.h.unmount();
+});
+
+for (const mode of ["throws", "no-start-event"] as const) {
+  test(`a restart that ${mode} reports START_FAILED and releases capture`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const x = setup({ platform: "android" });
+    await x.begin();
+    x.emit("audiostart");
+    x.advance(4300);
+    t.mock.timers.tick(4300);
+    x.emit("error", { error: "no-speech" });
+    x.emit("end");
+    if (mode === "throws")
+      x.native.start = () => {
+        x.events.push("start");
+        throw new Error("native failure");
+      };
+    x.advance(250);
+    t.mock.timers.tick(250);
+    x.h.flush();
+    if (mode === "no-start-event") {
+      x.advance(8000);
+      t.mock.timers.tick(8000);
+      x.h.flush();
+    }
+    assert.equal(x.h.value().active, false);
+    assert.match(x.h.value().error!, /could not start/);
+    assert.ok(x.events.includes("abort"));
+    x.advance(1500);
+    t.mock.timers.tick(1500);
+    x.h.flush();
+    assertAudioReleased(x);
+    assert.deepEqual(x.inserted, []);
+    const events = [...x.events];
+    x.advance(60000);
+    t.mock.timers.tick(60000);
+    x.h.flush();
+    assert.deepEqual(x.events, events);
+    assert.equal(x.events.filter((e) => e === "start").length, 2);
+    x.h.unmount();
+  });
+}
+
+for (const error of ["network", "language-not-supported"] as const) {
+  test(`${error} wins after recoverable silence, including a later no-speech event`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const x = setup({ platform: "android" });
+    await x.begin();
+    x.emit("audiostart");
+    x.emit("error", { error: "no-speech" });
+    x.emit("error", { error });
+    x.emit("error", { error: "no-speech" });
+    x.emit("end");
+    assert.match(
+      x.h.value().error!,
+      error === "network" ? /connection/ : /language/,
+    );
+    assert.equal(x.h.value().active, false);
+    assert.deepEqual(x.inserted, []);
+    assertAudioReleased(x);
+    const events = [...x.events];
+    x.advance(60000);
+    t.mock.timers.tick(60000);
+    x.h.flush();
+    assert.deepEqual(x.events, events);
+    assert.equal(x.startTimes.length, 1);
+    x.h.unmount();
+  });
+}
+
+test("Retry after terminal no-speech receives a fresh grace window and restart budget", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) {
+      x.native.permissionStatus = permissionResponse("granted");
+      await x.h.value().retry();
+      await x.h.settle();
+      x.emit("start");
+    }
+    for (let session = 0; session < 4; session++) {
+      x.advance(4300);
+      t.mock.timers.tick(4300);
+      x.emit("error", { error: "no-speech" });
+      x.emit("end");
+      if (session < 3) {
+        x.advance(250);
+        t.mock.timers.tick(250);
+        x.emit("start");
+      }
+    }
+    assert.equal(x.startTimes.length, (attempt + 1) * 4);
+    assert.equal(x.h.value().active, false);
+    assert.match(x.h.value().error!, /No speech/);
+    assertAudioReleased(x);
+  }
+  assert.deepEqual(
+    x.startTimes.slice(4).map((time) => time - x.startTimes[4]!),
+    [0, 4550, 9100, 13650],
+  );
+  x.h.unmount();
+});
+
+test("an Android end without a no-speech or speech-timeout error never restarts", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("speechstart");
+  x.emit("end");
+  x.advance(60000);
+  t.mock.timers.tick(60000);
+  x.h.flush();
+  assert.equal(x.startTimes.length, 1);
+  assert.match(x.h.value().error!, /No speech/);
+  assert.equal(x.h.value().active, false);
+  assertAudioReleased(x);
+  x.h.unmount();
+});
+
+test("Android nomatch alone cannot authorize a silence restart", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.emit("audiostart");
+  x.emit("nomatch");
+  x.emit("end");
+  x.advance(60000);
+  t.mock.timers.tick(60000);
+  x.h.flush();
+  assert.equal(x.startTimes.length, 1);
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /No speech/);
+  assert.deepEqual(x.inserted, []);
+  assertAudioReleased(x);
+  x.h.unmount();
+});
+
+for (const error of ["network", "language-not-supported"] as const) {
+  test(`a missing-end watchdog preserves the later ${error} error`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const x = setup({ platform: "android" });
+    await x.begin();
+    x.emit("audiostart");
+    x.emit("error", { error: "no-speech" });
+    x.emit("error", { error });
+    x.advance(1500);
+    t.mock.timers.tick(1500);
+    x.h.flush();
+    assert.equal(x.h.value().active, false);
+    assert.match(
+      x.h.value().error!,
+      error === "network" ? /connection/ : /language/,
+    );
+    assert.ok(x.events.includes("abort"));
+    x.advance(1500);
+    t.mock.timers.tick(1500);
+    x.h.flush();
+    assertAudioReleased(x);
+    assert.deepEqual(x.inserted, []);
+    const events = [...x.events];
+    x.advance(60000);
+    t.mock.timers.tick(60000);
+    x.h.flush();
+    assert.deepEqual(x.events, events);
+    assert.equal(x.startTimes.length, 1);
+    x.h.unmount();
+  });
+}
