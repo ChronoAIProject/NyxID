@@ -180,7 +180,8 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
-| 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 7000 | `approval_required`        | 403         | Approval is required and the request was not held: an eligible request sent `X-NyxID-Approval-Mode: async`, or an assistant call needs an execution-permission review. Carries `request_id`. NyxID sends or resumes the request after approval, so never re-send it. Ordinary proxy/LLM requests wait for the decision instead; see [Proxy](#proxy) |
+| 7001 | `approval_failed`          | 403         | Approval was rejected, expired or timed out, or the occurrence is already terminal; NyxID did not send the request on this call. Carries `request_id`, `approve_url` and `details` |
 | 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
@@ -4315,13 +4316,13 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approval continues the original held request on the same connection, so the caller must not re-send it; rejection, expiry or timeout returns HTTP 403 `approval_failed` (code `7001`). An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **Approval controls** apply to authenticated proxy requests.
 
 | Header | Behavior |
 | --- | --- |
-| `X-NyxID-Approval-Mode: async` | An eligible v2 proposal returns `approval_required` with a request ID for same-credential readback at `GET /api/v1/approvals/requests/{id}/status`. |
+| `X-NyxID-Approval-Mode: async` | An eligible v2 proposal returns `approval_required` with a request ID for same-credential readback at `GET /api/v1/approvals/requests/{id}/status`. After approval NyxID sends the retained request itself; never re-send it. Ineligible requests keep the connected wait. |
 | `X-NyxID-Approval-Wait-Seconds` | Supply one decimal integer from 10 through 300 to cap the connected wait and approval expiry from request receipt. The configured approval timeout and any shorter route deadline also apply. Omit the header to use the usual server wait. |
 
 An invalid or repeated budget returns HTTP 400 before approval creation. When
@@ -4331,7 +4332,9 @@ both controls are supplied, an eligible async proposal uses its async deadline.
 
 **Errors:**
 - `1000 bad_request` -- Service is inactive, service is a provider, invalid proxy path, or connection missing credential
-- `1002 forbidden` -- No active connection to this service, or approval was rejected/timed out
+- `1002 forbidden` -- No active connection to this service, or an approval policy Deny rule refused the operation
+- `7000 approval_required` -- An eligible async request or an assistant review needs approval; the request was not held (see Approval controls)
+- `7001 approval_failed` -- Approval was rejected, expired or timed out; the request was not sent
 - `1003 not_found` -- Service does not exist
 
 **Example:**
@@ -8758,7 +8761,7 @@ This prevents authenticated callers from polling approval requests that belong t
 
 Status values: `pending`, `approved`, `rejected`, `expired`.
 
-When status changes to `approved`, the caller can retry the original proxy request (the grant now exists).
+Do not re-send the original request when the status becomes `approved`. A connected request already received its response on its own connection. For a v2 proposal, NyxID sends the approved request itself and this response adds an `execution` field with its state and bounded result; v2 polls with a different credential receive a not-found-shaped response. See [execution permissions](EXECUTION_PERMISSIONS.md#external-requests-and-readback).
 
 **curl:**
 

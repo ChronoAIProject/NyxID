@@ -46,19 +46,20 @@ curl -X PUT https://nyx-api.chrono-ai.fun/api/v1/approvals/service-configs/<SERV
 
 ## What the agent receives
 
-When an agent's request hits an approval-gated service, it gets a `403` with `error_code: 7000`:
+When an agent's request hits an approval-gated service, NyxID holds the HTTP connection open until the user decides. If the user approves, NyxID sends the original request and the agent receives the downstream response directly; the agent does not retry.
+
+Only an eligible request that opts into async approval with the `X-NyxID-Approval-Mode: async` header (or an assistant call that needs an execution-permission review) gets an immediate `403` with `error_code: 7000` instead:
 
 ```json
 {
   "error": "approval_required",
   "error_code": 7000,
   "request_id": "b1c2d3e4-...",
-  "action_description": "POST /v1/chat/completions (model: gpt-4o, 3 messages)",
-  "message": "Approval required for this request."
+  "message": "Approval required. Review the pending request in Approval History; configured notifications are attempted."
 }
 ```
 
-The `request_id` is used to poll for status and to display to the user.
+The `request_id` is used to poll for status (async callers, with the same credential) and to display to the user. After approval NyxID sends or resumes the request itself.
 
 If the approval is rejected, expires, or times out, the agent receives `error_code: 7001`:
 
@@ -67,18 +68,21 @@ If the approval is rejected, expires, or times out, the agent receives `error_co
   "error": "approval_failed",
   "error_code": 7001,
   "request_id": "b1c2d3e4-...",
-  "approve_url": "https://nyx.chrono-ai.fun/approvals/history",
-  "message": "Approval request was rejected."
+  "approve_url": "https://nyx.chrono-ai.fun/assistant/approvals",
+  "message": "Approval failed: Approval request was rejected. Review the approval request and its history at https://nyx.chrono-ai.fun/assistant/approvals",
+  "details": { "code": "approval_denied", "status": "rejected", "request_id": "b1c2d3e4-..." }
 }
 ```
+
+`details` also carries `error`, `message`, `instructions` and `review_url`. The request was not sent.
 
 ## Agent-side handling
 
 A well-behaved agent should:
 
-1. Detect `error_code: 7000` and inform the user that approval is needed.
-2. Show the `action_description` so the user knows what they are approving.
-3. Poll for the approval decision, or ask the user to approve and then retry.
+1. Keep the HTTP connection open long enough for a held request; the response arrives after the decision.
+2. Detect `error_code: 7000` and inform the user that approval is needed.
+3. Ask the user to approve. An async caller may poll for the decision with the same credential; an assistant key cannot poll its own reviews. Never re-send the original request: an approved request is sent by NyxID, so a re-sent write can run twice.
 4. On `error_code: 7001`, show the `approve_url` and suggest setting up notifications if none are configured.
 
 ### Polling for approval status
@@ -93,14 +97,13 @@ Response:
 ```json
 {
   "status": "pending",
-  "expires_at": "2026-05-20T16:00:00Z",
-  "action_description": "POST /v1/chat/completions (model: gpt-4o, 3 messages)"
+  "expires_at": "2026-05-20T16:00:00Z"
 }
 ```
 
-Status values: `pending`, `approved`, `rejected`, `expired`.
+Status values: `pending`, `approved`, `rejected`, `expired`. For an async request, the response also has an `execution` field reporting whether NyxID sent the approved request and its bounded result. Poll with the same credential that made the request.
 
-Poll at a reasonable interval (5–10 seconds) until status is no longer `pending`, then retry the original request if approved.
+Poll at a reasonable interval (5–10 seconds) until status is no longer `pending`. Do not re-send the original request when it is approved; read the outcome from `execution`.
 
 ## Set up notification channels
 
@@ -177,4 +180,4 @@ nyxid approval service-configs   # lists all services with approval enabled, inc
 | Approval times out before user sees it | Default expiry is short | Increase `APPROVAL_EXPIRY_INTERVAL_SECS` on the server, or set up real-time notifications |
 | Agent receives `7001` immediately | Service returned `approval_failed` without a pending phase | The previous approval request for this `(user, service, requester)` tuple was already rejected. The agent should show `approve_url` |
 | `per_request` service creates grants | Service was reconfigured to `grant` mode | Run `nyxid approval service-configs` to confirm the current mode |
-| Agent loops infinitely on `7000` | Polling without timeout | Add a max-retry limit and show the user the `action_description` and a link to the web console |
+| Agent loops infinitely on `7000` | Polling without timeout | Add a polling limit and show the user the `request_id` and a link to the web console |

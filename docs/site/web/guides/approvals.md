@@ -1,9 +1,9 @@
 ---
 title: Set up approvals
-description: Require human approval before AI agents can call sensitive services, delivered via Telegram or mobile push notification.
+description: Require human approval before AI agents can call sensitive services, reviewed in the web console with optional Telegram or mobile push notifications.
 ---
 
-NyxID's approval system adds a human-in-the-loop gate on any service. When approval is enabled, an agent's proxy request is blocked until a designated approver confirms or denies it. Approvers are notified via Telegram or the NyxID mobile app (iOS/Android).
+NyxID's approval system adds a human-in-the-loop gate on any service. When approval is enabled, an agent's proxy request is held, with its connection open, until a designated approver confirms or denies it or the request expires. Approvers can also be notified via Telegram or the NyxID mobile app (iOS/Android).
 
 For the underlying design, see [Approvals](/docs/shared/concepts/approvals).
 
@@ -26,11 +26,11 @@ Per-request mode is the secure default. Use grant mode when the approval frictio
 4. Choose the mode: **Per request** (default) or **Grant**.
 5. Click **Save**.
 
-From this point, any proxy request to that service by any of your agents will be blocked with `HTTP 403` and an `action_description` describing the pending operation, until an approver acts on it.
+From this point, a proxy request to that service by any of your agents waits on its open connection until an approver acts on it. Approval continues the original request; denial or timeout returns `HTTP 403` to the agent (see [What the agent sees](#what-the-agent-sees)).
 
 ## Configure notification channels
 
-Approval requests are delivered wherever you configure. Set up at least one channel before enabling approvals.
+Pending requests always appear in the web console, with or without a notification channel. Telegram and mobile push are optional channels that alert approvers sooner. There is no email channel.
 
 ### Telegram
 
@@ -51,14 +51,7 @@ Start a conversation with `@NyxIDBot` before linking if NyxID cannot initiate th
 2. Accept the push notification permission prompt.
 3. Go to **Settings → Notifications**, enable **Push notifications**.
 
-Push notifications show the `action_description`. Tap the notification to open the approval in the app and decide.
-
-### Email
-
-1. Go to **Settings → Notifications**.
-2. Enable **Email notifications for approvals**.
-
-Email approval requires you to click a link in the email and confirm in the web console. It is slower than Telegram or push for time-sensitive requests.
+The push carries no request details: it reads **Approval Required** / *A service is requesting access*, or for an organization approval **Org Approval Required** / *{org name} admins: a service is requesting access*. Tap the notification to open the approval in the app, which loads the details, and decide.
 
 ## Approve or deny a request
 
@@ -68,7 +61,7 @@ Regardless of delivery channel, you can always act on pending requests from the 
 2. The **Pending** tab shows all outstanding requests with their `action_description`.
 3. Click **Approve** or **Deny** on a row.
 
-Approved requests unblock the waiting agent call (the proxy retries automatically). Denied requests return `HTTP 403` with `error_code: 7001` to the agent.
+Approval continues the waiting agent call: NyxID sends the original request and returns its response to the agent, with no retry. Denied requests return `HTTP 403` with `error_code: 7001` to the agent.
 
 ## View approval history and grants
 
@@ -81,28 +74,22 @@ When services are owned by an org, the org admin sets the approval policy. All o
 
 ## What the agent sees
 
-When approval is required and none has been given, the proxy responds:
-
-```json
-HTTP 403
-{
-  "error": "approval_required",
-  "error_code": 7000,
-  "request_id": "<uuid>",
-  "action_description": "POST /v1/chat/completions (model: gpt-4o, 2 messages)",
-  "approve_url": "https://nyx.chrono-ai.fun/approvals/<request_id>"
-}
-```
-
-After denial or timeout:
+When approval is required, the agent's request waits for the decision. After approval the agent receives the downstream response directly. After denial or timeout the request is not sent, and the proxy responds:
 
 ```json
 HTTP 403
 {
   "error": "approval_failed",
   "error_code": 7001,
-  "request_id": "<uuid>"
+  "message": "Approval failed: Approval request was rejected. Review the approval request and its history at https://nyx.chrono-ai.fun/assistant/approvals",
+  "request_id": "<uuid>",
+  "approve_url": "https://nyx.chrono-ai.fun/assistant/approvals",
+  "details": { "code": "approval_denied", "status": "rejected", "request_id": "<uuid>" }
 }
 ```
 
-Agents built for NyxID check these codes and surface them to the user. The `approve_url` links directly to the console review page.
+`details` also carries `error`, `message`, `instructions` and `review_url`.
+
+Only a request that opted into async approval (`X-NyxID-Approval-Mode: async` from an eligible caller) or an assistant execution-permission review receives `HTTP 403` `approval_required` (`error_code: 7000`) with a `request_id` instead of waiting. NyxID sends or resumes an approved request itself, so agents must never re-send it. See [Approvals for agents](/docs/ai/guides/approvals-for-agents).
+
+Agents built for NyxID check these codes and surface them to the user. The `approve_url` links to the approvals page in the web app.

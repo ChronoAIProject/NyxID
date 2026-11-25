@@ -69,12 +69,13 @@ Add these to your `.env` file alongside existing NyxID configuration:
 FCM_SERVICE_ACCOUNT_PATH=keys/fcm-service-account.json
 
 # APNs (Apple Push Notification service) -- iOS push notifications
-# All 4 APNs variables must be set together; if APNS_KEY_PATH is set,
-# APNS_KEY_ID, APNS_TEAM_ID, and APNS_TOPIC are required.
+# If APNS_KEY_PATH is set, APNS_KEY_ID and APNS_TEAM_ID are required
+# (startup panics without them). APNS_TOPIC is optional: each iOS device
+# registers its bundle ID as `app_id`, which is sent as the apns-topic.
 APNS_KEY_PATH=keys/apns-auth-key.p8       # Path to .p8 private key file
 APNS_KEY_ID=ABC123DEFG                     # 10-char Key ID from Apple Developer portal
 APNS_TEAM_ID=TEAMID1234                    # 10-char Team ID from Apple Developer portal
-APNS_TOPIC=dev.nyxid.app                   # iOS app bundle ID (used as apns-topic header)
+APNS_TOPIC=dev.nyxid.app                   # iOS app bundle ID (apns-topic for a device without app_id)
 APNS_SANDBOX=true                          # true = sandbox (development), false = production
                                            # Defaults: true in development, false in production
 ```
@@ -83,9 +84,9 @@ APNS_SANDBOX=true                          # true = sandbox (development), false
 |----------|----------|-------------|
 | `FCM_SERVICE_ACCOUNT_PATH` | For Android | Path to Firebase service account JSON file |
 | `APNS_KEY_PATH` | For iOS | Path to APNs `.p8` authentication key file |
-| `APNS_KEY_ID` | For iOS | Key ID from Apple Developer portal (Certificates, Identifiers & Profiles) |
-| `APNS_TEAM_ID` | For iOS | Team ID from Apple Developer portal (top-right of portal) |
-| `APNS_TOPIC` | For iOS | Bundle ID of the iOS app (e.g., `dev.nyxid.app`) |
+| `APNS_KEY_ID` | With `APNS_KEY_PATH` | Key ID from Apple Developer portal (Certificates, Identifiers & Profiles) |
+| `APNS_TEAM_ID` | With `APNS_KEY_PATH` | Team ID from Apple Developer portal (top-right of portal) |
+| `APNS_TOPIC` | No | Bundle ID of the iOS app (e.g., `dev.nyxid.app`). Push uses the device's registered `app_id` as the APNs topic and falls back to this value. See [ENV.md](ENV.md#verified-mobile-login-links-optional) for its use in verified login links |
 | `APNS_SANDBOX` | No | Use APNs sandbox environment. Default: `true` in development, `false` in production |
 
 Push notifications are disabled per-platform when the corresponding credentials are not configured. Users can still approve requests via the web UI or Telegram.
@@ -114,7 +115,7 @@ The JSON file contains `project_id`, `client_email`, and `private_key`. At start
 4. Note the **Key ID** (10-character string shown in the portal)
 5. Note your **Team ID** (top-right corner of the developer portal)
 6. Place the `.p8` file in the `keys/` directory (e.g., `keys/apns-auth-key.p8`)
-7. Set all four APNs variables in `.env`
+7. Set `APNS_KEY_PATH`, `APNS_KEY_ID` and `APNS_TEAM_ID` in `.env` (`APNS_TOPIC` is optional)
 
 At startup, the backend:
 - Reads and validates the `.p8` key file
@@ -238,7 +239,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-**Important:** On logout, also call `DELETE /api/v1/notifications/devices/{device_id}` to deregister the push device (see [Removing a Device](#removing-a-device)).
+**Important:** On logout, first deregister this device's push token with `DELETE /api/v1/notifications/devices/current` (body: `platform` and `token`), while the access token is still valid (see [Removing a Device](#removing-a-device)).
 
 ---
 
@@ -286,6 +287,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `platform` | string | Yes | `"fcm"` (Android) or `"apns"` (iOS) |
 | `token` | string | Yes | FCM registration token or APNs device token (hex). Max 4096 chars. |
+| `previous_token` | string | No | The token this device used before the platform rotated it. Same format rules as `token`. See [Handling Token Refresh](#handling-token-refresh). |
 | `device_name` | string | No | Human-readable device name. Max 100 chars. |
 | `app_id` | string | APNs: Yes, FCM: No | Bundle ID (e.g., `"dev.nyxid.app"`). Required for APNs. Max 256 chars. |
 
@@ -305,7 +307,7 @@ Content-Type: application/json
 }
 ```
 
-This endpoint is **idempotent**: if the same `token` is registered again, it updates the device metadata (name, timestamp) rather than creating a duplicate. Store the returned `device_id` locally for use during logout/uninstall cleanup.
+This endpoint is **idempotent**: if the same `token` is registered again, it updates the device metadata (name, timestamp) rather than creating a duplicate. The returned `device_id` identifies the device for `DELETE /api/v1/notifications/devices/{device_id}`; logout can instead remove the current device by its token (see [Removing a Device](#removing-a-device)).
 
 **Error (400):**
 ```json
@@ -323,7 +325,7 @@ Both FCM and APNs may issue new tokens at any time. When this happens:
 - **Android:** Override `onNewToken(token: String)` in your `FirebaseMessagingService`
 - **iOS:** Handle `application(_:didRegisterForRemoteNotificationsWithDeviceToken:)`
 
-In both cases, call `POST /api/v1/notifications/devices` with the new token. The server automatically upserts based on the token value.
+In both cases, call `POST /api/v1/notifications/devices` with the new token as `token` and the old one as `previous_token`. When `previous_token` matches one of your registered devices, the server replaces its token on that same device record (same `device_id`) instead of adding a device. Without `previous_token`, the new token is registered as a separate device and the old token stays until the push provider reports it invalid.
 
 ### Listing Registered Devices
 
@@ -359,7 +361,31 @@ Note: The actual device `token` is never returned in API responses -- it is a se
 
 ### Removing a Device
 
-Call this on user logout or app uninstall (if detectable).
+Two routes remove a device. Both require the access token.
+
+**Current device (logout):** remove this device by its push token. The mobile app calls this on sign-out. It returns 200 even when the token is not registered for this account.
+
+```
+DELETE /api/v1/notifications/devices/current
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "platform": "fcm",
+  "token": "dGVzdC1kZXZpY2UtdG9rZW4..."
+}
+```
+
+**Response (200):**
+```json
+{
+  "message": "Current device removed"
+}
+```
+
+**By device ID:** remove any listed device (for example, from a device-management screen).
 
 ```
 DELETE /api/v1/notifications/devices/{device_id}
@@ -373,9 +399,9 @@ Authorization: Bearer <access_token>
 }
 ```
 
-If no devices remain after removal, the server automatically sets `push_enabled = false`.
+With either route, if no devices remain after removal, the server automatically sets `push_enabled = false`.
 
-**Error (404):**
+**Error (404, by device ID only):**
 ```json
 {
   "error": "not_found",
@@ -403,20 +429,24 @@ Authorization: Bearer <access_token>
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 2,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_timeout_secs": 30,
   "grant_expiry_days": 30
 }
 ```
 
+The response has further fields; see [Get Notification Settings](API.md#get-notification-settings) for the full shape.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `telegram_connected` | boolean | Whether a Telegram account is linked |
 | `telegram_username` | string? | Linked Telegram username |
-| `telegram_enabled` | boolean | Whether Telegram notifications are active |
-| `push_enabled` | boolean | Whether push notifications are active |
+| `telegram_enabled` | boolean | Account-wide Telegram switch for notices from the NyxID Telegram bot (approvals and other account notices) |
+| `push_enabled` | boolean | Account-wide push switch. When false, the server sends no push of any type (see [Push `type` values](#push-type-values)) |
 | `push_device_count` | number | Number of registered push devices |
-| `approval_required` | boolean | Global approval toggle |
+| `global_approval_mode` | string | Global approval preference: `writes_only` (default when no preference is stored), `all`, or `off` |
+| `approval_required` | boolean | Compatibility value: `true` for both `writes_only` and `all`, `false` for `off`. Use `global_approval_mode` to tell them apart |
 | `approval_timeout_secs` | number | Seconds before auto-reject (10-300) |
 | `grant_expiry_days` | number | Days before grant expires (1-365) |
 
@@ -433,11 +463,13 @@ Content-Type: application/json
 {
   "telegram_enabled": true,
   "push_enabled": true,
-  "approval_required": true,
+  "global_approval_mode": "writes_only",
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
 ```
+
+All fields are optional. `global_approval_mode` accepts `writes_only`, `all` or `off`. The legacy `approval_required` write is also accepted: `true` selects **All requests** (not Writes only) and `false` selects **Off**. Sending both with conflicting values returns 400.
 
 **Response (200):** Same shape as GET response.
 
@@ -543,7 +575,29 @@ Sent after a decision is made (via Telegram, web UI, or another device) so the a
 }
 ```
 
-The `decision` field is `"approved"`, `"rejected"`, or `"expired"`.
+The `decision` field is `"approved"` or `"rejected"`. When a pending request expires, the server sends a separate silent push with `type: "approval_expired"` and `request_id` (no `decision` field).
+
+#### Push `type` values
+
+Every push carries a `type` in its data (FCM `data`; top-level keys in the APNs payload). All data values are strings. Alert pushes have a title and body; silent pushes are data-only (`content-available`). Only an `approval_request` that can be decided from the notification (no `can_decide: "false"`) gets the iOS `APPROVAL_REQUEST` category. Clients should ignore unknown types.
+
+| `type` | Sent when | Key data fields (besides `type`) |
+|---|---|---|
+| `approval_request` | Alert. An approval request is created and needs this person's decision (owner, or each org admin for an org policy). | `request_id`, `challenge_id` (same value), `deeplink` (`nyxid://challenge/{id}`). Proxy requests: `http_method`, `resource`, `verb` when known. Execution-permission reviews: `decision_kind: "execution_permission"`, `can_decide: "false"`, `review_path`. Org policy: `from_org_policy: "true"`, `org_id`, `org_name` when known |
+| `approval_decision` | Silent. A request is approved or rejected; sent to everyone who received its `approval_request`. | `request_id`, `decision` (`approved` or `rejected`) |
+| `approval_expired` | Silent. The expiry sweep marks a pending request expired; sent to everyone who received its `approval_request`. | `request_id` |
+| `connection_expired` | Alert. A connected service's OAuth connection can no longer be refreshed. | `service_slug`, `user_service_id`, `api_key_id`, `reconnect_url` |
+| `channel_bot_failed`, `channel_bot_restored`, `channel_bot_guest_defaults` | Alert. A channel bot stops working, recovers, or NyxID changes an organization bot's guest access defaults. Sent to the owner, or to every admin of an organization bot. | `bot_id`, `recommended_action`, `url` |
+| `mfa_recovery_used` | Alert. An MFA recovery code was used on the account. | none |
+| `mfa_disabled` | Alert. MFA was disabled on the account. | none |
+| `machine_lifecycle` | Alert. A remote machine lifecycle event is recorded. | `machine_id`, `operation_id`, `url` |
+| `machine_control` | Alert. NyxBot asks the owner to take control of a machine. | `url` |
+| `trigger_event` | Alert. A trigger with notification delivery receives an event. | `trigger_label`, `event_id`, `preview` (at most 512 characters) |
+| `device_bind_success`, `device_repeated_fail`, `device_lock_alert` | Alert. A headless device-code binding is approved, reaches repeated failed signed polls, or is locked. | `template` (same value), `hw_id`, `device_label`; `node_id`, `failed_poll_count`, `locked_until` when known |
+| `automation_result` (push-only automation delivery) | Alert. An automation whose destination is a notification finishes a run. | `conversation_id`, `deeplink` |
+| `automation_result`, `automation_problem`, `needs_decision`, `agent_update`, `chat_update`, `group_mention` (NyxBot Notifications) | Alert. A NyxBot Notifications row the person opted into for push (see [NyxBot Notifications](chat/12-notifications.md#optional-push)). | `kind` (same value), `notification_id`, `deeplink`; `conversation_id` when the row's source records one |
+| `group_mention` (collaboration group) | Alert. Someone mentions the person in a collaboration group. | `group_id`, `deeplink` |
+| `assistant_voice_completed` | Silent. Work from an ended voice call finishes, and the person turned on voice completion notifications. | `conversation_id`, `request_id` |
 
 ### Handling Approval Request Notifications
 
@@ -554,13 +608,13 @@ When a push notification with `type: "approval_request"` is received:
 
 In both cases:
 1. Extract `request_id` from the `data` payload
-2. Call `GET /api/v1/approvals/requests/{request_id}/status` to fetch full details
+2. Call `GET /api/v1/approvals/requests/{request_id}` to fetch full details
 3. Display the approval screen with service name, requester, and operation
-4. Let the user approve or reject
+4. Let the user approve or reject. When the push has `can_decide: "false"` (an execution-permission review), `/decide` refuses it: send the user to `review_path` in the NyxID web app instead
 
 ### Handling Silent Decision Notifications
 
-When a push notification with `type: "approval_decision"` is received:
+When a push notification with `type: "approval_decision"` or `type: "approval_expired"` is received:
 
 1. If the app is displaying the approval detail screen for this `request_id`, refresh the UI to show the decision
 2. If the app is on the approval history screen, refresh the list
@@ -572,7 +626,7 @@ When a push notification with `type: "approval_decision"` is received:
 
 ### Polling Approval Status
 
-After receiving a push notification, fetch the full approval request details:
+`GET /api/v1/approvals/requests/{request_id}/status` is the requester's status endpoint: it answers only the credential that made the request (same requester and resource owner), so the app cannot use it for requests made by an agent or service. To load a request received by push, the app calls `GET /api/v1/approvals/requests/{request_id}`, which returns the full request, including `status` and `expires_at`. Both use the statuses below.
 
 ```
 GET /api/v1/approvals/requests/{request_id}/status
@@ -767,45 +821,59 @@ Mobile App                          NyxID Backend
 
 ### Approval Notification Flow
 
+A service account always uses the **connected wait**. NyxID keeps the original proxy request open while the user decides; the service account receives no response until then and must not retry:
+
+- **Approved:** NyxID continues the original request and returns the downstream response on the same connection. In grant mode, approval also creates a reusable grant; in per-request mode it does not.
+- **Rejected, expired or timed out:** the request is not sent. The service account receives HTTP 403 `approval_failed` (error code 7001) with `request_id` and `approve_url`.
+
 ```
 Service Account       NyxID Backend        Push Service       Mobile App
     |                      |                    |                  |
     |-- proxy request ---->|                    |                  |
-    |                      |-- check approval   |                  |
-    |                      |   (no grant found) |                  |
-    |                      |-- send FCM/APNs -->|                  |
-    |<-- 403 approval_required                  |-- push --------->|
+    |   (connection held   |-- check approval   |                  |
+    |    open, no reply)   |   (no grant found) |                  |
+    |                      |-- create request   |                  |
+    |                      |-- send FCM/APNs -->|-- push --------->|
     |                      |                    |                  |
     |                      |                    |     User taps    |
     |                      |                    |     notification |
     |                      |                    |                  |
-    |                      |<--- GET .../status --------------------|
-    |                      |---- 200 { pending } ----------------->|
+    |                      |<--- GET /approvals/requests/{id} -----|
+    |                      |---- 200 { pending request } -------->|
     |                      |                    |                  |
     |                      |<--- POST .../decide { approved } ----|
     |                      |---- 200 { approved } ---------------->|
     |                      |                    |                  |
     |                      |-- create grant     |                  |
+    |                      |   (grant mode only)|                  |
     |                      |-- silent push ---->|-- silent push -->|
     |                      |                    |   (UI refresh)   |
-    |                      |                    |                  |
-    |-- retry proxy ------>|                    |                  |
-    |                      |-- grant found!     |                  |
-    |<-- 200 response -----|                    |                  |
+    |                      |-- continue the     |                  |
+    |                      |   original request |                  |
+    |<-- 200 downstream ---|                    |                  |
+    |    response          |                    |                  |
 ```
+
+Two other flows return HTTP 403 `approval_required` (error code 7000) with a `request_id` instead of holding the connection:
+
+- **Opt-in async (external callers):** only an eligible execution-permission (v2) request whose caller sent `X-NyxID-Approval-Mode: async`. The caller polls `GET /api/v1/approvals/requests/{id}/status` with the same credential; after approval NyxID sends the retained request itself and reports the outcome in the response's `execution` field. Ineligible requests (for example, to a service that forwards the caller's own bearer token) ignore the header and use the connected wait. See [execution permissions](EXECUTION_PERMISSIONS.md#external-requests-and-readback).
+- **Assistant reviews:** an assistant chat key can receive `approval_required` without the header when a call needs an execution-permission review. The review is recorded for the person, not the assistant key, so the key cannot poll it. The person reviews it in the NyxID web app, and approval queues the retained operation for NyxID to resume server-side. See [execution permissions](EXECUTION_PERMISSIONS.md#permission-updates-and-resume-2195-part-a).
+
+In every flow, never automatically re-send the request after `approval_required` or `approval_failed`. An approved request is continued or resumed by NyxID, so a re-sent write can run twice; a re-sent request after `approval_failed` asks the owner again.
 
 ### Logout Flow
 
 ```
-Mobile App                          NyxID Backend
-    |                                    |
-    |-- DELETE /notifications/devices/{id} ->|
-    |<-- 200 { message: "Device removed" } --|
-    |                                    |
-    |-- POST /auth/logout -------------->|
-    |<-- 200 { message: "Logged out" } --|
-    |                                    |
-    |   (clear local tokens/state)       |
+Mobile App                                  NyxID Backend
+    |                                            |
+    |-- DELETE /notifications/devices/current -->|
+    |   { platform, token }                      |
+    |<-- 200 { "Current device removed" } -------|
+    |                                            |
+    |-- POST /auth/logout ---------------------->|
+    |<-- 200 { message: "Logged out" } ----------|
+    |                                            |
+    |   (clear local tokens/state)               |
 ```
 
 ---
@@ -826,7 +894,8 @@ Mobile App                          NyxID Backend
 |--------|------|-------------|
 | `POST` | `/api/v1/notifications/devices` | Register or refresh a device token |
 | `GET` | `/api/v1/notifications/devices` | List registered devices |
-| `DELETE` | `/api/v1/notifications/devices/{device_id}` | Remove a device |
+| `DELETE` | `/api/v1/notifications/devices/current` | Remove this device by push token (logout) |
+| `DELETE` | `/api/v1/notifications/devices/{device_id}` | Remove a device by ID |
 
 ### Notification Settings
 
@@ -840,7 +909,8 @@ Mobile App                          NyxID Backend
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/approvals/requests` | List approval requests (filterable, paginated) |
-| `GET` | `/api/v1/approvals/requests/{id}/status` | Get approval request status |
+| `GET` | `/api/v1/approvals/requests/{id}` | Get an approval request's details |
+| `GET` | `/api/v1/approvals/requests/{id}/status` | Get approval request status (requester credential only) |
 | `POST` | `/api/v1/approvals/requests/{id}/decide` | Approve or reject a request |
 | `GET` | `/api/v1/approvals/grants` | List active approval grants |
 | `DELETE` | `/api/v1/approvals/grants/{grant_id}` | Revoke an approval grant |
