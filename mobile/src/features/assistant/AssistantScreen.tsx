@@ -507,6 +507,7 @@ export function AssistantScreen({
   const canCompose =
     !running &&
     !destroyed &&
+    !assistant.restricted &&
     assistant.online &&
     !assistant.loading &&
     !assistant.loadingOlder &&
@@ -532,6 +533,7 @@ export function AssistantScreen({
     disabled:
       !assistant.online ||
       !!destroyed ||
+      !!assistant.restricted ||
       assistant.loading ||
       assistant.recoveryRequired ||
       !!route?.params?.openLatest ||
@@ -1385,7 +1387,7 @@ export function AssistantScreen({
   }
 
   function renderAcknowledgement(row: AssistantAcknowledgement) {
-    if (row.status !== "pending") return null;
+    if (row.status !== "pending" || (assistant.agent?.owner_kind === "org" && assistant.agent.can_maintain === false && row.kind !== "action")) return null;
     return (
       <AssistantAcknowledgementCard
         key={row.id}
@@ -1455,6 +1457,14 @@ export function AssistantScreen({
     />
   ), [homeVisible, currentAgent, conversation, openPanelChat, createPanelAgent]);
 
+  if (assistant.restricted) return (
+    <WorkspacePage title={translateApp("Chat access is restricted.")}>
+      <ActionButton label={translateApp("Back to workspace")} onPress={() => navigation.setParams({
+        conversationId: undefined, agentId: undefined, acknowledgementId: undefined,
+        messageId: undefined, openLatest: false, draft: false, home: true,
+      })} />
+    </WorkspacePage>
+  );
   return (
     <WorkspacePage
       title={chatTitle}

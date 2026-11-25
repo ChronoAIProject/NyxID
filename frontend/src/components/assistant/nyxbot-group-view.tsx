@@ -754,10 +754,13 @@ export function NyxAgentGroupPage({
   const [recipientSelection, setRecipientSelection] =
     useState<RecipientSelection>(NO_RECIPIENT_EDITS);
   // Server names are authoritative; the inventory only fills older payloads.
-  const group =
+  const namedGroup =
     transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
     : undefined;
+  const restricted = new Set(agents.data?.agents.filter((agent) => agent.can_use === false).map((agent) => agent.id));
+  const group = namedGroup && { ...namedGroup, members: namedGroup.members.map((member) =>
+    restricted.has(member.id) ? { ...member, unavailable: true } : member) };
   const messages = (
     transcript.error ? [] : (transcript.data?.messages ?? [])
   ).map((message) =>
