@@ -22,7 +22,7 @@ const hot: LaunchSnapshot = {
   startup_kind: "hot",
   origin_source: "android_activity_started_after_background",
 };
-function fixture() {
+function fixture(androidActivityPause = false, sampled = true) {
   let epoch: number | null = 1;
   let initial: number | null = 1;
   let sampleCalls = 0;
@@ -30,6 +30,7 @@ function fixture() {
   let measure = async (_id: number): Promise<number | null> => 525;
   const events: LaunchTiming[] = [];
   const launch = createLaunchMonitor({
+    androidActivityPause,
     native: {
       getLaunchSnapshot: () => snapshot(),
       measureLaunchMilestone: (id) => measure(id),
@@ -37,7 +38,7 @@ function fixture() {
     current: () => epoch,
     begin: () => {
       sampleCalls++;
-      return epoch;
+      return sampled ? epoch : null;
     },
     coldGrant: async () => initial,
     submit: (_epoch, e) => events.push(e),
@@ -188,4 +189,65 @@ test("late snapshots, measurements and unsubscribed inputs cannot cross navigati
   await tick();
   assert.deepEqual(x.events, []);
   x.launch.reset();
+});
+
+test("Android temporary pause suspends an existing sample and resumes only the same active launch", async () => {
+  const x = fixture(true);
+  const delayed = deferred<number | null>();
+  x.launch.splash();
+  x.launch.shell("chat", true);
+  x.measure(() => delayed.promise);
+  x.launch.input({}, "chat_composer", () => true, async () => true);
+  x.launch.state("active");
+  await tick();
+  x.launch.state("background");
+  delayed.resolve(500);
+  await tick();
+  assert.equal(x.events.length, 2);
+  x.measure(async () => 580);
+  x.read(async () => ({ ...cold, continuation_only: true }));
+  x.launch.state("active");
+  await tick();
+  assert.deepEqual(x.events.map(e => e.milestone), ["app_active", "first_frame", "interaction_ready"]);
+  assert.equal(x.events[2].duration_ms, 580);
+  assert.equal(x.events[2].startup_kind, "cold");
+  assert.equal(x.calls(), 1);
+  x.launch.reset();
+});
+test("Android fresh activity start discards prior partial measurements and a permission resume cannot resample a hot launch", async () => {
+  const x = fixture(true);
+  x.launch.state("active");
+  await tick();
+  x.launch.state("background");
+  x.read(async () => hot);
+  x.launch.state("active");
+  await tick();
+  assert.deepEqual(x.events.map(e => e.startup_kind), ["cold", "cold", "hot", "hot"]);
+  x.launch.splash();
+  x.launch.shell("chat", true);
+  x.launch.input({}, "chat_composer", () => true, async () => true);
+  await tick();
+  assert.equal(x.events[4].startup_kind, "hot");
+  x.launch.state("background");
+  x.read(async () => ({ ...hot, continuation_only: true }));
+  x.launch.state("active");
+  await tick();
+  assert.equal(x.events.length, 5);
+  assert.equal(x.calls(), 2);
+  x.launch.reset();
+  const unsampled = fixture(true, false);
+  unsampled.launch.state("active");
+  await tick();
+  unsampled.launch.state("background");
+  unsampled.read(async () => hot);
+  unsampled.launch.state("active");
+  await tick();
+  assert.equal(unsampled.calls(), 2);
+  unsampled.launch.state("background");
+  unsampled.read(async () => ({ ...hot, continuation_only: true }));
+  unsampled.launch.state("active");
+  await tick();
+  assert.equal(unsampled.calls(), 2);
+  assert.deepEqual(unsampled.events, []);
+  unsampled.launch.reset();
 });

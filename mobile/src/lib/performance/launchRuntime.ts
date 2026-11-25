@@ -11,6 +11,7 @@ export type LaunchTiming = {
 export type LaunchSnapshot = {
   launch_id: number;
   startup_kind: LaunchKind;
+  continuation_only?: boolean;
   origin_source: string;
   app_active_ms?: number;
   active_source?: string;
@@ -54,6 +55,7 @@ const sources = {
 
 export function createLaunchMonitor(deps: {
   native: LaunchBridge | null;
+  androidActivityPause?: boolean;
   current: () => number | null;
   begin: () => number | null;
   coldGrant: () => Promise<number | null>;
@@ -65,6 +67,7 @@ export function createLaunchMonitor(deps: {
   let backgroundEpoch: number | null = null;
   let generation = 0;
   let cycle: Cycle | undefined;
+  let suspended: Cycle | undefined;
   let lastId = -1;
   let poll: ReturnType<typeof setTimeout> | undefined;
   let expiry: ReturnType<typeof setTimeout> | undefined;
@@ -90,6 +93,7 @@ export function createLaunchMonitor(deps: {
     clearTimeout(expiry);
     clearTimeout(inputRetry);
     cycle = undefined;
+    suspended = undefined;
   }
   function send(
     c: Cycle,
@@ -179,7 +183,9 @@ export function createLaunchMonitor(deps: {
       sources[c.kind].includes(snap.origin_source) &&
       Number.isSafeInteger(snap.launch_id) &&
       snap.launch_id >= 0 &&
-      (c.id === undefined ? snap.launch_id > lastId : c.id === snap.launch_id)
+      (c.id === undefined
+        ? !snap.continuation_only && snap.launch_id > lastId
+        : c.id === snap.launch_id)
     ) {
       c.id = snap.launch_id;
       lastId = c.id;
@@ -236,6 +242,36 @@ export function createLaunchMonitor(deps: {
     expiry = setTimeout(reset, 120000);
     void read(cycle);
   }
+  async function resumeAndroid(grant: number, gen: number, attempt = 0) {
+    const current = () =>
+      generation === gen && state === "active" && deps.current() === grant;
+    if (!current()) return;
+    const snapshot = await deps.native?.getLaunchSnapshot?.().catch(() => null);
+    if (!current()) return;
+    if (!snapshot) {
+      if (attempt < 20)
+        poll = setTimeout(() => void resumeAndroid(grant, gen, attempt + 1), 150);
+      return;
+    }
+    const previous = suspended;
+    suspended = undefined;
+    if (!snapshot.continuation_only) {
+      if (snapshot.startup_kind === "hot") start("hot", grant);
+      return;
+    }
+    // RN Android reports background on Activity.pause, including a short
+    // permission sheet. Only this native ID and its original sample can resume.
+    if (
+      !previous ||
+      previous.epoch !== grant ||
+      previous.id !== snapshot.launch_id ||
+      previous.kind !== snapshot.startup_kind
+    )
+      return;
+    cycle = { ...previous, readyPending: false };
+    expiry = setTimeout(reset, 120000);
+    void read(cycle);
+  }
   return {
     state(next: string | null) {
       if (next === state) return;
@@ -244,7 +280,9 @@ export function createLaunchMonitor(deps: {
         cold = false;
         background = true;
         backgroundEpoch = deps.current();
+        const previous = deps.androidActivityPause ? cycle ?? suspended : undefined;
         reset();
+        suspended = previous;
         return;
       }
       if (next !== "active") {
@@ -253,7 +291,16 @@ export function createLaunchMonitor(deps: {
       }
       if (background) {
         background = false;
-        start("hot", backgroundEpoch);
+        if (
+          deps.androidActivityPause &&
+          backgroundEpoch !== null &&
+          backgroundEpoch === deps.current() &&
+          deps.native?.getLaunchSnapshot
+        ) {
+          void resumeAndroid(backgroundEpoch, generation);
+        } else {
+          start("hot", backgroundEpoch);
+        }
       } else if (cold) {
         cold = false;
         const gen = generation;
@@ -266,7 +313,11 @@ export function createLaunchMonitor(deps: {
       }
     },
     consent() {
-      if (cycle && deps.current() !== cycle.epoch) reset();
+      if (
+        (cycle && deps.current() !== cycle.epoch) ||
+        (suspended && deps.current() !== suspended.epoch)
+      )
+        reset();
     },
     splash() {
       splashHidden = true;
@@ -275,9 +326,10 @@ export function createLaunchMonitor(deps: {
     shell(key: string | undefined, interactive: boolean) {
       route = key;
       clear = interactive;
-      if (cycle && key) {
-        if (cycle.route && key !== cycle.route) cycle.routeChanged = true;
-        cycle.route ??= key;
+      const launch = cycle ?? suspended;
+      if (launch && key) {
+        if (launch.route && key !== launch.route) launch.routeChanged = true;
+        launch.route ??= key;
       }
       ready();
     },

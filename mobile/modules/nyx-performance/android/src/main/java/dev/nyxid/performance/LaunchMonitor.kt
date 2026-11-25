@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.MessageQueue
 import android.os.Process
 import android.os.SystemClock
 import android.view.FrameMetrics
@@ -20,6 +21,7 @@ internal object LaunchMonitor {
   private var application: Application? = null
   private var binding: String? = null
   private var registered = false
+  private var bootstrapIdle: MessageQueue.IdleHandler? = null
   private val startedActivities = mutableSetOf<Activity>()
   private var observedWindow: Window? = null
   private var observedListener: Window.OnFrameMetricsAvailableListener? = null
@@ -35,7 +37,16 @@ internal object LaunchMonitor {
       val metadata = app.packageManager.getApplicationInfo(app.packageName, PackageManager.GET_META_DATA).metaData
       (metadata?.get(BINDING_META) as? String)?.takeIf { it.matches(Regex("^[a-f0-9]{64}$")) }
     }.getOrNull()
-    if (binding != null && preferences().getString("binding", null) == binding) register()
+    if (binding != null && preferences().getString("binding", null) == binding) {
+      register()
+      val idle = MessageQueue.IdleHandler {
+        if (allowed()) state.bootstrapIdle()
+        bootstrapIdle = null
+        false
+      }
+      bootstrapIdle = idle
+      Looper.myQueue().addIdleHandler(idle)
+    }
   }
   private fun register() {
     if (!registered) { registered = true; application!!.registerActivityLifecycleCallbacks(callbacks) }
@@ -44,7 +55,7 @@ internal object LaunchMonitor {
     val approved = value != null && value == binding
     if (approved && allowed()) return
     // Unregister and invalidate before a durable revoke or a new grant is written.
-    detachFrame(); state.seed(null); startedActivities.clear()
+    detachFrame(); clearBootstrapIdle(); state.seed(null); startedActivities.clear()
     if (registered) application!!.unregisterActivityLifecycleCallbacks(callbacks)
     registered = false
     // commit() can update SharedPreferences' memory even when its disk write
@@ -69,6 +80,10 @@ internal object LaunchMonitor {
     if (listener != null) observedWindow?.removeOnFrameMetricsAvailableListener(listener)
     observedWindow = null; observedListener = null
   }
+  private fun clearBootstrapIdle() {
+    bootstrapIdle?.let { Looper.myQueue().removeIdleHandler(it) }
+    bootstrapIdle = null
+  }
   private fun attachFrame(activity: Activity) {
     detachFrame()
     if (!allowed() || !state.hasLaunch()) return
@@ -89,7 +104,7 @@ internal object LaunchMonitor {
   }
   fun snapshot(): Map<String, Any>? = if (allowed()) state.snapshot() else null
   fun milestone(id: Long): Double? = if (allowed()) state.milestone(id) else null
-  fun invalidate() { detachFrame(); state.invalidate() }
+  fun invalidate() { detachFrame(); clearBootstrapIdle(); state.invalidate() }
   private val callbacks = object : Application.ActivityLifecycleCallbacks {
     override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
       if (activity.componentName.className == application!!.packageName + ".MainActivity") state.created(activity)

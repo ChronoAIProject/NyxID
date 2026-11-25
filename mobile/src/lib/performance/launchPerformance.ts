@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AppState,
+  Platform,
   Dimensions,
   type TextInput,
   type LayoutChangeEvent,
@@ -17,6 +18,7 @@ import {
 
 const launch = createLaunchMonitor({
   native: nativePerformance,
+  androidActivityPause: Platform.OS === "android",
   current: getPerformanceConsentEpoch,
   begin: beginPerformanceSample,
   coldGrant: getPerformanceColdGrant,

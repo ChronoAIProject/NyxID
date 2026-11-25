@@ -69,7 +69,7 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 | 看板 | 起点到终点 | 读数边界 |
 |---|---|---|
-| 冷启动与热启动 | Android 冷启动从系统的进程启动时点计，热启动从同一 Activity 经后台重新进入 started 状态计，到 Activity 恢复。iOS 冷启动从 didFinishLaunching 计，热启动从 willEnterForeground 计，到 didBecomeActive。 | iOS 冷启动读数从回调开始，系统加载和 pre-main 用 Instruments 单独核验。权限弹窗后的重新激活不构成一次热启动。 |
+| 冷启动与热启动 | Android 冷启动从系统的进程启动时点计，热启动从同一 Activity 经后台重新进入 started 状态计，到 Activity 恢复。iOS 冷启动从 didFinishLaunching 计，热启动从 willEnterForeground 计，到 didBecomeActive。 | iOS 冷启动读数从回调开始，系统加载和 pre-main 用 Instruments 单独核验。Android 排除主线程已经空闲才创建首个 Activity 的预启动进程。同一 Activity 的短暂失焦可继续原有观测，只有真正退到后台再返回才开启一轮热启动。 |
 | 首帧展示 | 从同一次启动的起点计到应用窗口的第一个可观测帧。Android 用窗口帧指标回调；iOS 用窗口提交后的一次显示节奏回调估算。 | 这是客户端可观测的显示时点；屏幕上是否有业务内容、物理像素哪一刻点亮，可对照系统轨迹或录像。 |
 | 关键交互可用 | 从同一起点计到当前路由无遮挡、已启用的登录邮箱输入框或聊天输入框布局完成并通过就绪检查。 | 每个启动最多一个目标。无对应输入框的页面没有该样本。测试时应实际点击控件并输入字符，检查其在同一页面响应；人的思考或打字等待时间不计入线上耗时。 |
 

@@ -2,7 +2,7 @@ package dev.nyxid.performance
 
 /** Native process-local launch state. Tokens and launch IDs never leave the bridge. */
 internal class LaunchState(private val now: () -> Double, private val processOrigin: () -> Double) {
-  private data class Launch(val id: Long, val kind: String, val origin: Double, var active: Double? = null, var frame: Double? = null)
+  private data class Launch(val id: Long, val kind: String, val origin: Double, var active: Double? = null, var frame: Double? = null, var continuation: Boolean = false)
   private var activity: Any? = null
   private var observedActivity = false
   private var stopped = false
@@ -12,6 +12,11 @@ internal class LaunchState(private val now: () -> Double, private val processOri
 
   fun seed(token: Any?) {
     activity = token; observedActivity = true; stopped = false; active = false; launch = null
+  }
+  fun bootstrapIdle() {
+    // The native process completed a message-loop idle with no activity. Its
+    // later first UI is prewarmed and must not use process birth as cold time.
+    if (activity == null) observedActivity = true
   }
   fun created(token: Any) {
     if (activity === token) return
@@ -30,7 +35,7 @@ internal class LaunchState(private val now: () -> Double, private val processOri
     launch?.let { if (it.active == null) it.active = elapsed(it.origin) }
   }
   fun paused(token: Any) {
-    if (activity === token) { active = false; launch = null }
+    if (activity === token) { active = false; launch?.continuation = true }
   }
   fun stopped(token: Any, mayReturn: Boolean) {
     // A grant can hydrate before React exposes currentActivity. The first real
@@ -59,6 +64,7 @@ internal class LaunchState(private val now: () -> Double, private val processOri
     return buildMap {
       put("launch_id", current.id)
       put("startup_kind", current.kind)
+      if (current.continuation) put("continuation_only", true)
       put("origin_source", if (current.kind == "cold") "android_process_uptime" else "android_activity_started_after_background")
       current.active?.let { put("app_active_ms", it); put("active_source", "android_activity_resumed") }
       current.frame?.let { put("first_frame_ms", it); put("first_frame_source", "android_window_frame_metrics_callback") }

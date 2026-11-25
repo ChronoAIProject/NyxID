@@ -14,6 +14,7 @@ test("login input readiness requires an enabled, laid-out current native node in
     {
       "react-native": {
         AppState: { currentState: "active" },
+        Platform: { OS: "ios" },
         Dimensions: { get: () => ({ width: 390, height: 844 }) },
       },
       "./nativePerformance": { nativePerformance: null },
