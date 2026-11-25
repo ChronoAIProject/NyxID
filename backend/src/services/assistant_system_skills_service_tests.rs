@@ -2210,6 +2210,7 @@ async fn flag_lookup_failure_preserves_runtime_availability_without_guidance() {
         "reply",
         &mut String::new(),
         &mut context,
+        None,
     ))
     .await;
     let result = match result {
@@ -2287,6 +2288,7 @@ async fn malformed_platform_configuration_fails_runtime_preparation_before_egres
         "reply",
         &mut String::new(),
         &mut None,
+        None,
     ))
     .await;
     let error = match result {
