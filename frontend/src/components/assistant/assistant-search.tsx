@@ -153,7 +153,9 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
 
   const agentList = (agents.data?.agents ?? []).filter((agent) => agent.status !== "destroyed");
   const agentNames = new Map(agentList.map((agent) => [agent.id, agentTitle(agent)]));
+  const restricted = new Set(agentList.filter((agent) => agent.can_use === false).map((agent) => agent.id));
   const chats: Entry[] = (recent.data ?? [])
+    .filter((chat) => !chat.agent || !restricted.has(chat.agent.id))
     .slice(0, typing ? RECENT_LIMIT : RECENT_PREVIEW)
     .map((chat) => ({
       id: `chat:${chat.id}`,
@@ -171,7 +173,7 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
           icon: Bot,
           hint: agent.kind === "nyxbot" ? "NyxBot" : "Specialist",
           keywords: [agent.name, "agent"],
-          run: () => go("/assistant", { agent: agent.id }),
+          run: () => go("/assistant", agent.can_use === false ? { agent: agent.id, details: "overview" } : { agent: agent.id }),
         })),
         ...(groups.data ?? []).map((group) => ({
           id: `group:${group.id}`,

@@ -49,7 +49,8 @@ export function AssistantThreadList({
   if (!agent) return null;
   const name = agentTitle(agent);
   const search = query.trim().toLocaleLowerCase();
-  const filtered = model.threads.filter((thread) =>
+  const availableThreads = agent.can_use === false ? [] : model.threads;
+  const filtered = availableThreads.filter((thread) =>
     [thread.title, conversationDisplayTitle(thread), thread.channel?.chat_title, thread.channel?.parent_title,
       thread.channel?.bot_label, thread.channel ? channelPlatformName(thread.channel.platform) : undefined,
       thread.channel ? channelSourceTitle(thread.channel) : undefined, thread.platform_thread?.platform]
@@ -82,7 +83,7 @@ export function AssistantThreadList({
           <div className="min-w-0 flex-1">
             <h2 className="truncate type-card-title text-foreground">{name}</h2>
             <p className="mt-0.5 text-12 text-text-tertiary">
-              {translateUi("{{count}} threads", { count: model.threads.length })}
+              {translateUi("{{count}} threads", { count: availableThreads.length })}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -143,7 +144,7 @@ export function AssistantThreadList({
         {!filtered.length ? (
           <div role="status" className="flex flex-col items-center gap-3 px-4 py-10 text-center text-13 text-text-tertiary">
             <MessageSquare aria-hidden="true" className="h-6 w-6 opacity-50" />
-            <p>{model.threadsLoading ? translateUi("Loading threads...")
+            <p>{agent.can_use === false ? translateUi("Chat access is restricted.") : model.threadsLoading ? translateUi("Loading threads...")
               : search ? translateUi("No matching threads") : translateUi("No threads yet")}</p>
           </div>
         ) : null}
