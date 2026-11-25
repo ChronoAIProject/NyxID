@@ -110,12 +110,15 @@ impl Payload {
         }
         self.lifecycle(if failed { "failed" } else { "completed" });
     }
-    pub async fn seal(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+    pub(crate) fn encoded(&self) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(self).map_err(|_| unavailable())?);
         if bytes.len() > MAX_PAYLOAD_BYTES {
             return Err(unavailable());
         }
-        keys.encrypt(&bytes).await
+        Ok(bytes)
+    }
+    pub async fn seal(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+        keys.encrypt(&self.encoded()?).await
     }
 }
 pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<Payload> {
@@ -142,7 +145,7 @@ pub(crate) async fn event_reply(
     response_id: &str,
     reply: &ReplyPayload,
 ) -> AppResult<Payload> {
-    let field = ["response_reply.ciphertext", &channel.id, response_id];
+    let field = [super::nyxbot_event_record::REPLY, &channel.id, response_id];
     let context = RecordContext::new(EVENTS, event_id, &channel.user_id, &field)?;
     open_payload(keys, &context, reply.context_version, &reply.ciphertext).await
 }
@@ -154,10 +157,14 @@ async fn open_payload(
     ciphertext: &[u8],
 ) -> AppResult<Payload> {
     let bytes = record_field::decrypt_context(keys, context, version, ciphertext).await?;
+    decode(&bytes)
+}
+
+pub(super) fn decode(bytes: &[u8]) -> AppResult<Payload> {
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(unavailable());
     }
-    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    serde_json::from_slice(bytes).map_err(|_| unavailable())
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     super::nyxbot_response_read::ensure_indexes(db).await?;
@@ -243,7 +250,9 @@ pub async fn load(
 fn replace_payload(fields: Document) -> Document {
     doc! {
         "$set": fields,
-        "$unset": {"payload_context_version": ""},
+        "$unset": {
+            "payload_context_version": "",
+        },
         "$inc": {"revision": 1_i64},
     }
 }

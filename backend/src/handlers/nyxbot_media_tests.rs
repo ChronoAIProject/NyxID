@@ -616,6 +616,24 @@ async fn channel_media_gateway_concurrent_duplicates_claim_once_and_keep_same_id
     );
     assert!(saved.turn_id.is_some());
     assert_eq!((saved.expires_at - saved.created_at).num_days(), 7);
+    assert_eq!(saved.event_context_version, Some(3));
+    let context = event_record::event_context(
+        &state.encryption_keys,
+        &saved,
+        saved.event_context_ciphertext.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    let winner = if saved.event_id == "delivery-a" {
+        &a
+    } else {
+        &b
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&context).unwrap(),
+        winner["event_context"]
+    );
+
     let media = saved.media.as_ref().unwrap();
     assert_eq!(
         media.key,

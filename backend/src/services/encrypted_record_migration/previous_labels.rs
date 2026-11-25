@@ -270,3 +270,8 @@ pub(super) fn event_reply_draft() -> impl Iterator<Item = super::FieldLabels> {
         }
     })
 }
+
+pub(super) const EVENT_REPLY_DIGEST: &str =
+    "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
+pub(super) const META_ASSETS: super::FieldLabels =
+    ("channel_meta_oauth_sessions", &["assets_encrypted"]);

@@ -7644,14 +7644,21 @@ pub(crate) async fn delete_with_retirement_in_session(
         db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
             .update_many(doc!{"user_id":user_id,"conversation_id":id,"delivery.execution_source_bound":true},
                 doc!{"$set":{"delivery.execution_source_bound":false},"$unset":{
-                    "event_context_ciphertext":"","delivery.target_ciphertext":"","delivery.target_expires_at":""
+                    "event_context_ciphertext": "",
+                    "event_context_version": "",
+                    "delivery.target_ciphertext": "",
+                    "delivery.target_context_version": "",
+                    "delivery.target_expires_at": "",
                 }})
             .session(&mut *session).await?;
         // Pending guest input has not yet been bound to a turn.
         // Revoke its resumability with the conversation, preserving dedup metadata.
         db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
             .update_many(doc!{"user_id":user_id,"guest_setup_conversation_id":id,"turn_id":bson::Bson::Null},
-                doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}})
+                doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset": {
+                    "guest_setup_payload": "",
+                    "guest_setup_context_version": "",
+                }})
             .session(&mut *session).await?;
         db.collection::<bson::Document>(CHECKPOINTS)
             .delete_one(doc! {"_id": id, "user_id": user_id})

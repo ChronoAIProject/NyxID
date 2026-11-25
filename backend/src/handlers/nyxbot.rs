@@ -16,6 +16,7 @@ use crate::services::assistant_links::AssistantPage;
 use crate::services::channel_inbound_diagnostics::{self as x_diagnostics, Outcome as XOutcome};
 use crate::services::nyxbot_channel_key as channel_key;
 use crate::services::nyxbot_dispatch_identity as dispatch_identity;
+use crate::services::nyxbot_event_record as event_record;
 use crate::services::nyxbot_gateway_release_service as releases;
 use crate::services::org_channel_service::OrgAccess;
 use axum::{
@@ -5238,7 +5239,15 @@ async fn custom_responses(
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
     let ciphertext = match serde_json::to_vec(context) {
-        Ok(bytes) => match state.encryption_keys.encrypt(&bytes).await {
+        Ok(bytes) => match event_record::seal(
+            &state.encryption_keys,
+            &event_key,
+            &binding.user_id,
+            &[event_record::CONTEXT, &destination.id],
+            &Zeroizing::new(bytes),
+        )
+        .await
+        {
             Ok(ciphertext) => ciphertext,
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         },
@@ -5262,7 +5271,7 @@ async fn custom_responses(
         event_id: event_id.to_owned(),
         relay_message_id: None,
         custom_binding_id: Some(binding.id.clone()),
-        event_context_version: None,
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: request["conversation"].as_str().map(str::to_owned),
@@ -5376,7 +5385,10 @@ async fn custom_responses(
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
                     doc! {"_id": &event_key},
-                    doc! {"$set": {"status": "refused"}, "$unset": {"event_context_ciphertext": ""}},
+                    doc! {"$set": {"status": "refused"}, "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }},
                 )
                 .await;
             response_sse(
@@ -5392,7 +5404,10 @@ async fn custom_responses(
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
                     doc! {"_id": &event_key},
-                    doc! {"$set": {"status": "refused"}, "$unset": {"event_context_ciphertext": ""}},
+                    doc! {"$set": {"status": "refused"}, "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }},
                 )
                 .await;
             response_sse(
@@ -5608,7 +5623,15 @@ async fn responses_with_producers_impl(
         dispatch_identity::dispatch_key(&row.id, idempotency)
     };
     let ciphertext = match serde_json::to_vec(context) {
-        Ok(bytes) => match state.encryption_keys.encrypt(&bytes).await {
+        Ok(bytes) => match event_record::seal(
+            &state.encryption_keys,
+            &event_key,
+            &row.user_id,
+            &[event_record::CONTEXT, &row.id],
+            &Zeroizing::new(bytes),
+        )
+        .await
+        {
             Ok(ciphertext) => ciphertext,
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         },
@@ -5704,7 +5727,7 @@ async fn responses_with_producers_impl(
         relay_message_id: (activity["source"]["type"] == json!("nyxid_relay"))
             .then(|| event_id.clone()),
         custom_binding_id: None,
-        event_context_version: None,
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: None,
@@ -6033,7 +6056,10 @@ async fn dispatch_relay_response(
                 .update_one(
                     unaccepted_provider_event(&event_key),
                     doc! {"$set": {"status": status, "conversation_id": conversation},
-                    "$unset": {"event_context_ciphertext": ""}},
+                    "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }},
                 )
                 .await;
         }
@@ -6164,7 +6190,10 @@ async fn discard_failed_provider_event(db: &mongodb::Database, event: &str) {
     let _ = events
         .update_one(
             fail,
-            doc! {"$set": {"status": "failed"}, "$unset": {"event_context_ciphertext": ""}},
+            doc! {"$set": {"status": "failed"}, "$unset": {
+                "event_context_ciphertext": "",
+                "event_context_version": "",
+            }},
         )
         .await;
 }

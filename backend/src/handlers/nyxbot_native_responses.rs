@@ -159,15 +159,18 @@ async fn accept(
         event_id: event_id.into(),
         relay_message_id: None,
         custom_binding_id: None,
-        event_context_version: None,
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(
-            state
-                .encryption_keys
-                .encrypt(
-                    &serde_json::to_vec(context)
-                        .map_err(|_| AppError::OAuthAuthorityUnavailable)?,
-                )
-                .await?,
+            event_record::seal(
+                &state.encryption_keys,
+                &event_key,
+                &row.user_id,
+                &[event_record::CONTEXT, &row.id],
+                &Zeroizing::new(
+                    serde_json::to_vec(context).map_err(|_| AppError::OAuthAuthorityUnavailable)?,
+                ),
+            )
+            .await?,
         ),
         status: if notification {
             "silent"

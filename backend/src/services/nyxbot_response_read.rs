@@ -208,7 +208,10 @@ pub(crate) fn record_reply<'a>(
             "status":{"$in":["running","resuming"]},
         };
         let Some((kind, selected, text)) = notice else {
-            let update = doc! {"$set": fields, "$unset": {"event_context_ciphertext": ""}};
+            let update = doc! {"$set": fields, "$unset": {
+                "event_context_ciphertext": "",
+                "event_context_version": "",
+            }};
             let changed = db
                 .collection::<Document>(EVENTS)
                 .update_one(filter, update)
@@ -272,7 +275,7 @@ pub(crate) fn record_reply<'a>(
                             filter.clone(),
                             vec![
                                 doc! {"$set":set.clone()},
-                                doc! {"$unset":"event_context_ciphertext"},
+                                doc! {"$unset":["event_context_ciphertext","event_context_version"]},
                             ],
                         )
                         .session(&mut *tx)

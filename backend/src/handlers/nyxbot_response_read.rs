@@ -196,8 +196,15 @@ pub(super) async fn reply(
     let reply = ReplyPayload {
         version: 1,
         response_id: id.clone(),
-        context_version: None,
-        ciphertext: payload.seal(&state.encryption_keys).await?,
+        context_version: event_record::version(&state.encryption_keys),
+        ciphertext: event_record::seal(
+            &state.encryption_keys,
+            &event,
+            &row.user_id,
+            &[event_record::REPLY, &row.id, &id],
+            &payload.encoded()?,
+        )
+        .await?,
     };
     let reply = bson::to_bson(&reply)
         .map_err(|_| AppError::Internal("Response reply unavailable".into()))?;
