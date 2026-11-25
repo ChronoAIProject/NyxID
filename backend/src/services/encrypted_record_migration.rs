@@ -1342,6 +1342,13 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         // error, never an exemption based solely on its byte length.
         let exempt = no_material
             && match entry.adapter {
+                Adapter::Pending
+                    if entry.collection == crate::models::approval_request::COLLECTION_NAME =>
+                {
+                    super::execution_permission_dispatch::proposals::record::no_retained_material(
+                        row,
+                    )
+                }
                 Adapter::Pending => true,
                 Adapter::Capability => {
                     row.get("capability_encrypted")

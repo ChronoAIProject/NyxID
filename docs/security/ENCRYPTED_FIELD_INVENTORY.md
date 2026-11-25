@@ -117,7 +117,9 @@ source document and preserves terminal body sentinels and publication leases.
   [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
 - Assistant recovery retains the encrypted input on the
   active turn’s restart window. Approval requests retain encrypted payloads
-  and results under the selected proposal version.
+  and results under the selected proposal version. Approval readers bind marked fields
+  to the request, user, version arm and field. Writers use the historical AAD in
+  both positions of the record-write switch.
   [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
@@ -191,7 +193,8 @@ version-map validation and exact-source migration stay in services.
   replies authenticate the binding digest bytes as AES AAD.
   [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
 - Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
-  Execution proposals use request-specific AAD and a distinct result suffix.
+  Execution proposals v1, v3 and v4 use `execution-proposal:v1:{id}`. V2 uses
+  `execution-proposal:v2:{id}`. Each result appends `:result`.
   The assistant reattach window authenticates the serialized tuple of domain,
   user, conversation, credential ID and window key. These services own the
   encoding of their historical AAD.
