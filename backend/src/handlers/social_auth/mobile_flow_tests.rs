@@ -47,7 +47,8 @@ async fn cancel(state: &AppState, provider: &str, csrf: &str, headers: HeaderMap
         headers,
     )
     .await
-    .unwrap_err();
+    .unwrap_err()
+    .into_response();
     response.headers()[header::LOCATION]
         .to_str()
         .unwrap()
@@ -176,7 +177,8 @@ async fn apple_form_post_requires_state_started_for_apple() {
         axum::Form(form),
     )
     .await
-    .unwrap_err();
+    .unwrap_err()
+    .into_response();
     assert!(
         response.headers()[header::LOCATION]
             .to_str()

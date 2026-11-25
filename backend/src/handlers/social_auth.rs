@@ -316,7 +316,7 @@ pub async fn callback(
     Path(provider_name): Path<String>,
     Query(params): Query<CallbackQuery>,
     headers: HeaderMap,
-) -> Result<(StatusCode, HeaderMap, ()), axum::response::Response> {
+) -> Result<(StatusCode, HeaderMap, ()), CallbackError> {
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
 
@@ -328,7 +328,7 @@ pub async fn callback(
         params.state.as_deref(),
     )
     .await
-    .map_err(IntoResponse::into_response)?;
+    .map_err(CallbackError::from_response)?;
 
     // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
@@ -458,7 +458,7 @@ pub async fn callback(
     };
 
     let signup = super::login_client_context::public_signup_admission(&headers, Some(peer), &state)
-        .map_err(IntoResponse::into_response)?;
+        .map_err(CallbackError::from_response)?;
     let create_outcome = social_auth_service::find_or_create_public_user(
         &state.db,
         &profile,
@@ -480,12 +480,12 @@ pub async fn callback(
         if matches!(e, AppError::RateLimited) {
             let mut response = e.into_response();
             let cleanup = callback_error(&redirect_target, "rate_limited", secure, domain);
-            for cookie in cleanup.headers().get_all(header::SET_COOKIE) {
+            for cookie in cleanup.0.headers().get_all(header::SET_COOKIE) {
                 response
                     .headers_mut()
                     .append(header::SET_COOKIE, cookie.clone());
             }
-            return response;
+            return CallbackError::from_response(response);
         }
         let error_key = match &e {
             AppError::SocialAuthConflict => "social_auth_conflict",
@@ -607,7 +607,7 @@ pub async fn callback(
         tele_social: &tele_social,
     })
     .await
-    .map_err(IntoResponse::into_response)
+    .map_err(CallbackError::from_response)
 }
 
 // --- Apple POST callback (response_mode=form_post) ---
@@ -652,7 +652,7 @@ pub async fn apple_callback(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     axum::Form(form): axum::Form<AppleCallbackForm>,
-) -> Result<(StatusCode, HeaderMap, ()), axum::response::Response> {
+) -> Result<(StatusCode, HeaderMap, ()), CallbackError> {
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let (redirect_target, mobile_nonce_hash) = callback_target(
@@ -663,7 +663,7 @@ pub async fn apple_callback(
         form.state.as_deref(),
     )
     .await
-    .map_err(IntoResponse::into_response)?;
+    .map_err(CallbackError::from_response)?;
 
     if form.error.is_some() {
         return Err(callback_error(
@@ -812,7 +812,7 @@ pub async fn apple_callback(
     };
 
     let signup = super::login_client_context::public_signup_admission(&headers, Some(peer), &state)
-        .map_err(IntoResponse::into_response)?;
+        .map_err(CallbackError::from_response)?;
     let create_outcome = social_auth_service::find_or_create_public_user(
         &state.db,
         &profile,
@@ -833,12 +833,12 @@ pub async fn apple_callback(
         if matches!(e, AppError::RateLimited) {
             let mut response = e.into_response();
             let cleanup = callback_error(&redirect_target, "rate_limited", secure, domain);
-            for cookie in cleanup.headers().get_all(header::SET_COOKIE) {
+            for cookie in cleanup.0.headers().get_all(header::SET_COOKIE) {
                 response
                     .headers_mut()
                     .append(header::SET_COOKIE, cookie.clone());
             }
-            return response;
+            return CallbackError::from_response(response);
         }
         let error_key = match &e {
             AppError::SocialAuthConflict => "social_auth_conflict",
@@ -958,7 +958,7 @@ pub async fn apple_callback(
         tele_social: &tele_social,
     })
     .await
-    .map_err(IntoResponse::into_response)
+    .map_err(CallbackError::from_response)
 }
 
 /// Both GET callbacks and Apple's form_post cross this same verified-identity
@@ -1449,13 +1449,27 @@ fn build_success_redirect_url(
 }
 
 /// Build an error redirect response that clears social flow cookies.
+pub struct CallbackError(Box<Response>);
+
+impl CallbackError {
+    fn from_response(response: impl IntoResponse) -> Self {
+        Self(Box::new(response.into_response()))
+    }
+}
+
+impl IntoResponse for CallbackError {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 fn callback_error(
     target: &SocialRedirectTarget,
     error: &str,
     secure: bool,
     domain: Option<&str>,
-) -> Response {
-    redirect_with_error(target, error, secure, domain).into_response()
+) -> CallbackError {
+    CallbackError::from_response(redirect_with_error(target, error, secure, domain))
 }
 
 fn redirect_with_error(
