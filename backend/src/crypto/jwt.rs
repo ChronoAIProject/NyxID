@@ -1527,6 +1527,7 @@ mod tests {
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
+            github_oauth_scope_response_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             chrono_probe_url: None,
             invocation_diagnostics_enabled: false,

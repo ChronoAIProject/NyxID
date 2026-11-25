@@ -47,6 +47,7 @@ use crate::services::{
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 use crate::turn_trace::{GuestServiceFailure, Stage};
 
+mod github_scope;
 #[path = "proxy_ingress.rs"]
 pub(crate) mod ingress;
 
@@ -7990,6 +7991,13 @@ async fn execute_resolved_proxy_inner<'a>(
             }
 
             let mut response_builder = Response::builder().status(status);
+            let github_snapshot = (state.config.github_oauth_scope_response_enabled
+                && github_scope::verified_route(
+                    target.catalog_slug.as_deref(),
+                    target.auth_method == "bearer",
+                    downstream_response.url(),
+                ))
+            .then(|| downstream_response.url().clone());
 
             // Forward only allowlisted response headers.
             // Skip content-length for SSE (length unknown). Keep it for other
@@ -7998,13 +8006,18 @@ async fn execute_resolved_proxy_inner<'a>(
                 let name_lower = name.as_str().to_lowercase();
                 if let Ok(header_name) =
                     axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                    && let Some(header_value) = forwarded_response_header_value(
-                        status,
-                        &name_lower,
-                        value.as_bytes(),
-                        is_sse,
-                        location_context.as_ref(),
-                    )
+                    && let Some(header_value) =
+                        if github_snapshot.is_some() && github_scope::forward_header(&name_lower) {
+                            Some(value.clone())
+                        } else {
+                            forwarded_response_header_value(
+                                status,
+                                &name_lower,
+                                value.as_bytes(),
+                                is_sse,
+                                location_context.as_ref(),
+                            )
+                        }
                 {
                     response_builder = response_builder.header(header_name, header_value);
                 }
@@ -8031,6 +8044,22 @@ async fn execute_resolved_proxy_inner<'a>(
                 downstream_response,
             )
             .await?;
+
+            if !should_stream
+                && target.connection_id.is_some()
+                && let Some(ref destination) = github_snapshot
+                && destination.path().trim_start_matches('/') == path.trim_start_matches('/')
+                && let Some(service_id) = resolved_user_service_id.as_deref()
+            {
+                response = github_scope::write_scope_refusal(
+                    response,
+                    &method,
+                    destination,
+                    &state.config.frontend_url,
+                    service_id,
+                )
+                .await;
+            }
 
             // Audit log the proxy request
             audit_service::log_for_user(

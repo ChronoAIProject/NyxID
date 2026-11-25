@@ -324,6 +324,8 @@ pub struct AppConfig {
     pub auth_device_eight_char_codes: bool,
     /// Opt-in request-bound read identity proofs for registered resource servers.
     pub resource_request_proof_enabled: bool,
+    /// Relay authoritative GitHub OAuth metadata and typed write refusals.
+    pub github_oauth_scope_response_enabled: bool,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
     /// Additional origins trusted for browser CSRF (comma-separated).
@@ -1376,6 +1378,7 @@ impl AppConfig {
             base_url,
             chrono_probe_url: env::var("CHRONO_PROBE_URL").ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
             invocation_diagnostics_enabled: parse_bool_env("INVOCATION_DIAGNOSTICS_ENABLED", false),
+            github_oauth_scope_response_enabled: parse_bool_env("NYXID_GITHUB_OAUTH_SCOPE_RESPONSE_ENABLED", false),
             domain_aliases: domain_aliases::DomainAliases::from_env(),
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
@@ -2291,6 +2294,7 @@ mod tests {
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
+            github_oauth_scope_response_enabled: false,
             base_url: base_url.to_string(),
             chrono_probe_url: None,
             invocation_diagnostics_enabled: false,

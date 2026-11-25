@@ -128,6 +128,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
+            github_oauth_scope_response_enabled: false,
             base_url: "https://auth.example.com".to_string(),
             chrono_probe_url: None,
             invocation_diagnostics_enabled: false,
