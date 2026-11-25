@@ -28,6 +28,7 @@ type Sources = {
     addEventListener(name: "change", listener: () => void): Subscription;
   };
   windowHeight: () => number;
+  androidContentBottom?: () => number | null;
   afterLayout: (callback: () => void) => number;
   cancelLayout: (id: number) => void;
   onFrame: (frame: KeyboardFrame | undefined, event?: FrameEvent) => void;
@@ -43,6 +44,7 @@ export function observeKeyboardFrames({
   appState,
   dimensions,
   windowHeight,
+  androidContentBottom,
   afterLayout,
   cancelLayout,
   onFrame,
@@ -59,13 +61,15 @@ export function observeKeyboardFrames({
     latest = frame;
     onFrame(frame, event);
   };
+  const visibleFrame = (frame: KeyboardFrame | undefined) =>
+    visibleKeyboardFrame(frame, windowHeight(), frame && androidContentBottom?.());
   const sync = (keepAcceptedFrame = false) => {
     const accepted = keepAcceptedFrame && platform === "ios" && authoritative;
     const frame = tracking
       ? accepted
         ? latest
         : keyboard.isVisible()
-          ? visibleKeyboardFrame(keyboard.metrics(), windowHeight())
+          ? visibleFrame(keyboard.metrics())
           : undefined
       : undefined;
     authoritative = platform === "ios" && (accepted || !!frame);
@@ -96,7 +100,7 @@ export function observeKeyboardFrames({
     )
       return;
     const frame =
-      raw.height === 0 && will ? raw : visibleKeyboardFrame(raw, height);
+      raw.height === 0 && will ? raw : visibleFrame(raw);
     if (platform === "ios") {
       if (will && frame) willFrames.push(frame);
       else if (
