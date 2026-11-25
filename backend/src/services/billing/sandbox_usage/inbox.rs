@@ -4,8 +4,8 @@ use super::inbox_cursor::{self, CursorPage};
 use super::inbox_facts;
 use super::inbox_promotion::promote_stream;
 use crate::models::sandbox_usage_inbox::{
-    AcceptedSequence, EFFECTIVE_FACTS, EVENTS, Event as StoredEvent, PRODUCERS, Producer, STREAMS,
-    Stream, Validation,
+    AcceptedSequence, EFFECTIVE_FACTS, EVENTS, Event as StoredEvent, OWNER_PINS, PRODUCERS,
+    Producer, STREAMS, Stream, Validation,
 };
 use bson::{Binary, Document, doc, spec::BinarySubtype};
 use chrono::{DateTime, Utc};
@@ -50,7 +50,7 @@ pub struct ReceiptObservation {
     pub validation_reason: Option<String>,
 }
 
-fn index_definitions() -> [(&'static str, Vec<(Document, bool)>); 4] {
+fn index_definitions() -> [(&'static str, Vec<(Document, bool)>); 5] {
     [
         (PRODUCERS, vec![(doc! {"namespace":1}, true)]),
         (
@@ -82,6 +82,13 @@ fn index_definitions() -> [(&'static str, Vec<(Document, bool)>); 4] {
                     false,
                 ),
                 (doc! {"owner_subject":1}, false),
+            ],
+        ),
+        (
+            OWNER_PINS,
+            vec![
+                (doc! {"namespace":1,"sandbox_id":1,"source_epoch":1}, true),
+                (doc! {"owner_id":1}, false),
             ],
         ),
     ]

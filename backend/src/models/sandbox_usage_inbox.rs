@@ -6,6 +6,7 @@ pub const PRODUCERS: &str = "sandbox_usage_producers_v1";
 pub const EVENTS: &str = "sandbox_usage_events_v1";
 pub const STREAMS: &str = "sandbox_usage_streams_v1";
 pub const EFFECTIVE_FACTS: &str = "sandbox_usage_effective_facts_v1";
+pub const OWNER_PINS: &str = "sandbox_usage_owner_pins_v1";
 
 #[derive(Deserialize, Serialize)]
 pub struct Producer {
@@ -91,4 +92,18 @@ pub struct EffectiveFact {
     pub runtime_generation: Option<i64>,
     pub home_id: Option<String>,
     pub home_generation: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HistoricalOwner {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub namespace: String,
+    pub sandbox_id: String,
+    pub source_epoch: String,
+    pub owner_issuer: String,
+    pub owner_subject: String,
+    pub owner_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub resolved_at: DateTime<Utc>,
 }

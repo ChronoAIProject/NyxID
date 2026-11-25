@@ -2850,6 +2850,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "Retain the effective evidence revision per fact to prevent a stale correction from replacing it after account deletion.",
     },
     Entry {
+        collection: "sandbox_usage_owner_pins_v1",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "Keep the historical owner binding for a Sandbox source epoch so erasure and replay cannot reassign corrections.",
+    },
+    Entry {
         collection: "sandbox_usage_rates_v1",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared usage pricing configuration"),

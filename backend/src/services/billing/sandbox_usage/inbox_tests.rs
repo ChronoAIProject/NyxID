@@ -257,3 +257,96 @@ async fn missing_sequence_preserves_sparse_custody_until_validation_can_continue
     assert_eq!(page["contiguous_validated_sequence"], "3");
     assert_eq!(page["missing_ranges"], serde_json::json!([]));
 }
+
+#[tokio::test]
+async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasure() {
+    use super::{inbox_shadow, pricing_schema, pricing_store_tests, pricing_tests};
+    use crate::models::{
+        sandbox_usage_rates::{COLLECTION_NAME as RATES, UsageTariff},
+        user::{COLLECTION_NAME as USERS, User, UserType},
+    };
+    let fx = Fixture::open("cma_custody_shadow", NAMESPACE).await;
+    let writer = fx.authority(WRITE_SCOPE).await;
+    pricing_store_tests::enable(&fx.db, true).await;
+    pricing_schema::prepare(&fx.db).await.unwrap();
+    let owner = Uuid::new_v4().to_string();
+    fx.db
+        .collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let initial_tariff = pricing_tests::tariff();
+    fx.db
+        .collection::<UsageTariff>(RATES)
+        .insert_one(&initial_tariff)
+        .await
+        .unwrap();
+    let (open, open_hash) = with_owner(OPEN, &owner, None, false);
+    let (usage, usage_hash) = with_owner(USAGE, &owner, Some(&open_hash), false);
+    inbox::accept(&fx.db, &writer, &open).await.unwrap();
+    let (_, accepted) = inbox::accept(&fx.db, &writer, &usage).await.unwrap();
+    let stream = accepted.receipt.stream_id.as_str();
+    let fact = "00000000-0000-4000-8000-000000000064";
+    let before = inbox_shadow::inspect(&fx.db, ISSUER, NAMESPACE, stream, fact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before["owner_status"], "resolved");
+    assert_eq!(before["financial_status"], "shadow");
+    assert_eq!(before["plans"][0]["tariff_id"], initial_tariff.id);
+
+    let mut later_tariff = pricing_tests::tariff();
+    later_tariff.effective_from += chrono::Duration::minutes(1);
+    later_tariff.version = 2;
+    fx.db
+        .collection::<UsageTariff>(RATES)
+        .insert_one(&later_tariff)
+        .await
+        .unwrap();
+    fx.db
+        .collection::<User>(USERS)
+        .delete_one(doc! {"_id":&owner})
+        .await
+        .unwrap();
+    let (correction, _) = with_owner(CORRECTION, &owner, Some(&usage_hash), true);
+    inbox::accept(&fx.db, &writer, &correction).await.unwrap();
+    let after = inbox_shadow::inspect(&fx.db, ISSUER, NAMESPACE, stream, fact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after["owner_status"], "resolved");
+    assert_eq!(after["financial_status"], "shadow");
+    assert_ne!(after["source_event_id"], before["source_event_id"]);
+    assert_eq!(
+        after["plans"][0]["tariff_id"],
+        before["plans"][0]["tariff_id"]
+    );
+    assert_eq!(after["plans"][0]["pin_id"], before["plans"][0]["pin_id"]);
+    assert_eq!(
+        fx.db
+            .collection::<Document>("billing_ledger")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+fn with_owner(
+    bytes: &[u8],
+    owner: &str,
+    previous: Option<&str>,
+    correction: bool,
+) -> (Vec<u8>, String) {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    value["owner_ref"]["subject"] = serde_json::json!(owner);
+    if let Some(previous) = previous {
+        value["previous_event_digest"] = serde_json::json!(previous);
+        if correction {
+            value["correction"]["expected_predecessor_digest"] = serde_json::json!(previous);
+        }
+    }
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let event = super::contract::decode_event(&bytes, inbox::clock()).unwrap();
+    (bytes, event.digest().as_str().to_string())
+}

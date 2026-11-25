@@ -8,6 +8,7 @@ use crate::{
         contract::Receipt,
         inbox::{self, InboxError, ReceiptObservation},
         inbox_authority::{self, Authority, READ_SCOPE, Registration, WRITE_SCOPE},
+        inbox_shadow,
     },
 };
 use axum::{
@@ -67,6 +68,32 @@ pub(crate) async fn register(
     )
     .await?;
     Ok(Json(json!({"revision": revision})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ShadowFact {
+    namespace: String,
+    stream_id: String,
+    fact_id: String,
+}
+
+pub(crate) async fn inspect_shadow_fact(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(fact): Json<ShadowFact>,
+) -> Result<impl IntoResponse, HttpError> {
+    require_admin(&state, &auth).await?;
+    let result = inbox_shadow::inspect(
+        &state.db,
+        &state.config.jwt_issuer,
+        &fact.namespace,
+        &fact.stream_id,
+        &fact.fact_id,
+    )
+    .await?
+    .ok_or(HttpError::NotFound)?;
+    Ok(Json(result))
 }
 
 async fn authorize(

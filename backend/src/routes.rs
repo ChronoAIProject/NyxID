@@ -1548,6 +1548,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             put(handlers::sandbox_billing::usage_inbox::register),
         )
         .route(
+            "/billing/cma-usage-pricing/inspect",
+            post(handlers::sandbox_billing::usage_inbox::inspect_shadow_fact),
+        )
+        .route(
             "/billing/cma-usage-tariffs",
             get(handlers::admin_sandbox_rates::usage::list)
                 .post(handlers::admin_sandbox_rates::usage::publish),
