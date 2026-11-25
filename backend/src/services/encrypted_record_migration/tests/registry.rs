@@ -38,10 +38,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             nyxbot_gateway_response::COLLECTION_NAME,
             doc! {"payload_ciphertext": &bytes},
         ),
-        (
-            assistant_conversation::COLLECTION_NAME,
-            doc! {"active_turn": {"restart_admission": {"window": {"input": &bytes}}}},
-        ),
     ]
 }
 
@@ -77,6 +73,18 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
         .filter(|line| line.starts_with("| `"))
         .collect();
     assert_eq!(rows.len(), REGISTRY.len());
+    let pending = REGISTRY
+        .iter()
+        .filter(|e| matches!(e.adapter, Adapter::Pending))
+        .count();
+    let collections: HashSet<_> = REGISTRY.iter().map(|e| e.collection).collect();
+    assert!(inventory.contains(&format!(
+        "{} entries for {} collections, with {} implemented adapters\nand {} Pending entries.",
+        REGISTRY.len(),
+        collections.len(),
+        REGISTRY.len() - pending,
+        pending
+    )));
     let mut unique = HashSet::new();
     for (entry, line) in REGISTRY.iter().zip(rows) {
         let cells: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
@@ -171,7 +179,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "89dd069d90525725f8d136619f99428d2f040d5176f66c9ef009d640e858c67c"
+        "68bf534769f813c488cb4a87da6cf374632bede78e8d57b924cef52aecb2c78f"
     );
     for digest in [
         Some(live.as_str()),
@@ -180,6 +188,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
+        Some(previous_labels::APPROVAL_PROPOSAL_DIGEST),
         Some(previous_labels::CMA_REQUEST_DIGEST),
         Some(previous_labels::LEARNING_PROPOSAL_DIGEST),
         Some(previous_labels::GATEWAY_SETUP_DIGEST),
@@ -226,7 +235,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::LEARNING_PROPOSAL_DIGEST
+                        previous_labels::APPROVAL_PROPOSAL_DIGEST
+                            | previous_labels::LEARNING_PROPOSAL_DIGEST
                             | previous_labels::CMA_REQUEST_DIGEST
                             | previous_labels::GATEWAY_SETUP_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST

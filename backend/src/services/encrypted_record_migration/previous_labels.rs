@@ -225,3 +225,6 @@ pub(super) const CMA_REQUEST_DIGEST: &str =
 
 pub(super) const LEARNING_PROPOSAL_DIGEST: &str =
     "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
+
+pub(super) const APPROVAL_PROPOSAL_DIGEST: &str =
+    "89dd069d90525725f8d136619f99428d2f040d5176f66c9ef009d640e858c67c";

@@ -712,6 +712,8 @@ pub struct ReattachWindow {
     pub terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<mongodb::bson::Binary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_context_version: Option<u8>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub capacity_deadline: DateTime<Utc>,
     #[serde(
