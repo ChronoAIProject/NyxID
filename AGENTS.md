@@ -11,6 +11,92 @@ NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, Re
 
 Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.md, AGENT_ISOLATION.md, CHANNEL_BOT_RELAY.md, CHANNEL_EVENT_GATEWAY.md, NODE_PROXY_ARCHITECTURE.md, OPENCLAW_INTEGRATION.md, API_DISCOVERY.md, SSH_NODE_KEY_AUTH.md. Read the relevant doc before working in that subsystem.
 
+## Start here (all agents)
+
+This file is long (about 230 KB). Some tools load only the beginning: if yours does, open `AGENTS.md` and read the section for the area you are working in. The contents list below names every section.
+
+## Specs: where to look
+
+- [`docs/README.md`](docs/README.md) is the spec map: each area's governing spec and the code it governs.
+- [`docs/spec-index.yaml`](docs/spec-index.yaml) is the same map in machine-readable form. Search it for the path you are editing, for example `grep -n "handlers/triggers.rs" docs/spec-index.yaml`, or for its parent folder. A path can belong to more than one area; read each matching spec.
+
+| Area | Governing spec | Main code |
+|---|---|---|
+| NyxBot (NyxAgent engine, agents, groups) | [`docs/chat/08-nyxagent-engine.md`](docs/chat/08-nyxagent-engine.md) (engine contract); [`docs/chat/09-nyxbot-orchestrator.md`](docs/chat/09-nyxbot-orchestrator.md) (team and channel design); [`docs/chat/12-shared-agents-and-groups.md`](docs/chat/12-shared-agents-and-groups.md) | `backend/src/services/assistant_*`, `backend/src/handlers/assistant_*`, `frontend/src/components/assistant/` |
+| Channel bots | [`docs/CHANNEL_BOT_RELAY.md`](docs/CHANNEL_BOT_RELAY.md); [`docs/CHANNEL_EVENT_GATEWAY.md`](docs/CHANNEL_EVENT_GATEWAY.md); [`docs/TELEGRAM_NEW.md`](docs/TELEGRAM_NEW.md); [`docs/PLATFORM_BOTFATHER.md`](docs/PLATFORM_BOTFATHER.md); [`docs/AURINKO_INTEGRATION.md`](docs/AURINKO_INTEGRATION.md) | `backend/src/services/channel_*`, `backend/src/services/channel_adapters/`, `backend/src/services/nyxbot_gateway_*`, `backend/src/services/telegram_*`, `backend/src/services/whatsapp_native*` |
+| Automations (triggers, schedules) | [`docs/NYXBOT_SCHEDULES.md`](docs/NYXBOT_SCHEDULES.md) | `backend/src/services/trigger_*`, `backend/src/handlers/trigger*`, `backend/src/handlers/assistant_schedules.rs` |
+| Notifications (NyxBot feed, push, approvals delivery) | [`docs/chat/12-notifications.md`](docs/chat/12-notifications.md); [`docs/MOBILE_APP_INTEGRATION.md`](docs/MOBILE_APP_INTEGRATION.md) | `backend/src/services/assistant_notification_service.rs`, `backend/src/services/notification_service*`, `backend/src/handlers/notifications.rs`, `backend/src/handlers/device_tokens.rs` |
+| Sandboxes (CMA, remote machines, sandbox billing, generated files) | [`docs/chat/12-cma-sessions.md`](docs/chat/12-cma-sessions.md); [`docs/CMA_BILLING.md`](docs/CMA_BILLING.md); [`docs/REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md`](docs/REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md); [`docs/chat/10-uploads.md`](docs/chat/10-uploads.md) (generated files) | `backend/src/services/assistant_cma_*`, `backend/src/services/remote_machine_*`, `backend/src/services/billing/sandbox_*`, `backend/src/services/generated_artifacts/` |
+| Shared registries | Routes: [`docs/API.md`](docs/API.md). Env vars: [`docs/ENV.md`](docs/ENV.md). Error codes: Critical Rule 3 below. Collections: `backend/src/services/personal_data_registry.rs` and [`docs/security/PERSONAL_ERASURE_INVENTORY.md`](docs/security/PERSONAL_ERASURE_INVENTORY.md) | `backend/src/routes.rs`, `backend/src/config.rs`, `backend/src/errors/mod.rs`, `backend/src/db.rs` |
+| Other areas | Not yet indexed: start from the deep-dive docs named in the Project Overview and the Critical Rules below | — |
+
+## Specs: keep them current as you work
+
+1. Before changing code, find its spec: search `docs/spec-index.yaml` for the path you are editing, then read that spec's rules and the guidance on making changes.
+2. The spec is the contract. If your change alters behaviour, a contract, limit, flag, env var, error code or key decision, update the governing spec in the same PR. For new features, write the spec section first or alongside the code.
+3. Edit in place, in present tense, describing current behaviour only: no "previously/now/this PR" notes, history or known-issue lists.
+4. One place per fact: change it in its governing spec and link to it elsewhere instead of copying.
+5. Keep the spec's section layout and one-pass size. If you add, move or rename a doc or a governed code path, update `docs/spec-index.yaml`.
+6. If you find code that disagrees with the spec and your change didn't cause it, do not edit the spec to match. Report it in the PR description (or as a NyxID issue).
+7. Do not edit docs that ship at runtime (`docs/assistant/CMA_WORKER_GUIDE.md`, `docs/assistant/CHANNEL_SETUP_GUIDE.md`, `docs/AI_AGENT_PLAYBOOK.md`, `docs/examples/nyxbot-voice-service.template.json`) unless the task asks for it. Docs read by tests are listed in `docs/spec-index.yaml` (`input_of`); run those tests when you edit them.
+8. In the PR description, name the spec sections you changed, or write "Spec impact: none".
+
+Main maintainers review spec changes nightly ([`docs/SPEC_MAINTENANCE.md`](docs/SPEC_MAINTENANCE.md)).
+
+## Git Workflow
+
+- Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
+- Open feature and fix PRs against `dev` for review and the fast, path-filtered gate. Once `dev` is the default branch, merging a PR there closes issues linked with `Closes #N`.
+- Every push to `dev` requests full CI, including backend tests, all-targets Clippy, coverage, feature builds, container E2E and image checks.
+- Run `scripts/cut-release.sh` with your own `gh` login to open a PR from a fixed staging commit into `main`. Its `release/YYYY-MM-DD` branch must stay on `dev`'s history. Further merges into `dev` can continue during review.
+- Wait for approval, full `CI Pipeline` and `Main Merge Guard`, then select **Create a merge commit**. The guard also accepts this repository's `dev` branch.
+- Cut urgent fixes from `main` on `hotfix/<name>`. Target `main` with full CI and review.
+- After a hotfix lands, merge `main` back into `dev` using **Create a merge commit** before cutting the next rollup.
+- GitHub runs `Main Merge Guard` from the default branch on `pull_request_target`. Retargeting a PR reruns the guard against its new base.
+
+
+<!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->
+
+## Contents of this file
+
+- Project Overview
+- Start here (all agents)
+- Specs: where to look
+- Specs: keep them current as you work
+- Git Workflow
+- Critical Rules
+  - 1. MongoDB Model Conventions
+  - 2. Layer Architecture
+  - 3. Error Handling
+  - 4. Frontend Patterns
+  - 5. Security
+  - 5a. Vendor URN Namespace
+  - 6. Node Proxy Conventions
+  - 7. OpenClaw Integration
+  - 8. Streamlined Services Architecture
+  - 9. Agent Isolation
+  - 10. Catalog Metadata and Endpoint Discovery
+  - 10a. Catalog Skill Curation
+  - 11. Oracle Relay (browser LLM pools)
+  - 12. Auth Device-Code Login
+  - 13. Hosted Connect Links
+  - 13a. Bot Connection Links
+  - 14. Connection Webhooks and Triggers
+  - 15. Agent Key Login
+  - 16. Agent Plugins
+- File Structure
+- Key API Routes
+- NyxAgent assistant engine
+- Channel Bot Notes
+- Environment Variables
+- Available Commands
+- Design System
+- Consensus R&D Foundational Invariants (managed by consensus-rnd)
+  - Aurinko email integration
+  - Tools Manager boundary
+  - Protected organization connection use
+  - Organization-specialist channel bindings
+
 ## Critical Rules
 
 - Server-mode SIGTERM/ctrl-c receivers are installed before startup IO; startup steps finish without cancellation, with clean exits before database writes or a drain before binding. Startup drain budgets count from signal receipt; one-shot commands install no receivers or billing/verification workers. SIGTERM/ctrl-c drains admitted work while serving both listeners; stop background claims, retain renewals, settle deadline turns as `turn_lost`/`shutdown`, and release exact generation/claim fences. `/ready` becomes 503; `/health` stays 200; chained start/finish audits share the process generation. See `docs/DEPLOYMENT.md#rolling-deploys-and-graceful-drain`.
@@ -738,19 +824,6 @@ All font choices, colors, spacing, and aesthetic direction are defined there.
 Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
-## Git Workflow
-
-- Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
-- Open feature and fix PRs against `dev` for review and the fast, path-filtered gate. Once `dev` is the default branch, merging a PR there closes issues linked with `Closes #N`.
-- Every push to `dev` requests full CI, including backend tests, all-targets Clippy, coverage, feature builds, container E2E and image checks.
-- Run `scripts/cut-release.sh` with your own `gh` login to open a PR from a fixed staging commit into `main`. Its `release/YYYY-MM-DD` branch must stay on `dev`'s history. Further merges into `dev` can continue during review.
-- Wait for approval, full `CI Pipeline` and `Main Merge Guard`, then select **Create a merge commit**. The guard also accepts this repository's `dev` branch.
-- Cut urgent fixes from `main` on `hotfix/<name>`. Target `main` with full CI and review.
-- After a hotfix lands, merge `main` back into `dev` using **Create a merge commit** before cutting the next rollup.
-- GitHub runs `Main Merge Guard` from the default branch on `pull_request_target`. Retargeting a PR reruns the guard against its new base.
-
-
-<!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->
 ## Consensus R&D Foundational Invariants (managed by consensus-rnd)
 
 - FI-001 AI outputs are untrusted by default; before entering the mainline they must pass independent checks, including the applicable mix of consensus, review, or automated verification.
