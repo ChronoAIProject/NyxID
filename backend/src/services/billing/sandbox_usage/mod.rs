@@ -35,3 +35,11 @@ mod pricing_tests;
 #[cfg(test)]
 mod resource_tests;
 pub mod tariff_store;
+
+mod completeness_contract;
+mod completeness_evidence;
+#[cfg(test)]
+mod completeness_fixture_tests;
+pub mod completeness_inbox;
+mod completeness_validation;
+mod shadow_completeness;

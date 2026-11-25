@@ -2,6 +2,7 @@
 use super::{
     contract::{Event, Fact, Metric, OwnerRef, Payload},
     inbox, inbox_shadow, policy, price_pins, pricing, pricing_schema,
+    shadow_completeness::observe_completeness,
 };
 use crate::{
     errors::{AppError, AppResult},
@@ -339,9 +340,12 @@ async fn observe_in_session(
             .iter()
             .map(|metric| metric.rounded_candidate),
     )?;
+    let completeness =
+        observe_completeness(db, session, bucket, pin.as_ref(), &mut unresolved).await?;
     let input = ShadowBucketInput {
         price_pin: pin,
         facts: refs,
+        completeness,
         provisional_metrics,
         unresolved: unresolved.into_iter().collect(),
         rounding: ROUNDING.into(),
@@ -362,7 +366,7 @@ async fn observe_in_session(
         if previous.schema_version != 1 || previous.owner_subject != owner_subject {
             return Err(corrupt());
         }
-        if previous.input_digest == input_digest {
+        if previous.input == input {
             return Ok(previous.clone());
         }
     }

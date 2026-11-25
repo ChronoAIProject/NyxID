@@ -2834,6 +2834,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "sandbox_usage_events_v1 — Retain the exact accepted usage evidence and receipt with opaque owner attribution so replay and corrections survive account deletion.",
     },
     Entry {
+        collection: "sandbox_usage_minute_completeness_v1",
+        owner: OwnerSelector::Fields(&["owner_subject"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "sandbox_usage_minute_completeness_v1 retains the original opaque attributed minute statement, revision and custody receipt to preserve historical usage corrections and reconciliation after account deletion.",
+    },
+    Entry {
         collection: "sandbox_usage_streams_v1",
         owner: OwnerSelector::Fields(&["owner_subject"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),

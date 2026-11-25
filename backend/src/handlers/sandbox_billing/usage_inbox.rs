@@ -6,6 +6,7 @@ use crate::{
     mw::auth::{AuthMethod, AuthUser},
     services::audit_service::AuditActor,
     services::billing::sandbox_usage::{
+        completeness_inbox,
         contract::Receipt,
         inbox::{self, InboxError, ReceiptObservation},
         inbox_authority::{self, Authority, READ_SCOPE, Registration, WRITE_SCOPE},
@@ -28,6 +29,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/usage-events", post(accept))
         .route("/usage-receipts/{event_id}", get(receipt))
         .route("/usage-cursors/{stream_id}", get(cursor))
+        .route("/usage-completeness", post(accept_completeness))
+        .route(
+            "/usage-completeness/{statement_id}",
+            get(completeness_receipt),
+        )
 }
 
 pub(crate) async fn prepare(
@@ -37,6 +43,42 @@ pub(crate) async fn prepare(
     require_admin(&state, &auth).await?;
     inbox::prepare(&state.db).await?;
     Ok(Json(json!({"schema_version": 1})))
+}
+
+pub(crate) async fn prepare_completeness(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<impl IntoResponse, HttpError> {
+    require_admin(&state, &auth).await?;
+    completeness_inbox::prepare(&state.db).await?;
+    Ok(Json(json!({"schema_version": 1})))
+}
+
+async fn accept_completeness(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    body: Bytes,
+) -> Result<impl IntoResponse, HttpError> {
+    let authority = authorize(&state, &auth, WRITE_SCOPE).await?;
+    let (created, response) = completeness_inbox::accept(&state.db, &authority, &body).await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(response)))
+}
+
+async fn completeness_receipt(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(statement_id): Path<String>,
+) -> Result<impl IntoResponse, HttpError> {
+    let authority = authorize(&state, &auth, READ_SCOPE).await?;
+    let response = completeness_inbox::read(&state.db, &authority, &statement_id)
+        .await?
+        .ok_or(HttpError::NotFound)?;
+    Ok(Json(response))
 }
 
 #[derive(Deserialize)]

@@ -1544,6 +1544,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::sandbox_billing::usage_inbox::prepare),
         )
         .route(
+            "/billing/cma-usage-completeness/prepare",
+            post(handlers::sandbox_billing::usage_inbox::prepare_completeness),
+        )
+        .route(
             "/billing/cma-usage-custody/producers/{account_id}",
             put(handlers::sandbox_billing::usage_inbox::register),
         )

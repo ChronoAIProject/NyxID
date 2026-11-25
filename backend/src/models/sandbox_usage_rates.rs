@@ -36,9 +36,20 @@ pub struct ShadowBucketMetric {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowCompletenessRef {
+    pub basis: String,
+    pub statement_id: String,
+    pub statement_digest: String,
+    pub validation_status: String,
+    pub validation_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowBucketInput {
     pub price_pin: Option<PricePin>,
     pub facts: Vec<ShadowFactRef>,
+    #[serde(default)]
+    pub completeness: Vec<ShadowCompletenessRef>,
     pub provisional_metrics: Vec<ShadowBucketMetric>,
     pub unresolved: Vec<String>,
     pub rounding: String,

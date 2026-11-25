@@ -107,3 +107,25 @@ pub struct HistoricalOwner {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub resolved_at: DateTime<Utc>,
 }
+
+pub const COMPLETENESS: &str = "sandbox_usage_minute_completeness_v1";
+
+#[derive(Deserialize, Serialize)]
+pub struct Completeness {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub namespace: String,
+    pub sandbox_id: String,
+    pub source_epoch: String,
+    pub owner_subject: String,
+    pub basis: String,
+    pub minute_start_ms: i64,
+    pub revision: i64,
+    pub statement_id: String,
+    pub digest: String,
+    pub canonical: Binary,
+    pub receipt_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub accepted_at: DateTime<Utc>,
+    pub accepted_validation: bson::Document,
+}
