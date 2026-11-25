@@ -231,6 +231,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             mcp_notification_ttl_secs: 86_400,
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
+            static_agent_key_origins: vec![],
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,

@@ -1977,6 +1977,7 @@ async fn server_run(cli: Cli) {
     );
 
     let cors = private_cors(allowed_origins);
+    let static_agent_key_cors = mw::static_agent_key_cors::StaticAgentKeyCors::from_config(&config);
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
@@ -1986,10 +1987,16 @@ async fn server_run(cli: Cli) {
     let (public_oauth, private_api) = routes::build_router_with_state(state.clone());
 
     let csrf_state = state.clone();
-    let private_api = private_api.layer(cors).layer(axum_mw::from_fn_with_state(
-        csrf_state,
-        mw::csrf::browser_csrf_middleware,
-    ));
+    let private_api = private_api
+        .layer(cors)
+        .layer(axum_mw::from_fn_with_state(
+            csrf_state,
+            mw::csrf::browser_csrf_middleware,
+        ))
+        .layer(axum_mw::from_fn_with_state(
+            static_agent_key_cors,
+            mw::static_agent_key_cors::middleware,
+        ));
     let device_code_rate_limiters = mw::rate_limit::DeviceCodeRateLimiters {
         per_ip: state.device_code_ip_limiter.clone(),
         per_pubkey: state.device_code_pubkey_limiter.clone(),
@@ -3381,6 +3388,63 @@ mod tests {
             .unwrap();
         assert!(exposed.contains(handlers::invocation_diagnostics::HANDLE_HEADER));
         assert!(exposed.contains(handlers::invocation_diagnostics::EXPIRES_HEADER));
+    }
+
+    #[tokio::test]
+    async fn static_agent_cors_survives_private_cors_layer_without_credentials() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let mut config = crate::test_utils::test_app_config();
+        config.frontend_url = "https://app.example".into();
+        config.base_url = "https://api.example".into();
+        config.static_agent_key_origins = vec!["https://static.example".into()];
+        let policy = mw::static_agent_key_cors::StaticAgentKeyCors::from_config(&config);
+        let app = axum::Router::new()
+            .route("/api/v1/auth/agent-key/self", get(|| async { "self" }))
+            .route("/api/v1/users/me", get(|| async { "private" }))
+            .layer(private_cors(configured_cors_origins(&config)))
+            .layer(axum_mw::from_fn_with_state(
+                policy,
+                mw::static_agent_key_cors::middleware,
+            ));
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/auth/agent-key/self")
+                    .header("Origin", "https://static.example")
+                    .header("Authorization", "Bearer child")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "https://static.example"
+        );
+        assert!(
+            !allowed
+                .headers()
+                .contains_key("access-control-allow-credentials")
+        );
+
+        let denied = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Origin", "https://static.example")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!denied.headers().contains_key("access-control-allow-origin"));
     }
 
     fn enc_hex(byte: u8) -> String {

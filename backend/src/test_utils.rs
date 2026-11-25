@@ -1909,6 +1909,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
+        static_agent_key_origins: vec![],
         database_url: "mongodb://ignored-for-test".to_string(),
         database_max_connections: 10,
         environment: "test".to_string(),

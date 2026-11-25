@@ -333,6 +333,10 @@ pub struct AppConfig {
     /// only include origins that legitimately perform cookie-authenticated
     /// state changes. Bearer / API-key callers never need to be listed here.
     pub csrf_trusted_origins: Vec<String>,
+    /// Exact origins allowed to use the static browser Agent Key surface.
+    /// These origins receive no cookie credentials and are limited to the
+    /// request/poll, self, and Nyx Responses routes by route-aware CORS.
+    pub static_agent_key_origins: Vec<String>,
     /// MongoDB connection string
     pub database_url: String,
     /// Maximum database connection pool size
@@ -1357,6 +1361,12 @@ impl AppConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            static_agent_key_origins: env::var("STATIC_AGENT_KEY_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
@@ -2297,6 +2307,7 @@ mod tests {
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
+            static_agent_key_origins: vec![],
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: environment.to_string(),
