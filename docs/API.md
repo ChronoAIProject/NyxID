@@ -9181,9 +9181,10 @@ The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <eve
 #### Automation coordinator completion
 
 When coordinator completion is enabled and `automation:coordinator-completion-v2`
-is serving-ready (every live generation supports it and activation was recorded after
-that support settled for 90 seconds; advisory roster warnings do not block it; see
-[security readiness](SECURITY_ROLLOUT_READINESS.md)), newly admitted assistant runs track
+is serving-ready (it is recorded active, immediately on a clean `ready` assessment or
+after 90 seconds of observed support, and every live generation supports it; advisory
+roster warnings do not block it; see [security readiness](SECURITY_ROLLOUT_READINESS.md)),
+newly admitted assistant runs track
 specialist assignments and group handoffs through the coordinator's final reply.
 Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
 for the default-off configuration, bounds and downgrade procedure.
@@ -9232,7 +9233,7 @@ Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event
 Delivery and dedup semantics depend on the target:
 
 - `webhook`: an atomic `trigger_deliveries` insert provides unique admission and durable dedup across replicas and restarts for as long as the delivery record is retained (`TRIGGER_DELIVERY_RETENTION_HOURS`, or 72 hours when retention is `0`); once MongoDB's TTL monitor has removed the expired record, the same event ID is admitted again. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
-- `agent` and `notification`: ingress first takes a claim on the trigger and event ID in a shared MongoDB collection, so it applies across replicas. The claim lasts `CHANNEL_EVENT_DEDUP_TTL_SECS` (300 seconds by default) and is not renewed during delivery. Delivery completes before the ingress response. On success the claim is committed and the event ID stays deduplicated for another `CHANNEL_EVENT_DEDUP_TTL_SECS`; on failure the claim is released so a retry can deliver. A repeat that arrives while a claim or committed entry is live returns `duplicate`, even if the claimed attempt later fails. Duplicate delivery remains possible: if delivery outlasts the claim, a concurrent repeat can claim and deliver again, and if the claim is lost before commit after a successful delivery, ingress returns an error and a sender retry can repeat the external effect. Senders should retry failures and consumers should remain idempotent.
+- `agent` and `notification`: ingress first takes a claim on the trigger and event ID in a shared MongoDB collection, so it applies across replicas. The claim lasts `CHANNEL_EVENT_DEDUP_TTL_SECS` (300 seconds by default). Delivery completes before the ingress response. On success the claim is committed and the event ID stays deduplicated for another `CHANNEL_EVENT_DEDUP_TTL_SECS`; on failure the claim is released so a retry can deliver. A repeat that arrives while a claim or committed entry is live returns `duplicate`, even if the claimed attempt later fails. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
 - `assistant`: ingress takes the same shared claim, then admits the run in one MongoDB transaction under a run ID derived from the trigger and event ID. A repeat returns `duplicate` while the claim or committed entry is live; after that, a repeat whose run is still retained in run history returns `accepted` without a second run or transcript event. Admission therefore does not depend on the claim lasting. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for run-history retention.
 
 Webhook-target envelopes are encrypted at rest with the configured encryption keys and removed by a database TTL index after `TRIGGER_DELIVERY_RETENTION_HOURS` (72 hours by default). Delivery list responses never contain payloads. Setting retention to `0` stores metadata for the default 72-hour bounded window but no envelope, makes `replay_available` false, and causes redelivery to return `trigger_delivery_record_not_found` (11606). Agent and notification payloads are never persisted.

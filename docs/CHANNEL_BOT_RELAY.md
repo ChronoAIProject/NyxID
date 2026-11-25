@@ -589,7 +589,7 @@ erDiagram
         string platform_bot_username
         bool webhook_registered
         string webhook_secret_hash
-        string status "pending | pending_webhook | active | failed"
+        string status "pending | active | failed | invalid"
         string app_id "Lark/Feishu only"
         bytes app_secret_encrypted "Lark/Feishu only"
         bytes lark_verification_token_encrypted "Lark/Feishu only"

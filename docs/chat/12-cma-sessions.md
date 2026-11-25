@@ -586,7 +586,7 @@ exact current text; `{login_url}` is the only variable part.
 | Conflict | `cma_sandbox_account_slot_occupied` | The account's one NyxID-created Sandbox allocation is held (byte-pinned). |
 | Conflict | `cma_sandbox_account_slot_occupied: the earlier creation is not confirmed absent; retry later to recheck its original request; do not delete or reconnect` | Automatic recovery of the held allocation could not prove the earlier creation absent; the new request is not dispatched. |
 | Conflict | `cma_nyxid_sandbox_required` | The selected parent is not this account's NyxID-created Sandbox. |
-| Conflict | `cma_sandbox_retiring: new Agents and tasks are closed` | The parent Sandbox is retiring or retired. |
+| Conflict | `cma_sandbox_retiring: new Agents and tasks are closed` | The parent Sandbox is retiring. |
 | Conflict | `cma_creation_authority_changed` | A retried creation's owner, catalog deployment, request or parent changed. |
 | Conflict | `cma_creation_authority_changed: the original request was confirmed not created; submit the corrected request with a new Idempotency-Key (CMA binds the original key to its original body)` | A changed body reuses the key of a Sandbox creation confirmed not created. |
 | Conflict | `cma_creation_already_completed: query the original resource` | The original creation is confirmed. |
@@ -594,8 +594,6 @@ exact current text; `{login_url}` is the only variable part.
 | Conflict | `cma_creation_replay_expired: retain the original request and confirm its result without resubmitting` | Replay is outside the 23-hour window from first dispatch. |
 | Conflict | `cma_creation_result_unknown` | A dispatched creation's result cannot be confirmed (30-second read limit, undecodable success body, or no saved remote ID). |
 | Conflict | `cma_creation_idempotency_conflict` | The same key was used with a different service or request. |
-| Conflict | `cma_creation_recovery_unavailable` | No retained creation record or request material exists for recovery. |
-| Conflict | `cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made` | A release lacks durable `confirmed_not_created` evidence. |
 | Conflict | `cma_retirement_idempotency_conflict` | A retirement sent through the CMA proxy uses a different `Idempotency-Key` from the one recorded for the Sandbox's pending retirement. The management route does not refuse this case: it retries a pending retirement with the recorded key. |
 
 **Management routes and Agent reads**:
@@ -611,6 +609,7 @@ exact current text; `{login_url}` is the only variable part.
 | Conflict | `cma_retirement_recovery_unavailable` | A retirement is pending without a recorded `Idempotency-Key`, so neither the management route nor the CMA proxy can retry it. |
 | Conflict | `cma_sandbox_retired` | A `pause` or `revive`, or a retirement of a Sandbox not yet marked retired, targets a Sandbox that no longer occupies the account slot. Retiring an already-retired Sandbox instead returns HTTP 200 with `pending: false`; `recover_creation` uses a separate path. |
 | Conflict | `cma_sandbox_retiring` | `pause` or `revive` is sent while the Sandbox's retirement is pending. |
+| Conflict | `cma_creation_recovery_unavailable` | No retained creation record or request material exists for recovery. |
 | Validation | `Invalid CMA event cursor` | Stream cursor and `Last-Event-ID` differ, repeat, or are invalid. |
 | Conflict | `cma_sandbox_generation_changed` | The request's generation is stale. |
 | Conflict | `cma_deployment_changed` | The CMA catalog service changed since the reference was created. |
@@ -628,7 +627,6 @@ exact current text; `{login_url}` is the only variable part.
 | Forbidden | `CMA requires this owner's enabled feature and current CMA grant` | The chat is not eligible for CMA tools. |
 | Validation | `Invalid CMA tool arguments` | Arguments are missing or malformed. |
 | Validation | `Use an attachment of at most 32 MiB from this conversation` | `nyxid__cma_save_attachment` names an upload over 32 MiB or from another conversation. An upload outside the current chat's scope is refused earlier as not found. |
-| Conflict | `CMA action access mode changed; confirm again` | The access mode changed after a non-read action was confirmed. |
 | Conflict | `cma_resource_page_too_large` | A `nyxid__list_cma_resources` page exceeds 64 KiB. |
 
 **Admin reservation routes and operator migration**:
@@ -641,6 +639,7 @@ exact current text; `{login_url}` is the only variable part.
 | Conflict | `Account erasure is in progress for this owner; inspection is unavailable` | The owner's account erasure has been accepted. |
 | Conflict | `cma_sandbox_live: this account already has its NyxID sandbox; create agents in its workspace or ask the owner to retire it` | The row is bound to a live Sandbox. |
 | Conflict | `cma_sandbox_retirement_proof_required: CMA has not confirmed retirement of this exact sandbox` | `confirm_retirement` without CMA `retired` for that identity. |
+| Conflict | `cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made` | A release lacks durable `confirmed_not_created` evidence. |
 | Conflict | `cma_creation_record_missing: no exact creation evidence is available; the reservation cannot be resolved` | No creation record exists. |
 | Conflict | `cma_creation_provenance_required: no saved receipt or CMA lineage ties a sandbox to this creation; ownership alone cannot establish NyxID creation provenance` | `associate` without receipt or lineage. |
 | Conflict | `cma_sandbox_retired: a retired resource cannot resolve an uncertain creation` | `associate` names a retired Sandbox. |
