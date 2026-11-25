@@ -1,0 +1,12 @@
+NyxID 1.0.5 brings iPhone Duo support, a basic Apple Watch companion, and a more polished workspace on iPhone and iPad.
+
+- Work across layouts designed for the inner and outer displays on iPhone Duo, with quick access to your chats and workspace.
+- Check unread activity, dictate messages to your agents, and approve or deny supported requests with the Apple Watch companion.
+- Enjoy a roomier iPad workspace with a persistent sidebar and refinements for portrait, landscape and multitasking windows.
+- Find updates faster with notification search, clearer unread badges, simpler filters, and Mark all as read in the options menu.
+- Keep the message composer on one line until you focus it or start writing, with better draft preservation as you move between chats.
+- Preview images and PDFs before sending, browse selected attachments, and recover interrupted uploads.
+- Review QR sign-ins in one compact card, with device, browser, request time and network details together, plus an expandable More details section.
+- Benefit from more reliable sign-in sessions, clearer errors, improved keyboard and search alignment, and more consistent Chinese translations.
+
+This update also includes voice, accessibility, stability and compatibility improvements.

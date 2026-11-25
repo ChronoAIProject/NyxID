@@ -10,7 +10,10 @@ use crate::services::{
 };
 use serde_json::Value;
 
-async fn channel_turn(name: &str, native: bool) -> (Fixture, AssistantConversation, String) {
+pub(super) async fn channel_turn(
+    name: &str,
+    native: bool,
+) -> (Fixture, AssistantConversation, String) {
     channel_turn_transport(name, if native { "native" } else { "gateway" }).await
 }
 async fn channel_turn_transport(

@@ -537,10 +537,21 @@ function setup(
     },
     "./AssistantMentionInput": {
       AssistantMentionInput: (props: {
-        renderActions?: (mention: null) => unknown;
+        renderActions?: (mention: null, layout: {
+          compact: boolean;
+          onLeadingWidth: (width: number) => void;
+          onTrailingWidth: (width: number) => void;
+        }) => unknown;
       }) => ({
         type: "AssistantMentionInput",
-        props: { ...props, children: props.renderActions?.(null) },
+        props: {
+          ...props,
+          children: props.renderActions?.(null, {
+            compact: false,
+            onLeadingWidth() {},
+            onTrailingWidth() {},
+          }),
+        },
       }),
     },
     "./ChatComposer": {
@@ -2772,7 +2783,7 @@ for (const platform of ["ios", "android"]) {
   }
 }
 
-test("phone composers collapse while idle on ordinary and corner devices; uploads/dictation and wide layouts remain expanded", () => {
+test("all idle composers collapse across phone, Duo and wide windows; attachment previews stay separate", () => {
   const x = setup(A, false);
   const idle = () => x.input().props.compactWhenIdle;
   assert.equal(idle(), true, "ordinary phone uses the shared idle row");
@@ -2782,18 +2793,18 @@ test("phone composers collapse while idle on ordinary and corner devices; upload
   assert.equal(idle(), true, "folded Duo may collapse");
   x.uploads.files.push({ key: "photo", status: "uploaded" });
   x.harness.render();
-  assert.equal(idle(), false, "pending attachments stay visible");
+  assert.equal(idle(), true, "attachments keep their own preview strip");
   x.uploads.files.length = 0;
   x.uploads.picking = true;
   x.harness.render();
-  assert.equal(idle(), false);
+  assert.equal(idle(), true, "the picker does not expand an idle text input");
   x.uploads.picking = false;
   x.setDictating(true);
   assert.equal(idle(), false, "dictation keeps its controls");
   x.setDictating(false);
   assert.equal(idle(), true);
   x.setWidth(1024);
-  assert.equal(idle(), false, "the persistent-sidebar layout is unchanged");
+  assert.equal(idle(), true, "wide windows use the same idle row");
   x.harness.unmount();
 });
 

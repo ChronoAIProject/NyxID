@@ -1750,3 +1750,6 @@ async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
+
+#[path = "proposal_record_tests.rs"]
+mod mixed_records;

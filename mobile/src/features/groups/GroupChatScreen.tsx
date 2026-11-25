@@ -1093,98 +1093,6 @@ function GroupChat({
             />
           ) : (
             <ComposerDictationFrame dictation={dictation}>
-              <OverflowScrollView
-                fadeColor={colors.composerBg}
-                horizontal
-                style={styles.horizontalStrip}
-                keyboardShouldPersistTaps="handled"
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.recipients}
-              >
-                <Label muted style={styles.small}>
-                  {translateApp("To")}
-                </Label>
-                {recipients.ids.map((id) => {
-                  const member = liveMembers.find((row) => row.id === id);
-                  return member ? (
-                    <Pressable
-                      key={id}
-                      accessibilityRole="button"
-                      accessibilityLabel={translateApp(
-                        "Remove recipient {{title}}",
-                        { title: title(id, member.name) },
-                      )}
-                      disabled={blocked}
-                      onPress={() =>
-                        editRecipients((old) => withRemoved(old, id))
-                      }
-                      style={[
-                        styles.recipient,
-                        {
-                          backgroundColor: colors.navActive,
-                          borderColor: colors.composerBorder,
-                        },
-                      ]}
-                    >
-                      <Label style={styles.small}>
-                        {title(id, member.name)}
-                      </Label>
-                      <X size={12} color={colors.textSecondary} />
-                    </Pressable>
-                  ) : null;
-                })}
-                {unavailableRecipients.map((id) => (
-                  <Pressable
-                    key={`unavailable:${id}`}
-                    accessibilityRole="button"
-                    accessibilityLabel={translateApp(
-                      "Remove unavailable recipient {{title}}",
-                      {
-                        title: title(
-                          id,
-                          routingMembers.find((member) => member.id === id)
-                            ?.name ?? id,
-                        ),
-                      },
-                    )}
-                    disabled={blocked}
-                    onPress={() =>
-                      editRecipients((old) => withRemoved(old, id))
-                    }
-                    style={[styles.recipient, { borderColor: colors.danger }]}
-                  >
-                    <Label style={[styles.small, { color: colors.danger }]}>
-                      {translateApp("{{title}} · Unavailable", {
-                        title: title(
-                          id,
-                          routingMembers.find((member) => member.id === id)
-                            ?.name ?? id,
-                        ),
-                      })}
-                    </Label>
-                    <X size={12} color={colors.danger} />
-                  </Pressable>
-                ))}
-                {(liveMembers.some(
-                  (member) => !recipients.ids.includes(member.id),
-                ) ||
-                  unavailableMembers.length > 0) && (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={translateApp("Add recipient")}
-                    disabled={blocked}
-                    onPress={() => showRecipientPicker("add")}
-                    style={styles.addRecipient}
-                  >
-                    <Plus size={14} color={colors.primaryOnTint} />
-                    <Label
-                      style={[styles.small, { color: colors.primaryOnTint }]}
-                    >
-                      {translateApp("Add")}
-                    </Label>
-                  </Pressable>
-                )}
-              </OverflowScrollView>
               <AssistantPendingUploads
                 files={uploads.files}
                 reselect={uploads.session.reselect}
@@ -1206,6 +1114,100 @@ function GroupChat({
               />
               <ChatComposerInput
                 dictation={dictation}
+                expandedContent={
+                  <OverflowScrollView
+                    fadeColor={colors.composerBg}
+                    horizontal
+                    style={styles.horizontalStrip}
+                    keyboardShouldPersistTaps="handled"
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.recipients}
+                  >
+                    <Label muted style={styles.small}>
+                      {translateApp("To")}
+                    </Label>
+                    {recipients.ids.map((id) => {
+                      const member = liveMembers.find((row) => row.id === id);
+                      return member ? (
+                        <Pressable
+                          key={id}
+                          accessibilityRole="button"
+                          accessibilityLabel={translateApp(
+                            "Remove recipient {{title}}",
+                            { title: title(id, member.name) },
+                          )}
+                          disabled={blocked}
+                          onPress={() =>
+                            editRecipients((old) => withRemoved(old, id))
+                          }
+                          style={[
+                            styles.recipient,
+                            {
+                              backgroundColor: colors.navActive,
+                              borderColor: colors.composerBorder,
+                            },
+                          ]}
+                        >
+                          <Label style={styles.small}>
+                            {title(id, member.name)}
+                          </Label>
+                          <X size={12} color={colors.textSecondary} />
+                        </Pressable>
+                      ) : null;
+                    })}
+                    {unavailableRecipients.map((id) => (
+                      <Pressable
+                        key={`unavailable:${id}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={translateApp(
+                          "Remove unavailable recipient {{title}}",
+                          {
+                            title: title(
+                              id,
+                              routingMembers.find((member) => member.id === id)
+                                ?.name ?? id,
+                            ),
+                          },
+                        )}
+                        disabled={blocked}
+                        onPress={() =>
+                          editRecipients((old) => withRemoved(old, id))
+                        }
+                        style={[styles.recipient, { borderColor: colors.danger }]}
+                      >
+                        <Label style={[styles.small, { color: colors.danger }]}>
+                          {translateApp("{{title}} · Unavailable", {
+                            title: title(
+                              id,
+                              routingMembers.find((member) => member.id === id)
+                                ?.name ?? id,
+                            ),
+                          })}
+                        </Label>
+                        <X size={12} color={colors.danger} />
+                      </Pressable>
+                    ))}
+                    {(liveMembers.some(
+                      (member) => !recipients.ids.includes(member.id),
+                    ) ||
+                      unavailableMembers.length > 0) && (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={translateApp("Add recipient")}
+                        disabled={blocked}
+                        onPress={() => showRecipientPicker("add")}
+                        style={styles.addRecipient}
+                      >
+                        <Plus size={14} color={colors.primaryOnTint} />
+                        <Label
+                          style={[styles.small, { color: colors.primaryOnTint }]}
+                        >
+                          {translateApp("Add")}
+                        </Label>
+                      </Pressable>
+                    )}
+                  </OverflowScrollView>
+                }
                 generation={composerGeneration}
                 accessibilityLabel={translateApp("Message the crew")}
                 placeholder={translateApp("Message the crew")}
@@ -1216,17 +1218,10 @@ function GroupChat({
                     edit(value);
                 }}
                 editable={!blocked && (collaboration || !!liveMembers.length)}
-                // Phones: same one-row idle composer as private chats.
-                compactWhenIdle={
-                  narrow &&
-                  !dictation.active &&
-                  uploads.files.length === 0 &&
-                  !uploads.picking &&
-                  !uploads.session.sending
-                }
+                compactWhenIdle={!dictation.active}
                 renderActions={(mentionAction, layout) => (
                   <ChatComposerToolbar
-                    layout={narrow ? layout : undefined}
+                    layout={layout}
                     dictation={dictation}
                     dictationDisabled={
                       blocked || uploads.picking || uploads.session.sending

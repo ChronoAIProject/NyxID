@@ -12,14 +12,49 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
+#[derive(Clone, Copy)]
+pub(super) enum Field<'a> {
+    Body,
+    Scope,
+    Interface(&'a str),
+}
+
+impl<'a> Field<'a> {
+    fn path(self, agent: &'a str) -> Vec<&'a str> {
+        match self {
+            Self::Body => vec!["body_encrypted", agent],
+            Self::Scope => vec!["scope_encrypted", agent],
+            Self::Interface(operation) => {
+                vec!["publication", "interface_encrypted", agent, operation]
+            }
+        }
+    }
+
+    pub(super) async fn seal(
+        self,
+        keys: &EncryptionKeys,
+        id: &str,
+        owner: &str,
+        agent: &str,
+        bytes: &[u8],
+    ) -> AppResult<(Vec<u8>, Option<u8>)> {
+        let path = self.path(agent);
+        let context = RecordContext::new(PROPOSALS_COLLECTION_NAME, id, owner, &path)?;
+        Ok((
+            record_field::encrypt_context(keys, &context, bytes).await?,
+            keys.contextual_record_writes().then_some(3),
+        ))
+    }
+}
 async fn open(
     keys: &EncryptionKeys,
     row: &Proposal,
-    path: &[&str],
+    field: Field<'_>,
     version: Option<u8>,
     bytes: &[u8],
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    let context = RecordContext::new(PROPOSALS_COLLECTION_NAME, &row.id, &row.owner_id, path)?;
+    let path = field.path(&row.agent_id);
+    let context = RecordContext::new(PROPOSALS_COLLECTION_NAME, &row.id, &row.owner_id, &path)?;
     record_field::decrypt_context(keys, &context, version, bytes).await
 }
 
@@ -27,7 +62,7 @@ pub(super) async fn body(keys: &EncryptionKeys, row: &Proposal) -> AppResult<Zer
     open(
         keys,
         row,
-        &["body_encrypted", &row.agent_id],
+        Field::Body,
         row.body_context_version,
         &row.body_encrypted,
     )
@@ -37,12 +72,12 @@ pub(super) async fn body(keys: &EncryptionKeys, row: &Proposal) -> AppResult<Zer
 async fn optional(
     keys: &EncryptionKeys,
     row: &Proposal,
-    path: &[&str],
+    field: Field<'_>,
     version: Option<u8>,
     bytes: Option<&[u8]>,
 ) -> AppResult<Option<Zeroizing<Vec<u8>>>> {
     match bytes {
-        Some(bytes) => open(keys, row, path, version, bytes).await.map(Some),
+        Some(bytes) => open(keys, row, field, version, bytes).await.map(Some),
         None if version.is_none() => Ok(None),
         None => Err(AppError::Internal(
             "Missing encrypted proposal field".into(),
@@ -57,7 +92,7 @@ pub(super) async fn scope(
     optional(
         keys,
         row,
-        &["scope_encrypted", &row.agent_id],
+        Field::Scope,
         row.scope_context_version,
         row.scope_encrypted.as_deref(),
     )
@@ -72,14 +107,12 @@ pub(super) async fn interface(
     optional(
         keys,
         row,
-        &[
-            "publication",
-            "interface_encrypted",
-            &row.agent_id,
-            &p.operation_id,
-        ],
+        Field::Interface(&p.operation_id),
         p.interface_context_version,
         p.interface_encrypted.as_deref(),
     )
     .await
 }
+
+#[path = "assistant_learning_record_storage.rs"]
+pub(super) mod storage;

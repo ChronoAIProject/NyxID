@@ -81,7 +81,7 @@ fn dispatched(p: &LearningPublication) -> bool {
 
 /// Card/panel code for an update package prepared before interface snapshots.
 pub(crate) const LEGACY_PACKAGE: &str = "legacy_package_requires_reprepare";
-const PACKAGE_FORMAT_SNAPSHOT: i64 = 2;
+pub(super) const PACKAGE_FORMAT_SNAPSHOT: i64 = 2;
 
 /// An update package prepared before #1828: no interface snapshot, so it
 /// declares `category: plain` and would drop the base's tools and runtimes.
@@ -830,7 +830,14 @@ async fn draft(
     let bytes = record::body(&state.encryption_keys, row)
         .await
         .map_err(|_| not_found())?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| not_found())?;
+    decode_draft(row, &bytes)
+}
+
+pub(super) fn decode_draft(
+    row: &AssistantAgentLearningProposal,
+    bytes: &[u8],
+) -> AppResult<GeneratedProposal> {
+    let text = std::str::from_utf8(bytes).map_err(|_| not_found())?;
     if row.source == ProposalSource::Authored {
         return super::assistant_skill_authoring::decode_body(text);
     }
@@ -1522,7 +1529,15 @@ pub async fn edit(
         return Err(must_reconcile());
     }
     let encoded = encode_draft(&state.db, &agent, &row, value).await?;
-    let encrypted = state.encryption_keys.encrypt(&encoded).await?;
+    let (encrypted, body_version) = record::Field::Body
+        .seal(
+            &state.encryption_keys,
+            &row.id,
+            &row.owner_id,
+            &row.agent_id,
+            &encoded,
+        )
+        .await?;
     let material = match row.scope_digest.as_deref() {
         Some(scope_digest) => format!(
             "{}:{}:{}:{}",
@@ -1542,12 +1557,14 @@ pub async fn edit(
     let db = state.db.clone();
     let proposal_id = id.to_owned();
     let skills_revision = agent.skills_revision;
+    let owner_id = row.owner_id.clone();
+    let proposal_agent = row.agent_id.clone();
     let body_len = encoded.len() as i64;
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
             let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
-                .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(expected_revision),"status":{"$in":["pending","publication_failed"]}})
+                .find_one(doc! {"_id":&proposal_id,"owner_id":&owner_id,"agent_id":&proposal_agent,"revision":revision_filter(expected_revision),"status":{"$in":["pending","publication_failed"]}})
                 .session(&mut *session).await?.ok_or_else(conflict)?;
             if fresh.publication.as_ref().is_some_and(|p| !non_effective(p, Utc::now())) { return Err(must_reconcile()); }
             if let Some(p) = &fresh.publication && let Some(target) = target_id(p) {
@@ -1557,26 +1574,27 @@ pub async fn edit(
             }
             let mut filter = operation_filter(&fresh);
             filter.insert("status", doc! {"$in":["pending","publication_failed"]});
-            let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
-                filter,
-                doc! {
-                    "$set": {
-                        "status": "pending",
-                        "body_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone() },
-                        "body_bytes": body_len,
-                        "fingerprint": &fingerprint,
-                        "revision": expected_revision+1,
-                        "agent_skills_revision": skills_revision,
-                        "updated_at": bson::DateTime::now(),
-                    },
-                    "$unset": {
-                        "body_context_version": "",
-                        "publication": "",
-                        "failure_code": "",
-                        "failure_rules": "",
-                    },
-                },
-            ).session(&mut *session).await?;
+            let mut set = doc! {
+                "status": "pending",
+                "body_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone() },
+                "body_bytes": body_len,
+                "fingerprint": &fingerprint,
+                "revision": expected_revision + 1,
+                "agent_skills_revision": skills_revision,
+                "updated_at": bson::DateTime::now(),
+            };
+            let mut unset = doc! {
+                "publication": "",
+                "failure_code": "",
+                "failure_rules": "",
+            };
+            if let Some(version) = body_version {
+                set.insert("body_context_version", i32::from(version));
+            } else {
+                unset.insert("body_context_version", "");
+            }
+            let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+                .update_one(filter, doc! {"$set": set, "$unset": unset}).session(&mut *session).await?;
             if changed.modified_count != 1 { return Err(conflict()); }
             Ok(())
         }.await;
@@ -1894,14 +1912,20 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
             &version,
             snapshot.as_ref(),
         )?;
-        let encrypted = match snapshot {
-            Some(value) => Some(
-                state
-                    .encryption_keys
-                    .encrypt(&serde_json::to_vec(&value).map_err(|_| conflict())?)
-                    .await?,
-            ),
-            None => None,
+        let (interface_encrypted, interface_context_version) = match snapshot {
+            Some(value) => {
+                let (bytes, version) = record::Field::Interface(&operation)
+                    .seal(
+                        &state.encryption_keys,
+                        &row.id,
+                        &row.owner_id,
+                        &row.agent_id,
+                        &serde_json::to_vec(&value).map_err(|_| conflict())?,
+                    )
+                    .await?;
+                (Some(bytes), version)
+            }
+            None => (None, None),
         };
         let p = LearningPublication {
             operation_id: operation,
@@ -1925,11 +1949,12 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
                 .into(),
             ),
             target_skill_id: body.base_skill.as_ref().map(|base| base.skill_id.clone()),
-            interface_encrypted: encrypted,
+            interface_encrypted,
+            interface_context_version,
             package_format: PACKAGE_FORMAT_SNAPSHOT,
             ..Default::default()
         };
-        state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id,"revision":revision_filter(row.revision),"status":"pending","publication":bson::Bson::Null},doc! {"$set":{"publication":bson::to_bson(&p).map_err(|_| conflict())?}}).await?;
+        state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id,"owner_id":&row.owner_id,"agent_id":&row.agent_id,"revision":revision_filter(row.revision),"status":"pending","publication":bson::Bson::Null},doc! {"$set":{"publication":bson::to_bson(&p).map_err(|_| conflict())?}}).await?;
         row = load(&state.db, actor, agent_id, id).await?.1;
     }
     if row
