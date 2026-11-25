@@ -20,7 +20,74 @@ use wiremock::{
 mod validation_regressions;
 
 #[path = "assistant_learning_recovery_tests.rs"]
-mod recovery;
+pub(crate) mod recovery;
+
+pub(crate) async fn contextualize(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    raw: &mut bson::Document,
+) {
+    use crate::crypto::record_field::RecordContext;
+    use bson::{Binary, spec::BinarySubtype};
+    let row: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
+    for (name, marker, path) in [
+        (
+            "body_encrypted",
+            "body_context_version",
+            vec!["body_encrypted", &row.agent_id],
+        ),
+        (
+            "scope_encrypted",
+            "scope_context_version",
+            vec!["scope_encrypted", &row.agent_id],
+        ),
+        (
+            "interface_encrypted",
+            "interface_context_version",
+            vec![
+                "publication",
+                "interface_encrypted",
+                &row.agent_id,
+                row.publication
+                    .as_ref()
+                    .map_or("", |p| p.operation_id.as_str()),
+            ],
+        ),
+    ] {
+        let parent = if name == "interface_encrypted" {
+            let Ok(p) = raw.get_document_mut("publication") else {
+                continue;
+            };
+            p
+        } else {
+            &mut *raw
+        };
+        let Ok(bytes) = parent.get_binary_generic(name) else {
+            continue;
+        };
+        let clear = keys.decrypt(bytes).await.unwrap();
+        let ctx =
+            RecordContext::new(PROPOSALS_COLLECTION_NAME, &row.id, &row.owner_id, &path).unwrap();
+        let bytes = keys.encrypt_record(&clear, &ctx).await.unwrap();
+        parent.insert(
+            name,
+            Binary {
+                subtype: BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        parent.insert(marker, 3_i32);
+    }
+}
+
+async fn install_contextual(f: &Fixture, id: &str) {
+    let rows = f
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+    let mut raw = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+    contextualize(&f.state.encryption_keys, &mut raw).await;
+    rows.replace_one(doc! {"_id":id}, raw).await.unwrap();
+}
 
 fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
@@ -2250,6 +2317,149 @@ async fn post_write_zip_hash_mismatch_keeps_check_only_barrier() {
         .unwrap()
         .unwrap();
     assert_eq!(barrier.get_str("state").unwrap(), "uncertain");
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_skill_acknowledgement_can_retry_a_refused_proxy_create() {
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+
+    let f = fixture("authoring_create_proxy_refusal").await;
+    let server = setup_ornn(&f).await;
+    let mut value = input(&f.chat.agent_id);
+    value["scope"] = json!({"status":"reduced","omissions":["Older notes were omitted."]});
+    let (row, card) = make(&f, value).await;
+    let skill_id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &skill_id, "POST").await;
+    let services = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME);
+    services
+        .update_one(
+            doc! {"slug":"ornn-api"},
+            doc! {"$set":{"proxy_operation_policy":{
+                "rules":[{"method":"POST","path_template":"/api/v1/skill-format/validate"}]
+            }}},
+        )
+        .await
+        .unwrap();
+    let acknowledge = || {
+        crate::handlers::assistant_nyxagent::decide_acknowledgement(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path((card.conversation_id.clone(), card.id.clone())),
+            Json(
+                serde_json::from_value(json!({"decision":"allow","accept_reduced_scope":true}))
+                    .unwrap(),
+            ),
+        )
+    };
+    let failure = acknowledge().await.err().expect("policy denies create");
+    let requests = ornn_requests(&server).await;
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.path() == "/api/v1/skill-format/validate")
+    );
+    assert!(!requests.iter().any(|r| r.url.path() == "/api/v1/skills"));
+    assert!(
+        matches!(&failure, AppError::Conflict(code) if code == "nyxid_refused"),
+        "{failure}"
+    );
+    let failed = stored(&f, &row.id).await;
+    assert_eq!(failed.failure_code.as_deref(), Some("nyxid_refused"));
+    let p = failed.publication.unwrap();
+    assert!(!p.started && !p.uncertain_dispatch);
+    assert!(
+        card_preview(&f, &row, &card).await["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("retry"))
+    );
+    services
+        .update_one(
+            doc! {"slug":"ornn-api"},
+            doc! {"$unset":{"proxy_operation_policy":""}},
+        )
+        .await
+        .unwrap();
+    let _ = acknowledge().await.unwrap();
+    let _ = acknowledge().await.unwrap();
+    let published = stored(&f, &row.id).await;
+    assert_eq!(published.status, "pinned");
+    let publication = published.publication.unwrap();
+    assert_eq!(publication.operation_id, p.operation_id);
+    assert_eq!(publication.skill_id.as_deref(), Some(skill_id.as_str()));
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_skill_check_finds_the_exact_version_after_a_lost_create_response() {
+    let f = fixture("authoring_create_exact_recovery").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let p = row.publication.as_ref().unwrap();
+    let id = Uuid::new_v4().to_string();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        matches!(finish(&f, card.clone(), true).await, Err(AppError::Conflict(code)) if code.contains("publication_ambiguous"))
+    );
+    let used = allowed_card(&f, &card).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/skill-search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+        )
+        .mount(&server)
+        .await;
+    assert!(
+        matches!(finish(&f, used.clone(), true).await, Err(AppError::Conflict(code)) if code.contains("publication_ambiguous"))
+    );
+    assert_eq!(
+        card_preview(&f, &row, &used).await["actions"],
+        json!(["check"])
+    );
+    Mock::given(method("GET")).and(path(format!("/api/v1/skills/{}", p.name)))
+        .and(query_param("version", &p.version))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{
+            "guid":id,"name":p.name,"version":p.version,"skillHash":p.sha256,
+            "isPrivate":true,"createdBy":f.owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]
+        }}))).expect(1).mount(&server).await;
+    let body: GeneratedProposal = serde_json::from_slice(
+        &f.state
+            .encryption_keys
+            .decrypt(&row.body_encrypted)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let archive =
+        publication::package_with_snapshot(&body, &p.operation_id, &p.name, &p.version, None)
+            .unwrap();
+    mount_version(&server, &f.owner, &id, p, archive).await;
+    finish(&f, used, true).await.unwrap();
+    let published = stored(&f, &row.id).await;
+    assert_eq!(published.status, "pinned");
+    assert_eq!(
+        published.publication.unwrap().skill_id.as_deref(),
+        Some(id.as_str())
+    );
     server.verify().await;
     f.state.db.drop().await.unwrap();
 }
@@ -5876,6 +6086,7 @@ async fn reduced_scope_publication_requires_consent_and_pins_with_metadata_audit
     let (row, card) = make(&f, value).await;
     let skill_id = Uuid::new_v4().to_string();
     mount_publication(&f, &server, &row, &skill_id, "POST").await;
+    install_contextual(&f, &row.id).await;
     assert!(finish(&f, card.clone(), true).await.is_err());
     assert!(
         server

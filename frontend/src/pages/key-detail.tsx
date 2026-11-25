@@ -1698,7 +1698,7 @@ function DeleteKeyDialog({
           translateUi(response?.upstream_revocation_scheduled === true
             ? "Removed from NyxID. Upstream revocation scheduled."
             : "Removed from NyxID. Upstream revocation is not confirmed."),
-          { action: { label: "View history", onClick: () => { void navigate({ to: "/keys/$keyId", params: { keyId } }); } }, duration: 15000 },
+          { action: { label: translateUi("View history"), onClick: () => { void navigate({ to: "/keys/$keyId", params: { keyId } }); } }, duration: 15000 },
         );
         close();
         void navigate({ to: "/keys", search: {} });

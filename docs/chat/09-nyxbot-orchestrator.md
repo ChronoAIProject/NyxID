@@ -165,8 +165,10 @@ enforcement is independent of the flag.
 validation, capacity, missing-replacement, authorization, conflict and storage/internal
 diagnostics in the tool result and activity panel. Keep notes to 500 characters
 and 50 total; split long facts deliberately. Confirm saved facts only from
-successful receipts, and report any still-unresolved writes. Later success never
-silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+successful receipts, and report any still-unresolved writes. Pass the rejected
+attempt's `failed_activity_id` in `recovery` when retrying or splitting the
+same intent. The web activity shows the count of committed parts beside the
+original diagnostic. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
 Memory and personas refuse obvious
 credential shapes.
 
@@ -940,18 +942,31 @@ too, not only for the callback claims, header and payload; before that fix it
 refused every such message with 401 `reply_binding_mismatch`, while BotFather
 (`telegram`) bots worked.
 
-**Deployment prerequisite.** The gateway only calls operator-allowlisted
-providers, read once at startup. This entry in `CMAEG_PROVIDERS` (CMA repository,
-`infra/cmaeg/configmap.yaml`, ChronoAIProject/cma#953) must be deployed before
-Telegram bots can be linked:
+**Deployment prerequisite.** The gateway reads its provider allowlist
+(`CMAEG_PROVIDERS`) at startup.
+Register `nyxbot` in every environment where users link Telegram bots, including
+staging. In `ChronoAIProject/cma-infra`, production uses
+`prod/chrono-cd/apps/cmaeg-prod.yaml` and staging uses
+`staging/apps/cmaeg-staging.yaml`. Set `base_url` to that environment's NyxID
+API. The production entry is shown below.
 
 ```json
-{"slug":"nyxbot","base_url":"https://nyx-api.chrono-ai.fun","kind":"responses_http",
- "paths":{"agent_card":"/api/v1/nyxbot/agent-card",
-  "binding":"/api/v1/nyxbot/bindings/{binding_id}",
-  "conversation":"/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
-  "responses":"/api/v1/nyxbot/responses"},
- "max_inflight":256}
+{
+  "slug": "nyxbot",
+  "base_url": "https://nyx-api.chrono-ai.fun",
+  "kind": "responses_http",
+  "paths": {
+    "agent_card": "/api/v1/nyxbot/agent-card",
+    "binding": "/api/v1/nyxbot/bindings/{binding_id}",
+    "conversation": "/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
+    "responses": "/api/v1/nyxbot/responses",
+    "recovery": {
+      "response": "/api/v1/nyxbot/responses/{response_id}",
+      "events": "/api/v1/nyxbot/responses/{response_id}/events"
+    }
+  },
+  "max_inflight": 256
+}
 ```
 
 `max_inflight` caps concurrent gateway calls to NyxID across all NyxBot

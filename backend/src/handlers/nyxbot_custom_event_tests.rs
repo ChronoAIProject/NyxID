@@ -25,6 +25,7 @@ async fn custom_binding(
             provider_api_key_id: Some(provider_key_id.into()),
             provider_key_ciphertext: None,
             producer_secret_ciphertext: None,
+            secret_context_versions: Default::default(),
             producer_key_id: format!("producer-{id}"),
             gateway_channel_id: Some(gateway_channel_id.into()),
             custom_event_url: Some(format!(
@@ -328,4 +329,136 @@ async fn custom_event_retries_share_one_turn_and_preserve_the_pinned_chat_anchor
         1
     );
     server.abort();
+}
+
+#[path = "nyxbot_mixed_event_bindings.rs"]
+mod mixed;
+
+#[tokio::test]
+async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner() {
+    use crate::{
+        models::{
+            assistant_agent::{AgentKind, COLLECTION_NAME as AGENTS},
+            org_membership::{COLLECTION_NAME as MEMBERS, OrgRole},
+        },
+        services::nyxbot_event_binding_service::{self as bindings, storage},
+    };
+    for outcome in ["ready", "reject", "unbind", "revoke"] {
+        let (mut state, _, upstream) = setup("event_binding_prep_race").await;
+        let _upstream = tokio_util::task::AbortOnDropHandle::new(upstream);
+        state.config.contextual_record_writes = false;
+        state.encryption_keys = Arc::new(crate::crypto::aes::EncryptionKeys::from_config(
+            &state.config,
+        ));
+        let keys = crate::test_utils::test_encryption_keys();
+        let org = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        state
+            .db
+            .collection(MEMBERS)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                OWNER,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        let mut agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+            .await
+            .unwrap();
+        agent.id = Uuid::new_v4().to_string();
+        agent.kind = AgentKind::Specialist;
+        agent.name = "org-specialist".into();
+        agent.user_id = org.clone();
+        state
+            .db
+            .collection::<crate::models::assistant_agent::AssistantAgent>(AGENTS)
+            .insert_one(&agent)
+            .await
+            .unwrap();
+        let dest = Box::pin(mixed::destination_fixture(&state, &agent.id)).await;
+        let mut remote = mixed::gateway(&state, true, outcome == "reject").await;
+        let rows = state.db.collection::<bson::Document>(EVENT_BINDINGS);
+        let setup = Box::pin(bindings::create(&state, OWNER, &agent.id, &dest, PARTITION));
+        let race = async {
+            let _hashes =
+                tokio::time::timeout(std::time::Duration::from_secs(8), remote.entered.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let source = rows
+                .find_one(doc! {"status":"preparing"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(source.get_str("user_id"), Ok(OWNER));
+            assert_eq!(source.get_str("agent_owner_id"), Ok(org.as_str()));
+            let id = source.get_str("_id").unwrap();
+            if outcome == "unbind" {
+                let row = bindings::get(&state, OWNER, id).await.unwrap();
+                Box::pin(bindings::unbind_provider(&state, &row))
+                    .await
+                    .unwrap();
+                assert!(!storage::migrate(&state.db, &keys, &source).await.unwrap());
+            } else {
+                assert!(storage::migrate(&state.db, &keys, &source).await.unwrap());
+                let rewrapped = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+                storage::verify(&state.db, &keys, &rewrapped).await.unwrap();
+                rows.update_one(doc! {"_id":id}, doc! {"$set":{"unrelated_sibling":"kept"}})
+                    .await
+                    .unwrap();
+            }
+            remote.resume.notify_one();
+            source
+        };
+        let (result, source) = tokio::join!(setup, Box::pin(race));
+        let id = source.get_str("_id").unwrap();
+        let row = bindings::get(&state, OWNER, id).await.unwrap();
+        let raw = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        if outcome != "unbind" {
+            assert_eq!(raw.get_str("unrelated_sibling"), Ok("kept"));
+        }
+        if matches!(outcome, "ready" | "revoke") {
+            assert!(result.is_ok());
+            Box::pin(bindings::authorize_provider(&state, &row))
+                .await
+                .unwrap();
+            storage::verify(&state.db, &keys, &raw).await.unwrap();
+            let debug = format!("{row:?}");
+            assert!(!debug.contains("ciphertext") && !debug.contains(&row.producer_key_id));
+            if outcome == "ready" {
+                continue;
+            }
+            Box::pin(bindings::revoke(&state, OWNER, id)).await.unwrap();
+        } else {
+            assert!(result.is_err());
+        }
+        let retired = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        assert_eq!(
+            retired.get_str("status"),
+            Ok(if outcome == "reject" {
+                "failed"
+            } else {
+                "revoked"
+            })
+        );
+        for field in ["provider_key_ciphertext", "producer_secret_ciphertext"] {
+            assert!(retired.get(field).is_none_or(|v| v == &bson::Bson::Null));
+            assert!(
+                retired
+                    .get_document("secret_context_versions")
+                    .ok()
+                    .is_none_or(|m| !m.contains_key(field))
+            );
+        }
+        assert!(!storage::migrate(&state.db, &keys, &source).await.unwrap());
+        storage::verify(&state.db, &keys, &retired).await.unwrap();
+        assert!(retired == rows.find_one(doc! {"_id":id}).await.unwrap().unwrap());
+    }
 }

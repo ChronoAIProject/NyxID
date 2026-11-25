@@ -223,6 +223,16 @@ async fn lease_handover_fences_stale_admission_status_and_checkpoint_and_dedupli
         sequence: Some(12),
     };
     checkpoint(&state.db, &old, &resume).await.unwrap();
+    let migrated = crate::services::channel_credential_continuity::rewrap_fixture(
+        &state.db,
+        &state.encryption_keys,
+        &old.bot,
+        &["bot_token_encrypted"],
+    )
+    .await;
+    assert!(old.current(&state.db).await.unwrap());
+    status(&state.db, &old, "connected", None).await.unwrap();
+    checkpoint(&state.db, &old, &resume).await.unwrap();
     let first = message(&old, "500");
     assert!(
         super::super::channel_admission_service::store_discord(&state.db, first.clone(), &old)
@@ -251,7 +261,7 @@ async fn lease_handover_fences_stale_admission_status_and_checkpoint_and_dedupli
     .unwrap();
     let new = Fence {
         lease,
-        bot: old.bot.clone(),
+        bot: migrated,
     };
     assert!(new.current(&state.db).await.unwrap());
     assert!(status(&state.db, &old, "connected", None).await.is_err());

@@ -1158,6 +1158,15 @@ pub struct ChatAuthority {
     pub with_nyxbot: bool,
 }
 impl ChatAuthority {
+    pub(crate) fn is_org_channel_guest(&self) -> bool {
+        self.guest
+            && self
+                .org_agent_access
+                .as_ref()
+                .and_then(|access| access.channel())
+                .is_some_and(|channel| channel.execution().guest)
+    }
+
     /// The adapter chooses interaction capability once; approval writers use
     /// the same transport-independent options as every other caller.
     pub(crate) fn approval_options(&self) -> super::approval_service::ApprovalOptions {

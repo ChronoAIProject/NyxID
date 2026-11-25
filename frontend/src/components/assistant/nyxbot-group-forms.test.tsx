@@ -294,11 +294,12 @@ it("creates an organization group with only its agents and eligible participants
   const otherAgent = agent({ id: "other-agent", name: "Other org specialist", kind: "specialist", owner_id: "org-b", owner_kind: "org" });
   const onCreated = vi.fn();
   const user = userEvent.setup();
-  render(<QueryClientProvider client={client}><NewGroupDialog agents={[...AGENTS, orgAgent, otherAgent]} onClose={vi.fn()} onCreated={onCreated} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NewGroupDialog agents={[...AGENTS, orgAgent, otherAgent, { ...orgAgent, id: "denied", name: "Restricted specialist", can_use: false, can_maintain: true }]} onClose={vi.fn()} onCreated={onCreated} /></QueryClientProvider>);
   await user.click(screen.getByRole("combobox", { name: "Ownership" }));
   await user.click(screen.getByRole("option", { name: "Research Org" }));
   const agents = screen.getByRole("list", { name: "Agents" });
   expect(within(agents).queryByText("NyxBot")).not.toBeInTheDocument();
+  expect(within(agents).queryByText("Restricted specialist")).not.toBeInTheDocument();
   expect(within(agents).queryByText("Other org specialist")).not.toBeInTheDocument();
   await user.click(within(agents).getByRole("checkbox"));
   const participants = screen.getByRole("list", { name: "Participants" });

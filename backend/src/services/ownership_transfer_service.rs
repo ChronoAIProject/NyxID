@@ -699,7 +699,7 @@ pub async fn transfer_with_keys(
     // Authenticate captured material after ACL admission and before the retrying
     // transaction. The exact raw source predicate fences ownership, ciphertext,
     // markers, headers and formerly absent fields together at commit.
-    let catalog_rebind = if kind == ResourceKind::Service {
+    let credential_rebind = if kind == ResourceKind::Service {
         let source = db
             .collection::<Document>(SERVICES)
             .find_one(doc! {"_id":&resource_id,"is_active":true})
@@ -808,7 +808,7 @@ pub async fn transfer_with_keys(
                 let destination = destination.clone();
                 let expected_version = expected_version.clone();
                 let refresh_key_id = refresh_key_id.clone();
-                let catalog_rebind = catalog_rebind.clone();
+                let credential_rebind = credential_rebind.clone();
                 let fresh_oauth_handle = fresh_oauth_handle.clone();
                 Box::pin(async move {
                     let result: AppResult<OwnershipTransfer> = async {
@@ -951,9 +951,20 @@ pub async fn transfer_with_keys(
                     "user_id"
                 }
             };
+            let credential_rebind = if kind == ResourceKind::ChannelBot {
+                let source = db.collection::<Document>(BOTS)
+                    .find_one(doc! {"_id":&resource_id, "user_id":&reviewed.previous_owner_user_id, "is_active":true})
+                    .session(&mut **transaction).await?
+                    .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
+                let bot = super::channel_bot_record::decode(&source)?;
+                let set = super::channel_credential_continuity::transfer(&bot, &destination, keys).await?;
+                Some((source, set))
+            } else {
+                credential_rebind
+            };
             let mut set = doc! { "updated_at": now };
             set.insert(owner_field, &destination);
-            if let Some((_, rebound)) = &catalog_rebind {
+            if let Some((_, rebound)) = &credential_rebind {
                 set.extend(rebound.clone());
             }
             let mut update = doc! { "$set": set };
@@ -972,7 +983,7 @@ pub async fn transfer_with_keys(
                     resource_filter.insert("user_id", &reviewed.previous_owner_user_id);
                 }
             }
-            if let Some((source, _)) = &catalog_rebind {
+            if let Some((source, _)) = &credential_rebind {
                 let mut exact = super::record_storage::exact_document_predicate(source);
                 resource_filter.insert("$expr", exact.remove("$expr").ok_or_else(||AppError::Internal("Catalog transfer source is invalid".into()))?);
             }

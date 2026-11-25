@@ -59,9 +59,11 @@ fn proposal(started: bool) -> AssistantAgentLearningProposal {
         failure_code: None,
         failure_rules: Vec::new(),
         scope_encrypted: None,
+        scope_context_version: None,
         scope_digest: None,
         evidence: Vec::new(),
         body_encrypted: Vec::new(),
+        body_context_version: None,
         body_bytes: 0,
         created_at: now,
         updated_at: now,
@@ -1371,7 +1373,13 @@ async fn wiremock_publish_failure_is_ambiguous_and_reconcile_accepts_one_match()
         ..Default::default()
     };
     assert!(matches!(
-        publication::publish_classified(&reader, None, bytes.clone()).await,
+        publication::publish_classified(
+            &reader,
+            None,
+            bytes.clone(),
+            crate::services::agent_skill_service::PublicationDispatch::for_test()
+        )
+        .await,
         publication::PublishOutcome::Uncertain { .. }
     ));
     server.reset().await;
@@ -1488,7 +1496,13 @@ async fn version_exists_reconciles_exact_zip_and_refuses_mismatch_without_anothe
         .mount(&server)
         .await;
     assert!(matches!(
-        publication::publish_classified(&reader, Some(&base), bytes.clone()).await,
+        publication::publish_classified(
+            &reader,
+            Some(&base),
+            bytes.clone(),
+            crate::services::agent_skill_service::PublicationDispatch::for_test()
+        )
+        .await,
         publication::PublishOutcome::VersionConflict { status: 409 }
     ));
     Mock::given(method("GET"))
@@ -1733,9 +1747,11 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             failure_code: None,
             failure_rules: Vec::new(),
             scope_encrypted: None,
+            scope_context_version: None,
             scope_digest: None,
             evidence: vec![evidence],
             body_encrypted: encrypted,
+            body_context_version: None,
             body_bytes: body.len() as i64,
             created_at: now,
             updated_at: now,
@@ -3186,5 +3202,121 @@ async fn invocation_publication_queue_refusal_rolls_back_settlement_and_duplicat
         .is_err()
     );
     session.abort_transaction().await.unwrap();
+    db.drop().await.unwrap();
+}
+
+#[path = "assistant_learning_proposal_mixed_tests.rs"]
+mod mixed_records;
+
+#[tokio::test]
+async fn learning_proposal_context_selects_each_field_and_preserves_absent_and_erased_rows() {
+    use crate::services::assistant_skill_authoring::tests::{
+        contextualize, recovery::mixed_authored_row,
+    };
+    let db = crate::test_utils::connect_transaction_test_database("proposal_reader_branches").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let bundle = Box::pin(mixed_authored_row(state.encryption_keys.clone())).await;
+    let mut raw = bundle.get_document("authored").unwrap().clone();
+    let legacy: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
+    contextualize(&state.encryption_keys, &mut raw).await;
+    let bound: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
+    for identity in [
+        "owner",
+        "agent",
+        "proposal",
+        "field",
+        "unmarked",
+        "unknown",
+        "legacy-marked",
+    ] {
+        let mut row = bound.clone();
+        let p = row.publication.as_mut().unwrap();
+        match identity {
+            "owner" => row.owner_id = "other-owner".into(),
+            "agent" => row.agent_id = "other-agent".into(),
+            "proposal" => row.id = "other-proposal".into(),
+            "field" => {
+                row.scope_encrypted = Some(bound.body_encrypted.clone());
+                row.body_encrypted = p.interface_encrypted.clone().unwrap();
+                p.interface_encrypted = bound.scope_encrypted.clone();
+            }
+            "unmarked" | "unknown" => {
+                let marker = (identity == "unknown").then_some(4);
+                row.scope_context_version = marker;
+                row.body_context_version = marker;
+                p.interface_context_version = marker;
+            }
+            "legacy-marked" => {
+                row.scope_encrypted = legacy.scope_encrypted.clone();
+                row.body_encrypted = legacy.body_encrypted.clone();
+                p.interface_encrypted = legacy
+                    .publication
+                    .as_ref()
+                    .unwrap()
+                    .interface_encrypted
+                    .clone();
+            }
+            _ => unreachable!(),
+        }
+        assert!(draft(&state, &row).await.is_err(), "{identity}");
+        assert!(
+            original_target_from_body(&state, &row).await.is_err(),
+            "{identity}"
+        );
+        assert!(proposal_scope(&state, &row).await.is_err(), "{identity}");
+        assert!(
+            interface_snapshot(&state, &row, row.publication.as_ref().unwrap())
+                .await
+                .is_err(),
+            "{identity}"
+        );
+    }
+    let mut different_operation = bound.publication.clone().unwrap();
+    different_operation.operation_id = "other-operation".into();
+    assert!(
+        interface_snapshot(&state, &bound, &different_operation)
+            .await
+            .is_err()
+    );
+
+    let agent = bson::from_document(bundle.get_document("agent").unwrap().clone()).unwrap();
+    for status in ["rejected", "invalidated", "pinned"] {
+        let mut raw = raw.clone();
+        raw.insert("status", status);
+        raw.remove("body_encrypted");
+        raw.remove("scope_encrypted");
+        raw.get_document_mut("publication")
+            .unwrap()
+            .remove("interface_encrypted");
+        let orphan: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
+        assert!(original_target_from_body(&state, &orphan).await.is_err());
+        assert!(proposal_scope(&state, &orphan).await.is_err());
+        assert!(
+            interface_snapshot(&state, &orphan, orphan.publication.as_ref().unwrap())
+                .await
+                .is_err()
+        );
+        raw.remove("body_context_version");
+        raw.remove("scope_context_version");
+        raw.get_document_mut("publication")
+            .unwrap()
+            .remove("interface_context_version");
+        let erased: AssistantAgentLearningProposal = bson::from_document(raw).unwrap();
+        assert_eq!(
+            original_target_from_body(&state, &erased).await.unwrap(),
+            None
+        );
+        assert!(
+            interface_snapshot(&state, &erased, erased.publication.as_ref().unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let preview = preview_value(&state, &agent, &erased).await.unwrap().0;
+        assert!(preview["files"].as_array().unwrap().is_empty());
+        assert!(preview["scope"].is_null());
+        assert_eq!(preview["scope_unavailable"], false);
+        assert_ne!(preview["failure_code"], "draft_unavailable");
+    }
     db.drop().await.unwrap();
 }

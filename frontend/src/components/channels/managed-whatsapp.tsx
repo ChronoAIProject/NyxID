@@ -298,7 +298,7 @@ export function ManagedWhatsApp({
                 onChange={() => setFeature(choice.value)}
                 className="mt-0.5 accent-primary"
               />
-              <span>{choice.label}</span>
+              <span>{translateUi(choice.label)}</span>
             </Label>
           ))}
       </fieldset>
@@ -308,7 +308,7 @@ export function ManagedWhatsApp({
           className="flex items-center gap-2 text-13 text-muted-foreground"
         >
           <Loader2 className="size-3 animate-spin" />
-          {stageLabels[stage] ?? translateUi("Waiting for Meta...")}
+          {translateUi(stageLabels[stage] ?? "Waiting for Meta...")}
         </div>
       )}
       {popupHint && stage === "popup" && (

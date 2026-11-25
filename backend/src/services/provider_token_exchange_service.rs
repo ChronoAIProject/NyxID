@@ -563,8 +563,8 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
     };
 
     let response = request.send().await.map_err(|error| {
-        if super::proxy_destination::http::refused_connection(&error) {
-            super::proxy_destination::refused()
+        if let Some(failure) = super::proxy_destination::http::connection_failure(&error) {
+            failure.into()
         } else {
             AppError::ChannelPlatformError("token_exchange transport failed".into())
         }

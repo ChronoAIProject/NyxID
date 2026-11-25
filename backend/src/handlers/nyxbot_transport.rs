@@ -271,7 +271,7 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
         set.insert("gateway_native_activation_operation", bson::Bson::Null);
     }
     let update = doc! {"$set": set,
-    "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",
+    "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", crate::services::nyxbot_channel_key::VERSION_PATH: "", "gateway_channel_id": "",
         "gateway_source": "", "gateway_native_phase": "", "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
         "gateway_groups": "", "gateway_groups_retry_at": "", "gateway_attempted_at": "", "gateway_fallback_at": "",
         "pending_agent_api_key_id": "", "pending_route_api_key_id": ""}};

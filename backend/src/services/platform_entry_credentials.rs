@@ -51,6 +51,16 @@ fn field(row: &Document, name: &str) -> Bson {
 }
 
 impl EntryCredentialSnapshot {
+    pub(super) fn signing_producer(
+        &self,
+    ) -> Option<&super::platform_credential_service::PlatformCredentialSnapshot> {
+        self.shared.as_ref().or_else(|| self.bot.signing_producer())
+    }
+
+    pub(super) fn channel_snapshot(&self) -> &CredentialSnapshot {
+        &self.bot
+    }
+
     pub(crate) async fn load(
         db: &Database,
         adapter: &dyn PlatformAdapter,
@@ -178,6 +188,7 @@ impl EntryCredentialSnapshot {
             let shared = super::platform_credential_service::load(db, &descriptor)
                 .await?
                 .ok_or_else(changed)?;
+            shared.check_proofs(bot)?;
             if shared.id != provider_id {
                 return Err(changed());
             }
@@ -185,13 +196,13 @@ impl EntryCredentialSnapshot {
                 ("client_id", "client_id_encrypted"),
                 ("client_secret", "client_secret_encrypted"),
             ] {
-                let expected = shared
-                    .secrets
-                    .get(name)
-                    .cloned()
-                    .map(Bson::Binary)
-                    .unwrap_or(Bson::Null);
-                if expected != field(&provider, path) {
+                let expected = shared.secrets.get(name).map(|v| v.bytes.as_slice());
+                let actual = provider
+                    .get(path)
+                    .map(super::credential_record_service::stored_bytes)
+                    .transpose()?
+                    .flatten();
+                if expected != actual.as_deref() {
                     return Err(changed());
                 }
             }
@@ -221,9 +232,6 @@ impl EntryCredentialSnapshot {
                 result.guards.push(Guard {collection:crate::models::platform_credential::COLLECTION_NAME,
                     filter:doc! {"_id":field(&auxiliary,"_id"),"provider":descriptor.provider,"secrets":field(&auxiliary,"secrets")}});
             }
-            // All supported composite credential mutations also write the provider
-            // row transactionally, including insertion/removal of auxiliary keys.
-            // Its updated_at guard therefore fences even an initially absent map.
             result.shared = Some(shared);
         }
         result.guards.push(Guard {
@@ -233,13 +241,62 @@ impl EntryCredentialSnapshot {
         Ok(result)
     }
 
+    pub(super) fn pin_name(&self, shared: bool) -> &'static str {
+        if self.shared.is_some() && shared {
+            "native_shared"
+        } else {
+            "native"
+        }
+    }
+
+    pub(super) fn pin_dependencies(
+        &self,
+        evidence: &crate::models::channel_bot::CredentialContinuity,
+        verification: &str,
+        purpose: &str,
+    ) -> AppResult<String> {
+        if purpose == "native_shared" {
+            let shared = self
+                .shared
+                .as_ref()
+                .map(|p| (p.producer_ids(), &p.generations));
+            return super::channel_credential_continuity::dependencies(
+                self.bot.bot(),
+                purpose,
+                &[],
+                &(verification, shared, &self.connection_identity),
+                evidence,
+            );
+        }
+        let shared = self
+            .shared
+            .as_ref()
+            .map(|shared| (shared.producer_ids(), &shared.secrets));
+        super::channel_credential_continuity::dependencies(
+            self.bot.bot(),
+            "native",
+            &[],
+            &(verification, shared, &self.connection_identity),
+            evidence,
+        )
+    }
+
     pub(crate) fn fingerprint(&self) -> AppResult<String> {
         use sha2::{Digest, Sha256};
         let shared = self.shared.as_ref().map(|shared| &shared.secrets);
+        let verification = self.bot.fingerprint()?;
+        if let Some(evidence) = super::channel_credential_continuity::verified(self.bot.bot())? {
+            let purpose = self.pin_name(evidence.version == 2);
+            return Ok(super::channel_credential_continuity::select(
+                evidence,
+                purpose,
+                self.pin_dependencies(evidence, &verification, purpose)?,
+            ));
+        }
         let material = Zeroizing::new(
             serde_json::to_vec(&(
                 "nyxid-native-entry-credentials:v2",
-                self.bot.fingerprint()?,
+                verification,
                 shared,
                 &self.connection_identity,
             ))
@@ -297,6 +354,25 @@ impl EntryCredentialSnapshot {
         self.bot.secrets(keys, adapter).await
     }
 
+    pub(super) async fn fence_sources_for_rewrap(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<bool> {
+        if let Some(source) = self.signing_producer()
+            && !source.exact_sources(db, session).await?
+        {
+            return Ok(false);
+        }
+        if !self
+            .check_dependencies(db, session, TokenRequirement::Identity, true)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.bot.fence_signing_source(db, session).await
+    }
+
     pub(crate) async fn fence_in_session(
         &self,
         db: &Database,
@@ -308,7 +384,20 @@ impl EntryCredentialSnapshot {
         {
             return Ok(false);
         }
-        self.bot.fence_in_session(db, session).await
+        self.fence_observed_bot(db, session).await
+    }
+
+    async fn fence_observed_bot(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<bool> {
+        let matched = self.bot.fence_in_session(db, session).await?;
+        if matched && self.signing_producer().is_some() {
+            super::channel_signing_migration::prepare_observed(db, session, &self.bot.bot().id)
+                .await?;
+        }
+        Ok(matched)
     }
 
     /// Changing runtime modes authorizes no provider send. Fence a currently
@@ -325,7 +414,7 @@ impl EntryCredentialSnapshot {
         {
             return Ok(false);
         }
-        self.bot.fence_in_session(db, session).await
+        self.fence_observed_bot(db, session).await
     }
 
     pub(crate) async fn validate_runtime_controls_in_session(
@@ -370,7 +459,29 @@ impl EntryCredentialSnapshot {
                 filter.insert("$or", available);
             }
             let collection = db.collection::<Document>(guard.collection);
-            let exists = if write_fence {
+            let generations = self
+                .shared
+                .as_ref()
+                .and_then(|shared| match guard.collection {
+                    crate::models::provider_config::COLLECTION_NAME => {
+                        Some(&shared.primary_generations)
+                    }
+                    crate::models::platform_credential::COLLECTION_NAME => {
+                        Some(&shared.auxiliary_generations)
+                    }
+                    _ => None,
+                });
+            let exists = if let Some(generations) = generations {
+                super::channel_signing_migration::fence_projection(
+                    db,
+                    session,
+                    guard.collection,
+                    filter,
+                    generations,
+                    write_fence.then_some("platform_entry_effect_revision"),
+                )
+                .await?
+            } else if write_fence {
                 collection
                     .update_one(
                         filter,
@@ -390,6 +501,9 @@ impl EntryCredentialSnapshot {
             if !exists {
                 return Ok(false);
             }
+        }
+        if let Some(shared) = &self.shared {
+            return shared.auxiliary_presence_matches(db, session).await;
         }
         Ok(true)
     }

@@ -90,7 +90,7 @@ export function AssistantEngineSidebar({
     : openGroup
     ? undefined
     : selectedAgentOf(agents.data?.agents, openThreadAgentId, search.agent);
-  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled });
+  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled && selectedAgent?.can_use !== false });
   const actorKey = ["assistant", "actor", userId, "sidebar"];
   // The earlier engines' chats are not listed in NyxAgent mode, so they are
   // not fetched either.

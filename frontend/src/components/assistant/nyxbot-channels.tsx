@@ -162,7 +162,7 @@ export function ChannelBotsManager({
     (row) =>
       row.status !== "destroyed" &&
       !row.share_role &&
-      (row.owner_kind !== "org" || (orgChannels && adminOf(row.owner_id))),
+      (row.owner_kind !== "org" || (row.can_maintain !== false && orgChannels && adminOf(row.owner_id))),
   );
   const agentOf = (row: NyxAgentChannelAgent) => row.agent_id ?? nyxbot?.id;
   const connected = (channels.data ?? []).filter(
@@ -176,10 +176,13 @@ export function ChannelBotsManager({
       !connectedBotIds.has(bot.id) &&
       !orgs.data?.some((org) => org.id === bot.user_id && org.your_role !== "admin") &&
       (agent?.owner_kind !== "org" ||
-        (orgChannels &&
+        (agent.can_maintain !== false && orgChannels &&
           bot.user_id === agent.owner_id &&
           adminOf(agent.owner_id))),
   );
+  const reviewAllowed = review && targets.some((candidate) => candidate.id === review.facts.agent_id)
+    && (!review.channelId || connected.some((row) => row.id === review.channelId && row.can_manage
+      && targets.some((candidate) => candidate.id === agentOf(row))));
   const busy =
     preview.isPending ||
     connect.isPending ||
@@ -276,8 +279,8 @@ export function ChannelBotsManager({
           {review ? <OrgChannelDisclosure preview={review.facts} /> : null}
           <DialogFooter>
             <Button variant="outline" disabled={busy} onClick={() => setReview(undefined)}>{translateUi("Cancel")}</Button>
-            <Button disabled={busy || !review || !adminOf(review.facts.org_id)} onClick={async () => {
-              if (!review) return;
+            <Button disabled={busy || !reviewAllowed} onClick={async () => {
+              if (!review || !reviewAllowed) return;
               const pending = review;
               setReview(undefined);
               if (pending.channelId) {
@@ -312,7 +315,7 @@ export function ChannelBotsManager({
             const target = targets.find((candidate) => candidate.id === agentOf(row));
             const live = row.status === "pending" || row.status === "active";
             const canManage =
-              !row.org_specialist || (row.can_manage === true && adminOf(row.org_specialist.org_id));
+              !row.org_specialist || (row.can_manage === true && Boolean(target) && adminOf(row.org_specialist.org_id));
             const rowTargets = targets.filter((a) =>
               row.org_specialist
                 ? a.owner_kind === "org" &&

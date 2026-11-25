@@ -1798,6 +1798,26 @@ it("does not restore an active turn from a history request older than settlement
   expect(transport.session(id).messages.at(-1)?.content).toBe("Answer 界");
 });
 
+it("restores committed memory recovery evidence from settled history", async () => {
+  const recovery = { failed_activity_id: "20b44753-5c6e-4f19-8931-64c775d64cd4", part: 1, total: 2, committed: true };
+  const activity = { id: "saved-part", label: "nyxid__remember", status: "completed", started_at: start, ended_at: reset };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page, messages: [page.messages[0], { ...page.messages[1], activities: [
+      { ...activity, memory_recovery: recovery },
+      { ...activity, id: "legacy" },
+      { ...activity, id: "future", memory_recovery: { ...recovery, committed: "future" } },
+    ] }] });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const tools = transport.session(id).messages.at(-1)?.toolCalls;
+  expect(tools).toHaveLength(3);
+  expect(tools?.[0]?.memoryRecovery).toEqual(recovery);
+  expect(tools?.[1]?.memoryRecovery).toBeUndefined();
+  expect(tools?.[2]?.memoryRecovery).toBeUndefined();
+});
+
 it.each([null, undefined])("parses backend failures with status %s through active polling, settlement and reload", async (status) => {
   let active = true;
   const attachment = { id: "upload", origin: "user_upload", content_type: "text/plain", size: 5, label: "source.txt", pages: null, image_input: null, expired: false };

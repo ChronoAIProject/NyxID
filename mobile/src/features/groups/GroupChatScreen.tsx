@@ -226,7 +226,17 @@ function GroupChat({
     setVoiceMinimized(minimized);
   }
   const [localError, setLocalError] = useLocalizedState<string>();
-  const group = chat.isError ? undefined : chat.data?.group;
+  const names = useQuery({
+    queryKey: ["workspace", "agents", "group-labels", chat.epoch],
+    queryFn: ({ signal }) => agentsApi.list(signal),
+    enabled: chat.active,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const roster = chat.isError ? undefined : chat.data?.group;
+  const restricted = new Set(names.data?.agents.filter((agent) => agent.can_use === false).map((agent) => agent.id));
+  const group = roster && { ...roster, members: roster.members.map((member) =>
+    restricted.has(member.id) ? { ...member, unavailable: true } : member) };
   const recipientRoster = useRef<Group["members"]>(
     assistantDraftStore.get<Group["members"]>(`recipient-roster:${draftKey}`) ??
       [],
@@ -274,13 +284,6 @@ function GroupChat({
       );
     else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
   }, [draftKey, routingMembers, selection]);
-  const names = useQuery({
-    queryKey: ["workspace", "agents", "group-labels", chat.epoch],
-    queryFn: ({ signal }) => agentsApi.list(signal),
-    enabled: chat.active,
-    retry: false,
-    staleTime: 60_000,
-  });
   const identity = useQuery({
     queryKey: [...groupKeys(chat.epoch), "identity"],
     queryFn: ({ signal }) => accountApi.getProfile(signal),

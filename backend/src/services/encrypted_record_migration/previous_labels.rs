@@ -140,6 +140,9 @@ pub(super) const LABELS: &[super::FieldLabels] = &[
 
 // #2896 replaced three entries and appended seven. Keep this view independent
 // of future live-registry edits so retained counters keep their original names.
+pub(super) const OAUTH_WEBHOOK_DIGEST: &str =
+    "b87c6a8c242ec34ae73c327f2ff7ed8ab332f07985afb8ed50ce2693d6270892";
+
 pub(super) const RECONCILED_DIGEST: &str =
     "97d55ec8edff7d0599c59dc342e6a46fb5d580650d4be4b6e9cad693773d3b4c";
 pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
@@ -201,3 +204,18 @@ pub(super) fn reconciled() -> impl Iterator<Item = super::FieldLabels> {
         })
         .chain(ADDED.iter().copied())
 }
+
+pub(super) const CHANNEL_BOT_DIGEST: &str =
+    "fdb9b9bb2bba7447d7cef07e588e6c1d1ce9461af13bd17be7664d0a47dc1f12";
+
+pub(super) const WHATSAPP_DIGEST: &str =
+    "6c328214696d6e4cdbb50c0b9aa5ef852c20e6e480fd2203ed6002b48477a50b";
+
+pub(super) const CHANNEL_KEY_DIGEST: &str =
+    "417aa700dd5f5ce2adc8bc54a7c146f2b9b57e655c90c0e9a7fe642e4a9931d9";
+
+pub(super) const EVENT_BINDING_DIGEST: &str =
+    "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
+
+pub(super) const GATEWAY_SETUP_DIGEST: &str =
+    "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";

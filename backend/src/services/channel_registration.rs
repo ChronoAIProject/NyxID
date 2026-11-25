@@ -162,14 +162,8 @@ impl<'a> RegistrationValues<'a> {
     }
 }
 
-/// Read the field named by the registration descriptor or the consuming protocol.
-/// The owner, record ID, version and ciphertext all come from the same bot.
-pub(super) async fn open_secret(
-    keys: &EncryptionKeys,
-    bot: &ChannelBot,
-    field: &str,
-) -> AppResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
-    let ciphertext = match field {
+pub(super) fn stored_secret<'a>(bot: &'a ChannelBot, field: &str) -> AppResult<Option<&'a [u8]>> {
+    Ok(match field {
         "bot_token_encrypted" => Some(bot.bot_token_encrypted.as_slice()),
         "registration_pin_encrypted" => bot.registration_pin_encrypted.as_deref(),
         "webhook_secret_encrypted" => bot.webhook_secret_encrypted.as_deref(),
@@ -181,7 +175,17 @@ pub(super) async fn open_secret(
                 "Unknown channel bot credential field".into(),
             ));
         }
-    };
+    })
+}
+
+/// Read the field named by the registration descriptor or the consuming protocol.
+/// The owner, record ID, version and ciphertext all come from the same bot.
+pub(super) async fn open_secret(
+    keys: &EncryptionKeys,
+    bot: &ChannelBot,
+    field: &str,
+) -> AppResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    let ciphertext = stored_secret(bot, field)?;
     let version = bot.secret_context_versions.get(field).copied();
     match ciphertext {
         Some(bytes) => crate::crypto::record_field::decrypt(
@@ -321,41 +325,6 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
             billing: None,
         }
     }
-}
-
-#[cfg(test)]
-pub(crate) async fn bind_fixture_fields(
-    db: &mongodb::Database,
-    keys: &EncryptionKeys,
-    id: &str,
-    fields: &[&str],
-) {
-    use bson::{Document, doc};
-    let collection = crate::models::channel_bot::COLLECTION_NAME;
-    let rows = db.collection::<Document>(collection);
-    let row = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
-    let owner = row.get_str("user_id").unwrap();
-    let mut set = Document::new();
-    for &field in fields {
-        let plain = keys
-            .decrypt(row.get_binary_generic(field).unwrap())
-            .await
-            .unwrap();
-        let path = [field];
-        let context =
-            crate::crypto::record_field::RecordContext::new(collection, id, owner, &path).unwrap();
-        set.insert(
-            field,
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: keys.encrypt_record(&plain, &context).await.unwrap(),
-            },
-        );
-        set.insert(format!("secret_context_versions.{field}"), 3);
-    }
-    rows.update_one(doc! {"_id":id}, doc! {"$set":set})
-        .await
-        .unwrap();
 }
 
 #[cfg(test)]

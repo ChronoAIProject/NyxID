@@ -1,3 +1,4 @@
+import { onboardingText } from "../../../../../shared/onboardingCopy";
 import { useEffect, useRef, useState } from "react";
 import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
   readonly onStart: (step: NextStep) => void;
   readonly onClose: () => void;
 }) {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
   const [setup, setSetup] = useState<SuggestionSetup>();
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState(false);
@@ -34,7 +35,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
       if (!currentRequest()) return;
       if (current.connected || current.choices.length === 0) {
         started.current = true;
-        start.current({ ...step, prompt: current.connected ? current.prompt : step.prompt, connect: false });
+        start.current({ ...step, prompt: onboardingText(i18n.resolvedLanguage, current.connected ? current.prompt : step.prompt), connect: false });
         onClose();
         return;
       }
@@ -59,7 +60,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
   }, []);
 
   return (
-    <div className="space-y-3 px-4 py-3" aria-label={translateUi("{{suggestion}} options", { suggestion: step.title })}>
+    <div className="space-y-3 px-4 py-3" aria-label={translateUi("{{suggestion}} options", { suggestion: onboardingText(i18n.resolvedLanguage, step.title) })}>
       <p className="type-secondary text-muted-foreground">
         {busy ? translateUi("Checking your connections…") : translateUi("Choose a provider to connect your account.")}
       </p>

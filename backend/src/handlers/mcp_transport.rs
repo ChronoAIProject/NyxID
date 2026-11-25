@@ -26,6 +26,7 @@ use crate::services::{
     operation_descriptor, proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::turn_trace::{GuestServiceFailure, Stage};
 
 use super::services_helpers::fetch_service;
 
@@ -223,6 +224,41 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
             "isError": is_error,
         }),
     )
+}
+
+fn guest_service_failure(
+    auth: &McpAuthContext,
+    reason: GuestServiceFailure,
+    mut response: Response,
+) -> Response {
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.is_org_channel_guest())
+    {
+        reason.record(Stage::Mcp, None);
+        response
+            .extensions_mut()
+            .insert(crate::models::assistant_conversation::ToolFailure {
+                kind: "tool_error".into(),
+                reason: Some(reason.as_str().into()),
+                status: None,
+            });
+    }
+    response
+}
+
+fn operation_access_failure(
+    auth: &McpAuthContext,
+    request_id: Option<serde_json::Value>,
+    error: &crate::errors::AppError,
+) -> Response {
+    let response = tool_result(request_id, &error.to_string(), true);
+    if matches!(error, crate::errors::AppError::ApiKeyScopeForbidden(_)) {
+        guest_service_failure(auth, GuestServiceFailure::GuestOperationDenied, response)
+    } else {
+        response
+    }
 }
 
 fn concurrency_limited_response(id: Option<serde_json::Value>) -> Response {
@@ -513,6 +549,14 @@ async fn service_tool_content(
     };
     let status = response.status;
     let is_error = !(200..300).contains(&status);
+    let guest_downstream_error = (400..600).contains(&status)
+        && auth
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.is_org_channel_guest());
+    if guest_downstream_error {
+        GuestServiceFailure::DownstreamHttpError.record(Stage::Mcp, Some(status));
+    }
     let Some(media) = response.media.filter(|_| !is_error) else {
         let text = if is_error {
             format!("Error ({status}): {}", response.text)
@@ -536,7 +580,8 @@ async fn service_tool_content(
             vec![serde_json::json!({ "type": "text", "text": text })],
             is_error,
             is_error.then(|| crate::models::assistant_conversation::ToolFailure {
-                reason: None,
+                reason: guest_downstream_error
+                    .then(|| GuestServiceFailure::DownstreamHttpError.as_str().into()),
                 kind: "service_status".into(),
                 status: Some(status),
             }),
@@ -2645,9 +2690,8 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
     )
 }
 
-/// Schedule creation has no client-generated object ID. Approval handles and
-/// the universal-tool wrapper are transport, not a different creation. Keep the
-/// old digest as a lookup candidate for replies written by older replicas.
+/// Approval handles, memory recovery links and the universal-tool wrapper do
+/// not change what the tool writes. Keep the exact digest for older replicas.
 fn chat_retry_digest(params: &serde_json::Value) -> String {
     let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
         let arguments = params["arguments"]["arguments_json"]
@@ -2657,13 +2701,19 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     } else {
         (params["name"].as_str(), params.get("arguments").cloned())
     };
-    if name == Some("nyxid__create_schedule")
-        && let Some(arguments) = arguments
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
+    if let Some(arguments) = arguments
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
     {
-        arguments.remove("acknowledgement_id");
-        return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        let field = match name {
+            Some("nyxid__create_schedule") => Some("acknowledgement_id"),
+            Some("nyxid__remember") => Some("recovery"),
+            _ => None,
+        };
+        if let Some(field) = field {
+            arguments.remove(field);
+            return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        }
     }
     chat_activity_digest(params)
 }
@@ -3855,17 +3905,26 @@ fn dispatch_service_tool<'a>(
                 if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
                     crate::services::lark_attachment_tool::diagnostics::error(&e);
                 }
-                return tool_result(
+                let response = tool_result(
                     request.id.clone(),
                     &format!("Invalid tool arguments: {e}"),
                     true,
                 );
+                return if matches!(
+                    e,
+                    crate::errors::AppError::BadRequest(_)
+                        | crate::errors::AppError::ValidationError(_)
+                ) {
+                    guest_service_failure(auth, GuestServiceFailure::InvalidToolArguments, response)
+                } else {
+                    response
+                };
             }
         };
         if let Err(error) =
             prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
         {
-            return tool_result(request.id.clone(), &error.to_string(), true);
+            return operation_access_failure(auth, request.id.clone(), &error);
         }
         if let Some(refused) = guest_service_refusal(
             state,
@@ -4381,20 +4440,28 @@ async fn authorize_mcp_operation(
         // An approval the owner granted for their own requests is theirs: a
         // guest in the same chat shares the chat's key, not the approval.
         approval_service::ApprovalOutcome::Allowed { required: true } if guest_turn(auth) => {
-            return Err(guest_refused(request_id));
+            return Err(guest_service_failure(
+                auth,
+                GuestServiceFailure::ApprovalRequired,
+                guest_refused(request_id),
+            ));
         }
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
         approval_service::ApprovalOutcome::Denied => {
-            return Err(tool_result(
-                request_id,
-                "Operation denied by approval policy",
-                true,
+            return Err(guest_service_failure(
+                auth,
+                GuestServiceFailure::ApprovalDenied,
+                tool_result(request_id, "Operation denied by approval policy", true),
             ));
         }
         // Nobody but the owner asks the owner to approve: a guest's request
         // would look like the owner's own.
         approval_service::ApprovalOutcome::NeedsApproval(_) if guest_turn(auth) => {
-            return Err(guest_refused(request_id));
+            return Err(guest_service_failure(
+                auth,
+                GuestServiceFailure::ApprovalRequired,
+                guest_refused(request_id),
+            ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
@@ -4577,7 +4644,9 @@ fn annotate_shared_connection(
 }
 
 fn chat_access_hint(auth: &McpAuthContext) -> &'static str {
-    if auth
+    if guest_turn(auth) {
+        "chat_access meanings: granted = the guest has service access within the specialist's live guest limits. Each call must also pass the effective approval policy. Use the arguments the tool requires. NyxID will refuse actions that require owner approval. Report the tool's actual outcome."
+    } else if auth
         .org_agent_access
         .as_ref()
         .is_some_and(|a| a.shared().is_some())
@@ -4720,11 +4789,17 @@ async fn guest_service_refusal(
     else {
         return Some(guest_refused(request_id));
     };
-    if prepared
-        .authorize_agent_operations(&agent.guest_operation_scopes, service, endpoint)
-        .is_err()
+    if let Err(error) =
+        prepared.authorize_agent_operations(&agent.guest_operation_scopes, service, endpoint)
     {
-        return Some(guest_refused(request_id));
+        let response = guest_refused(request_id);
+        return Some(
+            if matches!(error, crate::errors::AppError::ApiKeyScopeForbidden(_)) {
+                guest_service_failure(auth, GuestServiceFailure::GuestOperationDenied, response)
+            } else {
+                response
+            },
+        );
     }
     let access = crate::services::agent_operation_scope_service::guest_level(
         &agent,
@@ -4734,13 +4809,17 @@ async fn guest_service_refusal(
     // A method override may be honoured in place of the method the call is
     // sent with, and approvals see only the latter: guests never send one.
     if prepared.carries_method_override() {
-        return Some(tool_result(
-            request_id,
-            &crate::services::assistant_acknowledgement_service::guest_method_override_refusal(
-                &service.service_slug,
-            )
-            .to_string(),
-            true,
+        return Some(guest_service_failure(
+            auth,
+            GuestServiceFailure::GuestOperationDenied,
+            tool_result(
+                request_id,
+                &crate::services::assistant_acknowledgement_service::guest_method_override_refusal(
+                    &service.service_slug,
+                )
+                .to_string(),
+                true,
+            ),
         ));
     }
     let mut effects = prepared.effects();
@@ -4778,14 +4857,18 @@ async fn guest_service_refusal(
         GuestAccess::Read => reads && uses,
     };
     (!allowed).then(|| {
-        tool_result(
-            request_id,
-            &crate::services::assistant_acknowledgement_service::guest_service_refusal(
-                &service.service_slug,
-                access,
-            )
-            .to_string(),
-            true,
+        guest_service_failure(
+            auth,
+            GuestServiceFailure::GuestOperationDenied,
+            tool_result(
+                request_id,
+                &crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                    &service.service_slug,
+                    access,
+                )
+                .to_string(),
+                true,
+            ),
         )
     })
 }
@@ -5025,6 +5108,21 @@ fn native_team_tool_result(
     is_error: bool,
 ) -> Response {
     let mut response = tool_result(request_id, &value.to_string(), is_error);
+    if name == "nyxid__remember" && value["details"]["failed_activity_id"].is_string() {
+        // The reference identifies this activity, so identical rejections
+        // still count as the same result for continuation progress.
+        let mut stable = value.clone();
+        stable["details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_activity_id");
+        response
+            .extensions_mut()
+            .insert(result_digest(&serde_json::json!({
+                "content": [{"type":"text","text":stable.to_string()}],
+                "isError": is_error,
+            })));
+    }
     // Only a trusted native remember diagnostic may enrich persisted activity.
     // Never interpret arbitrary downstream result text as safe UI metadata.
     if name == "nyxid__remember"
@@ -5685,7 +5783,16 @@ async fn handle_meta_call_tool(
             if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
                 crate::services::lark_attachment_tool::diagnostics::error(&e);
             }
-            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            let response = tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            return if matches!(
+                e,
+                crate::errors::AppError::BadRequest(_)
+                    | crate::errors::AppError::ValidationError(_)
+            ) {
+                guest_service_failure(auth, GuestServiceFailure::InvalidToolArguments, response)
+            } else {
+                response
+            };
         }
     };
     if result_query.is_some()
@@ -5700,7 +5807,7 @@ async fn handle_meta_call_tool(
     if let Err(error) =
         prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
     {
-        return tool_result(request_id, &error.to_string(), true);
+        return operation_access_failure(auth, request_id, &error);
     }
     if let Some(refused) = guest_service_refusal(
         state,

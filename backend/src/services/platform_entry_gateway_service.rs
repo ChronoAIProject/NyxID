@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     AppState,
+    crypto::{aes::EncryptionKeys, record_field},
     errors::AppResult,
     models::{
         api_key::{ApiKey, COLLECTION_NAME as KEYS},
@@ -1012,6 +1013,75 @@ pub(crate) fn request_policy(
     )
 }
 
+const REQUEST_FIELD: &str = "request_ciphertext";
+
+async fn setup_bytes(
+    keys: &EncryptionKeys,
+    row: &PlatformEntryGateway,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let bytes = record_field::decrypt(
+        keys,
+        GATEWAYS,
+        &row.id,
+        &row.credential_owner_id,
+        REQUEST_FIELD,
+        row.secret_context_versions.get(REQUEST_FIELD).copied(),
+        &row.request_ciphertext,
+    )
+    .await
+    .map_err(|_| refused())?;
+    if sha256(&bytes) != row.request_hash {
+        return Err(refused());
+    }
+    Ok(bytes)
+}
+
+fn stored_transport(source: &Document) -> AppResult<PlatformEntryGateway> {
+    let row: PlatformEntryGateway = bson::from_document(source.clone()).map_err(|_| refused())?;
+    if row
+        .secret_context_versions
+        .keys()
+        .any(|field| field != REQUEST_FIELD)
+    {
+        return Err(refused());
+    }
+    Ok(row)
+}
+
+pub(super) async fn verify_request(keys: &EncryptionKeys, source: &Document) -> AppResult<()> {
+    let row = stored_transport(source)?;
+    record_field::verify_current(
+        keys,
+        GATEWAYS,
+        &row.id,
+        &row.credential_owner_id,
+        REQUEST_FIELD,
+        row.secret_context_versions.get(REQUEST_FIELD).copied(),
+        &row.request_ciphertext,
+    )
+    .await?;
+    setup_bytes(keys, &row).await?;
+    Ok(())
+}
+
+pub(super) async fn migrate_request(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    source: &Document,
+) -> AppResult<bool> {
+    let row = stored_transport(source)?;
+    setup_bytes(keys, &row).await?;
+    super::record_field_service::migrate_snapshot(
+        db,
+        keys,
+        GATEWAYS,
+        source,
+        &row.credential_owner_id,
+        &[REQUEST_FIELD],
+    )
+    .await
+}
+
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("sha256:{:x}", Sha256::digest(bytes))
@@ -1262,14 +1332,7 @@ async fn dispatch_setup(
         .to_std()
         .map_err(|_| refused())?;
     tokio::time::timeout(remaining, async {
-        let bytes = state
-            .encryption_keys
-            .decrypt(&row.request_ciphertext)
-            .await
-            .map_err(|_| refused())?;
-        if sha256(&bytes) != row.request_hash {
-            return Err(refused());
-        }
+        let bytes = setup_bytes(&state.encryption_keys, row).await?;
         // No await separates the exact retained-attempt check and HTTP request
         // construction; the absolute dispatch deadline also bounds send and body.
         if chrono::Utc::now() >= deadline
@@ -1414,11 +1477,16 @@ pub(crate) async fn prepare(
             "sources":fingerprint_sources,"partition":policy["partition"],"reply":policy["reply"],
             "agent_key":format!("sha256:{}",provider.key_hash),"channel_key":format!("sha256:{}",route.key_hash),"hmac_secrets":[]
         })).as_bytes());
-        let ciphertext = state
-            .encryption_keys
-            .encrypt(&request)
-            .await
-            .map_err(|_| refused())?;
+        let ciphertext = record_field::encrypt(
+            &state.encryption_keys,
+            GATEWAYS,
+            &id,
+            authority.actor(),
+            REQUEST_FIELD,
+            &request,
+        )
+        .await
+        .map_err(|_| refused())?;
         let mut configuration = authority.configuration().clone();
         configuration.transport = EntryTransport::NyxagentGateway {
             channel_id: id.clone(),
@@ -1448,6 +1516,11 @@ pub(crate) async fn prepare(
             request_hash,
             creation_fingerprint,
             request_ciphertext: ciphertext,
+            secret_context_versions: if state.encryption_keys.contextual_record_writes() {
+                [(REQUEST_FIELD.to_owned(), 3)].into()
+            } else {
+                Default::default()
+            },
             state: "prepared".into(),
             revision: 1,
             created_at: now,

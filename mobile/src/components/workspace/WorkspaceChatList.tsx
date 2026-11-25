@@ -441,7 +441,7 @@ export function WorkspaceChatList({
         })}
       />
     ) : null;
-  const currentRow = missingCurrent ? (
+  const currentRow = missingCurrent && agent?.can_use !== false ? (
     <ChatRow
       disabled={disabled}
       label={translateApp("Current chat")}

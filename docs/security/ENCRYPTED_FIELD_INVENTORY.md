@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 31 implemented adapters
-and 18 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 36 implemented adapters
+and 13 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -49,11 +49,11 @@ A collection may use separate adapters for different fields.
 | `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | — | Pending |
+| `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | [channel_bot_record.rs](../../backend/src/services/channel_bot_record.rs) | Implemented |
 | `channel_connect_links` | `receiver.secret_encrypted` | [channel_connect_link_service.rs](../../backend/src/services/channel_connect_link_service.rs) | Implemented |
 | `downstream_services` | `credential_encrypted` | [catalog_credential_record_service.rs](../../backend/src/services/catalog_credential_record_service.rs) | Implemented |
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
-| `nyxbot_channels` | `agent_key_ciphertext` | — | Pending |
+| `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | — | Pending |
 | `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload` | — | Pending |
 | `mobile_social_deliveries` | `ciphertext` | — | Pending |
@@ -61,18 +61,18 @@ A collection may use separate adapters for different fields.
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
 | `oracle_login_profiles` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `oracle_login_snapshots` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
-| `platform_entry_gateway_transports` | `request_ciphertext` | — | Pending |
+| `platform_entry_gateway_transports` | `request_ciphertext` | [platform_entry_gateway_service.rs](../../backend/src/services/platform_entry_gateway_service.rs) | Implemented |
 | `platform_native_reply_handles` | `ciphertext` | — | Pending |
 | `platform_setups` | `facts_ciphertext` | [platform_setup_record_service.rs](../../backend/src/services/platform_setup_record_service.rs) | Implemented |
 | `triggers` | `verification_secret_encrypted`, `delivery_secret_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
 | `trigger_deliveries` | `envelope_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
 | `user_service_connections` | `credential_encrypted` | [connection_record_service.rs](../../backend/src/services/connection_record_service.rs) | Implemented |
 | `async_service_operation_artifacts` | `data_encrypted` | [generated_artifacts/storage.rs](../../backend/src/services/generated_artifacts/storage.rs) | Implemented |
-| `assistant_cma_sandboxes` | `request_ciphertext` | — | Pending |
-| `assistant_cma_creations` | `request_ciphertext` | — | Pending |
-| `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | — | Pending |
+| `assistant_cma_sandboxes` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
+| `assistant_cma_creations` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
+| `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
-| `channel_whatsapp_native` | `native_verify_token_encrypted` | — | Pending |
+| `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | — | Pending |
 
@@ -83,31 +83,64 @@ storage. Contextual writers set the replaced field’s version atomically, and
 disabling the connection webhook clears its material and marker. The migration
 compares the exact observed client document before replacing stored material.
 
+Channel bot writers bind each local credential to its bot ID, owner and field when
+contextual writes are enabled. The adapter verifies the six fields and preserves
+verification, native-entry, Discord resume and Aurinko pins across storage rewrites.
+Telegram manager and connection-backed bots can use an empty local token. Shared signing
+producers prepare their dependent bots before rewrap. A real replacement starts a
+new field generation. Owner transfer rebinds local credentials and retires the old
+generations in the transaction that moves the bot and its routes.
+[Bot record adapter](../../backend/src/services/channel_bot_record.rs) · [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
+
+Each CMA request copy uses its own stored collection, row ID, user ID and field.
+The adapter checks the hash of the exact HTTP body and compares the full source
+document before updating the envelope and its marker. An uncertain creation
+retains its request and idempotency key through rewrap and recovery.
+[CMA request storage](../../backend/src/services/assistant_cma_request_record.rs)
+
 ### Production storage for Pending fields
 
-- Channel bot registration and delivery readers select each local credential by bot ID,
-  owner and stored field version. The writers still emit the historical format in both
-  writer modes, so serving these rows requires legacy reads. The registry entry stays
-  Pending through the reader rollout.
-  [Channel bot field reader](../../backend/src/services/channel_registration.rs)
-
-- Mobile social sign-in stores and redeems its encrypted PKCE-bound response. CMA
-  sandbox recovery opens the sandbox request and checks the creation’s request
-  hash. The creation also retains its own encrypted copy until cleanup.
-  [Mobile delivery](../../backend/src/services/mobile_social_service.rs) · [Sandbox recovery](../../backend/src/services/assistant_cma_sandbox_service.rs) · [Creation admission](../../backend/src/services/assistant_cma_admission.rs)
+- Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
+  [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
+- Learning proposal readers use the body, scope and publication interface version
+  markers independently. Each contextual field binds the proposal ID, owner and
+  agent. The interface also binds the publication operation. Writers use the
+  historical format in both positions of `CONTEXTUAL_RECORD_WRITES`, so serving
+  these proposals still requires legacy reads.
+  [Proposal readers](../../backend/src/services/assistant_learning_record.rs)
 - NyxBot keeps the latest event reference on the thread. The event holds its
-  context, the late-delivery target and the queued guest setup payload. Event
-  bindings retain the encrypted provider key and producer secret separately.
+  context, the late-delivery target and the queued guest setup payload.
   Gateway responses store an encrypted replay payload.
-  [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Binding setup and cleanup](../../backend/src/services/nyxbot_event_binding_service.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
-- Native WhatsApp enrollment stores its verification token on the native
-  configuration row. Assistant recovery retains the encrypted input on the
+  [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
+- Assistant recovery retains the encrypted input on the
   active turn’s restart window. Approval requests retain encrypted payloads
   and results under the selected proposal version.
-  [WhatsApp enrollment](../../backend/src/services/whatsapp_native.rs) · [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+  [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+
+NyxBot custom-event bindings retain a provider API key and a producer HMAC
+secret. Each field binds to the binding ID, linking person, target agent and
+its recorded owner, field name and corresponding key ID. Storage verification
+checks the provider key against its independent API-key digest. For a legacy
+producer secret, NyxID can check the original 32-byte base64 encoding. The
+gateway receives the credentials during setup, and the owner receives the
+producer secret once. Subsequent serving paths use binding metadata and live
+authority. [Binding setup and cleanup](../../backend/src/services/nyxbot_event_binding_service.rs)
+
+The NyxBot gateway agent key binds to the channel ID, linking person and
+installed agent key ID. On an org route, the org owns the separate route key.
+Direct-to-gateway preparation stores pending IDs. Adoption publishes the
+ciphertext with its installed ID. Storage verification checks the matching
+API key’s retained owner and SHA-256 digest, including for revoked keys.
+[Channel key storage](../../backend/src/services/nyxbot_channel_key.rs)
+
+The native WhatsApp Verify Token binds to the settings row’s bot ID, owner and
+ownership generation. Callback transitions preserve it. Relay-phase settings
+replacement clears it. Enrollment requires a matching live bot. Migration can
+authenticate retained settings under the original owner after a transfer.
+[WhatsApp enrollment and storage](../../backend/src/services/whatsapp_native/token_record.rs)
 
 ## Source and storage boundaries
 
@@ -138,8 +171,7 @@ version-map validation and exact-source migration stay in services.
   mutation. SSH CA context remains platform/service/public-key bound across
   owner transfer.
 - Fields bound to an owner must authenticate and re-encrypt for the new owner
-  in the same fenced transfer transaction. This remains required follow-up work
-  for the pending channel bot family. Oracle pool transfer must preserve the
+  in the same fenced transfer transaction. Oracle pool transfer must preserve the
   established pool-bound outer envelope contract.
 - Oracle profile and snapshot adapters authenticate and rewrap only the outer
   server envelope, preserving their established pool/profile/generation/revision
@@ -152,8 +184,10 @@ version-map validation and exact-source migration stay in services.
   and issued child. Platform setup facts bind their row and owner; anonymous
   native setup also binds its server-keyed sender scope, and adoption must
   re-encrypt for the new owner in the same fenced transaction.
-- Platform gateway setup uses the historical unbound envelope, then verifies
-  the decrypted request against its stored SHA-256 before dispatch. Native
+- Platform gateway setup binds the serialized request to the transport ID,
+  credential owner and field. Replay and migration check the exact bytes
+  against the retained SHA-256, including for historical unbound envelopes.
+  Retirement retains the request and its hash. Native
   replies authenticate the binding digest bytes as AES AAD.
   [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
 - Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.

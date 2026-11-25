@@ -94,6 +94,7 @@ function toolCalls(
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
+      ...(activity.memory_recovery ? { memoryRecovery: activity.memory_recovery } : {}),
       decision: activity.decision,
     })),
   };
@@ -320,11 +321,14 @@ export class NyxAgentTransport {
     return this.live.get(id)?.conversation ?? this.histories.get(id)?.conversation ?? this.index.get(id);
   }
 
-  /** Drop every cached thread of an agent that was deleted permanently. */
+  /** Drop locally held conversations when an agent is removed or access ends. */
   forgetAgent(agentId: string) {
     this.mutationRevision += 1;
     for (const row of this.getConversations(agentId)) {
       this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
+      this.live.get(row.id)?.controller.abort();
+      this.live.delete(row.id);
+      this.decisionViews.delete(row.id);
       this.index.delete(row.id);
       this.histories.delete(row.id);
       this.consumedRetries.delete(row.id);

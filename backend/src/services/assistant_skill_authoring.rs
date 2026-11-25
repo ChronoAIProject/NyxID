@@ -407,9 +407,11 @@ pub async fn create(
         failure_code: None,
         failure_rules: Vec::new(),
         scope_encrypted: Some(state.encryption_keys.encrypt(&scope_bytes).await?),
+        scope_context_version: None,
         scope_digest: Some(scope_digest),
         evidence: Vec::new(),
         body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+        body_context_version: None,
         body_bytes: encoded.len() as i64,
         created_at: now,
         updated_at: now,
@@ -697,9 +699,11 @@ async fn submit_owner_draft(
             failure_code: None,
             failure_rules: Vec::new(),
             scope_encrypted: None,
+            scope_context_version: None,
             scope_digest: None,
             evidence: Vec::new(),
             body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+            body_context_version: None,
             body_bytes: encoded.len() as i64,
             created_at: now,
             updated_at: now,
@@ -815,10 +819,11 @@ pub async fn publish_automatically(
     );
     // Full access bypasses every request to proceed, including reduced-scope
     // consent. Persist only its count; the linked preview decrypts the declaration.
-    if let Some(encrypted) = &proposal.scope_encrypted {
-        let scope: DraftScope =
-            serde_json::from_slice(&state.encryption_keys.decrypt(encrypted).await?)
-                .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
+    if let Some(bytes) =
+        super::assistant_learning_record::scope(&state.encryption_keys, &proposal).await?
+    {
+        let scope: DraftScope = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
         if scope.status == "reduced" {
             summary.push_str(&format!(
                 "; Reduced scope: {} declared omission(s); separate consent bypassed by Full access",
@@ -937,7 +942,7 @@ pub async fn raise_review_card(
 
 #[cfg(test)]
 #[path = "assistant_skill_authoring_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) fn credential_shaped(value: &str) -> bool {
     validation::credential_position(value).is_some()

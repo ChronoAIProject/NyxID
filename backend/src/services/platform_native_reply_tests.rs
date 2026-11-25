@@ -310,6 +310,31 @@ fn signed_discord_receipt_claim_uses_only_its_encrypted_interaction_followup() {
                 crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
                     &server.uri(),
                 );
+            let bot = crate::services::channel_bot_service::get_bot(
+                &state.db,
+                &receipt.configuration.identity.channel_bot_id,
+            )
+            .await
+            .unwrap();
+            let original_aad = binding_digest(&receipt).unwrap();
+            crate::services::channel_credential_continuity::rewrap_fixture(
+                &state.db,
+                &state.encryption_keys,
+                &bot,
+                &["bot_token_encrypted"],
+            )
+            .await;
+            let persisted = state
+                .db
+                .collection::<NativeEntryReceipt>(
+                    crate::models::platform_entry_identity::NATIVE_RECEIPTS,
+                )
+                .find_one(doc! {"_id":&receipt.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(binding_digest(&persisted).unwrap(), original_aad);
+            assert_eq!(persisted.content_commitment, receipt.content_commitment);
             let authority = claim(&state, &receipt, &adapter).await.unwrap();
             assert!(!format!("{authority:?}").contains("synthetic-interaction"));
             let result = send_claimed_for_test(
