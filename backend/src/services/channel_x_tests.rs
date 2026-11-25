@@ -623,7 +623,14 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
         .unwrap();
     assert_eq!(
         list.iter().map(|p| p.provider).collect::<Vec<_>>(),
-        ["aurinko", "meta", "telegram-new", "x"]
+        [
+            "aurinko",
+            "instagram",
+            "messenger",
+            "meta",
+            "telegram-new",
+            "x"
+        ]
     );
     let (_, Json(updated)) = admin::update(
         State(state.clone()),

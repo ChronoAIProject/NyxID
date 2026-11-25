@@ -3498,6 +3498,8 @@ mod tests {
             shipped,
             vec![
                 "auth:oauth-refresh-client-auth-v1",
+                "channels:messenger",
+                "channels:instagram",
                 "auth:invitation-code",
                 "auth:oauth-exact-redirects-v1",
                 "auth:app-token-management-v1",

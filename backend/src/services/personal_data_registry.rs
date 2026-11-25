@@ -3326,7 +3326,6 @@ pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
 /// complete account export. Each addition is owned by its writer module.
 #[cfg(test)]
 pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
-    ("assistant_attachments", "user_id"),
     ("assistant_checkpoints", "user_id"),
     ("assistant_group_requests", "actor_user_id"),
     ("org_channel_messages", "author_user_id"),
@@ -3347,7 +3346,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("channel_email_batches", "user_id"),
     ("channel_email_receipts", "user_id"),
     ("channel_email_sends", "user_id"),
-    ("channel_reply_deliveries", "user_id"),
     ("nyxbot_events", "user_id"),
     ("refresh_tokens", "user_id"),
     ("service_change_events", "actor.person_id"),
@@ -3484,11 +3482,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         "assistant_skill_draft_attempts",
         "user_id",
         OwnerIndexBoundedReason::ShortTtl,
-    ),
-    (
-        "assistant_voice_announcements",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
         "assistant_voice_windows",

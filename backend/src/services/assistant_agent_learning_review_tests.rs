@@ -3048,6 +3048,8 @@ async fn publication_events_are_bounded_deduplicated_and_identifier_safe() {
         .insert_one(doc! {
             "_id": "card", "conversation_id": &f.row.id, "user_id": &f.owner,
             "api_key_id": &f.chat.api_key_id, "kind": "action", "summary": "Review skill",
+            "tool_name": TOOL, "authored_skill": {"proposal_id": &row.id, "agent_id": &row.agent_id,
+            "revision": row.revision, "skills_revision": row.agent_skills_revision},
             "status": "allowed", "created_at": bson::DateTime::now(),
             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(1)),
         })
