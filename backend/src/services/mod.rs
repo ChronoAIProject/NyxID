@@ -287,6 +287,7 @@ pub mod service_pool_service;
 pub mod shared_agent_consent;
 pub mod shared_agent_service;
 pub(crate) mod shared_agent_transport;
+pub(crate) mod signup_admission;
 pub mod skill_outline;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;

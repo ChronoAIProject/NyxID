@@ -2059,6 +2059,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         billing_fail_closed: false,
         billing_resale_enabled: false,
         email_auth_enabled: false,
+        public_signup_limits: None,
         auto_verify_email: false,
         telemetry_dsn: None,
         telemetry_host: None,

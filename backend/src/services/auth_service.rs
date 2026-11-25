@@ -150,6 +150,27 @@ pub async fn register_user(
     invite_reservation: Option<&super::invite_code_service::InviteReservation>,
     auto_verify_email: bool,
 ) -> AppResult<RegisterResult> {
+    register_public_user(
+        db,
+        email,
+        password_raw,
+        display_name,
+        invite_reservation,
+        auto_verify_email,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn register_public_user(
+    db: &mongodb::Database,
+    email: &str,
+    password_raw: &str,
+    display_name: Option<&str>,
+    invite_reservation: Option<&super::invite_code_service::InviteReservation>,
+    auto_verify_email: bool,
+    signup: Option<super::signup_admission::SignupAdmission>,
+) -> AppResult<RegisterResult> {
     // Validate password length
     if password_raw.len() < 8 {
         return Err(AppError::ValidationError(
@@ -162,6 +183,10 @@ pub async fn register_user(
             "Password must be at most {} characters",
             MAX_PASSWORD_LENGTH
         )));
+    }
+
+    if let Some(admission) = signup {
+        admission.check(db).await?;
     }
 
     // Check for existing person user - return fake success to prevent email
@@ -233,6 +258,8 @@ pub async fn register_user(
 
     if let Some(reservation) = invite_reservation {
         super::invite_code_service::commit_signup(db, reservation, &new_user).await?;
+    } else if let Some(admission) = signup {
+        admission.insert_user(db, &new_user).await?;
     } else {
         db.collection::<User>(USERS).insert_one(&new_user).await?;
     }

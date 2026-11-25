@@ -28,6 +28,29 @@ pub(super) fn resolve_client_context(
         .ok_or_else(|| AppError::Internal("unable to resolve client IP".to_string()))
 }
 
+pub(super) fn public_signup_admission(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    state: &AppState,
+) -> AppResult<Option<crate::services::signup_admission::SignupAdmission>> {
+    state
+        .config
+        .public_signup_limits
+        .map(|limits| {
+            let resolved = crate::mw::rate_limit::resolve_client_ip(
+                headers,
+                peer,
+                &state.config.trusted_proxy_ips,
+            )
+            .ok_or_else(|| AppError::Internal("unable to resolve signup client IP".to_string()))?;
+            Ok(crate::services::signup_admission::SignupAdmission::new(
+                limits,
+                resolved.ip,
+            ))
+        })
+        .transpose()
+}
+
 pub(super) fn auth_device_attribution(value: ClientIpAttribution) -> AuthDeviceClientIpAttribution {
     match value {
         ClientIpAttribution::Verified => AuthDeviceClientIpAttribution::Verified,

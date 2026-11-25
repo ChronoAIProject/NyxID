@@ -287,6 +287,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             billing_fail_closed: false,
             billing_resale_enabled: false,
             email_auth_enabled: false,
+            public_signup_limits: None,
             auto_verify_email: false,
         }
     }

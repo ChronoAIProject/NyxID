@@ -38,6 +38,7 @@ pub async fn exchange_social_token(
     subject_token: &str,
     subject_token_type: &str,
     provider: &str,
+    signup: Option<super::signup_admission::SignupAdmission>,
 ) -> AppResult<SocialTokenExchangeResponse> {
     let result = exchange_social_token_inner(
         db,
@@ -50,6 +51,7 @@ pub async fn exchange_social_token(
         subject_token,
         subject_token_type,
         provider,
+        signup,
     )
     .await;
 
@@ -138,6 +140,7 @@ async fn exchange_social_token_inner(
     subject_token: &str,
     subject_token_type: &str,
     provider: &str,
+    signup: Option<super::signup_admission::SignupAdmission>,
 ) -> AppResult<SocialTokenExchangeInner> {
     // Step 1: Authenticate the requesting OAuth client
     let _client = oauth_service::authenticate_client(db, client_id, client_secret).await?;
@@ -165,11 +168,21 @@ async fn exchange_social_token_inner(
         SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };
 
-    complete_verified_exchange(db, config, jwt_keys, client_id, social_provider, profile).await
+    complete_verified_signup_exchange(
+        db,
+        config,
+        jwt_keys,
+        client_id,
+        social_provider,
+        profile,
+        signup,
+    )
+    .await
 }
 
 /// Provider verification stays at the caller; all verified first factors cross
 /// this session-issuance boundary, including the NyxID MFA gate.
+#[cfg(test)]
 async fn complete_verified_exchange(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -178,12 +191,39 @@ async fn complete_verified_exchange(
     social_provider: SocialProvider,
     profile: SocialProfile,
 ) -> AppResult<SocialTokenExchangeInner> {
+    complete_verified_signup_exchange(
+        db,
+        config,
+        jwt_keys,
+        client_id,
+        social_provider,
+        profile,
+        None,
+    )
+    .await
+}
+
+async fn complete_verified_signup_exchange(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    client_id: &str,
+    social_provider: SocialProvider,
+    profile: SocialProfile,
+    signup: Option<super::signup_admission::SignupAdmission>,
+) -> AppResult<SocialTokenExchangeInner> {
     // Step 4: Find or create user. First-time social sign-ups are blocked
     // when the invite-code gate is enabled.
     let allow_new_users = !feature_flag_service::invitation_code_required(db).await?;
-    let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users)
-        .await?
-        .user;
+    let user = social_auth_service::find_or_create_public_user(
+        db,
+        &profile,
+        allow_new_users,
+        None,
+        signup,
+    )
+    .await?
+    .user;
 
     // Native social exchange follows the person's mobile rollout decision.
     // When enabled, redeem the same bounded challenge as other login flows
