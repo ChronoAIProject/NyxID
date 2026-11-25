@@ -64,7 +64,7 @@ pub async fn pin(db: &Database, scope: &UsageScope, time: DateTime<Utc>) -> AppR
     ))
 }
 
-async fn pin_in_session(
+pub(super) async fn pin_in_session(
     db: &Database,
     session: &mut ClientSession,
     scope: &UsageScope,

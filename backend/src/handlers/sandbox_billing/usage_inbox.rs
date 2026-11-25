@@ -9,7 +9,7 @@ use crate::{
         contract::Receipt,
         inbox::{self, InboxError, ReceiptObservation},
         inbox_authority::{self, Authority, READ_SCOPE, Registration, WRITE_SCOPE},
-        inbox_shadow,
+        inbox_shadow, shadow_buckets,
     },
 };
 use axum::{
@@ -97,6 +97,47 @@ pub(crate) async fn inspect_shadow_fact(
     .await?
     .ok_or(HttpError::NotFound)?;
     Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ShadowBucketRequest {
+    namespace: String,
+    sandbox_id: String,
+    source_epoch: String,
+    minute: chrono::DateTime<chrono::Utc>,
+}
+
+pub(crate) async fn observe_shadow_bucket(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(request): Json<ShadowBucketRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    require_admin(&state, &auth).await?;
+    let row = shadow_buckets::observe(
+        &state.db,
+        &state.config.jwt_issuer,
+        shadow_buckets::Bucket {
+            namespace: &request.namespace,
+            sandbox_id: &request.sandbox_id,
+            source_epoch: &request.source_epoch,
+            minute: request.minute,
+        },
+    )
+    .await?
+    .ok_or(HttpError::NotFound)?;
+    Ok(Json(json!({
+        "bucket_id": row.bucket_id,
+        "revision_id": row.id,
+        "revision": row.revision,
+        "previous_revision_id": row.previous_revision_id,
+        "input_digest": row.input_digest,
+        "financial_status": "shadow",
+        "provisional_total": row.provisional_total.to_string(),
+        "provisional_delta": row.provisional_delta.to_string(),
+        "unresolved": row.input.unresolved,
+        "positions": row.positions,
+    })))
 }
 
 async fn authorize(

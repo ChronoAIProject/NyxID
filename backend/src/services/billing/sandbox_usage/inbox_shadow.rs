@@ -108,7 +108,7 @@ pub async fn inspect(
     })))
 }
 
-async fn historical_owner(
+pub(super) async fn historical_owner(
     db: &Database,
     nyxid_issuer: &str,
     event: &Event,

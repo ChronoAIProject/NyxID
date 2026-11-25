@@ -1552,6 +1552,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::sandbox_billing::usage_inbox::inspect_shadow_fact),
         )
         .route(
+            "/billing/cma-usage-pricing/observe-bucket",
+            post(handlers::sandbox_billing::usage_inbox::observe_shadow_bucket),
+        )
+        .route(
             "/billing/cma-usage-tariffs",
             get(handlers::admin_sandbox_rates::usage::list)
                 .post(handlers::admin_sandbox_rates::usage::publish),

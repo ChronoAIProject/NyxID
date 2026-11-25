@@ -389,12 +389,15 @@ async fn missing_sequence_preserves_sparse_custody_until_validation_can_continue
 
 #[tokio::test]
 async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasure() {
-    use super::{inbox_shadow, pricing_schema, pricing_store_tests, pricing_tests};
+    use super::{inbox_shadow, pricing_schema, pricing_store_tests, pricing_tests, shadow_buckets};
     use crate::models::{
+        billing_ledger::COLLECTION_NAME as LEDGER,
+        billing_wallet::COLLECTION_NAME as WALLETS,
         credits::Credits,
         sandbox_usage_rates::{
             COLLECTION_NAME as RATES, POLICIES, Selection, UsagePolicy, UsageTariff,
         },
+        usage_meter::COLLECTION_NAME as USAGE_METER,
         user::{COLLECTION_NAME as USERS, User, UserType},
     };
     let fx = Fixture::open("cma_custody_shadow", NAMESPACE).await;
@@ -434,6 +437,22 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
     let (_, accepted) = inbox::accept(&fx.db, &writer, &usage).await.unwrap();
     let stream = accepted.receipt.stream_id.as_str();
     let fact = "00000000-0000-4000-8000-000000000064";
+    let bucket = || shadow_buckets::Bucket {
+        namespace: NAMESPACE,
+        sandbox_id: "sbx_synthetic",
+        source_epoch: "00000000-0000-4000-8000-000000000002",
+        minute: pricing_tests::time(),
+    };
+    let unpriced = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        unpriced
+            .input
+            .unresolved
+            .contains(&"owner_unresolved".into())
+    );
     let unresolved = inbox_shadow::inspect(&fx.db, ISSUER, NAMESPACE, stream, fact)
         .await
         .unwrap()
@@ -466,6 +485,33 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         before_cpu["result"],
         serde_json::json!({"status":"candidate","numerator_pico":"120000000000000000","divisor":"3600000"})
     );
+    let first_bucket = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_bucket.bucket_id, unpriced.bucket_id);
+    assert_eq!(
+        first_bucket.previous_revision_id.as_deref(),
+        Some(unpriced.id.as_str())
+    );
+    assert!(
+        first_bucket
+            .input
+            .unresolved
+            .contains(&"measured_stream_missing".into())
+    );
+    assert!(
+        first_bucket
+            .input
+            .unresolved
+            .contains(&"minute_completeness_unproven".into())
+    );
+    assert_eq!(first_bucket.input.facts[0].evidence_revision, 1);
+    let replay = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay, first_bucket);
 
     let mut later_tariff = pricing_tests::tariff();
     later_tariff.effective_from += chrono::Duration::minutes(1);
@@ -499,7 +545,50 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         after_cpu["result"],
         serde_json::json!({"status":"candidate","numerator_pico":"60000000000000000","divisor":"3600000"})
     );
-    for collection in ["billing_ledger", "billing_wallets", "usage_meter"] {
+    let corrected_bucket = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(corrected_bucket.bucket_id, first_bucket.bucket_id);
+    assert_eq!(
+        corrected_bucket.previous_revision_id.as_deref(),
+        Some(first_bucket.id.as_str())
+    );
+    assert_eq!(
+        corrected_bucket.input.price_pin,
+        first_bucket.input.price_pin
+    );
+    assert_eq!(corrected_bucket.input.facts[0].evidence_revision, 2);
+    assert_eq!(corrected_bucket.provisional_delta.pico(), -16_666_666_666);
+    let measured_open = include_bytes!(
+        "../../../../tests/fixtures/cma_usage_v1/measured-stream-open.canonical.json"
+    );
+    let measured =
+        include_bytes!("../../../../tests/fixtures/cma_usage_v1/measured.canonical.json");
+    let (opening, opening_digest) = with_owner(measured_open, &owner, None, false);
+    let (evidence, _) = with_owner(measured, &owner, Some(&opening_digest), false);
+    inbox::accept(&fx.db, &writer, &opening).await.unwrap();
+    inbox::accept(&fx.db, &writer, &evidence).await.unwrap();
+    let both = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(both.bucket_id, corrected_bucket.bucket_id);
+    assert_eq!(both.input.facts.len(), 2);
+    assert_eq!(both.positions.len(), 2);
+    assert!(
+        !both
+            .input
+            .unresolved
+            .contains(&"measured_stream_missing".into())
+    );
+    assert!(
+        both.input
+            .unresolved
+            .contains(&"minute_completeness_unproven".into())
+    );
+    assert_eq!(both.input.price_pin, first_bucket.input.price_pin);
+    for collection in [LEDGER, WALLETS, USAGE_METER] {
         assert_eq!(
             fx.db
                 .collection::<Document>(collection)

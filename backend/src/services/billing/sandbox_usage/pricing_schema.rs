@@ -2,7 +2,7 @@
 use super::policy::unavailable;
 use crate::{
     errors::AppResult,
-    models::sandbox_usage_rates::{COLLECTION_NAME, PINS, POLICIES, SCHEMA},
+    models::sandbox_usage_rates::{BUCKET_REVISIONS, COLLECTION_NAME, PINS, POLICIES, SCHEMA},
     services::feature_flag_service as flags,
 };
 use mongodb::{
@@ -37,6 +37,8 @@ pub async fn prepare(db: &Database) -> AppResult<()> {
         (POLICIES, doc! {"scope.owner_id":1}, false),
         (PINS, doc! {"scope_key":1,"minute":1}, true),
         (PINS, doc! {"scope.owner_id":1}, false),
+        (BUCKET_REVISIONS, doc! {"bucket_id":1,"revision":1}, true),
+        (BUCKET_REVISIONS, doc! {"owner_subject":1}, false),
     ] {
         db.collection::<Document>(name)
             .create_index(

@@ -2823,7 +2823,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::NotPersonal("shared producer authorization"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
         export_selector: ExportSelector::None,
-        why: "Sandbox usage producer registrations govern machine custody for the namespace, independently of the owners whose evidence it carries.",
+        why: "sandbox_usage_producers_v1 — Sandbox usage producer registrations govern machine custody for the namespace, independently of the owners whose evidence it carries.",
     },
     Entry {
         collection: "sandbox_usage_events_v1",
@@ -2831,7 +2831,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         export_selector: ExportSelector::None,
-        why: "Retain the exact accepted usage evidence and receipt with opaque owner attribution so replay and corrections survive account deletion.",
+        why: "sandbox_usage_events_v1 — Retain the exact accepted usage evidence and receipt with opaque owner attribution so replay and corrections survive account deletion.",
     },
     Entry {
         collection: "sandbox_usage_streams_v1",
@@ -2839,7 +2839,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         export_selector: ExportSelector::None,
-        why: "Retain stream ordering and the accepted evidence head for recovery after account deletion.",
+        why: "sandbox_usage_streams_v1 — Retain stream ordering and the accepted evidence head for recovery after account deletion.",
     },
     Entry {
         collection: "sandbox_usage_effective_facts_v1",
@@ -2847,7 +2847,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         export_selector: ExportSelector::None,
-        why: "Retain the effective evidence revision per fact to prevent a stale correction from replacing it after account deletion.",
+        why: "sandbox_usage_effective_facts_v1 — Retain the effective evidence revision per fact to prevent a stale correction from replacing it after account deletion.",
     },
     Entry {
         collection: "sandbox_usage_owner_pins_v1",
@@ -2855,7 +2855,15 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         export_selector: ExportSelector::None,
-        why: "Keep the historical owner binding for a Sandbox source epoch so erasure and replay cannot reassign corrections.",
+        why: "sandbox_usage_owner_pins_v1 — Keep the historical owner binding for a Sandbox source epoch so erasure and replay cannot reassign corrections.",
+    },
+    Entry {
+        collection: "sandbox_usage_shadow_bucket_revisions_v1",
+        owner: OwnerSelector::Fields(&["owner_subject"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "sandbox_usage_shadow_bucket_revisions_v1 retains immutable provisional totals, evidence references and signed correction differences with opaque owner attribution for historical reconciliation.",
     },
     Entry {
         collection: "sandbox_usage_rates_v1",

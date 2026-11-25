@@ -8,6 +8,7 @@ mod inbox_facts;
 pub mod inbox_promotion;
 pub mod inbox_shadow;
 mod scalars;
+pub mod shadow_buckets;
 mod strict_json;
 mod types;
 mod validation;
