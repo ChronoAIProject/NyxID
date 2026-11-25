@@ -3,6 +3,7 @@ use super::{
     inbox_authority::{self, Authority, READ_SCOPE, Registration, WRITE_SCOPE},
 };
 use crate::models::sandbox_usage_inbox::Validation;
+use crate::services::audit_service::{self, AuditActor};
 use bson::{DateTime, Document, doc};
 use mongodb::Database;
 use uuid::Uuid;
@@ -17,6 +18,16 @@ const CORRECTION: &[u8] =
     include_bytes!("../../../../tests/fixtures/cma_usage_v1/correction.canonical.json");
 const SEAL: &[u8] =
     include_bytes!("../../../../tests/fixtures/cma_usage_v1/stream-seal.canonical.json");
+
+fn registration_actor() -> AuditActor {
+    AuditActor {
+        user_id: "fixture-admin".into(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    }
+}
 
 struct Fixture {
     db: Database,
@@ -57,6 +68,8 @@ impl Fixture {
                 enabled: true,
                 accepting: true,
             },
+            &registration_actor(),
+            audit_service::audit_chain_hmac_key().unwrap(),
         )
         .await
         .unwrap();
@@ -276,6 +289,8 @@ async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
             enabled: true,
             accepting: false,
         },
+        &registration_actor(),
+        audit_service::audit_chain_hmac_key().unwrap(),
     )
     .await
     .unwrap();
@@ -376,7 +391,10 @@ async fn missing_sequence_preserves_sparse_custody_until_validation_can_continue
 async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasure() {
     use super::{inbox_shadow, pricing_schema, pricing_store_tests, pricing_tests};
     use crate::models::{
-        sandbox_usage_rates::{COLLECTION_NAME as RATES, UsageTariff},
+        credits::Credits,
+        sandbox_usage_rates::{
+            COLLECTION_NAME as RATES, POLICIES, Selection, UsagePolicy, UsageTariff,
+        },
         user::{COLLECTION_NAME as USERS, User, UserType},
     };
     let fx = Fixture::open("cma_custody_shadow", NAMESPACE).await;
@@ -384,15 +402,30 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
     pricing_store_tests::enable(&fx.db, true).await;
     pricing_schema::prepare(&fx.db).await.unwrap();
     let owner = Uuid::new_v4().to_string();
-    fx.db
-        .collection::<User>(USERS)
-        .insert_one(crate::test_utils::test_user(&owner, UserType::Person))
-        .await
-        .unwrap();
     let initial_tariff = pricing_tests::tariff();
     fx.db
         .collection::<UsageTariff>(RATES)
         .insert_one(&initial_tariff)
+        .await
+        .unwrap();
+    let mut pin = pricing_tests::pin(&initial_tariff);
+    pin.scope.owner_id = owner.clone();
+    pin.scope_key = super::policy::scope_key(&pin.scope).unwrap();
+    pin.dimensions.cpu = Selection::Allocated;
+    fx.db
+        .collection::<UsagePolicy>(POLICIES)
+        .insert_one(UsagePolicy {
+            id: pin.policy_id.unwrap(),
+            schema_version: 1,
+            scope_key: pin.scope_key,
+            scope: pin.scope,
+            version: 1,
+            effective_from: pin.minute,
+            dimensions: pin.dimensions,
+            legacy_coverage: pin.legacy_coverage,
+            created_by: "fixture".into(),
+            created_at: initial_tariff.created_at,
+        })
         .await
         .unwrap();
     let (open, open_hash) = with_owner(OPEN, &owner, None, false);
@@ -401,17 +434,45 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
     let (_, accepted) = inbox::accept(&fx.db, &writer, &usage).await.unwrap();
     let stream = accepted.receipt.stream_id.as_str();
     let fact = "00000000-0000-4000-8000-000000000064";
+    let unresolved = inbox_shadow::inspect(&fx.db, ISSUER, NAMESPACE, stream, fact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unresolved["owner_status"], "unresolved");
+    assert_eq!(unresolved["plans"], serde_json::json!([]));
+    fx.db
+        .collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
     let before = inbox_shadow::inspect(&fx.db, ISSUER, NAMESPACE, stream, fact)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(before["owner_status"], "resolved");
     assert_eq!(before["financial_status"], "shadow");
-    assert_eq!(before["plans"][0]["tariff_id"], initial_tariff.id);
+    let cpu = |report: &serde_json::Value| {
+        report["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|plan| plan["metric"] == "sandbox_cpu_millis_seconds")
+            .unwrap()
+            .clone()
+    };
+    let before_cpu = cpu(&before);
+    assert_eq!(before_cpu["tariff_id"], initial_tariff.id);
+    assert_eq!(
+        before_cpu["result"],
+        serde_json::json!({"status":"candidate","numerator_pico":"120000000000000000","divisor":"3600000"})
+    );
 
     let mut later_tariff = pricing_tests::tariff();
     later_tariff.effective_from += chrono::Duration::minutes(1);
     later_tariff.version = 2;
+    for rate in &mut later_tariff.rates {
+        rate.credits_per_unit = Credits::from_whole(2);
+    }
     fx.db
         .collection::<UsageTariff>(RATES)
         .insert_one(&later_tariff)
@@ -431,19 +492,24 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
     assert_eq!(after["owner_status"], "resolved");
     assert_eq!(after["financial_status"], "shadow");
     assert_ne!(after["source_event_id"], before["source_event_id"]);
+    let after_cpu = cpu(&after);
+    assert_eq!(after_cpu["tariff_id"], before_cpu["tariff_id"]);
+    assert_eq!(after_cpu["pin_id"], before_cpu["pin_id"]);
     assert_eq!(
-        after["plans"][0]["tariff_id"],
-        before["plans"][0]["tariff_id"]
+        after_cpu["result"],
+        serde_json::json!({"status":"candidate","numerator_pico":"60000000000000000","divisor":"3600000"})
     );
-    assert_eq!(after["plans"][0]["pin_id"], before["plans"][0]["pin_id"]);
-    assert_eq!(
-        fx.db
-            .collection::<Document>("billing_ledger")
-            .count_documents(doc! {})
-            .await
-            .unwrap(),
-        0
-    );
+    for collection in ["billing_ledger", "billing_wallets", "usage_meter"] {
+        assert_eq!(
+            fx.db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "{collection}",
+        );
+    }
 }
 
 fn with_owner(

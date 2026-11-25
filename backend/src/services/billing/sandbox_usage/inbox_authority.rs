@@ -4,6 +4,7 @@ use crate::models::{
     service_account::{COLLECTION_NAME as ACCOUNTS, ServiceAccount, ServiceAccountPurpose},
     service_account_token::{COLLECTION_NAME as TOKENS, ServiceAccountToken},
 };
+use crate::services::audit_service::{self, AuditActor};
 use bson::{DateTime, Document, doc};
 use mongodb::{
     ClientSession, Database,
@@ -22,7 +23,12 @@ pub struct Registration<'a> {
     pub accepting: bool,
 }
 
-pub async fn register(db: &Database, request: Registration<'_>) -> Result<i64, InboxError> {
+pub async fn register(
+    db: &Database,
+    request: Registration<'_>,
+    actor: &AuditActor,
+    audit_key: &[u8],
+) -> Result<i64, InboxError> {
     if request.expected_revision < 0 || (request.accepting && !request.enabled) {
         return Err(InboxError::Invalid("invalid_producer_state"));
     }
@@ -39,7 +45,26 @@ pub async fn register(db: &Database, request: Registration<'_>) -> Result<i64, I
         .read_concern(ReadConcern::snapshot())
         .write_concern(WriteConcern::builder().w(Acknowledgment::Majority).build())
         .await?;
-    let result = register_in_session(db, &mut session, &request, revision).await;
+    let result = async {
+        register_in_session(db, &mut session, &request, revision).await?;
+        audit_service::log_actor_event_in_session(
+            db,
+            &mut session,
+            audit_key,
+            actor,
+            "sandbox_usage_producer_registered",
+            serde_json::json!({
+                "service_account_id": request.account_id,
+                "namespace": request.namespace,
+                "revision": revision,
+                "enabled": request.enabled,
+                "accepting": request.accepting,
+            }),
+        )
+        .await
+        .map_err(|_| InboxError::Unavailable)
+    }
+    .await;
     if let Err(error) = result {
         let _ = session.abort_transaction().await;
         return Err(error);

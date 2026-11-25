@@ -4,6 +4,7 @@ use crate::{
     errors::AppError,
     models::sandbox_usage_inbox::Validation,
     mw::auth::{AuthMethod, AuthUser},
+    services::audit_service::AuditActor,
     services::billing::sandbox_usage::{
         contract::Receipt,
         inbox::{self, InboxError, ReceiptObservation},
@@ -65,6 +66,8 @@ pub(crate) async fn register(
             enabled: request.enabled,
             accepting: request.accepting,
         },
+        &AuditActor::from_auth_user(&auth),
+        state.audit_chain_hmac_key.as_slice(),
     )
     .await?;
     Ok(Json(json!({"revision": revision})))
