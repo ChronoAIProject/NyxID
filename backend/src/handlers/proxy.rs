@@ -8082,7 +8082,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     ),
                 )
                 .await
-                .map_err(|_| proxy_client_disconnected(&service_id.to_string()))?;
+                .map_err(|_| proxy_client_disconnected(service_id))?;
             }
 
             // Audit log the proxy request
