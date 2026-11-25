@@ -78,16 +78,125 @@ impl Fixture {
 
 async fn issue_token(db: &Database, account: &str, scope: &str, generation: i64) -> String {
     let jti = Uuid::new_v4().to_string();
+    persist_token(db, account, scope, generation, &jti).await;
+    jti
+}
+
+async fn persist_token(db: &Database, account: &str, scope: &str, generation: i64, jti: &str) {
     let now = DateTime::now();
     db.collection::<Document>("service_account_tokens")
         .insert_one(doc! {
-            "_id":Uuid::new_v4().to_string(), "jti":&jti,"service_account_id":account,
+                "_id":Uuid::new_v4().to_string(), "jti":jti,"service_account_id":account,
             "scope":scope, "revoked":false, "credential_generation":generation,
             "created_at":now, "expires_at":DateTime::from_millis(now.timestamp_millis() + 60_000),
         })
         .await
         .unwrap();
-    jti
+}
+
+#[tokio::test]
+async fn mounted_custody_routes_require_the_correct_scope_and_recover_the_original_receipt() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    let fx = Fixture::open("cma_custody_http", NAMESPACE).await;
+    let state = crate::test_utils::test_app_state(fx.db.clone());
+    let mut tokens = Vec::new();
+    for scope in [WRITE_SCOPE, READ_SCOPE] {
+        let (jwt, jti) = crate::crypto::jwt::generate_service_account_token(
+            &state.jwt_keys,
+            &state.config,
+            &fx.account,
+            scope,
+            60,
+            0,
+        )
+        .unwrap();
+        persist_token(&fx.db, &fx.account, scope, 0, &jti).await;
+        tokens.push(jwt);
+    }
+    let (_, mounted) = crate::routes::build_router();
+    let router = mounted.with_state(state);
+    let call = |method: &str, path: &str, bearer: Option<&str>, body: &'static [u8]| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/api/v1/billing/sandboxes{path}"))
+            .header("content-type", "application/json");
+        if let Some(bearer) = bearer {
+            request = request.header("authorization", format!("Bearer {bearer}"));
+        }
+        let request = request.body(Body::from(body)).unwrap();
+        let router = router.clone();
+        async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 512 * 1024).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&bytes)
+                .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes)));
+            (status, body)
+        }
+    };
+    let events = "/usage-events";
+    let writer = Some(tokens[0].as_str());
+    let reader = Some(tokens[1].as_str());
+    assert_eq!(
+        call("POST", events, None, OPEN).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call("POST", events, reader, OPEN).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = call("POST", events, writer, USAGE).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "stream_not_open");
+
+    let (status, body) = call("POST", events, writer, OPEN).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["processing"],
+        json!({
+            "validation_status": "validated",
+            "validation_reason": null,
+            "owner_status": "unresolved",
+            "financial_status": "shadow",
+        }),
+    );
+    let original = body["receipt"].clone();
+    let receipt = format!("/usage-receipts/{}", original["event_id"].as_str().unwrap());
+    let cursor = format!("/usage-cursors/{}", original["stream_id"].as_str().unwrap());
+    for path in [&receipt, &cursor] {
+        let (status, body) = call("GET", path, writer, b"").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+    let (status, observed) = call("GET", &receipt, reader, b"").await;
+    assert_eq!(status, StatusCode::OK, "{observed}");
+    assert_eq!(observed["receipt"], original);
+    let (status, observed) = call("POST", events, writer, OPEN).await;
+    assert_eq!(status, StatusCode::OK, "{observed}");
+    assert_eq!(observed["receipt"], original);
+    let (status, cursor_page) = call("GET", &cursor, reader, b"").await;
+    assert_eq!(status, StatusCode::OK, "{cursor_page}");
+    assert_eq!(
+        cursor_page,
+        json!({
+            "stream_id": original["stream_id"],
+            "contiguous_custody_sequence": "1",
+            "custody_chain_head": original["payload_digest"],
+            "contiguous_validated_sequence": "1",
+            "validated_chain_head": original["payload_digest"],
+            "highest_received_sequence": "1",
+            "missing_ranges": [],
+            "next_page": null,
+        }),
+    );
+    let (status, body) = call("GET", &format!("{cursor}?page=outdated"), reader, b"").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "conflict");
 }
 
 #[tokio::test]
@@ -154,6 +263,7 @@ async fn replay_retains_one_receipt_after_concurrent_submission_and_sealing() {
 async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
     let mut fx = Fixture::open("cma_custody_rotation", NAMESPACE).await;
     let stale = fx.authority(WRITE_SCOPE).await;
+    let stale_read = fx.authority(READ_SCOPE).await;
     let (_, receipt) = inbox::accept(&fx.db, &stale, OPEN).await.unwrap();
     let receipt = receipt.receipt;
     inbox_authority::register(
@@ -180,6 +290,10 @@ async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
     fx.jti = issue_token(&fx.db, &fx.account, &fx.scopes, 1).await;
     assert!(matches!(
         inbox::accept(&fx.db, &stale, USAGE).await,
+        Err(InboxError::Forbidden)
+    ));
+    assert!(matches!(
+        inbox::receipt(&fx.db, &stale_read, receipt.event_id.as_str()).await,
         Err(InboxError::Forbidden)
     ));
     let read = fx.authority(READ_SCOPE).await;

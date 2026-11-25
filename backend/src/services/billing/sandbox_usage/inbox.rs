@@ -1,5 +1,5 @@
 use super::contract::{Basis, Clock, Event, Payload, Receipt, decode_event};
-use super::inbox_authority::{Authority, READ_SCOPE, WRITE_SCOPE};
+use super::inbox_authority::{Authority, WRITE_SCOPE};
 use super::inbox_cursor::{self, CursorPage};
 use super::inbox_facts;
 use super::inbox_promotion::promote_stream;
@@ -460,7 +460,7 @@ pub async fn receipt(
     authority: &Authority,
     event_id: &str,
 ) -> Result<Option<ReceiptObservation>, InboxError> {
-    authority.require_scope(READ_SCOPE)?;
+    authority.authorize_read(db).await?;
     receipt_in_namespace(db, authority.namespace(), event_id).await
 }
 
@@ -483,7 +483,7 @@ pub async fn cursor(
     stream_id: &str,
     page: Option<&str>,
 ) -> Result<Option<CursorPage>, InboxError> {
-    authority.require_scope(READ_SCOPE)?;
+    authority.authorize_read(db).await?;
     let stream = db
         .collection::<Stream>(STREAMS)
         .find_one(doc! {"namespace":authority.namespace(), "stream_id":stream_id})

@@ -7,7 +7,7 @@ use crate::models::{
 use bson::{DateTime, Document, doc};
 use mongodb::{
     ClientSession, Database,
-    options::{Acknowledgment, WriteConcern},
+    options::{Acknowledgment, ReadConcern, WriteConcern},
 };
 
 pub const WRITE_SCOPE: &str = "billing:sandbox-usage:write";
@@ -28,26 +28,64 @@ pub async fn register(db: &Database, request: Registration<'_>) -> Result<i64, I
     }
     super::policy::text(request.namespace).map_err(|_| InboxError::Invalid("invalid_namespace"))?;
     super::policy::text(request.owner_issuer).map_err(|_| InboxError::Invalid("invalid_issuer"))?;
-    let account = db
-        .collection::<ServiceAccount>(ACCOUNTS)
-        .find_one(doc! {"_id":request.account_id})
-        .await?
-        .ok_or(InboxError::Invalid("service_account_missing"))?;
-    if request.enabled
-        && (!account.is_active
-            || account.purpose != ServiceAccountPurpose::General
-            || !has_scope(&account.allowed_scopes, WRITE_SCOPE)
-            || !has_scope(&account.allowed_scopes, READ_SCOPE))
-    {
-        return Err(InboxError::Invalid("service_account_scope"));
-    }
-    let producers = db.collection::<Producer>(PRODUCERS);
     inbox::require_prepared(db).await?;
-    let write_concern = WriteConcern::builder().w(Acknowledgment::Majority).build();
     let revision = request
         .expected_revision
         .checked_add(1)
         .ok_or(InboxError::Invalid("revision_overflow"))?;
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::builder().w(Acknowledgment::Majority).build())
+        .await?;
+    let result = register_in_session(db, &mut session, &request, revision).await;
+    if let Err(error) = result {
+        let _ = session.abort_transaction().await;
+        return Err(error);
+    }
+    inbox::commit(&mut session).await?;
+    Ok(revision)
+}
+
+async fn register_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    request: &Registration<'_>,
+    revision: i64,
+) -> Result<(), InboxError> {
+    // Read before taking document locks, including when disabling registration
+    // after the producer account has been removed.
+    let account = db
+        .collection::<ServiceAccount>(ACCOUNTS)
+        .find_one(doc! {"_id":request.account_id})
+        .max_time(std::time::Duration::from_secs(5))
+        .session(&mut *session)
+        .await?;
+    if request.enabled {
+        let account = account.ok_or(InboxError::Invalid("service_account_missing"))?;
+        if !account.is_active
+            || account.purpose != ServiceAccountPurpose::General
+            || !has_scope(&account.allowed_scopes, WRITE_SCOPE)
+            || !has_scope(&account.allowed_scopes, READ_SCOPE)
+        {
+            return Err(InboxError::Invalid("service_account_scope"));
+        }
+        // This account can submit usage for unrelated owners in the namespace.
+        // Protect its credentials in the same transaction that grants access.
+        let protected = db
+            .collection::<Document>(ACCOUNTS)
+            .update_one(
+                doc! {"_id":request.account_id},
+                doc! {"$set":{"platform_protected":true}, "$inc":{"usage_custody_revision":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        if protected.matched_count != 1 {
+            return Err(InboxError::Unavailable);
+        }
+    }
+    let producers = db.collection::<Producer>(PRODUCERS);
     if request.expected_revision == 0 {
         let result = producers
             .insert_one(Producer {
@@ -58,10 +96,10 @@ pub async fn register(db: &Database, request: Registration<'_>) -> Result<i64, I
                 accepting: request.accepting,
                 revision,
             })
-            .write_concern(write_concern)
+            .session(&mut *session)
             .await;
         return match result {
-            Ok(_) => Ok(revision),
+            Ok(_) => Ok(()),
             Err(error) if super::super::ledger::is_duplicate_key_error(&error) => {
                 Err(InboxError::Conflict("producer_exists"))
             }
@@ -72,11 +110,11 @@ pub async fn register(db: &Database, request: Registration<'_>) -> Result<i64, I
         doc! {"_id":request.account_id,"namespace":request.namespace,"owner_issuer":request.owner_issuer,
             "revision":request.expected_revision},
         doc! {"$set":{"enabled":request.enabled,"accepting":request.accepting,"revision":revision}},
-    ).write_concern(write_concern).await?;
+    ).session(&mut *session).await?;
     if updated.matched_count != 1 {
         return Err(InboxError::Conflict("producer_registration_changed"));
     }
-    Ok(revision)
+    Ok(())
 }
 
 pub struct Authority {
@@ -105,6 +143,28 @@ impl Authority {
 
     pub fn namespace(&self) -> &str {
         &self.producer.namespace
+    }
+
+    pub(super) async fn authorize_read(&self, db: &Database) -> Result<(), InboxError> {
+        self.require_scope(READ_SCOPE)?;
+        let account = db
+            .collection::<ServiceAccount>(ACCOUNTS)
+            .find_one(doc! {"_id":&self.producer.service_account_id, "is_active":true})
+            .read_concern(ReadConcern::majority())
+            .await?
+            .ok_or(InboxError::Forbidden)?;
+        let token = db
+            .collection::<ServiceAccountToken>(TOKENS)
+            .find_one(self.token_filter())
+            .read_concern(ReadConcern::majority())
+            .await?
+            .ok_or(InboxError::Forbidden)?;
+        self.verify_grant(&account, &token)?;
+        let current = inbox::producer(db, &self.producer.service_account_id).await?;
+        if current.revision != self.producer.revision {
+            return Err(InboxError::Forbidden);
+        }
+        Ok(())
     }
 
     pub(super) fn require_scope(&self, scope: &'static str) -> Result<(), InboxError> {
@@ -138,21 +198,14 @@ impl Authority {
             .session(&mut *session)
             .await?
             .ok_or(InboxError::Forbidden)?;
-        let token_filter = doc! {"jti":&self.token_jti,"service_account_id":account_id,
-        "revoked":false,"expires_at":{"$gt":DateTime::now()}};
+        let token_filter = self.token_filter();
         let token = db
             .collection::<ServiceAccountToken>(TOKENS)
             .find_one(token_filter.clone())
             .session(&mut *session)
             .await?
             .ok_or(InboxError::Forbidden)?;
-        if account.purpose != ServiceAccountPurpose::General
-            || account.credential_generation != token.credential_generation
-            || !has_scope(&account.allowed_scopes, self.scope)
-            || !has_scope(&token.scope, self.scope)
-        {
-            return Err(InboxError::Forbidden);
-        }
+        self.verify_grant(&account, &token)?;
         for (collection, filter) in [
             (ACCOUNTS, doc! {"_id":account_id,"is_active":true}),
             (TOKENS, token_filter),
@@ -171,6 +224,27 @@ impl Authority {
             if matched != 1 {
                 return Err(InboxError::Forbidden);
             }
+        }
+        Ok(())
+    }
+
+    fn token_filter(&self) -> Document {
+        doc! {"jti":&self.token_jti,"service_account_id":&self.producer.service_account_id,
+        "revoked":false,"expires_at":{"$gt":DateTime::now()}}
+    }
+
+    fn verify_grant(
+        &self,
+        account: &ServiceAccount,
+        token: &ServiceAccountToken,
+    ) -> Result<(), InboxError> {
+        if !account.platform_protected
+            || account.purpose != ServiceAccountPurpose::General
+            || account.credential_generation != token.credential_generation
+            || !has_scope(&account.allowed_scopes, self.scope)
+            || !has_scope(&token.scope, self.scope)
+        {
+            return Err(InboxError::Forbidden);
         }
         Ok(())
     }

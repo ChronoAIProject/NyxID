@@ -212,6 +212,10 @@ impl IntoResponse for HttpError {
             Self::Inbox(InboxError::Invalid(reason)) => {
                 AppError::ValidationError(reason.into()).into_response()
             }
+            Self::Inbox(InboxError::Conflict("cursor_changed")) => {
+                AppError::Conflict("Usage cursor changed; restart pagination".into())
+                    .into_response()
+            }
             Self::Inbox(InboxError::Conflict(reason)) => {
                 AppError::Conflict(reason.into()).into_response()
             }

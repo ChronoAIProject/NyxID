@@ -274,6 +274,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            cma_usage_custody_recovery_enabled: false,
             billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,

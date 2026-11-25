@@ -107,6 +107,7 @@ mod tests {
             capture_start_ms: 0,
             last_fact_end_ms: 0,
             sequence: 1,
+            head_id: "head-event-row".into(),
             head_digest: "a".repeat(64),
             promotion_ready: false,
             pending: pending
