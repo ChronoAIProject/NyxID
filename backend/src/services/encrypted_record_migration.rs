@@ -54,6 +54,7 @@ enum Adapter {
     ChannelBot,
     NativeWhatsapp,
     NyxbotChannelKey,
+    ThreadReference,
     EventBinding,
     GatewayTransport,
     CmaRequest,
@@ -251,7 +252,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_threads",
-        adapter: Adapter::Pending,
+        adapter: Adapter::ThreadReference,
         fields: &["event_ref_ciphertext"],
     },
     Entry {
@@ -569,7 +570,8 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
         Some(
-            previous_labels::APPROVAL_PROPOSAL_DIGEST
+            previous_labels::REATTACH_WINDOW_DIGEST
+            | previous_labels::APPROVAL_PROPOSAL_DIGEST
             | previous_labels::LEARNING_PROPOSAL_DIGEST
             | previous_labels::CMA_REQUEST_DIGEST
             | previous_labels::GATEWAY_SETUP_DIGEST
@@ -780,6 +782,9 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::ThreadReference => {
+            Box::pin(super::nyxbot_thread_reference::verify(keys, row)).await
+        }
         Adapter::ApprovalProposal => {
             Box::pin(super::execution_permission_dispatch::proposals::record::verify(keys, row))
                 .await
@@ -930,6 +935,9 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::ThreadReference => {
+            Box::pin(super::nyxbot_thread_reference::migrate(db, keys, row)).await
+        }
         Adapter::ApprovalProposal => {
             Box::pin(
                 super::execution_permission_dispatch::proposals::record::migrate(db, keys, row),
