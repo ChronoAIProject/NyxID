@@ -3,7 +3,7 @@ title: Approvals (human-in-the-loop)
 description: How NyxID can require human sign-off before forwarding an agent's proxy request, the difference between per-request and grant modes, and where approvals fit in the proxy pipeline.
 ---
 
-The approvals system adds a human checkpoint to the proxy. When a service is configured to require approval, any programmatic request to that service — from an AI agent, a service account, or a delegated token — is held until the resource owner explicitly approves or rejects it. The downstream call is only made if the user approves.
+The approvals system adds a human checkpoint to the proxy. When a service is configured to require approval, any programmatic request to that service — from an AI agent, a service account, or a delegated token — waits for the resource owner to approve or reject it before NyxID forwards it. The downstream call is only made if the user approves.
 
 ## Why approvals exist
 

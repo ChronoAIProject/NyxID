@@ -18,7 +18,7 @@ reviews and merges the result.
 
    Patterns use git's default pathspec matching (`*` also matches `/`), so
    each pattern can be passed to `git log` as written. Quote every pattern so the
-   shell does not expand it; only quoted patterns also match deleted files. Skip areas with no commits.
+   shell passes it to git unchanged. Skip areas with no commits.
 
 2. **Always check the shared registries**, where most spec drift starts:
 

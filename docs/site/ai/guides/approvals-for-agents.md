@@ -177,7 +177,7 @@ nyxid approval service-configs   # lists all services with approval enabled, inc
 | Symptom | Cause | Fix |
 |---|---|---|
 | User never receives the approval request | No notification channel configured | Run `nyxid notification telegram-link` or install the mobile app |
-| Approval times out before user sees it | The approval wait is short | Increase the approval timeout (`approval_timeout_secs` in notification settings), or set up real-time notifications |
+| Approval times out before user sees it | The approval wait is short | For a held request, raise `approval_timeout_secs` in notification settings (10–300 seconds; new settings already use 300). Async external requests use their own 600-second wait. Set up real-time notifications in either case |
 | Agent receives `7001` immediately | A saved decision already applies to this request (for example an earlier rejection) | Show `approve_url`; do not re-send in a loop |
 | `per_request` service creates grants | Service was reconfigured to `grant` mode | Run `nyxid approval service-configs` to confirm the current mode |
 | Agent loops infinitely on `7000` | Polling without timeout | Add a polling limit and show the user the `request_id` and a link to the web console |
