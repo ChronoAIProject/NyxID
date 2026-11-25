@@ -1540,6 +1540,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_sandbox_rates::usage::prepare),
         )
         .route(
+            "/billing/cma-usage-custody/prepare",
+            post(handlers::sandbox_billing::usage_inbox::prepare),
+        )
+        .route(
+            "/billing/cma-usage-custody/producers/{account_id}",
+            put(handlers::sandbox_billing::usage_inbox::register),
+        )
+        .route(
             "/billing/cma-usage-tariffs",
             get(handlers::admin_sandbox_rates::usage::list)
                 .post(handlers::admin_sandbox_rates::usage::publish),

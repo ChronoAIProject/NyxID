@@ -48,6 +48,18 @@ impl Event {
         &self.digest
     }
 
+    pub(super) fn custody_receipt(&self, receipt_id: String, accepted_at_ms: u64) -> Receipt {
+        Receipt {
+            receipt_id: Id(receipt_id),
+            event_id: self.header.event_id.clone(),
+            stream_id: self.header.stream_id.clone(),
+            sequence: self.header.sequence,
+            payload_digest: self.digest.clone(),
+            accepted_at_ms: Millis(accepted_at_ms),
+            custody: Custody::Persisted,
+        }
+    }
+
     /// Check the next append against the current durable stream head. The
     /// inbox must establish that the head is current in the append transaction.
     pub fn validate_successor_of(&self, head: &Event) -> ContractResult<()> {

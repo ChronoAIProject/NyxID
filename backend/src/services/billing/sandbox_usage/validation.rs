@@ -266,12 +266,12 @@ fn quality(coverage: &Coverage, quantity: Option<u128>) -> Check {
     }
 }
 
-fn has_compute(fact: &Fact) -> bool {
+pub(super) fn has_compute(fact: &Fact) -> bool {
     fact.audit_time.compute_uptime_ms.get() > 0
         || fact.coverage.cpu.expected_binding_ms.get() > 0
         || fact.coverage.memory.expected_binding_ms.get() > 0
 }
 
-fn has_home(fact: &Fact) -> bool {
+pub(super) fn has_home(fact: &Fact) -> bool {
     fact.audit_time.retained_home_ms.get() > 0 || fact.coverage.disk.expected_binding_ms.get() > 0
 }

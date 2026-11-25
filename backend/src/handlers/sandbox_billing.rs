@@ -1,4 +1,5 @@
 //! Trusted producer API for configured CMA rates and finite prepaid windows.
+pub(crate) mod usage_inbox;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -24,6 +25,7 @@ pub fn router() -> Router<AppState> {
         .route("/receipts/{request_id}", get(receipt))
         .route("/cursors/{sandbox_id}", get(cursor))
         .route("/windows/{window_id}/evidence", post(evidence))
+        .merge(usage_inbox::router())
         .layer(DefaultBodyLimit::max(512 * 1024))
 }
 

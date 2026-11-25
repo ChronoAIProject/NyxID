@@ -1,6 +1,9 @@
 //! V1 evidence decoding and opt-in shadow pricing. No wallet/provider charging.
 pub mod contract;
 mod corrections;
+pub mod inbox;
+pub mod inbox_authority;
+mod inbox_facts;
 mod scalars;
 mod strict_json;
 mod types;
@@ -14,6 +17,8 @@ mod contract_tests;
 mod correction_tests;
 #[cfg(test)]
 mod fixture_tests;
+#[cfg(test)]
+mod inbox_tests;
 
 pub mod policy;
 pub mod price_pins;
