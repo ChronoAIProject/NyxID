@@ -1,7 +1,31 @@
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { channelChatTitle, type ChannelThreadGroup } from "./nyxbot-labels";
+import { channelChatTitle, channelPlatformName, type ChannelThreadGroup } from "./nyxbot-labels";
 import type { Conversation } from "@/types/assistant";
+
+/** App threads can be used from both web and mobile; external origins are saved. */
+export function conversationChannelPlatform(conversation: Pick<Conversation, "platform_thread" | "channel">): string | null {
+  const platform = conversation.platform_thread?.platform ?? conversation.channel?.platform;
+  return platform === "telegram-new" ? "telegram" : platform || null;
+}
+
+export function conversationChannelName(conversation: Pick<Conversation, "platform_thread" | "channel">): string | null {
+  const platform = conversationChannelPlatform(conversation);
+  return platform ? channelPlatformName(platform) : null;
+}
+
+/** Summarize external channels; ordinary app chats need no source marker. */
+export function conversationChannelCounts(conversations: readonly Conversation[]): readonly { platform: string; name: string; count: number }[] {
+  const counts = new Map<string, { platform: string; name: string; count: number }>();
+  for (const conversation of conversations) {
+    const platform = conversationChannelPlatform(conversation);
+    if (!platform) continue;
+    const entry = counts.get(platform) ?? { platform, name: channelPlatformName(platform), count: 0 };
+    entry.count += 1;
+    counts.set(platform, entry);
+  }
+  return [...counts.values()];
+}
 
 /** Display-only: persisted titles and platform routing identities never change. */
 export function conversationDisplayTitle(conversation: Conversation): string {

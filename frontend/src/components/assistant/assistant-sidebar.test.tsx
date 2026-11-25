@@ -662,7 +662,8 @@ describe("NyxBot agents in the sidebar", () => {
     const sourceButton = screen.getByRole("button", { name: "Engineering on Lark, 2 threads" });
     expect(sourceButton).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Lark · Bot: NyxBot")).toBeVisible();
-    expect(screen.getByText("Direct chats")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Personal conversations" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connected bot chats" })).toBeVisible();
     expect(screen.queryByText("Channel chat")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^Thread · .*10:16:45/ }));
