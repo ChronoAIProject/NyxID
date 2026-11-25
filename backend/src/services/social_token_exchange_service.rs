@@ -878,6 +878,7 @@ mod tests {
             "subject-token",
             SUBJECT_TOKEN_TYPE_ID_TOKEN,
             "facebook",
+            None,
         )
         .await
         {
@@ -914,6 +915,7 @@ mod tests {
             "subject-token",
             SUBJECT_TOKEN_TYPE_ID_TOKEN,
             "github",
+            None,
         )
         .await
         {
