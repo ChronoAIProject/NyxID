@@ -8026,7 +8026,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     destination,
                 );
             let github_scope_refusal = github_metadata
-                && !should_stream
+                && !is_sse
                 && target.connection_id.is_some()
                 && destination.path().trim_start_matches('/') == path.trim_start_matches('/')
                 && github_scope::missing_public_write_scope(
@@ -8044,35 +8044,45 @@ async fn execute_resolved_proxy_inner<'a>(
                 github_metadata,
             );
 
-            let mut response = crate::services::proxy_http_response::relay_response(
-                state,
-                crate::services::proxy_http_response::HttpResponseContext {
-                    service_id: service_id.to_string(),
-                    path: path.to_string(),
-                    nyxagent_admission,
-                    model_request: model_request.clone(),
-                    response_builder,
-                    status,
-                    is_sse,
-                    should_stream,
-                    usage_context,
-                    metered,
-                    request_body_len,
-                    resale_metric: billing_ctx.resale.as_ref().map(|spec| spec.metric),
-                    downstream_cancellation,
-                    exchange_diagnostics,
-                },
-                downstream_response,
-            )
-            .await?;
-
-            if github_scope_refusal && let Some(service_id) = resolved_user_service_id.as_deref() {
-                response = github_scope::write_scope_refusal(
-                    response,
-                    &state.config.frontend_url,
-                    service_id,
+            let stream_completed = (github_scope_refusal && should_stream)
+                .then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let mut response =
+                crate::services::proxy_http_response::relay_response_observing_completion(
+                    state,
+                    crate::services::proxy_http_response::HttpResponseContext {
+                        service_id: service_id.to_string(),
+                        path: path.to_string(),
+                        nyxagent_admission,
+                        model_request: model_request.clone(),
+                        response_builder,
+                        status,
+                        is_sse,
+                        should_stream,
+                        usage_context,
+                        metered,
+                        request_body_len,
+                        resale_metric: billing_ctx.resale.as_ref().map(|spec| spec.metric),
+                        downstream_cancellation: downstream_cancellation.clone(),
+                        exchange_diagnostics,
+                    },
+                    downstream_response,
+                    stream_completed.clone(),
                 )
-                .await;
+                .await?;
+
+            if github_scope_refusal && let Some(exact_key_id) = resolved_user_service_id.as_deref()
+            {
+                response = until_client_disconnect(
+                    &downstream_cancellation,
+                    github_scope::write_scope_refusal(
+                        response,
+                        &state.config.frontend_url,
+                        exact_key_id,
+                        stream_completed.as_deref(),
+                    ),
+                )
+                .await
+                .map_err(|_| proxy_client_disconnected(&service_id.to_string()))?;
             }
 
             // Audit log the proxy request

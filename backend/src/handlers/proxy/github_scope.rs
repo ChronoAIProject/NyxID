@@ -1,12 +1,16 @@
 use axum::{
     Json,
-    body::{Body, to_bytes},
+    body::Body,
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures::{StreamExt as _, stream};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use url::Url;
+
+const MAX_REFUSAL_BYTES: usize = 8192;
 
 const METADATA_HEADERS: &[&str] = &[
     "x-oauth-scopes",
@@ -34,26 +38,31 @@ pub(super) async fn write_scope_refusal(
     response: Response,
     frontend: &str,
     service_id: &str,
+    stream_completed: Option<&AtomicBool>,
 ) -> Response {
-    let status = response.status();
     let Some(remediation_url) = manage_url(frontend, service_id) else {
         return response;
     };
     let (mut parts, body) = response.into_parts();
-    // The direct proxy has already buffered this response and settled usage.
-    // Preserve an upstream explanation that identifies a separate refusal.
-    let bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Response::from_parts(
-                parts,
-                Body::from_stream(futures::stream::once(async {
-                    Err::<bytes::Bytes, _>(error)
-                })),
-            );
+    let mut relay = body.into_data_stream();
+    let mut inspected = bytes::BytesMut::new();
+    // Poll the ordinary relay so its accounting and idle timeout also apply to
+    // the inspected bytes. Pass through anything that exceeds the error bound.
+    while let Some(chunk) = relay.next().await {
+        match chunk {
+            Ok(chunk) if chunk.len() <= MAX_REFUSAL_BYTES - inspected.len() => {
+                inspected.extend_from_slice(&chunk);
+            }
+            remainder => {
+                let prefix = stream::iter([Ok(inspected.freeze()), remainder]);
+                return Response::from_parts(parts, Body::from_stream(prefix.chain(relay)));
+            }
         }
-    };
-    if !generic_refusal(status, &bytes) {
+    }
+    let bytes = inspected.freeze();
+    if stream_completed.is_some_and(|completed| !completed.load(Ordering::Relaxed))
+        || !generic_refusal(parts.status, &bytes)
+    {
         return Response::from_parts(parts, Body::from(bytes));
     }
 
@@ -96,6 +105,8 @@ pub(super) fn missing_public_write_scope(
 ) -> bool {
     if method != Method::POST
         || !matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
+        || !one_header(headers, "content-type")
+            .is_some_and(crate::services::content_type::is_json_content_type)
         || one_header(headers, "x-github-request-id").is_none_or(str::is_empty)
         || headers.contains_key(header::RETRY_AFTER)
         || headers.contains_key("x-github-sso")
@@ -157,9 +168,6 @@ fn generic_refusal(status: StatusCode, bytes: &[u8]) -> bool {
         message: &'a str,
         errors: Option<serde::de::IgnoredAny>,
     }
-    if bytes.len() > 8192 {
-        return false;
-    }
     serde_json::from_slice::<GithubError<'_>>(bytes).is_ok_and(|error| {
         error.errors.is_none()
             && matches!(
@@ -194,12 +202,14 @@ fn manage_url(frontend: &str, service_id: &str) -> Option<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
 
     const SERVICE: &str = "05ceabf7-ad92-42d0-9be7-047aa3f869e7";
     const PATH: &str = "/repos/example/project/git/refs";
 
     fn evidence() -> HeaderMap {
         let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
         headers.insert("x-github-request-id", "synthetic-request".parse().unwrap());
         headers.insert("x-oauth-scopes", "read:user".parse().unwrap());
         headers.insert(
@@ -304,7 +314,8 @@ mod tests {
         .body(Body::from(body))
         .unwrap();
         if classify {
-            response = write_scope_refusal(response, "https://console.example.test", SERVICE).await;
+            response =
+                write_scope_refusal(response, "https://console.example.test", SERVICE, None).await;
         }
         assert!(response.headers().contains_key("x-oauth-scopes"));
         assert!(!response.headers().contains_key("x-github-sso"));
@@ -321,7 +332,7 @@ mod tests {
             .headers_mut()
             .insert(header::CONTENT_LENGTH, "23".parse().unwrap());
         let response =
-            write_scope_refusal(response, "https://console.example.test/", SERVICE).await;
+            write_scope_refusal(response, "https://console.example.test/", SERVICE, None).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(response.headers().contains_key("x-oauth-scopes"));
         assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
@@ -338,6 +349,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chunked_refusals_are_classified_only_after_a_small_complete_body() {
+        use bytes::Bytes;
+        use std::sync::Arc;
+
+        let generic = Bytes::from_static(br#"{"message":"Not Found"}"#);
+        let independent =
+            Bytes::from_static(br#"{"message":"Not Found","errors":[{"code":"repository_rule"}]}"#);
+        let large_chunk = Bytes::from(vec![b' '; MAX_REFUSAL_BYTES]);
+        for (chunks, reaches_eof, expected_scope) in [
+            (vec![generic.slice(..8), generic.slice(8..)], true, true),
+            (vec![generic.clone()], false, false),
+            (vec![independent], true, false),
+            (
+                vec![generic.clone(), large_chunk, Bytes::from_static(b"tail")],
+                true,
+                false,
+            ),
+        ] {
+            let expected = chunks.concat();
+            let stream_completed = Arc::new(AtomicBool::new(false));
+            let inspector = stream_completed.clone();
+            let stream = async_stream::stream! {
+                for chunk in chunks {
+                    yield Ok::<_, std::io::Error>(chunk);
+                }
+                if reaches_eof {
+                    stream_completed.store(true, Ordering::Relaxed);
+                }
+            };
+            let status = StatusCode::NOT_FOUND;
+            let headers = evidence();
+            assert!(missing_public_write_scope(
+                &Method::POST,
+                PATH,
+                status,
+                &headers
+            ));
+            let response = super::super::project_direct_response_headers(
+                Response::builder().status(status),
+                status,
+                &headers,
+                false,
+                None,
+                true,
+            )
+            .body(Body::from_stream(stream))
+            .unwrap();
+            assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+            let response = write_scope_refusal(
+                response,
+                "https://console.example.test",
+                SERVICE,
+                Some(&inspector),
+            )
+            .await;
+            if expected.len() > MAX_REFUSAL_BYTES {
+                assert!(!inspector.load(Ordering::Relaxed));
+            }
+            let status = response.status();
+            let body = to_bytes(response.into_body(), MAX_REFUSAL_BYTES * 2)
+                .await
+                .unwrap();
+            if expected_scope {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["code"], "insufficient_scope");
+                assert_eq!(
+                    body["remediation_url"],
+                    format!("https://console.example.test/keys/{SERVICE}")
+                );
+            } else {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(body.as_ref(), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn preserves_independent_provider_refusals() {
         for body in [
             r#"{"message":"You have exceeded a secondary rate limit"}"#,
@@ -347,7 +436,7 @@ mod tests {
             *response.status_mut() = StatusCode::FORBIDDEN;
             *response.headers_mut() = evidence();
             let response =
-                write_scope_refusal(response, "https://console.example.test", SERVICE).await;
+                write_scope_refusal(response, "https://console.example.test", SERVICE, None).await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert_eq!(
                 to_bytes(response.into_body(), 8192).await.unwrap(),
