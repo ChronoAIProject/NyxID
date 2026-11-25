@@ -1252,12 +1252,29 @@ pub async fn lookup_finding(
 /// malformed material records a finite finding and does not starve later rows.
 pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> AppResult<()> {
     let db = super::transaction_service::durable_database(db);
+    let runs = db.collection::<Document>(RUNS);
+    let mut available = doc! {
+        "_id": RUN_ID, "generation": generation, "phase": "running",
+        "$expr": {"$lte": ["$lease_until", "$$NOW"]},
+    };
+    // Authenticate the generation before taking its lease. Match the same
+    // registry and provider proof when claiming it after the asynchronous check.
+    let proof = runs
+        .find_one(available.clone())
+        .projection(doc! {"_id":0, "generation":1, "registry_digest":1, "provider_proof":1})
+        .await?
+        .ok_or_else(lost)?;
+    verify_generation(keys, &proof).await?;
+    available.extend(proof);
     let token = uuid::Uuid::new_v4().to_string();
-    let run=db.collection::<Document>(RUNS).find_one_and_update(
-        doc!{"_id":RUN_ID,"generation":generation,"phase":"running","$expr":{"$lte":["$lease_until","$$NOW"]}},
-        vec![doc!{"$set":{"lease_token":&token,"lease_until":{"$add":["$$NOW",120_000]}}}])
-        .return_document(ReturnDocument::After).await?.ok_or_else(lost)?;
-    verify_generation(keys, &run).await?;
+    let run = runs
+        .find_one_and_update(
+            available,
+            vec![doc! {"$set":{"lease_token":&token,"lease_until":{"$add":["$$NOW",120_000]}}}],
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(lost)?;
     let index =
         usize::try_from(run.get_i32("entry").map_err(|_| invalid())?).map_err(|_| invalid())?;
     if index == REGISTRY.len() {
