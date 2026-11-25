@@ -161,6 +161,12 @@ export function hookHarness<T>(
                 : name.endsWith("/i18n/appTranslation") && Object.entries(mocks).some(([key]) => key.endsWith("/i18n/LanguageProvider"))
                   ? { ...require(name), translateApp: (phrase: string, values?: Record<string, string | number>) =>
                       englishTranslation((Object.entries(mocks).find(([key]) => key.endsWith("/i18n/LanguageProvider"))![1] as { useAppLanguage(): { t: typeof englishTranslation } }).useAppLanguage().t(phrase, values), values) }
+                : name.endsWith("/performance/useNativePerformance")
+                  ? {
+                      usePerformanceLifecycle: () => {},
+                      usePerformanceInputReady: () => () => {},
+                      useChatNativeFrames: () => ({ beginDrag() {}, endDrag() {}, momentumBegin() {}, momentumEnd() {} }),
+                    }
                 : name.endsWith("/deviceLanguages")
                   ? harness.load(require.resolve(name))
                 : name.endsWith("/DynamicTypeText")

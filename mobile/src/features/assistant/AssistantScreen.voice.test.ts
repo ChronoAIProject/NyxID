@@ -1,3 +1,4 @@
+import type { AssistantTurnPerformance, ChatTurnTimings } from "./assistantTurnPerformance";
 import { buildApiError } from "../../lib/api/responseError";
 import {
   createAssistantDraftStore,
@@ -92,6 +93,13 @@ function setup(
   let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
+  const perf = { enabled: false, sample: undefined as AssistantTurnPerformance | undefined, submitted: [] as ChatTurnTimings[] };
+  const nativePerf = {
+    readiness: [] as { screen: string; enabled: boolean; scope: unknown }[],
+    frames: [] as { focused: boolean; streaming: boolean; scope: unknown }[],
+    events: [] as string[],
+    layouts: [] as unknown[],
+  };
   const alerts: { text: string; style?: string; onPress?: () => void }[][] = [];
   const drafts: {
     agentId: string;
@@ -118,6 +126,7 @@ function setup(
     for (const listener of [...keyboardListeners]) listener();
   };
   let transcriptFollowing = true;
+  let transcriptReady = false;
   let features: string[] | undefined = ["assistant:voice"];
   const agent = {
     id: "agent-a",
@@ -181,7 +190,9 @@ function setup(
       files?: AssistantUploadedMessage,
       _acknowledgement?: string,
       model?: string,
+      sample?: AssistantTurnPerformance,
     ) => {
+      perf.sample = sample;
       events.push(model ? ["send", text, files, model] : ["send", text, files]);
       return true;
     },
@@ -244,6 +255,10 @@ function setup(
     },
   };
   const mocks = {
+    "../../lib/performance/metrics": {
+      beginPerformanceSample: () => perf.enabled ? epoch : null,
+      submitPerformanceSample: (_epoch: number, _event: string, timings: ChatTurnTimings) => perf.submitted.push(timings),
+    },
     "../../i18n/LanguageProvider": {
       useAppLanguage: () => ({
         t: (phrase: string) => translations[phrase] ?? phrase,
@@ -485,6 +500,7 @@ function setup(
     "./useTranscriptScrollFollow": {
       useTranscriptScrollFollow: () => ({
         following: transcriptFollowing,
+        ready: transcriptReady,
         listProps: {
           onLayout: (event: any) =>
             events.push(["follow-layout", event.nativeEvent.layout.height]),
@@ -493,10 +509,28 @@ function setup(
           onScroll: (event: any) =>
             events.push(["follow-scroll", event.nativeEvent.contentOffset.y]),
           onScrollBeginDrag: () => events.push(["follow-drag"]),
+          onScrollEndDrag: () => events.push(["follow-drag-end"]),
+          onMomentumScrollBegin: () => events.push(["follow-momentum"]),
+          onMomentumScrollEnd: () => events.push(["follow-momentum-end"]),
         },
         follow: () => {},
         pause: () => {},
       }),
+    },
+    "../../lib/performance/useNativePerformance": {
+      usePerformanceInputReady: (screen: string, enabled: boolean, scope: unknown) => {
+        nativePerf.readiness.push({ screen, enabled, scope });
+        return (event: unknown) => nativePerf.layouts.push(event);
+      },
+      useChatNativeFrames: (options: { focused: boolean; streaming: boolean; scope: unknown }) => {
+        nativePerf.frames.push(options);
+        return {
+          beginDrag: () => nativePerf.events.push("drag"),
+          endDrag: () => nativePerf.events.push("drag-end"),
+          momentumBegin: () => nativePerf.events.push("momentum"),
+          momentumEnd: () => nativePerf.events.push("momentum-end"),
+        };
+      },
     },
     "./AssistantAcknowledgementCard": {
       AssistantAcknowledgementCard: "AssistantAcknowledgementCard",
@@ -682,6 +716,8 @@ function setup(
     all().find((element) => element.type === "AssistantVoiceConversation");
   return {
     harness,
+    perf,
+    nativePerf,
     navigationDisabled: () => navigationDisabled,
     assistant,
     uploads,
@@ -776,6 +812,10 @@ function setup(
     },
     pauseTranscript: () => {
       transcriptFollowing = false;
+      harness.render();
+    },
+    setTranscriptReady: (value: boolean) => {
+      transcriptReady = value;
       harness.render();
     },
     setFeatures: (value: string[] | undefined) => {
@@ -3557,4 +3597,64 @@ test("opening voice reuses a draft prepared earlier and applies its model before
   ]);
   assert.equal(x.drafts.length, 0);
   x.harness.unmount();
+});
+
+test("a batched reply commits through the matching saved bubble after the live row is gone", async () => {
+  const x = setup(A);
+  x.perf.enabled = true;
+  x.input().props.onChangeText("Private prompt");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  const sample = x.perf.sample!;
+  const turnId = "fast-turn";
+  const reply = { cursor: 1, turnId, blocks: [{ id: "b", index: 0, text: "Private answer" }] };
+  sample.admitted();
+  sample.observe({ event: "turn.status", turn_id: turnId, conversation_id: A, status: "running", cursor: 1 }, reply);
+  sample.observe({ event: "block.delta", block_id: "b", text: "Private answer", cursor: 2 }, reply);
+  sample.finish("completed");
+  const row = (id: string, seq: number) => messageSchema.parse({
+    id, seq, turn_id: id, role: "assistant", text: "Private answer", status: "completed",
+    error_code: null, created_at: "2026-11-14T01:00:00Z", activities: [], attachments: [],
+  });
+  x.assistant.history!.messages = [row("older-turn", 1), row(turnId, 2)];
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  const body = (index: number) => elements(expand(list.props.renderItem({ item: list.props.data[index], index })))
+    .find((node) => node.type === "ReplyBody")!.props;
+  assert.equal(body(0).onTextCommit, undefined);
+  assert.equal(x.perf.submitted.length, 0);
+  assert.equal(body(1).text, "Private answer");
+  const commit = body(1).onTextCommit;
+  commit();
+  commit();
+  assert.equal(x.perf.submitted.length, 1);
+  assert.equal(x.perf.submitted[0]?.outcome, "completed");
+  assert.equal(typeof x.perf.submitted[0]?.first_text_commit_ms, "number");
+  assert.equal(body(1).onTextCommit, undefined);
+  x.harness.unmount();
+});
+
+test("real composer and transcript handlers forward native readiness and frame boundaries without losing scroll follow", () => {
+  const view = setup("thread-a");
+  assert.equal(view.nativePerf.readiness.at(-1)?.enabled, false);
+  assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
+  view.setTranscriptReady(true);
+  assert.equal(view.nativePerf.readiness.at(-1)?.screen, "chat");
+  assert.equal(view.nativePerf.readiness.at(-1)?.enabled, true);
+  assert.equal(view.nativePerf.frames.at(-1)?.focused, true);
+  const layout = { nativeEvent: { layout: { width: 320, height: 48 } } };
+  view.input().props.onInputLayout(layout);
+  assert.deepEqual(view.nativePerf.layouts, [layout]);
+  const list = view.all().find((element) => element.type === "FlatList")!;
+  list.props.onScrollBeginDrag();
+  list.props.onScrollEndDrag({});
+  list.props.onMomentumScrollBegin();
+  list.props.onMomentumScrollEnd({});
+  assert.deepEqual(view.nativePerf.events, ["drag", "drag-end", "momentum", "momentum-end"]);
+  assert.deepEqual(view.events.filter((event) => String(event[0]).startsWith("follow-")), [["follow-drag"], ["follow-drag-end"], ["follow-momentum"], ["follow-momentum-end"]]);
+  view.setFocused(false);
+  assert.equal(view.nativePerf.readiness.at(-1)?.enabled, false);
+  assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
+  view.harness.unmount();
 });

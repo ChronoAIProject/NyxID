@@ -66,6 +66,7 @@
     "@xterm/xterm": "^6.0.0",
     "base64-js": "1.5.1",
     "expo": "~55.0.12",
+    "expo-application": "~55.0.13",
     "expo-blur": "~55.0.13",
     "expo-camera": "~55.0.22",
     "expo-clipboard": "~55.0.12",

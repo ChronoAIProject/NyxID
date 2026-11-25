@@ -1,0 +1,8 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["NyxPerformanceModule"],
+    "appDelegateSubscribers": ["NyxPerformanceAppDelegateSubscriber"]
+  },
+  "android": { "modules": ["dev.nyxid.performance.NyxPerformanceModule"] }
+}

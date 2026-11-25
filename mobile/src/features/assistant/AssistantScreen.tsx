@@ -22,6 +22,7 @@ import {
   chatSurfaceStyles,
 } from "./ChatSurface";
 import { TranscriptViewport } from "./TranscriptViewport";
+import { useChatNativeFrames, usePerformanceInputReady } from "../../lib/performance/useNativePerformance";
 import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import {
@@ -86,6 +87,11 @@ import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
 import { AssistantReplyBody } from "./AssistantReplyBody";
+import { AssistantTurnPerformance } from "./assistantTurnPerformance";
+import {
+  beginPerformanceSample,
+  submitPerformanceSample,
+} from "../../lib/performance/metrics";
 import { RotateCcw, X } from "lucide-react-native";
 import type {
   AssistantParams,
@@ -271,6 +277,7 @@ export function AssistantScreen({
   useAppLanguage();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
+  const turnPerformance = useRef<AssistantTurnPerformance | undefined>(undefined);
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
   const { width: windowWidth, fontScale } = useWindowDimensions();
@@ -404,13 +411,11 @@ export function AssistantScreen({
     assistant.conversationId ? conversation?.last_message_at : undefined,
   );
   const running = assistant.sending || !!conversation?.active_turn;
+  const streamedText = assistant.live ? liveReplyText(assistant.live) : "";
   const liveText = sanitizeAssistantMessageContent(
-    assistant.live
-      ? liveReplyText(assistant.live) ||
-          conversation?.active_turn?.reply?.text ||
-          ""
-      : (conversation?.active_turn?.reply?.text ?? ""),
+    streamedText || conversation?.active_turn?.reply?.text || "",
   );
+  const liveTextTurnId = streamedText ? assistant.live?.turnId : conversation?.active_turn?.turn_id;
   const liveAttachments = conversation?.active_turn?.attachments ?? [];
   const liveActivities = conversation?.active_turn?.activities ?? [];
   const destroyed = conversation?.agent?.destroyed;
@@ -517,6 +522,16 @@ export function AssistantScreen({
     (!!assistant.conversationId ||
       (assistant.agent?.can_use === true &&
         assistant.agent.status !== "destroyed"));
+  const onInputLayout = usePerformanceInputReady(
+    homeVisible ? "nyxbot_home" : "chat",
+    focused && canCompose && (homeVisible || transcriptScroll.ready) && !voiceThread,
+    draftKey,
+  );
+  const frameMetrics = useChatNativeFrames({
+    focused: focused && !homeVisible && !voiceThread && transcriptScroll.ready,
+    streaming: assistant.sending && !!assistant.live?.blocks?.length && !streamPersisted,
+    scope: draftKey,
+  });
   const uploads = useAssistantUploads({
     retainKey: draftKey,
     conversationId: assistant.conversationId,
@@ -1061,6 +1076,13 @@ export function AssistantScreen({
 
   async function sendDraft() {
     if (!(canSend || canGuideSend) || !composerPress.current("send")) return;
+    const epoch = running ? null : beginPerformanceSample();
+    const sample = epoch === null
+      ? undefined
+      : new AssistantTurnPerformance((timings) =>
+          submitPerformanceSample(epoch, "mobile.perf_chat_turn", timings),
+        );
+    if (!running) turnPerformance.current = sample;
     setStopProtected(true);
     transcriptScroll.follow();
     await perform(() =>
@@ -1070,16 +1092,27 @@ export function AssistantScreen({
         getRevision: () => draftRevision.current,
         send: async (text) => {
           if (running) return guidance.submit(text, uploads.files.length);
-          const accepted = await uploads.session.submit(async (payload) => {
-            const model = assistant.conversationId ? undefined : uploads.session.model;
-            if (model && payload)
-              await uploads.session.applyDraftModel(payload.conversationId, assistantApi.changeModel);
-            return model && !payload
-              ? assistant.send(connection.prefix(text), undefined, undefined, undefined, model)
-              : assistant.send(connection.prefix(text), undefined, payload);
-          });
-          if (accepted) connection.sent();
-          return accepted;
+          try {
+            const accepted = await uploads.session.submit(async (payload) => {
+              const model = assistant.conversationId ? undefined : uploads.session.model;
+              if (model && payload)
+                await uploads.session.applyDraftModel(payload.conversationId, assistantApi.changeModel);
+              return assistant.send(
+                connection.prefix(text),
+                undefined,
+                payload,
+                undefined,
+                payload ? undefined : model,
+                sample,
+              );
+            });
+            if (accepted) connection.sent();
+            else sample?.finish("error");
+            return accepted;
+          } catch (cause) {
+            sample?.finish("error");
+            throw cause;
+          }
         },
       }),
     );
@@ -1192,6 +1225,11 @@ export function AssistantScreen({
         ) : (
           <AssistantReplyBody
             text={sanitizeAssistantMessageContent(item.text)}
+            onTextCommit={
+              focused && item.role === "assistant"
+                ? turnPerformance.current?.commitFor(item.turn_id)
+                : undefined
+            }
             onLinkPress={openSafeLink}
             activity={
               item.activities.length ||
@@ -1634,6 +1672,22 @@ export function AssistantScreen({
                 : undefined
             }
             {...transcriptScroll.listProps}
+            onScrollBeginDrag={() => {
+              transcriptScroll.listProps.onScrollBeginDrag();
+              frameMetrics.beginDrag();
+            }}
+            onScrollEndDrag={(event) => {
+              transcriptScroll.listProps.onScrollEndDrag(event);
+              frameMetrics.endDrag();
+            }}
+            onMomentumScrollBegin={() => {
+              transcriptScroll.listProps.onMomentumScrollBegin();
+              frameMetrics.momentumBegin();
+            }}
+            onMomentumScrollEnd={(event) => {
+              transcriptScroll.listProps.onMomentumScrollEnd(event);
+              frameMetrics.momentumEnd();
+            }}
             onLayout={(event) => {
               transcriptScroll.listProps.onLayout(event);
               transcriptEdges.layout(event.nativeEvent.layout.height);
@@ -1779,6 +1833,7 @@ export function AssistantScreen({
                     </Label>
                     <AssistantReplyBody
                       text={liveText}
+                      onTextCommit={focused ? turnPerformance.current?.commitFor(liveTextTurnId) : undefined}
                       onLinkPress={openSafeLink}
                       activity={
                         liveActivities.length ? (
@@ -2011,6 +2066,7 @@ export function AssistantScreen({
             ) : null}
             <ChatComposerInput
               dictation={dictation}
+              onInputLayout={onInputLayout}
               value={draft}
               onChangeText={updateDraft}
               generation={`${draftKey}:${composerGeneration}`}

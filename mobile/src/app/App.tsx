@@ -1,4 +1,5 @@
 import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
+import { usePerformanceLifecycle } from "../lib/performance/useNativePerformance";
 import { newAssistantChatParams } from "./assistantChatParams";
 import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { useAppLanguage } from "../i18n/LanguageProvider";
@@ -195,6 +196,7 @@ export default function App() {
 
 function AppContent() {
   useAppLanguage();
+  usePerformanceLifecycle();
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,

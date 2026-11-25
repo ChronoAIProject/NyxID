@@ -8,6 +8,8 @@ import { extractAuthDeviceUserCodeFromQr } from "../features/auth/deviceUserCode
 import { loadTestModule } from "./api/apiUrlTestHarness";
 
 type ResolvedProfile = {
+  performanceToken: string;
+  performanceHost: string;
   associatedUrls: string[];
   androidHttpsAppLinks: boolean;
   apiBaseUrl: string;
@@ -739,4 +741,17 @@ test("Expo preserves a valid frontend base path and represents an HTTPS port sep
   assert.equal(config.android.intentFilters.flatMap((filter) => filter.data).some(
     (data) => data.host === "frontend.example:8443",
   ), false);
+});
+
+test("direct performance ingestion requires the active profile's own destination", () => {
+  const env = profileEnv({
+    DEV_PERFORMANCE_POSTHOG_TOKEN: "phc_test_fixture",
+    DEV_PERFORMANCE_POSTHOG_HOST: "https://ingest.example.test",
+  });
+  const dev = resolveProfile("dev", env);
+  const prod = resolveProfile("prod", env);
+  assert.equal(dev.performanceToken, env.DEV_PERFORMANCE_POSTHOG_TOKEN);
+  assert.equal(dev.performanceHost, env.DEV_PERFORMANCE_POSTHOG_HOST);
+  assert.equal(prod.performanceToken, "");
+  assert.equal(prod.performanceHost, "");
 });

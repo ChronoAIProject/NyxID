@@ -57,6 +57,8 @@ function readProfile(env, prefix) {
     legalBaseUrl: env[`${prefix}_LEGAL_BASE_URL`] || "",
     allowedEmails: env[`${prefix}_ALLOWED_EMAILS`] || "",
     telemetryDsn: env[`${prefix}_TELEMETRY_DSN`] || "",
+    performanceToken: env[`${prefix}_PERFORMANCE_POSTHOG_TOKEN`] || "",
+    performanceHost: env[`${prefix}_PERFORMANCE_POSTHOG_HOST`] || "",
     telemetryHost: env[`${prefix}_TELEMETRY_HOST`] || "",
     shareAnalytics: env[`${prefix}_SHARE_ANALYTICS`] || "",
   };
@@ -249,6 +251,9 @@ function resolveProfile(appEnv, env, options = {}) {
     legalBaseUrl,
     allowedEmails: pick("allowedEmails"),
     telemetryDsn: pick("telemetryDsn"),
+    // Performance destinations must be explicitly configured per build profile.
+    performanceToken: primary.performanceToken,
+    performanceHost: primary.performanceHost,
     telemetryHost: pick("telemetryHost"),
     shareAnalytics: pick("shareAnalytics") || "false",
   };
