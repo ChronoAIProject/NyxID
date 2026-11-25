@@ -37,7 +37,7 @@ function SourceGroup({ source, bot, activeId, searching, unreadIds, draftedIds, 
   const platform = channelPlatformName(bot.platform);
   return (
     <section className="mb-2" aria-label={source.title}>
-      <button type="button" aria-expanded={open} aria-controls={listId}
+      <button type="button" aria-expanded={open} aria-controls={listId} aria-describedby={`${listId}-source-label`}
         data-channel-group={bot.key} data-keep-drawer-open=""
         data-channel-source={JSON.stringify([bot.key, source.key])}
         aria-label={translateUi("{{chat}} on {{platform}}, {{count}} threads{{status}}", {
@@ -48,7 +48,8 @@ function SourceGroup({ source, bot, activeId, searching, unreadIds, draftedIds, 
         className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-overlay focus-visible:outline-2 focus-visible:outline-ring">
         <ChevronRight aria-hidden="true" className={cn("h-3 w-3 shrink-0 text-text-tertiary transition-transform", open && "rotate-90")} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate type-row-title text-foreground">{source.title}</span>
+          <span id={`${listId}-source-label`} className="block type-group-label text-text-tertiary">{translateUi("Source chat")}</span>
+          <span className="mt-0.5 block truncate type-row-title text-foreground">{source.title}</span>
           <span className="mt-0.5 block truncate type-secondary text-text-tertiary">
             {translateUi("{{platform}} · Bot: {{bot}}", { platform, bot: bot.label })}
           </span>

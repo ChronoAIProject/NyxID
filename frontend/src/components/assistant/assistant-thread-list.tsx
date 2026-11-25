@@ -2,13 +2,35 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, MessageSquare, Plus, Search, Settings2, X } from "lucide-react";
 import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
 import { AgentAvatar } from "./nyxbot-agent-avatar";
-import { agentTitle, channelPlatformName, splitChannelThreads } from "@/lib/assistant/nyxbot-labels";
-import { channelSourceTitle, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
+import { ChannelPlatformGlyph } from "@/components/shared/channel-platform-glyph";
+import { agentTitle, splitChannelThreads } from "@/lib/assistant/nyxbot-labels";
+import { channelSourceTitle, conversationChannelCounts, conversationChannelName, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
 import { ChannelSourceThreads } from "./channel-source-threads";
 import type { SidebarAgents } from "./assistant-sidebar";
 import type { Conversation } from "@/types/assistant";
 import { usePinnedConversationIds } from "@/hooks/use-conversation-pins";
 import { pinnedConversationsFirst } from "@/stores/assistant-pins-store";
+
+export function ThreadChannelSummary({ threads }: { readonly threads: readonly Conversation[] }) {
+  useUiTranslation();
+  const channels = conversationChannelCounts(threads);
+  if (!channels.length) return null;
+  return (
+    <div aria-label={translateUi("Thread channels")} className="mt-3 flex flex-wrap items-center gap-2 type-secondary text-text-tertiary">
+      <span className="shrink-0">{translateUi("Channels")}:</span>
+      {channels.map(({ platform, name, count }) => {
+        const label = translateUi("{{channel}} ({{count}})", { channel: name, count });
+        return (
+          <span key={platform} role="img" aria-label={label} title={label}
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full bg-overlay px-2 py-0.5">
+            <ChannelPlatformGlyph platform={platform} className="size-4 shrink-0" />
+            <span aria-hidden="true" className="tabular-nums">{count}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 function threadPeriod(thread: Conversation): string {
   const updated = new Date(thread.last_message_at);
@@ -52,7 +74,7 @@ export function AssistantThreadList({
   const availableThreads = agent.can_use === false ? [] : model.threads;
   const filtered = availableThreads.filter((thread) =>
     [thread.title, conversationDisplayTitle(thread), thread.channel?.chat_title, thread.channel?.parent_title,
-      thread.channel?.bot_label, thread.channel ? channelPlatformName(thread.channel.platform) : undefined,
+      thread.channel?.bot_label, conversationChannelName(thread),
       thread.channel ? channelSourceTitle(thread.channel) : undefined, thread.platform_thread?.platform]
       .some((value) => value?.toLocaleLowerCase().includes(search)),
   );
@@ -101,6 +123,7 @@ export function AssistantThreadList({
             </button> : null}
           </div>
         </div>
+        <ThreadChannelSummary threads={availableThreads} />
         <div className="mt-3 flex items-center justify-between gap-2">
           <span className="type-group-label text-text-tertiary">{translateUi("Threads")}</span>
           {canChat ? (
@@ -127,16 +150,30 @@ export function AssistantThreadList({
       <nav aria-label={translateUi("Threads with {{value1}}", { value1: name })}
         data-scroll-fade="" className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
         {notice}
-        {own.length && bots.length ? <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("Direct chats")}</h3> : null}
-        {[...periods].map(([period, threads]) => (
-          <section key={period} aria-label={translateUi(period)} className="mb-4">
-            <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi(period)}</h3>
-            <div className="space-y-1">{threads.map(renderThread)}</div>
+        {own.length ? (
+          <section aria-label={translateUi("Personal conversations")} className="mb-5">
+            <div className="px-2 pb-3 pt-1">
+              <h3 className="type-row-title text-foreground">{translateUi("Personal conversations")}</h3>
+              <p className="mt-1 type-secondary text-text-tertiary">
+                {translateUi("Private chats here or through a personal channel connection.")}
+              </p>
+            </div>
+            {[...periods].map(([period, threads]) => (
+              <section key={period} aria-label={translateUi(period)} className="mb-4 last:mb-0">
+                <h4 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi(period)}</h4>
+                <div className="space-y-1">{threads.map(renderThread)}</div>
+              </section>
+            ))}
           </section>
-        ))}
+        ) : null}
         {bots.length ? (
-          <section aria-label={translateUi("From chat apps")} className="mb-4">
-            <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("From chat apps")}</h3>
+          <section aria-label={translateUi("Connected bot chats")} className="mb-4">
+            <div className="px-2 pb-2 pt-1">
+              <h3 className="type-row-title text-foreground">{translateUi("Connected bot chats")}</h3>
+              <p className="mt-1 type-secondary text-text-tertiary">
+                {translateUi("Conversations from linked bots, grouped by source chat.")}
+              </p>
+            </div>
             {bots.map((bot) => <ChannelSourceThreads key={bot.key} bot={bot} searching={Boolean(search)}
               activeId={activeThreadId} unreadIds={model.unreadThreadIds} renderThread={renderThread} />)}
           </section>
