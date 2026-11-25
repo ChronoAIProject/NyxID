@@ -13,6 +13,7 @@ import {
   ServiceUsage,
   UsageMetricsDisclosure,
 } from "./billing-usage-details";
+import { usageGroupCount } from "./usage-group-count";
 import { BillingQuantityChart } from "./billing-quantity-chart";
 import { BillingFundingChart } from "./billing-funding-chart";
 
@@ -44,8 +45,7 @@ export function BillingUsageExplorer({
         </div>
         {rows.length > 0 && (
           <span className="usage-group-count">
-            {groups.length} {dimensions[dimension].toLowerCase()}
-            {groups.length === 1 ? "" : "s"}
+            {usageGroupCount(dimension, groups.length)}
           </span>
         )}
       </CardHeader>

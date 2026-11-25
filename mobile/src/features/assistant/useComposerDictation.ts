@@ -34,7 +34,7 @@ const STOP_TIMEOUT_MS = 8000;
 /** How long a new attempt waits for an aborted one's `end`. */
 const RELEASE_TIMEOUT_MS = 1500;
 /** Some Android services ignore silence intent extras and stop after ~4s.
- * Restart only before any speech, inside one bounded user recording. */
+ * Restart only without a transcript after a no-speech error, inside one bounded attempt. */
 const ANDROID_INITIAL_SILENCE_MS = 15_000;
 const MAX_SILENCE_RESTARTS = 3;
 
@@ -285,6 +285,7 @@ export function useComposerDictation({
     let receivedResult = false;
     let heardSpeech = false;
     let silenceRestarts = 0;
+    let recoverableSilence = false;
     let serverRetried = false;
     let recovering: Promise<boolean> | undefined;
     let restartSilent: (() => void) | undefined;
@@ -513,9 +514,6 @@ export function useComposerDictation({
           listening = true;
           setPhase("listening");
         }),
-        Recognizer.addListener("speechstart", () => {
-          if (valid()) heardSpeech = true;
-        }),
         Recognizer.addListener("result", (event) => {
           if (!valid()) return;
           // Each final segment is appended (the recognizer supplies spacing);
@@ -537,17 +535,22 @@ export function useComposerDictation({
         }),
         Recognizer.addListener("error", (event) => {
           if (!valid() || !native || recovering) return;
+          const silenceError =
+            event.error === "no-speech" || event.error === "speech-timeout";
+          if (silenceError && failure && failure !== NO_SPEECH) return;
           if (
-            (event.error === "no-speech" || event.error === "speech-timeout") &&
+            silenceError &&
+            (!failure || failure === NO_SPEECH) &&
             canRestartSilence()
           ) {
             failure = NO_SPEECH;
+            recoverableSilence = true;
             clearTimeout(nativeEndTimer);
             nativeEndTimer = setTimeout(() => {
               if (!valid() || !native) return;
               native = false;
               release(audioOwner!, endCapture);
-              failure = START_FAILED;
+              failure ??= NO_SPEECH;
               settle();
             }, RELEASE_TIMEOUT_MS);
             return;
@@ -623,9 +626,19 @@ export function useComposerDictation({
           clearTimeout(nativeEndTimer);
           if (
             !recovering &&
-            (!failure || failure === NO_SPEECH) &&
+            recoverableSilence &&
+            failure === NO_SPEECH &&
             canRestartSilence()
           ) {
+            if (
+              ANDROID_INITIAL_SILENCE_MS - (Date.now() - nativeStartedAt) <
+              1000
+            ) {
+              deactivate(audioOwner!);
+              settle();
+              return;
+            }
+            const duration = Date.now() - lastNativeStartedAt;
             silenceRestarts++;
             failure = undefined;
             listening = false;
@@ -635,15 +648,15 @@ export function useComposerDictation({
               () => {
                 if (!valid()) return;
                 if (
-                  Date.now() - nativeStartedAt >=
-                  ANDROID_INITIAL_SILENCE_MS
+                  ANDROID_INITIAL_SILENCE_MS - (Date.now() - nativeStartedAt) <
+                  1000
                 ) {
                   failure = NO_SPEECH;
                   deactivate(audioOwner!);
                   settle();
                 } else restartSilent?.();
               },
-              Math.max(250, 5000 - (Date.now() - lastNativeStartedAt)),
+              duration >= 2000 ? 250 : Math.max(250, 5000 - duration),
             );
             return;
           }
@@ -667,6 +680,7 @@ export function useComposerDictation({
       const beginNative = (onDevice: boolean, silentRestart = false) => {
         native = true;
         listening = false;
+        recoverableSilence = false;
         if (!silentRestart) setPhase("connecting");
         clearTimeout(startTimer);
         startTimer = setTimeout(() => {
@@ -684,12 +698,10 @@ export function useComposerDictation({
                 androidRecognitionServicePackage: recognition.service,
                 androidIntentOptions: {
                   EXTRA_PREFER_OFFLINE: onDevice,
-                  ...(continuous
+                  ...(continuous && Number(Platform.Version) >= 33
                     ? {
                         EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS:
                           ANDROID_INITIAL_SILENCE_MS,
-                        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
-                        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
                       }
                     : {}),
                 },
@@ -713,7 +725,8 @@ export function useComposerDictation({
           beginNative(recognition.onDevice, true);
         } catch {
           failure = START_FAILED;
-          deactivate(audioOwner!);
+          native = false;
+          release(audioOwner!, endCapture);
           settle();
         }
       };

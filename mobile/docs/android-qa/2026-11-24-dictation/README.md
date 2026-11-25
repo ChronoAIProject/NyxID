@@ -2,6 +2,41 @@
 
 Refs #2760 and #2761. Quality gate: **PASS WITH NOTES**. The changed production hook and language picker passed focused regression tests and an Android native integration fixture. Xiaomi's real speech provider and the normal release app still need device retesting.
 
+## Follow-up changes — 2026-11-25
+
+The 2026-11-24 emulator evidence below predates these changes. Its numbers,
+logs and source hashes describe that historical build, not this follow-up.
+
+- Android continuous composer dictation sends the 15,000 ms minimum-length
+  intent option only on API 33 or later. It no longer overrides complete or
+  possibly-complete silence lengths on any API. On API 32 and earlier, Expo's
+  existing 600,000 ms continuous defaults remain intact. Offline preference and
+  the explicit speech-service package are unchanged; crew utterances keep native
+  defaults.
+- A bare `speechstart` event does not count as a transcript. Recovery requires a
+  service-reported `no-speech` or `speech-timeout` error, no transcribed words,
+  and native `end`. Non-empty interim or final words prevent automatic recovery.
+- Each native session lasting at least two seconds restarts after 250 ms.
+  Shorter sessions keep at least five seconds between starts to prevent a tight
+  retry loop. At most three restarts occur, and no new session opens with less
+  than one second of the 15-second grace remaining. A restarted session may
+  finish naturally after grace; grace is an admission window, not a guaranteed
+  minimum recording duration. A synthetic 4.3-second service is expected to
+  start at 0, 4,550, 9,100 and 13,650 ms and settle at 17,950 ms.
+- A recoverable no-speech error without native `end` is aborted by the existing
+  1.5-second release watchdog and reported as no speech. Later network or
+  language errors retain precedence. Cancellation and startup failures release
+  audio ownership and cannot reopen capture from a stale timer.
+
+These paths are covered by local hook tests through the production entry point.
+They do not establish Xiaomi or other real speech-provider behavior. The
+existing no-speech notice offers **Retry** and **Dismiss** (the close action).
+
+Expo 3.1.3 passes app-supplied numeric intent values as Android `Int`, while the
+Android documentation describes these duration extras as long values. Whether a
+speech service honors them remains unverified; this follow-up does not patch the
+native bridge or claim that the extras alone extend recording.
+
 ## Behavior verified
 
 - Language discovery queries the same default Android recognition provider used for recording. The picker displays provider-reported locales; it does not manufacture a supported-language list.

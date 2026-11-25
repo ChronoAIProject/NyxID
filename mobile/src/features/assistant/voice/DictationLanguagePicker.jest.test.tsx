@@ -152,3 +152,25 @@ it("offers retry, speech settings and an explicit validated language when the pr
   expect(state.choose).toHaveBeenCalledWith("zh-CN");
   expect(close).toHaveBeenCalledTimes(1);
 });
+
+it("rejects invalid manual language codes before persisting any choice", async () => {
+  const state = {
+    ...language(),
+    manualEntry: true,
+    listUnavailable: true,
+    options: [language().options[0]!],
+  };
+  const close = jest.fn();
+  await render(<DictationLanguagePicker language={state} onClose={close} />);
+  for (const value of [
+    "English",
+    "zh CN",
+    "en-US;lang=ja-JP",
+    "en-u-ca-gregory",
+  ]) {
+    await fireEvent.changeText(screen.getByLabelText("Language code"), value);
+    await fireEvent.press(screen.getByText("Use language code"));
+    expect(state.choose).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  }
+});
