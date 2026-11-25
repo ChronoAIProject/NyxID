@@ -2028,18 +2028,10 @@ export function AssistantScreen({
                             name: agentName,
                           })
                     }
-              // Phones: idle composers are one row; anything typed, attached,
-              // uploading or dictating keeps the full two-row layout.
-              compactWhenIdle={
-                narrowHeader &&
-                !dictation.active &&
-                uploads.files.length === 0 &&
-                !uploads.picking &&
-                !uploads.session.sending
-              }
+              compactWhenIdle={!dictation.active}
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={narrowHeader ? layout : undefined}
+                  layout={layout}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||
@@ -2070,6 +2062,7 @@ export function AssistantScreen({
                   mention={mentionAction}
                   settings={
                     <AssistantComposerSettings
+                      hideTrigger={layout.compact}
                       scope={`${getAuthEpoch()}:${draftKey}`}
                       agentOverride={assistant.agent?.access_mode_override}
                       activeTurn={permissionsLocked}

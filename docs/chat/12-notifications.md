@@ -156,7 +156,8 @@ ACL checks; missing or destroyed agents use the system identity. `outcome` and
 `by_kind` contains unread row counts for all six kinds, using the same visibility
 filter and single aggregate as the total. Clients tolerate these additive fields
 being absent during rollout. Rows reuse the sidebar's agent and stacked crew
-avatars, with a small kind badge; mark-all stays in the feed footer.
+avatars, with a small kind badge. Web keeps mark-all in the feed footer;
+mobile places it in the header's Notification options menu.
 
 The list response is:
 
@@ -265,8 +266,9 @@ through **99**, then **99+**. The single count pill uses the warning tone while 
 **Automations** and **Chats**. Rows show their kind, current source title, bounded
 preview, age, unread state and a count chip when activity coalesced. The panel
 supports cursor pagination, empty/error states and mark-all with the viewed
-`as_of` fence. Both clients label the action **Mark all notifications as read**,
-enable it from the global summary unread count on every filter, and clear all
+`as_of` fence. Web labels the action **Mark all notifications as read**; mobile
+offers **Mark all as read** under Notification options. Both enable it from the
+global summary unread count on every filter, and clear all
 kinds through the same server fence. Opening a row navigates to its canonical source and marks it seen.
 An empty page can still have a cursor when all its sources are hidden. Both clients
 keep pagination available until that cursor is exhausted, bound automatic traversal
@@ -286,6 +288,16 @@ refresh, cursor pagination and the same filters. It refreshes on focus, app
 foreground, push receipt and notification live frames. Push taps use the existing
 canonical assistant-link router and mark the supplied `notification_id` seen.
 Approvals Activity remains separate.
+
+Mobile filters show text labels without counts. Search matches titles, previews,
+agents, participants, source labels and platform names within the selected filter.
+Search filters the fetched pages locally; when no match is visible it follows
+up to five distinct cursors, then offers **Search older notifications**. That
+action also remains available below matching results while older pages exist.
+An empty search result is final only after the server's cursor is exhausted.
+Searching and opening Notification options do not mark rows read. The mark-all
+menu action retains the global `as_of` fence and is disabled while offline,
+pending, or when there is nothing unread.
 
 The existing owner live stream emits identifiers only:
 

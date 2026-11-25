@@ -72,18 +72,18 @@ for (const [mode, colors] of [["light", lightColors], ["dark", darkColors]] as c
 }
 
 for (const [mode, colors] of [["light", lightColors], ["dark", darkColors]] as const) {
-  for (const [unread, text] of [[9, "9"], [24, "24"], [100, "99+"]] as const) {
-    test(`${mode} ${text} grows right from the bell's midpoint and leaves the lower half visible`, () => {
+  for (const [unread, text] of [[9, "9"], [24, "24"], [100, "99+"], [101, "99+"], [1000, "99+"]] as const) {
+    test(`${mode} ${text} sits beside the bell without covering or fading the glyph`, () => {
       const x = render({ unread, needsDecision: 1, onPress: () => {} }, colors);
       const glyph = x.all().find(n => n.props.testID === "notification-bell-glyph")!;
-      const ring = x.all().find(n => n.props.testID === "notification-bell-badge-ring")!;
       const badge = x.all().find(n => n.props.testID === "notification-bell-badge")!;
-      const frame = ring.props.style[0];
-      const fill = badge.props.style[0];
-      assert.equal(frame.right, undefined);
-      assert.equal(frame.left + frame.borderWidth, glyph.props.style.width / 2);
-      assert.ok(frame.left + frame.borderWidth >= 8);
-      assert.ok(frame.top + frame.borderWidth + fill.height <= 9);
+      const children = x.root.props.children;
+      assert.ok(children.includes(glyph) && children.includes(badge));
+      assert.equal(nodes(glyph).some(n => n === badge), false);
+      assert.equal(x.root.props.style.flexDirection, "row");
+      assert.ok(x.root.props.style.gap > 0);
+      assert.equal(x.root.props.style.opacity, undefined);
+      assert.equal(badge.props.style[0].position, undefined);
       assert.equal(nodes(badge).find(n => n.type === "Text")!.props.children, text);
       x.h.unmount();
     });

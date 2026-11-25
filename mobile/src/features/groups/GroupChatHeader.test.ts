@@ -19,7 +19,11 @@ const nodes = (n: any): E[] =>
       ? nodes(n.type(n.props))
       : [
           n,
-          ...[n.props.children, n.props.ListFooterComponent]
+          ...[
+            n.props.children,
+            n.props.ListFooterComponent,
+            n.type === "Input" ? n.props.expandedContent : null,
+          ]
             .flat(Infinity)
             .flatMap(nodes),
         ]
@@ -1010,7 +1014,7 @@ test("scrolling the crew transcript dismisses the keyboard and never swallows a 
   f.h.unmount();
 });
 
-test("ordinary and corner phone crew composers share the idle row and toolbar while wide and busy composers stay expanded", () => {
+test("ordinary, corner and wide crew composers share the idle row while dictation keeps its controls", () => {
   const ordinary = setup();
   assert.equal(ordinary.input().props.compactWhenIdle, true);
   const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
@@ -1026,14 +1030,14 @@ test("ordinary and corner phone crew composers share the idle row and toolbar wh
     file: { name: "photo.png" },
   });
   ordinary.h.render();
-  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  assert.equal(ordinary.input().props.compactWhenIdle, true, "attachments keep their own preview strip");
   ordinary.uploads.files.length = 0;
   ordinary.dictation.active = true;
   ordinary.h.render();
   assert.equal(ordinary.input().props.compactWhenIdle, false);
   ordinary.dictation.active = false;
   ordinary.setWidth(1024);
-  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  assert.equal(ordinary.input().props.compactWhenIdle, true, "wide windows use the same idle row");
   ordinary.h.unmount();
   const f = setup({ cornerWindow: true });
   assert.equal(f.input().props.compactWhenIdle, true);
