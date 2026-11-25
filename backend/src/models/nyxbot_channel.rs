@@ -366,6 +366,8 @@ pub struct NyxbotThread {
     /// gate supplemental-send eligibility while it is unexpired. Opaque, never logged.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub event_ref_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_ref_context_version: Option<u8>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub event_ref_expires_at: Option<DateTime<Utc>>,
     /// Relay inbound paired with the reference, including bot-originated activity.

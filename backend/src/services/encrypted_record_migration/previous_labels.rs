@@ -228,3 +228,6 @@ pub(super) const LEARNING_PROPOSAL_DIGEST: &str =
 
 pub(super) const APPROVAL_PROPOSAL_DIGEST: &str =
     "89dd069d90525725f8d136619f99428d2f040d5176f66c9ef009d640e858c67c";
+
+pub(super) const REATTACH_WINDOW_DIGEST: &str =
+    "68bf534769f813c488cb4a87da6cf374632bede78e8d57b924cef52aecb2c78f";

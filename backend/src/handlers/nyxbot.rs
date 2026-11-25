@@ -7001,28 +7001,15 @@ async fn gateway_inbound_inner(
             chats::direct_partition(chat_id, sender.id, thread_id),
         );
     }
-    // Encrypted; opaque, never logged.
-    if let Some(event_ref) = event_ref
-        && let Ok(sealed) = state.encryption_keys.encrypt(event_ref.as_bytes()).await
-    {
-        metadata.extend(
-            crate::services::channel_supplemental_delivery::reference_fields(
-                sealed,
-                Utc::now() + ChronoDuration::minutes(29),
-                relay_message_id.as_deref(),
-            ),
-        );
-    }
-    if !metadata.is_empty() {
-        let _ = Box::pin(async {
-            state
-                .db
-                .collection::<NyxbotThread>(THREADS)
-                .update_one(doc! {"_id": &chat.id}, doc! {"$set": metadata})
-                .await
-        })
-        .await;
-    }
+    let _ = Box::pin(crate::services::nyxbot_thread_reference::record_activity(
+        &state.db,
+        &state.encryption_keys,
+        &chat,
+        metadata,
+        event_ref,
+        relay_message_id.as_deref(),
+    ))
+    .await;
     // Only legacy admission implies addressing. A gateway may already have
     // accepted broader thread admission before its acknowledgement is stored.
     // Versioned facts must use explicit evidence even during that window.

@@ -31,10 +31,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"delivery": {"target_ciphertext": &bytes}, "event_context_ciphertext": &bytes, "guest_setup_payload": &bytes},
         ),
         (
-            nyxbot_channel::THREADS_COLLECTION_NAME,
-            doc! {"event_ref_ciphertext": &bytes},
-        ),
-        (
             nyxbot_gateway_response::COLLECTION_NAME,
             doc! {"payload_ciphertext": &bytes},
         ),
@@ -179,7 +175,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "68bf534769f813c488cb4a87da6cf374632bede78e8d57b924cef52aecb2c78f"
+        "5dfa37490ffad3c3a6cc3eb3fbe19ca6adf2c2291d78cc5d1c998a815055fb42"
     );
     for digest in [
         Some(live.as_str()),
@@ -189,6 +185,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
         Some(previous_labels::APPROVAL_PROPOSAL_DIGEST),
+        Some(previous_labels::REATTACH_WINDOW_DIGEST),
         Some(previous_labels::CMA_REQUEST_DIGEST),
         Some(previous_labels::LEARNING_PROPOSAL_DIGEST),
         Some(previous_labels::GATEWAY_SETUP_DIGEST),
@@ -235,7 +232,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::APPROVAL_PROPOSAL_DIGEST
+                        previous_labels::REATTACH_WINDOW_DIGEST
+                            | previous_labels::APPROVAL_PROPOSAL_DIGEST
                             | previous_labels::LEARNING_PROPOSAL_DIGEST
                             | previous_labels::CMA_REQUEST_DIGEST
                             | previous_labels::GATEWAY_SETUP_DIGEST
