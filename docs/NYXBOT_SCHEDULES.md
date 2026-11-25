@@ -28,7 +28,7 @@ bots or billing.
 
 - **Triggers:** `backend/src/models/trigger.rs`,
   `backend/src/services/trigger_service.rs`, `backend/src/handlers/` trigger
-  routes, CLAUDE.md "Connection Webhooks and Triggers". Today a trigger is an
+  routes, `AGENTS.md` Critical Rule 14 "Connection Webhooks and Triggers". Today a trigger is an
   inbound webhook (token or HMAC verified) delivered to a webhook URL, a device
   agent conversation, or a notification.
 - **NyxBot event turns:**
@@ -275,7 +275,7 @@ enabling the flag; old servers reject the additive notification settings.
 - **Run history per trigger,** linking to the thread of each run.
 - **Agent pages** show that agent's schedules.
 - **Owner-only.** Human routes for creating, editing and deleting from the web;
-  agent keys keep today's trigger API rules (CLAUDE.md).
+  agent keys keep today's trigger API rules (`AGENTS.md` Critical Rule 14).
 
 ### S7. Performance (applies to everything here, and is measured)
 

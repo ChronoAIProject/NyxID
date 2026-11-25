@@ -606,10 +606,10 @@ exact current text; `{login_url}` is the only variable part.
 | Not found | `Sandbox not found`, `Sandbox was not created through NyxID` | No NyxID-created Sandbox matches. |
 | Not found | `CMA Agent not found`, `CMA Agent parent not found` | No owned Agent or parent reference matches. |
 | Validation | `One Idempotency-Key is required` | A `pause` or `revive` command, or a retirement, has no, or more than one, `Idempotency-Key` (`recover_creation` takes none). |
-| Validation | `Sandbox label must contain 1–120 bytes without control characters` | A rename sets a label that is empty after trimming, longer than 120 bytes, or contains control characters. |
-| Conflict | `cma_retirement_idempotency_conflict` | A retirement uses a different `Idempotency-Key` from the one recorded for this Sandbox's pending retirement. |
-| Conflict | `cma_retirement_recovery_unavailable` | A retirement is already pending without a recorded `Idempotency-Key`, so a new request cannot replace or retry it. |
-| Conflict | `cma_sandbox_retired` | A command targets a Sandbox that no longer occupies the account slot. |
+| Validation | `Sandbox label must contain 1–120 bytes without control characters` | After trimming, a rename's label is empty, longer than 120 bytes, or contains a control character. |
+| Conflict | `cma_retirement_idempotency_conflict` | A retirement sent through the CMA proxy uses a different `Idempotency-Key` from the one recorded for the Sandbox's pending retirement. The management route does not refuse this case: it retries a pending retirement with the recorded key. |
+| Conflict | `cma_retirement_recovery_unavailable` | A retirement is pending without a recorded `Idempotency-Key`, so neither the management route nor the CMA proxy can retry it. |
+| Conflict | `cma_sandbox_retired` | A `pause` or `revive`, or a retirement of a Sandbox not yet marked retired, targets a Sandbox that no longer occupies the account slot. Retiring an already-retired Sandbox instead returns HTTP 200 with `pending: false`; `recover_creation` uses a separate path. |
 | Conflict | `cma_sandbox_retiring` | `pause` or `revive` is sent while the Sandbox's retirement is pending. |
 | Validation | `Invalid CMA event cursor` | Stream cursor and `Last-Event-ID` differ, repeat, or are invalid. |
 | Conflict | `cma_sandbox_generation_changed` | The request's generation is stale. |

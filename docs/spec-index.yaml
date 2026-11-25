@@ -56,7 +56,7 @@ areas:
       - { doc: docs/CHANNEL_THREAD_FOLLOW.md, role: reference, covers: "thread follow per platform" }
       - { doc: docs/CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md, role: reference, covers: "thread-follow contract with the gateway" }
       - { doc: docs/TELEGRAM_NEW.md, role: reference, covers: "managed Telegram, manager bots, full saved reply delivery (64-part rule for NyxBot posts)" }
-      - { doc: docs/PLATFORM_BOTFATHER.md, role: reference, covers: "shared BotFather help publications" }
+      - { doc: docs/PLATFORM_BOTFATHER.md, role: reference, covers: "platform BotFather manager: account linking, native chat entry, shared help publications, operator recovery" }
       - { doc: docs/AURINKO_INTEGRATION.md, role: reference, covers: "Aurinko email channel and service" }
     governs:
       - backend/src/services/channel_*
@@ -108,7 +108,7 @@ areas:
     status: current
     specs:
       - { doc: docs/EXECUTION_PERMISSIONS.md, role: reference, covers: "execution permissions: proposals, enrollment, async approval, resume" }
-      - { doc: docs/GRANULAR_APPROVALS_DESIGN.md, role: design, covers: "exact-service approval digests and grants" }
+      - { doc: docs/GRANULAR_APPROVALS_DESIGN.md, role: reference, covers: "exact-service approvals, global approval defaults and execution-authority digests (sections it marks as current contracts; the rest is design history)" }
       - { doc: docs/API.md, role: reference, covers: "Transaction Approval on the proxy, approval routes, error codes 7000 and 7001" }
       - { doc: docs/MOBILE_APP_INTEGRATION.md, role: reference, covers: "approval pushes and the mobile approval sequence" }
       - { doc: docs/site/shared/concepts/approvals.md, role: guide, covers: "approval concepts for users" }
@@ -117,8 +117,11 @@ areas:
       - backend/src/services/approval_*
       - backend/src/handlers/approval*
       - backend/src/models/approval_*
-      - backend/src/services/execution_permission_*
+      - backend/src/services/execution_permission*
+      - backend/src/models/execution_permission*
       - backend/src/handlers/execution_permission*
+      - backend/src/handlers/exact_service_approval*
+      - backend/src/services/execution_authority*
     verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
   - area: sandboxes
@@ -164,7 +167,7 @@ input_of:
 not_yet_indexed:
   - { area: auth-and-login, start_with: [docs/ADR-015-auth-device-login.md, docs/DEVICE_LOGIN_PROTOCOL.md] }
   - { area: billing, start_with: [docs/BILLING_EXACT_ACCOUNTING.md, docs/BILLING_OPERATIONS.md, docs/PLATFORM_KEYS_AND_INFERENCE.md] }
-  - { area: catalog-services-and-proxy, start_with: [docs/API_DISCOVERY.md, docs/AI_SERVICES_ARCHITECTURE.md, docs/CATALOG_MANAGER.md, docs/TOOLS.md, docs/PROXY_STREAMING_ARCHITECTURE.md] }
+  - { area: catalog-services-and-proxy, start_with: [docs/API_DISCOVERY.md, docs/AI_SERVICES_ARCHITECTURE.md, docs/CATALOG_MANAGER.md, docs/TOOLS.md] }
   - { area: agent-keys-and-isolation, start_with: [docs/AGENT_ISOLATION.md, docs/AGENT_OPERATION_SCOPES.md, docs/SERVICE_ACCOUNTS.md] }
   - { area: nodes-and-machines, start_with: [docs/NODE_PROXY_ARCHITECTURE.md, docs/MACHINE_NODES.md, docs/NYXID_NODE.md, docs/SSH_NODE_KEY_AUTH.md] }
   - { area: oauth-and-security, start_with: [docs/OIDC.md, docs/security/OAUTH_AUTHORITY_ROLLOUT.md, docs/SECURITY_ROLLOUT_READINESS.md] }

@@ -24,7 +24,7 @@ reviews and merges the result.
 
    ```bash
    git log -p <registries_verified_at>..origin/dev -- backend/src/routes.rs backend/src/config.rs \
-     backend/src/errors/mod.rs backend/src/db.rs
+     backend/src/errors/mod.rs backend/src/db.rs backend/src/services/personal_data_registry.rs
    ```
 
    New or changed routes go to `docs/API.md`, environment variables and
