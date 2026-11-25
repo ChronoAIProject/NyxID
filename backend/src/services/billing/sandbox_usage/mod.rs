@@ -5,6 +5,7 @@ pub mod inbox;
 pub mod inbox_authority;
 mod inbox_cursor;
 mod inbox_facts;
+pub mod inbox_promotion;
 mod scalars;
 mod strict_json;
 mod types;

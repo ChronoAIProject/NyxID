@@ -108,6 +108,7 @@ mod tests {
             last_fact_end_ms: 0,
             sequence: 1,
             head_digest: "a".repeat(64),
+            promotion_ready: false,
             pending: pending
                 .into_iter()
                 .map(|sequence| AcceptedSequence {

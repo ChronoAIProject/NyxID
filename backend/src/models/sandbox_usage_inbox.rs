@@ -31,8 +31,21 @@ pub struct Event {
     pub canonical: Binary,
     pub digest: String,
     pub receipt_id: String,
+    #[serde(default)]
+    pub validation: Validation,
+    #[serde(default)]
+    pub validation_reason: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub accepted_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Validation {
+    #[default]
+    Validated,
+    Pending,
+    Rejected,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -52,6 +65,8 @@ pub struct Stream {
     pub head_digest: String,
     #[serde(default)]
     pub pending: Vec<AcceptedSequence>,
+    #[serde(default)]
+    pub promotion_ready: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

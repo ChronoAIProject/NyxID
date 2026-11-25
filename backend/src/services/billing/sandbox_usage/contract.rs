@@ -63,6 +63,18 @@ impl Event {
     /// Check the next append against the current durable stream head. The
     /// inbox must establish that the head is current in the append transaction.
     pub fn validate_successor_of(&self, head: &Event) -> ContractResult<()> {
+        self.validate_stream_of(head)?;
+        let before = head.header();
+        let after = self.header();
+        if before.sequence.get().checked_add(1) != Some(after.sequence.get())
+            || after.previous_event_digest.as_ref() != Some(head.digest())
+        {
+            return Err("stream_chain_discontinuity");
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_stream_of(&self, head: &Event) -> ContractResult<()> {
         let before = head.header();
         let after = self.header();
         if before.producer_namespace != after.producer_namespace
@@ -75,11 +87,6 @@ impl Event {
             || before.algorithm_version != after.algorithm_version
         {
             return Err("stream_binding_changed");
-        }
-        if before.sequence.get().checked_add(1) != Some(after.sequence.get())
-            || after.previous_event_digest.as_ref() != Some(head.digest())
-        {
-            return Err("stream_chain_discontinuity");
         }
         if matches!(head.payload(), Payload::StreamSeal { .. }) {
             return Err("stream_sealed");

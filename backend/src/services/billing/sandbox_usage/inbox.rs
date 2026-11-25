@@ -2,10 +2,12 @@ use super::contract::{Basis, Clock, Event, Payload, Receipt, decode_event};
 use super::inbox_authority::{Authority, READ_SCOPE, WRITE_SCOPE};
 use super::inbox_cursor::{self, CursorPage};
 use super::inbox_facts;
+use super::inbox_promotion::promote_stream;
 use crate::models::sandbox_usage_inbox::{
-    EFFECTIVE_FACTS, EVENTS, Event as StoredEvent, PRODUCERS, Producer, STREAMS, Stream,
+    AcceptedSequence, EFFECTIVE_FACTS, EVENTS, Event as StoredEvent, PRODUCERS, Producer, STREAMS,
+    Stream, Validation,
 };
-use bson::{Binary, DateTime as BsonDateTime, Document, doc, spec::BinarySubtype};
+use bson::{Binary, Document, doc, spec::BinarySubtype};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{
@@ -42,6 +44,12 @@ pub(super) fn clock() -> Clock {
     }
 }
 
+pub struct ReceiptObservation {
+    pub receipt: Receipt,
+    pub validation: Validation,
+    pub validation_reason: Option<String>,
+}
+
 fn index_definitions() -> [(&'static str, Vec<(Document, bool)>); 4] {
     [
         (PRODUCERS, vec![(doc! {"namespace":1}, true)]),
@@ -62,6 +70,7 @@ fn index_definitions() -> [(&'static str, Vec<(Document, bool)>); 4] {
                     true,
                 ),
                 (doc! {"owner_subject":1}, false),
+                (doc! {"promotion_ready":1, "_id":1}, false),
             ],
         ),
         (
@@ -129,7 +138,7 @@ pub async fn accept(
     db: &Database,
     authority: &Authority,
     bytes: &[u8],
-) -> Result<(bool, Receipt), InboxError> {
+) -> Result<(bool, ReceiptObservation), InboxError> {
     authority.require_scope(WRITE_SCOPE)?;
     if bytes.len() > MAX_EVENT_BYTES {
         return Err(InboxError::Invalid("event_size"));
@@ -161,7 +170,15 @@ pub async fn accept(
         }
         .await;
         match result {
-            Ok(result) => return Ok(result),
+            Ok((created, observation, promotion_ready)) => {
+                if promotion_ready
+                    && let Err(error) =
+                        promote_stream(db, authority.namespace(), header.stream_id.as_str()).await
+                {
+                    tracing::warn!(error = %error, "Usage custody validation remains pending");
+                }
+                return Ok((created, observation));
+            }
             Err(error) => {
                 if matches!(&error, InboxError::Database(error) if error.contains_label("UnknownTransactionCommitResult"))
                 {
@@ -174,7 +191,7 @@ pub async fn accept(
                     )
                     .await?
                     {
-                        Some(receipt) if receipt.matches(&event) => Ok((false, receipt)),
+                        Some(receipt) if receipt.receipt.matches(&event) => Ok((false, receipt)),
                         Some(_) => Err(InboxError::Conflict("event_digest_changed")),
                         None => Err(InboxError::Unavailable),
                     };
@@ -194,7 +211,7 @@ fn retryable(error: &mongodb::error::Error) -> bool {
         || super::super::ledger::is_duplicate_key_error(error)
 }
 
-async fn commit(session: &mut ClientSession) -> Result<(), InboxError> {
+pub(super) async fn commit(session: &mut ClientSession) -> Result<(), InboxError> {
     for _ in 0..MAX_ATTEMPTS - 1 {
         match session.commit_transaction().await {
             Ok(()) => return Ok(()),
@@ -211,7 +228,7 @@ async fn append(
     session: &mut ClientSession,
     event: &Event,
     accepting: bool,
-) -> Result<(bool, Receipt), InboxError> {
+) -> Result<(bool, ReceiptObservation, bool), InboxError> {
     let header = event.header();
     let namespace = header.producer_namespace.as_str();
     let stream = header.stream_id.as_str();
@@ -228,7 +245,7 @@ async fn append(
         if row.digest != event.digest().as_str() || row.canonical.bytes != event.canonical_bytes() {
             return Err(InboxError::Conflict("event_digest_changed"));
         }
-        return Ok((false, stored_receipt(&row)?));
+        return Ok((false, receipt_observation(&row)?, false));
     }
     if !accepting {
         return Err(InboxError::Unavailable);
@@ -238,13 +255,14 @@ async fn append(
         .session(&mut *session)
         .await?;
     let row_id = Uuid::new_v4().to_string();
+    let mut validation = Validation::Validated;
+    let mut promotion_ready = false;
     match existing {
         Some(mut current) => {
-            if sequence <= current.sequence {
+            if sequence <= current.sequence
+                || current.pending.iter().any(|item| item.sequence == sequence)
+            {
                 return Err(InboxError::Conflict("sequence_already_used"));
-            }
-            if current.sequence.checked_add(1) != Some(sequence) {
-                return Err(InboxError::Prerequisite("predecessor_missing"));
             }
             let previous = events
                 .find_one(doc! {"_id":&current.head_id, "namespace":namespace, "stream_id":stream})
@@ -255,21 +273,27 @@ async fn append(
             if previous.digest != current.head_digest || previous.sequence != current.sequence {
                 return Err(InboxError::Corrupt);
             }
-            event
-                .validate_successor_of(&head)
-                .map_err(InboxError::Conflict)?;
-            current.last_fact_end_ms = inbox_facts::apply(
-                db,
-                session,
-                event,
-                current.capture_start_ms,
-                current.last_fact_end_ms,
-            )
-            .await?;
-            let old_head = current.head_id;
-            current.sequence = sequence;
-            current.head_id = row_id.clone();
-            current.head_digest = event.digest().as_str().into();
+            let old_head = current.head_id.clone();
+            if current.sequence.checked_add(1) == Some(sequence) {
+                advance_head(db, session, &mut current, event, &head, &row_id).await?;
+            } else {
+                if !matches!(event.payload(), Payload::Usage { .. })
+                    || sequence.saturating_sub(current.sequence)
+                        > inbox_cursor::MAX_PENDING_DISTANCE
+                {
+                    return Err(InboxError::Prerequisite("predecessor_missing"));
+                }
+                event
+                    .validate_stream_of(&head)
+                    .map_err(InboxError::Conflict)?;
+                validation = Validation::Pending;
+                current.pending.push(AcceptedSequence {
+                    sequence,
+                    digest: event.digest().as_str().into(),
+                });
+                current.pending.sort_unstable_by_key(|item| item.sequence);
+            }
+            promotion_ready = current.promotion_ready;
             let updated = streams
                 .replace_one(doc! {"_id":&current.id, "head_id":old_head}, current)
                 .session(&mut *session)
@@ -311,6 +335,7 @@ async fn append(
                 head_id: row_id.clone(),
                 head_digest: event.digest().as_str().into(),
                 pending: Vec::new(),
+                promotion_ready: false,
             };
             streams.insert_one(initial).session(&mut *session).await?;
         }
@@ -330,11 +355,50 @@ async fn append(
         },
         digest: event.digest().as_str().into(),
         receipt_id: receipt_id.clone(),
+        validation,
+        validation_reason: None,
         accepted_at: DateTime::from_timestamp_millis(accepted_at_ms as i64)
             .ok_or(InboxError::Corrupt)?,
     };
     events.insert_one(row).session(&mut *session).await?;
-    Ok((true, event.custody_receipt(receipt_id, accepted_at_ms)))
+    Ok((
+        true,
+        ReceiptObservation {
+            receipt: event.custody_receipt(receipt_id, accepted_at_ms),
+            validation,
+            validation_reason: None,
+        },
+        promotion_ready,
+    ))
+}
+
+pub(super) async fn advance_head(
+    db: &Database,
+    session: &mut ClientSession,
+    stream: &mut Stream,
+    event: &Event,
+    head: &Event,
+    row_id: &str,
+) -> Result<(), InboxError> {
+    event
+        .validate_successor_of(head)
+        .map_err(InboxError::Conflict)?;
+    stream.last_fact_end_ms = inbox_facts::apply(
+        db,
+        session,
+        event,
+        stream.capture_start_ms,
+        stream.last_fact_end_ms,
+    )
+    .await?;
+    stream.sequence = event.header().sequence.get() as i64;
+    stream.head_id = row_id.into();
+    stream.head_digest = event.digest().as_str().into();
+    stream.promotion_ready = stream
+        .pending
+        .first()
+        .is_some_and(|next| stream.sequence.checked_add(1) == Some(next.sequence));
+    Ok(())
 }
 
 pub(super) fn decode_stored(row: &StoredEvent) -> Result<Event, InboxError> {
@@ -376,11 +440,19 @@ fn stored_receipt(row: &StoredEvent) -> Result<Receipt, InboxError> {
     ))
 }
 
+fn receipt_observation(row: &StoredEvent) -> Result<ReceiptObservation, InboxError> {
+    Ok(ReceiptObservation {
+        receipt: stored_receipt(row)?,
+        validation: row.validation,
+        validation_reason: row.validation_reason.clone(),
+    })
+}
+
 pub async fn receipt(
     db: &Database,
     authority: &Authority,
     event_id: &str,
-) -> Result<Option<Receipt>, InboxError> {
+) -> Result<Option<ReceiptObservation>, InboxError> {
     authority.require_scope(READ_SCOPE)?;
     receipt_in_namespace(db, authority.namespace(), event_id).await
 }
@@ -389,13 +461,13 @@ async fn receipt_in_namespace(
     db: &Database,
     namespace: &str,
     event_id: &str,
-) -> Result<Option<Receipt>, InboxError> {
+) -> Result<Option<ReceiptObservation>, InboxError> {
     let row = db
         .collection::<StoredEvent>(EVENTS)
         .find_one(doc! {"namespace":namespace, "source_event_id":event_id})
         .read_concern(ReadConcern::majority())
         .await?;
-    row.as_ref().map(stored_receipt).transpose()
+    row.as_ref().map(receipt_observation).transpose()
 }
 
 pub async fn cursor(

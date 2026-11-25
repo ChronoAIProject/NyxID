@@ -2,6 +2,7 @@ use super::{
     inbox::{self, InboxError},
     inbox_authority::{self, Authority, READ_SCOPE, Registration, WRITE_SCOPE},
 };
+use crate::models::sandbox_usage_inbox::Validation;
 use bson::{DateTime, Document, doc};
 use mongodb::Database;
 use uuid::Uuid;
@@ -109,18 +110,20 @@ async fn replay_retains_one_receipt_after_concurrent_submission_and_sealing() {
     );
     let (first, receipt) = left.unwrap();
     let (second, concurrent) = right.unwrap();
+    let receipt = receipt.receipt;
     assert_ne!(first, second);
-    assert_eq!(receipt, concurrent);
+    assert_eq!(receipt, concurrent.receipt);
     inbox::accept(&fx.db, &writer, CORRECTION).await.unwrap();
     inbox::accept(&fx.db, &writer, SEAL).await.unwrap();
     let (created, replay) = inbox::accept(&fx.db, &writer, USAGE).await.unwrap();
     assert!(!created);
-    assert_eq!(receipt, replay);
+    assert_eq!(receipt, replay.receipt);
     assert_eq!(
         Some(receipt.clone()),
         inbox::receipt(&fx.db, &reader, receipt.event_id.as_str())
             .await
             .unwrap()
+            .map(|value| value.receipt)
     );
     let cursor = inbox::cursor(&fx.db, &reader, receipt.stream_id.as_str(), None)
         .await
@@ -152,6 +155,7 @@ async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
     let mut fx = Fixture::open("cma_custody_rotation", NAMESPACE).await;
     let stale = fx.authority(WRITE_SCOPE).await;
     let (_, receipt) = inbox::accept(&fx.db, &stale, OPEN).await.unwrap();
+    let receipt = receipt.receipt;
     inbox_authority::register(
         &fx.db,
         Registration {
@@ -182,24 +186,25 @@ async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
     assert_eq!(
         inbox::receipt(&fx.db, &read, receipt.event_id.as_str())
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|value| value.receipt),
         Some(receipt.clone())
     );
     let write = fx.authority(WRITE_SCOPE).await;
     let (created, replay) = inbox::accept(&fx.db, &write, OPEN).await.unwrap();
     assert!(!created);
-    assert_eq!(receipt, replay);
+    assert_eq!(receipt, replay.receipt);
     assert!(matches!(
         inbox::accept(&fx.db, &write, USAGE).await,
         Err(InboxError::Unavailable)
     ));
     let foreign = Fixture::on(fx.db.clone(), "foreign-fixture").await;
     let other = foreign.authority(READ_SCOPE).await;
-    assert_eq!(
+    assert!(
         inbox::receipt(&fx.db, &other, receipt.event_id.as_str())
             .await
-            .unwrap(),
-        None
+            .unwrap()
+            .is_none()
     );
     assert!(
         inbox::cursor(&fx.db, &other, receipt.stream_id.as_str(), None)
@@ -207,4 +212,48 @@ async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn missing_sequence_preserves_sparse_custody_until_validation_can_continue() {
+    let fx = Fixture::open("cma_custody_sparse", NAMESPACE).await;
+    let writer = fx.authority(WRITE_SCOPE).await;
+    let reader = fx.authority(READ_SCOPE).await;
+    inbox::accept(&fx.db, &writer, OPEN).await.unwrap();
+    let mut later: serde_json::Value = serde_json::from_slice(USAGE).unwrap();
+    later["sequence"] = serde_json::json!("3");
+    later["event_id"] = serde_json::json!("00000000-0000-4000-8000-00000000004c");
+    let current = super::contract::decode_event(USAGE, inbox::clock()).unwrap();
+    later["previous_event_digest"] = serde_json::json!(current.digest().as_str());
+    later["facts"] = serde_json::json!([]);
+    let bytes = serde_json::to_vec(&later).unwrap();
+    let (created, deferred) = inbox::accept(&fx.db, &writer, &bytes).await.unwrap();
+    assert!(created);
+    assert!(matches!(deferred.validation, Validation::Pending));
+    let stream = deferred.receipt.stream_id.as_str();
+    let page = inbox::cursor(&fx.db, &reader, stream, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let page = serde_json::to_value(page).unwrap();
+    assert_eq!(page["highest_received_sequence"], "3");
+    assert_eq!(page["contiguous_custody_sequence"], "1");
+    assert_eq!(
+        page["missing_ranges"],
+        serde_json::json!([{"first":"2","last":"2"}])
+    );
+    inbox::accept(&fx.db, &writer, USAGE).await.unwrap();
+    let repaired = inbox::receipt(&fx.db, &reader, deferred.receipt.event_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deferred.receipt, repaired.receipt);
+    assert!(matches!(repaired.validation, Validation::Validated));
+    let page = inbox::cursor(&fx.db, &reader, stream, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let page = serde_json::to_value(page).unwrap();
+    assert_eq!(page["contiguous_validated_sequence"], "3");
+    assert_eq!(page["missing_ranges"], serde_json::json!([]));
 }

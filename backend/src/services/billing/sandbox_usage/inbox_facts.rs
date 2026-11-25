@@ -26,8 +26,11 @@ pub(super) async fn apply(
     match event.payload() {
         Payload::Usage { facts: additions } => {
             let mut end = previous_end;
-            for fact in additions {
-                let row = fact_row(fact, namespace, stream, event_id, owner);
+            let rows = additions
+                .iter()
+                .map(|fact| fact_row(fact, namespace, stream, event_id, owner))
+                .collect::<Vec<_>>();
+            for row in &rows {
                 if row.start_ms < begin {
                     return Err(InboxError::Conflict("fact_before_capture"));
                 }
@@ -40,8 +43,10 @@ pub(super) async fn apply(
                 if original.is_some() {
                     return Err(InboxError::Conflict("fact_already_exists"));
                 }
-                ensure_nonoverlapping(&facts, session, &row).await?;
+                ensure_nonoverlapping(&facts, session, row).await?;
                 end = end.max(row.end_ms);
+            }
+            for row in rows {
                 facts.insert_one(row).session(&mut *session).await?;
             }
             Ok(end)

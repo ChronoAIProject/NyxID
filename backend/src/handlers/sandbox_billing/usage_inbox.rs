@@ -2,10 +2,11 @@ use super::super::admin_helpers::require_admin;
 use crate::{
     AppState,
     errors::AppError,
+    models::sandbox_usage_inbox::Validation,
     mw::auth::{AuthMethod, AuthUser},
     services::billing::sandbox_usage::{
         contract::Receipt,
-        inbox::{self, InboxError},
+        inbox::{self, InboxError, ReceiptObservation},
         inbox_authority::{self, Authority, READ_SCOPE, Registration, WRITE_SCOPE},
     },
 };
@@ -94,18 +95,18 @@ struct ReceiptResponse {
 
 #[derive(Serialize)]
 struct Processing {
-    validation_status: &'static str,
-    validation_reason: Option<&'static str>,
+    validation_status: Validation,
+    validation_reason: Option<String>,
     owner_status: &'static str,
     financial_status: &'static str,
 }
 
-fn receipt_response(receipt: Receipt) -> Json<ReceiptResponse> {
+fn receipt_response(observation: ReceiptObservation) -> Json<ReceiptResponse> {
     Json(ReceiptResponse {
-        receipt,
+        receipt: observation.receipt,
         processing: Processing {
-            validation_status: "validated",
-            validation_reason: None,
+            validation_status: observation.validation,
+            validation_reason: observation.validation_reason,
             owner_status: "unresolved",
             financial_status: "shadow",
         },
