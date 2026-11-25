@@ -152,23 +152,10 @@ async fn cursor(
     Query(query): Query<CursorQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
     let authority = authorize(&state, &auth, READ_SCOPE).await?;
-    let (sequence, digest) = inbox::cursor(&state.db, &authority, &stream_id)
+    let page = inbox::cursor(&state.db, &authority, &stream_id, query.page.as_deref())
         .await?
         .ok_or(HttpError::NotFound)?;
-    if query.page.is_some() {
-        return Err(InboxError::Conflict("cursor_changed").into());
-    }
-    let sequence = sequence.to_string();
-    Ok(Json(json!({
-        "stream_id": stream_id,
-        "contiguous_custody_sequence": sequence,
-        "custody_chain_head": digest,
-        "contiguous_validated_sequence": sequence,
-        "validated_chain_head": digest,
-        "highest_received_sequence": sequence,
-        "missing_ranges": [],
-        "next_page": null,
-    })))
+    Ok(Json(page))
 }
 
 pub(crate) enum HttpError {

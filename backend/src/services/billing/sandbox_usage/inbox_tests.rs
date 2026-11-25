@@ -122,14 +122,13 @@ async fn replay_retains_one_receipt_after_concurrent_submission_and_sealing() {
             .await
             .unwrap()
     );
-    assert_eq!(
-        inbox::cursor(&fx.db, &reader, receipt.stream_id.as_str())
-            .await
-            .unwrap()
-            .unwrap()
-            .0,
-        4
-    );
+    let cursor = inbox::cursor(&fx.db, &reader, receipt.stream_id.as_str(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    let cursor = serde_json::to_value(cursor).unwrap();
+    assert_eq!(cursor["contiguous_validated_sequence"], "4");
+    assert_eq!(cursor["contiguous_custody_sequence"], "4");
     assert_eq!(
         fx.db
             .collection::<Document>("sandbox_usage_events_v1")
@@ -202,10 +201,10 @@ async fn replaced_token_can_read_retained_custody_after_new_intake_closes() {
             .unwrap(),
         None
     );
-    assert_eq!(
-        inbox::cursor(&fx.db, &other, receipt.stream_id.as_str())
+    assert!(
+        inbox::cursor(&fx.db, &other, receipt.stream_id.as_str(), None)
             .await
-            .unwrap(),
-        None
+            .unwrap()
+            .is_none()
     );
 }

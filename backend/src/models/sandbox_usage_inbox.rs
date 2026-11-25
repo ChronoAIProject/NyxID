@@ -50,6 +50,14 @@ pub struct Stream {
     pub sequence: i64,
     pub head_id: String,
     pub head_digest: String,
+    #[serde(default)]
+    pub pending: Vec<AcceptedSequence>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct AcceptedSequence {
+    pub sequence: i64,
+    pub digest: String,
 }
 
 #[derive(Deserialize, Serialize)]

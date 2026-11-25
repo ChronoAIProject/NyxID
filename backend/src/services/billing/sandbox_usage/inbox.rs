@@ -1,5 +1,6 @@
 use super::contract::{Basis, Clock, Event, Payload, Receipt, decode_event};
 use super::inbox_authority::{Authority, READ_SCOPE, WRITE_SCOPE};
+use super::inbox_cursor::{self, CursorPage};
 use super::inbox_facts;
 use crate::models::sandbox_usage_inbox::{
     EFFECTIVE_FACTS, EVENTS, Event as StoredEvent, PRODUCERS, Producer, STREAMS, Stream,
@@ -309,6 +310,7 @@ async fn append(
                 sequence,
                 head_id: row_id.clone(),
                 head_digest: event.digest().as_str().into(),
+                pending: Vec::new(),
             };
             streams.insert_one(initial).session(&mut *session).await?;
         }
@@ -400,14 +402,17 @@ pub async fn cursor(
     db: &Database,
     authority: &Authority,
     stream_id: &str,
-) -> Result<Option<(i64, String)>, InboxError> {
+    page: Option<&str>,
+) -> Result<Option<CursorPage>, InboxError> {
     authority.require_scope(READ_SCOPE)?;
     let stream = db
         .collection::<Stream>(STREAMS)
         .find_one(doc! {"namespace":authority.namespace(), "stream_id":stream_id})
         .read_concern(ReadConcern::majority())
         .await?;
-    Ok(stream.map(|stream| (stream.sequence, stream.head_digest)))
+    stream
+        .map(|stream| inbox_cursor::snapshot(stream, page))
+        .transpose()
 }
 
 pub async fn producer(db: &Database, actor_id: &str) -> Result<Producer, InboxError> {

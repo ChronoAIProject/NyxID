@@ -3,6 +3,7 @@ pub mod contract;
 mod corrections;
 pub mod inbox;
 pub mod inbox_authority;
+mod inbox_cursor;
 mod inbox_facts;
 mod scalars;
 mod strict_json;
