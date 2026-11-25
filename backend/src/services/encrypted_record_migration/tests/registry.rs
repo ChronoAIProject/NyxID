@@ -28,10 +28,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"delivery_access_token_encrypted": &bytes, "delivery_refresh_token_encrypted": &bytes},
         ),
         (
-            nyxbot_channel::EVENTS_COLLECTION_NAME,
-            doc! {"delivery": {"target_ciphertext": &bytes}, "event_context_ciphertext": &bytes, "guest_setup_payload": &bytes, "response_reply": {"ciphertext": &bytes}},
-        ),
-        (
             nyxbot_gateway_response::COLLECTION_NAME,
             doc! {"payload_ciphertext": &bytes},
         ),
@@ -176,7 +172,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c"
+        "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -196,7 +192,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
     let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
     let reply_draft = "1c55ec996722c504e1e0fad8cc55a31a178a515945c322484f8e1115ad59c649";
+    let event_reply_checkpoint = "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
     for digest in [
+        Some(event_reply_checkpoint),
         Some(reply_draft),
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
@@ -247,7 +245,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 .contains(&"registry_or_primary_provider_changed"),
             digest != Some(live.as_str())
         );
-        let includes_meta = digest.is_some_and(|v| v == live || historical_meta.contains(&v));
+        let includes_meta = digest.is_some_and(|v| {
+            v == live || v == event_reply_checkpoint || historical_meta.contains(&v)
+        });
         assert_eq!(
             report
                 .field_outcomes
@@ -263,7 +263,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 .any(|field| field.collection == "nyxbot_events"
                     && field.field == "response_reply.ciphertext"
                     && field.authenticated_current == 11),
-            digest == Some(live.as_str()) || digest == Some(reply_draft)
+            digest == Some(live.as_str())
+                || digest == Some(event_reply_checkpoint)
+                || digest == Some(reply_draft)
         );
         let expected = match digest {
             Some(previous_labels::DIGEST) => Some((

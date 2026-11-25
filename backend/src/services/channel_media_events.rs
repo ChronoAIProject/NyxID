@@ -454,7 +454,10 @@ pub async fn sweep(db: &Database) -> AppResult<u64> {
             .update_one(
                 exact,
                 doc! {"$set":{"media.interrupted":true,"status":"interrupted"},
-                "$unset":{"event_context_ciphertext":""}},
+                "$unset": {
+                    "event_context_ciphertext": "",
+                    "event_context_version": "",
+                }},
             )
             .await?
             .modified_count;
@@ -520,7 +523,10 @@ pub async fn note_in_session(
             exact.insert("_id", doc! {"$in":ids});
             noted |= rows
                 .update_many(exact, doc! {"$set":{"media.noted":true,"media.interrupted":true,"status":"interrupted"},
-                    "$unset":{"event_context_ciphertext":""}})
+                    "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }})
                 .session(&mut *session)
                 .await?
                 .modified_count

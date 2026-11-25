@@ -654,3 +654,22 @@ pub struct ChannelTurnDelivery {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub target_expires_at: Option<DateTime<Utc>>,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct WaitingGuest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) media_event_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
+    pub(crate) conversation: String,
+    pub(crate) agent: String,
+    pub(crate) profile: String,
+    pub(crate) text: String,
+    pub(crate) note: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) question: Option<String>,
+    pub(crate) question_key: Option<String>,
+    pub(crate) origin: super::assistant_conversation::ChannelOrigin,
+    #[serde(default)]
+    pub(crate) reply_channel: Option<super::assistant_conversation::ChannelOrigin>,
+}

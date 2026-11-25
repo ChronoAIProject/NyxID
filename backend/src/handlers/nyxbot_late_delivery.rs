@@ -990,14 +990,28 @@ async fn mint_target(
 ) -> AppResult<()> {
     fetch_target(state, event, channel, d).await?;
     if let (Some(sealed), Some(expires)) = (&d.target_ciphertext, d.target_expires_at) {
-        state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {"_id": &event.id, "delivery.state":{"$in":["pending","preparing_text"]}, "delivery.target_ciphertext": bson::Bson::Null},
+        let update = event_record::set_material(
             doc! {
-                "$set": {
-                    "delivery.target_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone()},
-                    "delivery.target_expires_at": bson::DateTime::from_chrono(expires),
+                "delivery.target_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone() },
+                "delivery.target_expires_at": bson::DateTime::from_chrono(expires),
+            },
+            "delivery.target_context_version",
+            d.target_context_version,
+        );
+        state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .update_one(
+                doc! {
+                    "_id": &event.id,
+                    "user_id": &event.user_id,
+                    "channel_id": &event.channel_id,
+                    "delivery.state": {"$in":["pending","preparing_text"]},
+                    "delivery.target_ciphertext": bson::Bson::Null,
                 },
-                "$unset": {"delivery.target_context_version": ""},
-            }).await?;
+                update,
+            )
+            .await?;
     }
     let canonical = state
         .db
@@ -1052,9 +1066,16 @@ async fn fetch_target(
     if expires <= Utc::now() || expires > Utc::now() + ChronoDuration::hours(24) {
         return Ok(());
     }
-    let sealed = state.encryption_keys.encrypt(target.as_bytes()).await?;
+    let sealed = event_record::seal(
+        &state.encryption_keys,
+        &event.id,
+        &event.user_id,
+        &[event_record::TARGET, &event.channel_id],
+        target.as_bytes(),
+    )
+    .await?;
     d.target_ciphertext = Some(sealed);
-    d.target_context_version = None;
+    d.target_context_version = event_record::version(&state.encryption_keys);
     d.target_expires_at = Some(expires);
     Ok(())
 }

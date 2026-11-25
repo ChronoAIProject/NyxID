@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 42 implemented adapters
-and 8 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 43 implemented adapters
+and 7 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -55,7 +55,7 @@ A collection may use separate adapters for different fields.
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
 | `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs) | Implemented |
-| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext` | — | Pending |
+| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext` | [Event storage](../../backend/src/services/nyxbot_event_record.rs) | Implemented |
 | `mobile_social_deliveries` | `ciphertext` | — | Pending |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
@@ -129,6 +129,12 @@ the reference deadline and relay message. A matching relay binding is recomputed
 with the new ciphertext in the same exact-source update.
 [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs)
 
+NyxBot event writers bind the event ID, owner, channel and field purpose. The
+stored no-turn reply also binds its response ID. The adapter compares the exact
+event before updating ciphertext and version pairs. Delivery claims, guest
+leases, media retention and replay mappings keep their original values.
+[Event storage](../../backend/src/services/nyxbot_event_record.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
@@ -136,11 +142,9 @@ with the new ciphertext in the same exact-source update.
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
-- The NyxBot event holds its context, the late-delivery target, the queued guest setup payload and the stored no-turn reply.
-  Gateway response rows store a separate replay payload. Event replies bind the event,
-  owner, channel and response ID. Gateway payloads bind the response row, owner,
-  channel, binding and response ID. Both writers use the historical encoding.
-  [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [No-turn reply](../../backend/src/handlers/nyxbot_response_read.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
+- Gateway responses retain their own replay payload, bound on contextual reads to the
+  response row, owner, channel, binding and response ID. The writer uses the historical encoding.
+  [Gateway replay](../../backend/src/services/nyxbot_response_recovery.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and

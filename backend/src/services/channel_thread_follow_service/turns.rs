@@ -374,7 +374,12 @@ pub async fn filter_events(
                         .update_one(doc! {"_id": source, "$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],
                             "delivery.state": {"$in": ["waiting", "pending"]}},
                             doc! {"$set": {"status": "refused", "delivery.state": "refused"},
-                                "$unset": {"event_context_ciphertext": "", "delivery.target_ciphertext": ""}})
+                                "$unset": {
+                                    "event_context_ciphertext": "",
+                                    "event_context_version": "",
+                                    "delivery.target_ciphertext": "",
+                                    "delivery.target_context_version": "",
+                                }})
                         .session(&mut *session).await?;
                 }
             }

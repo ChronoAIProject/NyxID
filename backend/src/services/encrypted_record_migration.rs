@@ -55,6 +55,7 @@ enum Adapter {
     NativeWhatsapp,
     NyxbotChannelKey,
     ThreadReference,
+    NyxbotEvent,
     EventBinding,
     GatewayTransport,
     CmaRequest,
@@ -257,7 +258,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_events",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NyxbotEvent,
         fields: &[
             "delivery.target_ciphertext",
             "event_context_ciphertext",
@@ -575,15 +576,17 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
+        Some(previous_labels::EVENT_REPLY_DIGEST) => project_labels(
+            &row,
+            previous_labels::event_reply_draft()
+                .chain(std::iter::once(previous_labels::META_ASSETS)),
+        )?,
         Some(previous_labels::EVENT_REPLY_DRAFT_DIGEST) => {
             project_labels(&row, previous_labels::event_reply_draft())?
         }
         Some(digest) if previous_labels::META_DIGESTS.contains(&digest) => project_labels(
             &row,
-            previous_labels::reconciled().chain(std::iter::once((
-                "channel_meta_oauth_sessions",
-                &["assets_encrypted"][..],
-            ))),
+            previous_labels::reconciled().chain(std::iter::once(previous_labels::META_ASSETS)),
         )?,
         Some(
             previous_labels::THREAD_EVENT_DIGEST
@@ -799,6 +802,7 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::verify(keys, row)).await,
         Adapter::ThreadReference => {
             Box::pin(super::nyxbot_thread_reference::verify(keys, row)).await
         }
@@ -952,6 +956,7 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::migrate(db, keys, row)).await,
         Adapter::ThreadReference => {
             Box::pin(super::nyxbot_thread_reference::migrate(db, keys, row)).await
         }

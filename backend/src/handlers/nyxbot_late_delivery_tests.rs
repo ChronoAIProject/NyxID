@@ -414,19 +414,7 @@ async fn original_reply_target_survives_event_expiry_and_newer_chat_activity() {
         .unwrap()
         .unwrap();
     let delivery = event.delivery.as_ref().unwrap();
-    assert!(delivery.target_context_version.is_none());
-    let target = contextual_event_field(
-        &f.state.encryption_keys,
-        &event,
-        "delivery.target_ciphertext",
-        delivery.target_ciphertext.as_deref().unwrap(),
-    )
-    .await;
-    patch(
-        &f,
-        doc! {"delivery.target_ciphertext":target,"delivery.target_context_version":3},
-    )
-    .await;
+    assert_eq!(delivery.target_context_version, Some(3));
     patch(
         &f,
         doc! {"created_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(1))},
