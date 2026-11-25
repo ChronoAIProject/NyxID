@@ -606,117 +606,6 @@ pub(crate) async fn update_record(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn completion_requires_exact_typed_proof_and_preserves_corruption() {
-        let (state, _, _server, bot) =
-            crate::services::channel_adapters::meta::tests::fixture("instagram").await;
-        let grant = bot.meta_binding.as_ref().unwrap().grant_id.clone();
-        let scope = crate::services::transaction_service::run_db_only(
-            &state.db,
-            &(&state.db, &bot),
-            |tx, &(db, bot)| Box::pin(ensure_current(db, tx, bot, true)),
-        )
-        .await
-        .unwrap();
-        let rows = state.db.collection::<Document>(GRANT_SCOPES);
-        for corrupt in [
-            doc! {},
-            doc! {"local_data_erased_at":"date","completed_grant_id":&grant},
-            doc! {"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":9_i32},
-            doc! {"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":"other-grant"},
-        ] {
-            rows.update_one(
-                doc! {"_id":&scope.id},
-                doc! {"$unset":{"local_data_erased_at":"","completed_grant_id":""}},
-            )
-            .await
-            .unwrap();
-            let mut fields = corrupt.clone();
-            fields.insert("status", "completed");
-            rows.update_one(doc! {"_id":&scope.id}, doc! {"$set":fields})
-                .await
-                .unwrap();
-            let result = crate::services::transaction_service::run_db_only(
-                &state.db,
-                &(&state.db, bot.id.as_str(), grant.as_str()),
-                |tx, &(db, bot, grant)| Box::pin(mark_complete(db, tx, bot, grant)),
-            )
-            .await;
-            assert!(result.is_err());
-            let preserved = rows
-                .find_one(doc! {"_id":&scope.id})
-                .await
-                .unwrap()
-                .unwrap();
-            for (key, value) in corrupt {
-                assert_eq!(preserved.get(&key), Some(&value));
-            }
-        }
-        rows.update_one(doc! {"_id":&scope.id},doc! {"$set":{"status":"sealed"},"$unset":{"local_data_erased_at":"","completed_grant_id":""}}).await.unwrap();
-        crate::services::transaction_service::run_db_only(
-            &state.db,
-            &(&state.db, bot.id.as_str(), grant.as_str()),
-            |tx, &(db, bot, grant)| Box::pin(mark_complete(db, tx, bot, grant)),
-        )
-        .await
-        .unwrap();
-        let completed = rows
-            .find_one(doc! {"_id":&scope.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(super::super::grants::completed(&completed, &grant).unwrap());
-        assert!(
-            crate::services::transaction_service::run_db_only(
-                &state.db,
-                &(&state.db, &bot),
-                |tx, &(db, bot)| Box::pin(ensure_current(db, tx, bot, false))
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            crate::services::transaction_service::run_db_only(
-                &state.db,
-                &(&state.db, &bot),
-                |tx, &(db, bot)| Box::pin(fence_current(db, tx, bot))
-            )
-            .await
-            .is_err()
-        );
-        let still_terminal = rows
-            .find_one(doc! {"_id":&scope.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!still_terminal.contains_key("identity"));
-
-        for field in [
-            "identity",
-            "app_id",
-            "from_generation",
-            "to_generation",
-            "binding_fingerprint",
-            "authorized_at",
-        ] {
-            assert!(!completed.contains_key(field));
-        }
-        assert!(
-            crate::services::transaction_service::run_db_only(
-                &state.db,
-                &(&state.db, bot.id.as_str()),
-                |tx, &(db, bot)| { Box::pin(mark_complete(db, tx, bot, "absent-grant")) }
-            )
-            .await
-            .is_err()
-        );
-    }
-}
-
 /// The exact event keeps provenance after its inbound source reaches its TTL.
 pub(crate) async fn event_reference(db: &Database, event: &str) -> AppResult<Option<GrantRef>> {
     let row = db
@@ -1031,4 +920,115 @@ pub(crate) async fn fence_reconnect(
         false,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completion_requires_exact_typed_proof_and_preserves_corruption() {
+        let (state, _, _server, bot) =
+            crate::services::channel_adapters::meta::tests::fixture("instagram").await;
+        let grant = bot.meta_binding.as_ref().unwrap().grant_id.clone();
+        let scope = crate::services::transaction_service::run_db_only(
+            &state.db,
+            &(&state.db, &bot),
+            |tx, &(db, bot)| Box::pin(ensure_current(db, tx, bot, true)),
+        )
+        .await
+        .unwrap();
+        let rows = state.db.collection::<Document>(GRANT_SCOPES);
+        for corrupt in [
+            doc! {},
+            doc! {"local_data_erased_at":"date","completed_grant_id":&grant},
+            doc! {"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":9_i32},
+            doc! {"local_data_erased_at":bson::DateTime::now(),"completed_grant_id":"other-grant"},
+        ] {
+            rows.update_one(
+                doc! {"_id":&scope.id},
+                doc! {"$unset":{"local_data_erased_at":"","completed_grant_id":""}},
+            )
+            .await
+            .unwrap();
+            let mut fields = corrupt.clone();
+            fields.insert("status", "completed");
+            rows.update_one(doc! {"_id":&scope.id}, doc! {"$set":fields})
+                .await
+                .unwrap();
+            let result = crate::services::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, bot.id.as_str(), grant.as_str()),
+                |tx, &(db, bot, grant)| Box::pin(mark_complete(db, tx, bot, grant)),
+            )
+            .await;
+            assert!(result.is_err());
+            let preserved = rows
+                .find_one(doc! {"_id":&scope.id})
+                .await
+                .unwrap()
+                .unwrap();
+            for (key, value) in corrupt {
+                assert_eq!(preserved.get(&key), Some(&value));
+            }
+        }
+        rows.update_one(doc! {"_id":&scope.id},doc! {"$set":{"status":"sealed"},"$unset":{"local_data_erased_at":"","completed_grant_id":""}}).await.unwrap();
+        crate::services::transaction_service::run_db_only(
+            &state.db,
+            &(&state.db, bot.id.as_str(), grant.as_str()),
+            |tx, &(db, bot, grant)| Box::pin(mark_complete(db, tx, bot, grant)),
+        )
+        .await
+        .unwrap();
+        let completed = rows
+            .find_one(doc! {"_id":&scope.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(super::super::grants::completed(&completed, &grant).unwrap());
+        assert!(
+            crate::services::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, &bot),
+                |tx, &(db, bot)| Box::pin(ensure_current(db, tx, bot, false))
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            crate::services::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, &bot),
+                |tx, &(db, bot)| Box::pin(fence_current(db, tx, bot))
+            )
+            .await
+            .is_err()
+        );
+        let still_terminal = rows
+            .find_one(doc! {"_id":&scope.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!still_terminal.contains_key("identity"));
+
+        for field in [
+            "identity",
+            "app_id",
+            "from_generation",
+            "to_generation",
+            "binding_fingerprint",
+            "authorized_at",
+        ] {
+            assert!(!completed.contains_key(field));
+        }
+        assert!(
+            crate::services::transaction_service::run_db_only(
+                &state.db,
+                &(&state.db, bot.id.as_str()),
+                |tx, &(db, bot)| { Box::pin(mark_complete(db, tx, bot, "absent-grant")) }
+            )
+            .await
+            .is_err()
+        );
+    }
 }
