@@ -472,10 +472,14 @@ check evidence:
 
 ## Documentation
 
-- Update `docs/API.md` if you add or change API endpoints
-- Update `docs/ARCHITECTURE.md` if you add new collections, services, or architectural patterns
-- Update `README.md` if you add new features visible to users
-- Do **not** create new documentation files unless the feature is significant enough to warrant a standalone guide
+- Update the governing spec in the same PR as the code. Find it in [`docs/README.md`](docs/README.md) or by
+  searching [`docs/spec-index.yaml`](docs/spec-index.yaml) for the path you changed; the rules are in
+  [`AGENTS.md`](AGENTS.md) ("Specs: keep them current as you work").
+- One place per fact: change a fact in its governing spec and link to it from `docs/API.md`,
+  `docs/ARCHITECTURE.md` or `README.md` rather than restating it. New endpoints still get a `docs/API.md` entry.
+- Edit specs in place, in present tense; history belongs in git and PR descriptions.
+- Update `README.md` if you add new features visible to users.
+- Do **not** create new documentation files unless the feature is significant enough to warrant a standalone guide.
 
 ### In-Code Documentation
 

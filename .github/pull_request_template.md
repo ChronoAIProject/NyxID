@@ -17,4 +17,4 @@
 - [ ] Code follows the project's [architecture rules](CONTRIBUTING.md#architecture-rules)
 - [ ] No hardcoded secrets or credentials
 - [ ] Error messages do not leak internal details
-- [ ] Documentation updated (if applicable)
+- [ ] Spec updated in this PR (name the sections), or "Spec impact: none" (see `AGENTS.md` › Specs)

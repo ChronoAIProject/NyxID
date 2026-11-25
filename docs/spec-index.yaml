@@ -1,0 +1,146 @@
+# NyxID spec index: which spec governs which code.
+#
+# Agents: search this file for the path you are editing, e.g.
+#   grep -n "handlers/triggers.rs" docs/spec-index.yaml
+# or for its parent folder, then read every matching area's specs.
+# A path can match more than one area.
+#
+# Human-readable version: docs/README.md. How to keep specs current:
+# AGENTS.md ("Specs: keep them current as you work") and
+# docs/SPEC_MAINTENANCE.md (nightly check).
+#
+# Fields
+#   area         short area label (also the owner label)
+#   specs        governing documents; `role` is reference (current behaviour,
+#                edited in place), design (why; frozen), runbook (operations)
+#                or guide (tasks)
+#   governs      git pathspec globs (`*` within a path segment)
+#   verified_at  last commit at which the specs were checked against the code
+#   input_of     docs that code, tests or the frontend build read directly
+#                (edit with care; run the named consumer)
+
+version: 1
+
+areas:
+  - area: nyxbot
+    title: NyxBot (NyxAgent engine, agents, groups, shared agents)
+    status: current
+    specs:
+      - { doc: docs/chat/08-nyxagent-engine.md, role: reference }
+      - { doc: docs/chat/09-nyxbot-orchestrator.md, role: design }
+      - { doc: docs/chat/12-shared-agents-and-groups.md, role: reference }
+      - { doc: docs/NYXBOT_SERVICE_EXECUTION.md, role: reference }
+      - { doc: docs/NYXBOT_FIRST_RUN.md, role: reference }
+    governs:
+      - backend/src/services/assistant_*
+      - backend/src/handlers/assistant_*
+      - backend/src/models/assistant_*
+      - backend/src/services/nyxbot_*
+      - backend/src/handlers/nyxbot*
+      - frontend/src/components/assistant/*
+    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+
+  - area: channels
+    title: Channel bots (relay, Agent Event Gateway, platform adapters)
+    status: current
+    specs:
+      - { doc: docs/CHANNEL_BOT_RELAY.md, role: reference }
+      - { doc: docs/CHANNEL_EVENT_GATEWAY.md, role: reference }
+      - { doc: docs/CHANNEL_THREAD_FOLLOW.md, role: reference }
+      - { doc: docs/CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md, role: reference }
+      - { doc: docs/TELEGRAM_NEW.md, role: reference }
+      - { doc: docs/PLATFORM_BOTFATHER.md, role: reference }
+      - { doc: docs/AURINKO_INTEGRATION.md, role: reference }
+    governs:
+      - backend/src/services/channel_*
+      - backend/src/services/channel_adapters/*
+      - backend/src/handlers/channel_*
+      - backend/src/models/channel_*
+      - backend/src/services/nyxbot_gateway_*
+      - backend/src/handlers/nyxbot_gateway_*
+      - backend/src/services/telegram_*
+      - backend/src/handlers/telegram_*
+      - backend/src/services/whatsapp_native*
+      - backend/src/services/org_channel_service*
+    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+
+  - area: automations
+    title: Automations (triggers, webhook and schedule sources)
+    status: current
+    specs:
+      - { doc: docs/NYXBOT_SCHEDULES.md, role: reference }
+      - { doc: docs/API.md, role: reference }  # section "Inbound Triggers"
+    governs:
+      - backend/src/services/trigger_*
+      - backend/src/handlers/trigger*
+      - backend/src/models/trigger*
+      - backend/src/handlers/assistant_schedules.rs
+    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+
+  - area: notifications
+    title: Notifications (NyxBot feed, push, approvals delivery)
+    status: current
+    specs:
+      - { doc: docs/chat/12-notifications.md, role: reference }
+      - { doc: docs/MOBILE_APP_INTEGRATION.md, role: reference }
+      - { doc: docs/API.md, role: reference }  # notification settings, device tokens, approvals
+    governs:
+      - backend/src/services/assistant_notification_service*
+      - backend/src/services/notification_service*
+      - backend/src/handlers/assistant_notifications.rs
+      - backend/src/handlers/notifications.rs
+      - backend/src/handlers/device_tokens.rs
+      - backend/src/models/assistant_notification.rs
+      - backend/src/models/notification_channel.rs
+      - mobile/src/lib/notifications/*
+    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+
+  - area: sandboxes
+    title: Sandboxes (CMA sandboxes, remote machines, sandbox billing, generated files)
+    status: current
+    specs:
+      - { doc: docs/chat/12-cma-sessions.md, role: reference }
+      - { doc: docs/superpowers/specs/2026-11-04-cma-worker-v1-design.md, role: design }
+      - { doc: docs/CMA_BILLING.md, role: reference }
+      - { doc: docs/REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md, role: reference }
+      - { doc: docs/REMOTE_MACHINE_DELETE_RECOVERY.md, role: runbook }
+      - { doc: docs/chat/10-uploads.md, role: reference }  # section "Generated Sandbox files"
+    governs:
+      - backend/src/services/assistant_cma_*
+      - backend/src/handlers/assistant_cma_*
+      - backend/src/handlers/cma_sessions.rs
+      - backend/src/services/remote_machine_*
+      - backend/src/handlers/remote_machine*
+      - backend/src/services/billing/sandbox_*
+      - backend/src/services/generated_artifacts/*
+      - deploy/remote-machine/*
+    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+
+registries:
+  - { code: backend/src/routes.rs, spec: docs/API.md, holds: routes }
+  - { code: backend/src/config.rs, spec: docs/ENV.md, holds: environment variables and defaults }
+  - { code: backend/src/errors/mod.rs, spec: AGENTS.md, holds: error codes (Critical Rule 3) }
+  - { code: backend/src/db.rs, spec: docs/security/PERSONAL_ERASURE_INVENTORY.md, holds: collections and indexes }
+  - { code: backend/src/services/personal_data_registry.rs, spec: docs/security/PERSONAL_ERASURE_INVENTORY.md, holds: collection registration }
+
+input_of:
+  - { doc: docs/assistant/CMA_WORKER_GUIDE.md, consumer: runtime and test, read_by: backend/src/services/assistant_cma_tools.rs }
+  - { doc: docs/assistant/CHANNEL_SETUP_GUIDE.md, consumer: runtime, read_by: backend/src/handlers/assistant_team.rs }
+  - { doc: docs/AI_AGENT_PLAYBOOK.md, consumer: runtime, read_by: backend/src/handlers/llms_txt.rs }
+  - { doc: docs/examples/nyxbot-voice-service.template.json, consumer: runtime, read_by: backend/src/services/voice/catalog.rs }
+  - { doc: docs/security/PERSONAL_ERASURE_INVENTORY.md, consumer: test, read_by: backend/src/services/personal_data_registry.rs }
+  - { doc: docs/security/ENCRYPTED_FIELD_INVENTORY.md, consumer: test, read_by: backend/src/services/encrypted_record_migration/tests/registry.rs }
+  - { doc: docs/AGENT_OPERATION_SCOPES.md, consumer: test, read_by: backend/src/services/agent_operation_scope_tests.rs }
+  - { doc: docs/ACCOUNT_DATA_EXPORT.md, consumer: test, read_by: backend/src/services/account_export_model_tests.rs }
+  - { doc: docs/chat/activity-history-compat.md, consumer: test, read_by: "frontend/src/schemas/assistant-history-compat.test.ts, mobile/src/features/assistant/assistantHistoryCompat.test.ts" }
+  - { doc: "docs/site/**", consumer: frontend build, read_by: frontend/vite.config.ts (publish gate; pages must be in frontend/src/features/docs/manifest.ts) }
+
+not_yet_indexed:
+  - { area: auth-and-login, start_with: [docs/ADR-015-auth-device-login.md, docs/DEVICE_LOGIN_PROTOCOL.md] }
+  - { area: billing, start_with: [docs/BILLING_EXACT_ACCOUNTING.md, docs/BILLING_OPERATIONS.md, docs/PLATFORM_KEYS_AND_INFERENCE.md] }
+  - { area: catalog-and-services, start_with: [docs/API_DISCOVERY.md, docs/AI_SERVICES_ARCHITECTURE.md, docs/CATALOG_MANAGER.md, docs/TOOLS.md] }
+  - { area: agent-keys-and-isolation, start_with: [docs/AGENT_ISOLATION.md, docs/AGENT_OPERATION_SCOPES.md, docs/SERVICE_ACCOUNTS.md] }
+  - { area: nodes-and-machines, start_with: [docs/NODE_PROXY_ARCHITECTURE.md, docs/MACHINE_NODES.md, docs/NYXID_NODE.md, docs/SSH_NODE_KEY_AUTH.md] }
+  - { area: oauth-and-security, start_with: [docs/OIDC.md, docs/security/OAUTH_AUTHORITY_ROLLOUT.md, docs/SECURITY_ROLLOUT_READINESS.md, docs/EXECUTION_PERMISSIONS.md] }
+  - { area: plugins, start_with: [docs/PLUGINS.md] }
+  - { area: deployment, start_with: [docs/DEPLOYMENT.md, docs/ENV.md] }
