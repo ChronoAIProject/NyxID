@@ -15,36 +15,16 @@ Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.m
 
 This file is long (about 230 KB). Some tools load only the beginning: if yours does, open `AGENTS.md` and read the section for the area you are working in. The contents list below names every section.
 
-## Specs: where to look
-
-- [`docs/README.md`](docs/README.md) is the spec map: each area's governing spec and the code it governs.
-- [`docs/spec-index.yaml`](docs/spec-index.yaml) is the same map in machine-readable form. It is short: read it and pick every area whose `governs` pattern matches the path you are editing (`*` matches any characters, including `/`). A path can belong to more than one area; read each matching spec.
-
-The full list of each area's specs is the index (`docs/spec-index.yaml`; [`docs/README.md`](docs/README.md) is its overview); this table names where to start. If several areas match a path, start with the most specific pattern (for example `assistant_cma_*` before `assistant_*`).
-
-| Area | Start here | Main code |
-|---|---|---|
-| NyxBot (NyxAgent engine, agents, groups) | [`docs/chat/08-nyxagent-engine.md`](docs/chat/08-nyxagent-engine.md) | `backend/src/services/assistant_*`, `backend/src/handlers/assistant_*`, `frontend/src/components/assistant/` |
-| Channel bots | [`docs/CHANNEL_BOT_RELAY.md`](docs/CHANNEL_BOT_RELAY.md) | `backend/src/services/channel_*`, `backend/src/services/channel_adapters/`, `backend/src/services/nyxbot_gateway_*`, `backend/src/services/telegram_*` |
-| Automations (triggers, schedules) | [`docs/NYXBOT_SCHEDULES.md`](docs/NYXBOT_SCHEDULES.md) | `backend/src/services/trigger_*`, `backend/src/handlers/trigger*` |
-| Notifications (NyxBot feed, push) | [`docs/chat/12-notifications.md`](docs/chat/12-notifications.md) | `backend/src/services/assistant_notification_service.rs`, `backend/src/services/notification_service*`, `backend/src/handlers/notifications.rs` |
-| Approvals (proxy approvals, execution permissions) | [`docs/EXECUTION_PERMISSIONS.md`](docs/EXECUTION_PERMISSIONS.md); global approval modes are Critical Rule 9 | `backend/src/services/approval_*`, `backend/src/handlers/approvals.rs`, `backend/src/services/execution_permission*`, `backend/src/services/exact_service_approval_service.rs`, `backend/src/services/execution_authority.rs` |
-| Sandboxes (CMA, remote machines, sandbox billing, generated files) | [`docs/README.md`](docs/README.md) (the word has three meanings) | `backend/src/services/assistant_cma_*`, `backend/src/services/remote_machine_*`, `backend/src/services/billing/sandbox_*` |
-| Shared registries | Routes: [`docs/API.md`](docs/API.md). Env vars: [`docs/ENV.md`](docs/ENV.md). Error codes: Critical Rule 3 below. Collections: [`docs/security/PERSONAL_ERASURE_INVENTORY.md`](docs/security/PERSONAL_ERASURE_INVENTORY.md) | `backend/src/routes.rs`, `backend/src/config.rs`, `backend/src/errors/mod.rs`, `backend/src/db.rs` |
-| Other areas | Not yet indexed: see [`docs/README.md`](docs/README.md) | — |
-
 ## Specs: keep them current as you work
 
-1. Before changing code, find its spec: match the path you are editing against the `governs` patterns in `docs/spec-index.yaml`, then use each spec's `covers` line to read the parts that cover the code, routes and behaviour you are changing.
+1. Before changing code, read the spec that governs it: the deep-dive docs listed above, or search `docs/` for the code, route or behaviour you are changing.
 2. The spec is the contract. If your change alters behaviour, a contract, limit, flag, env var, error code or key decision, update the governing spec in the same PR. For new features, write the spec section first or alongside the code.
 3. Edit in place, in present tense, describing current behaviour only: no "previously/now/this PR" notes, history or known-issue lists.
 4. One place per fact: change it in its governing spec and link to it elsewhere instead of copying.
-5. Keep the spec's existing structure; do not restructure, split or move specs unless the task asks for it. If you add, move or rename a doc or a governed code path, update `docs/spec-index.yaml`.
+5. Keep the spec's existing structure; do not restructure, split or move specs unless the task asks for it.
 6. If you find code that disagrees with the spec and your change didn't cause it, do not edit the spec to match. Report it in the PR description; open a NyxID issue only if the person you are working for asks.
-7. Do not edit docs that ship at runtime (`docs/assistant/CMA_WORKER_GUIDE.md`, `docs/assistant/CHANNEL_SETUP_GUIDE.md`, `docs/AI_AGENT_PLAYBOOK.md`, `docs/examples/nyxbot-voice-service.template.json`) unless the task asks for it. Docs read by tests are listed in `docs/spec-index.yaml` (`input_of`); run those tests when you edit them.
+7. Do not edit docs that ship at runtime (`docs/assistant/CMA_WORKER_GUIDE.md`, `docs/assistant/CHANNEL_SETUP_GUIDE.md`, `docs/AI_AGENT_PLAYBOOK.md`, `docs/examples/nyxbot-voice-service.template.json`) unless the task asks for it. Tests read `docs/security/PERSONAL_ERASURE_INVENTORY.md`, `docs/security/ENCRYPTED_FIELD_INVENTORY.md`, `docs/AGENT_OPERATION_SCOPES.md`, `docs/ACCOUNT_DATA_EXPORT.md` and `docs/chat/activity-history-compat.md`; run those tests when you edit them. Pages under `docs/site/` are built into the frontend and must be listed in `frontend/src/features/docs/manifest.ts`.
 8. In the PR description, name the spec sections you changed, or write "Spec impact: none".
-
-Main maintainers review spec changes nightly ([`docs/SPEC_MAINTENANCE.md`](docs/SPEC_MAINTENANCE.md)).
 
 ## Git Workflow
 
@@ -61,7 +41,6 @@ Main maintainers review spec changes nightly ([`docs/SPEC_MAINTENANCE.md`](docs/
 
 - Project Overview
 - Start here (all agents)
-- Specs: where to look
 - Specs: keep them current as you work
 - Git Workflow
 - Critical Rules
