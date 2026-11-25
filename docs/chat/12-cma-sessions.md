@@ -370,11 +370,13 @@ not a plaintext fallback or automatic deletion. Account purge still deletes both
 owner-scoped record collections, while chat/watch cleanup does not discard an
 unresolved creation.
 
-This release does not enable writer cutover or disable legacy reads. CMA creation
-collections are not in the generic operator rewrap inventory; retain legacy reads
-until legacy pending requests have completed/been purged or a CMA migration adapter
-has been deployed and verified. An inventory pass alone does not establish that
-these CMA rows have been converted.
+This release does not enable writer cutover or disable legacy reads. The CMA
+creation collections (`assistant_cma_sandboxes`, `assistant_cma_creations`) are in
+the operator rewrap inventory with a dedicated CMA request adapter (see
+[the encrypted field inventory](../security/ENCRYPTED_FIELD_INVENTORY.md)); retain
+legacy reads until legacy pending requests have completed/been purged or the rewrap
+has converted them. An inventory pass alone does not establish that these CMA rows
+have been converted.
 
 ### Admin inspection of held account slots
 
