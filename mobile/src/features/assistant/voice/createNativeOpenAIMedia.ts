@@ -1,4 +1,5 @@
-import { Platform } from "react-native";
+import Constants from "expo-constants";
+import { NativeModules, Platform } from "react-native";
 import type { VoiceMediaAdapter } from "./AssistantVoiceClient";
 import {
   NativeOpenAIMedia,
@@ -8,10 +9,18 @@ import {
 
 /** The native import stays outside the pure, injected media lifecycle. */
 export function createNativeOpenAIMedia(): VoiceMediaAdapter | undefined {
-  // The iOS path is validated with the universal native app. Keep Android on
-  // its existing media engine until native Android routing is verified.
-  if (Platform.OS !== "ios") return undefined;
-  // Keep the native module out of Android/web startup and older Android clients.
+  if (Platform.OS === "android") {
+    // Older Android binaries can lack the native module. Select WebView
+    // before importing the package or acquiring the microphone.
+    if (
+      Constants.expoConfig?.extra?.androidOpenAIVoiceEngine !== "native" ||
+      !NativeModules.WebRTCModule
+    ) {
+      return undefined;
+    }
+  } else if (Platform.OS !== "ios") {
+    return undefined;
+  }
   const { mediaDevices, RTCPeerConnection } =
     require("react-native-webrtc") as typeof import("react-native-webrtc");
   return new NativeOpenAIMedia({

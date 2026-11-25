@@ -9,6 +9,7 @@ import {
 } from "./NativeOpenAIMedia";
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
 import { systemStatusActivityActive } from "../../../lib/systemStatusActivity";
+import { loadTestModule } from "../../../lib/api/apiUrlTestHarness";
 
 type Event = { data?: unknown; track?: NativeAudioTrack };
 type Listener = (event: Event) => void;
@@ -112,6 +113,64 @@ class Peer extends Events implements NativeAudioPeer {
     this.connectionState = "closed";
     this.dispatch("connectionstatechange");
   }
+}
+
+for (const [platform, engine, linked, native] of [
+  ["ios", "webview", true, true],
+  ["android", "native", true, true],
+  ["android", "native", false, false],
+  ["android", "webview", true, false],
+  ["android", undefined, true, false],
+  ["web", "native", true, false],
+] as const) {
+  test(`OpenAI factory on ${platform}, engine=${engine}, linked=${linked}`, async () => {
+    const stream = new Stream();
+    let imports = 0;
+    const factory = loadTestModule<typeof import("./createNativeOpenAIMedia")>(
+      new URL("./createNativeOpenAIMedia.ts", import.meta.url).href,
+      {
+        require(name: string) {
+          switch (name) {
+            case "expo-constants":
+              return {
+                default: {
+                  expoConfig: { extra: { androidOpenAIVoiceEngine: engine } },
+                },
+              };
+            case "react-native":
+              return {
+                Platform: { OS: platform },
+                NativeModules: { WebRTCModule: linked ? {} : null },
+              };
+            case "./NativeOpenAIMedia":
+              return { NativeOpenAIMedia };
+            case "react-native-webrtc":
+              imports++;
+              return {
+                mediaDevices: { getUserMedia: async () => stream },
+                RTCPeerConnection: Peer,
+              };
+            default:
+              throw new Error(`Unexpected factory dependency: ${name}`);
+          }
+        },
+      },
+    );
+    assert.equal(imports, 0);
+    const media = factory.createNativeOpenAIMedia();
+    assert.equal(imports, native ? 1 : 0);
+    if (!native) return assert.equal(media, undefined);
+    assert.ok(media instanceof NativeOpenAIMedia);
+    try {
+      assert.equal(
+        await media.prepare("openai_live", new AbortController().signal),
+        "private-sdp-offer",
+      );
+    } finally {
+      media.close();
+    }
+    assert.equal(stream.track.readyState, "ended");
+  });
 }
 
 function deferred<T>() {
