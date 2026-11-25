@@ -372,6 +372,13 @@ pub fn configured(
     row: Option<&PlatformCredentialSnapshot>,
     descriptor: &PlatformCredentialDescriptor,
 ) -> bool {
+    configured_record(row.map(|snapshot| &snapshot.projected), descriptor)
+}
+
+pub(crate) fn configured_record(
+    row: Option<&PlatformCredential>,
+    descriptor: &PlatformCredentialDescriptor,
+) -> bool {
     descriptor
         .fields
         .iter()
@@ -642,6 +649,80 @@ pub(crate) async fn migrate_storage_snapshot(
     super::org_membership_authority::finish(session, result).await
 }
 
+/// Keep the login secret available for signed deauthorization and deletion.
+async fn require_drained_meta_app(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    platform: &str,
+    app: &str,
+) -> AppResult<()> {
+    let obligations = [
+        (
+            crate::models::channel_meta::GRANT_SCOPES,
+            doc! {"platform":platform,"app_id":app,"outstanding":true},
+        ),
+        (
+            crate::models::channel_bot::COLLECTION_NAME,
+            doc! {
+                "platform": platform, "credential_source": "platform", "meta_binding.app_id": app,
+            },
+        ),
+        (
+            crate::models::channel_meta::SESSIONS,
+            doc! {
+                "platform": platform, "app_id": app,
+                "$or": [
+                    {"grant_subject_id": {"$type": "string"}},
+                    {"status": {"$in": ["pending","exchanging","assets","installing"]},
+                     "expires_at": {"$gt": bson::DateTime::now()}},
+                ],
+            },
+        ),
+        (
+            super::channel_meta_service::provider::REQUESTS,
+            doc! {
+                "platform": platform, "app_id": app, "status": "pending",
+            },
+        ),
+        (
+            "channel_meta_grant_authority",
+            doc! {
+                "platform": platform, "app_id": app,
+                "outstanding":{"$in":[true,bson::Bson::Null]},
+            },
+        ),
+    ];
+    for (collection, filter) in obligations {
+        if db
+            .collection::<bson::Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .max_time(std::time::Duration::from_secs(5))
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict(
+                "Drain the retained Meta inbox grants and deletion obligations before changing the application ID or login secret".into()
+            ));
+        }
+    }
+    // A revoked grant can still receive its first signed deletion after the
+    // owner's account has gone. Preserve that application's verifier until
+    // the independently captured retired scope is actually purged.
+    let retired = db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .find_one(doc! {"retired_grant.platform":platform,
+        "retired_grant.app_id":{"$in":[app,bson::Bson::Null]}})
+        .max_time(std::time::Duration::from_secs(5))
+        .session(&mut *tx)
+        .await?;
+    if retired.is_some() {
+        return Err(AppError::Conflict("Complete the retired Meta grant's signed deletion before changing its application ID or login secret".into()));
+    }
+    Ok(())
+}
+
 pub async fn update(
     db: &mongodb::Database,
     keys: &EncryptionKeys,
@@ -666,6 +747,43 @@ pub async fn update(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find_one(doc! {"provider":descriptor.provider})
         .await?;
+    let mut drain_app = None;
+    if super::channel_adapters::meta::is_meta(descriptor.provider)
+        && let Some(source) = &source
+        && let Some(app) = source
+            .get_document("fields")
+            .ok()
+            .and_then(|f| f.get_str("app_id").ok())
+    {
+        let id_changes = fields
+            .get("app_id")
+            .is_some_and(|v| v.as_ref().map(|v| v.trim()) != Some(app));
+        let secret_changes = if let Some(value) = fields.get("client_secret")
+            && let Some(bson::Bson::Binary(encrypted)) = source
+                .get_document("secrets")
+                .ok()
+                .and_then(|s| s.get("client_secret"))
+        {
+            match value {
+                None => true,
+                Some(value) => {
+                    let row = bson::from_document(source.clone()).map_err(|_| {
+                        AppError::Internal("Invalid platform credential storage".into())
+                    })?;
+                    let current =
+                        decrypt_platform_field(keys, &row, "client_secret", &encrypted.bytes)
+                            .await?;
+                    use subtle::ConstantTimeEq;
+                    !bool::from(current.as_slice().ct_eq(value.trim().as_bytes()))
+                }
+            }
+        } else {
+            false
+        };
+        if id_changes || secret_changes {
+            drain_app = Some(app);
+        }
+    }
     let id = source
         .as_ref()
         .map(|row| row.get_str("_id").map(str::to_owned))
@@ -771,10 +889,26 @@ pub async fn update(
         None => doc! {"_id":&id,"provider":descriptor.provider},
     };
     let db = super::transaction_service::durable_database(db);
-    let context = (&db, &filter, &update, source.is_none());
+    if let Some(app) = drain_app {
+        super::channel_meta_service::grants::reconcile_retired_app(&db, descriptor.provider, app)
+            .await?;
+    }
+    let context = (
+        &db,
+        &filter,
+        &update,
+        source.is_none(),
+        descriptor.provider,
+        drain_app,
+    );
     super::transaction_service::run_db_only(&db, &context, |tx, context| {
-        let &(db, filter, update, upsert) = context;
+        let &(db, filter, update, upsert, platform, drain_app) = context;
         Box::pin(async move {
+            if let Some(app) = drain_app {
+                super::feature_flag_service::fence_meta_enrollment_in_session(db, platform, tx)
+                    .await?;
+                require_drained_meta_app(db, tx, platform, app).await?;
+            }
             if signing::update_in_session(
                 db,
                 tx,
@@ -823,9 +957,32 @@ pub async fn delete(
         return Ok(());
     }
     let db = super::transaction_service::durable_database(db);
+    if super::channel_adapters::meta::is_meta(descriptor.provider)
+        && let Some(row) = db
+            .collection::<PlatformCredential>(COLLECTION_NAME)
+            .find_one(doc! {"provider":descriptor.provider})
+            .await?
+        && let Some(app) = row.fields.get("app_id")
+    {
+        super::channel_meta_service::grants::reconcile_retired_app(&db, descriptor.provider, app)
+            .await?;
+    }
     super::transaction_service::run_db_only(&db, &(&db, descriptor.provider), |tx, context| {
         let &(db, provider) = context;
         Box::pin(async move {
+            if super::channel_adapters::meta::is_meta(provider) {
+                super::feature_flag_service::fence_meta_enrollment_in_session(db, provider, tx)
+                    .await?;
+                if let Some(row) = db
+                    .collection::<PlatformCredential>(COLLECTION_NAME)
+                    .find_one(doc! {"provider": provider})
+                    .session(&mut *tx)
+                    .await?
+                    && let Some(app) = row.fields.get("app_id")
+                {
+                    require_drained_meta_app(db, tx, provider, app).await?;
+                }
+            }
             db.collection::<PlatformCredential>(COLLECTION_NAME)
                 .delete_one(doc! {"provider": provider})
                 .session(&mut *tx)

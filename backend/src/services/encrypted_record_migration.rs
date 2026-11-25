@@ -371,6 +371,11 @@ const REGISTRY: &[Entry] = &[
             "execution_proposal.v4.result",
         ],
     },
+    Entry {
+        collection: "channel_meta_oauth_sessions",
+        adapter: Adapter::Pending,
+        fields: &["assets_encrypted"],
+    },
 ];
 
 /// Safe control-plane report: no database cursors, record IDs, ciphertext,
@@ -569,8 +574,16 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
+        Some(digest) if previous_labels::META_DIGESTS.contains(&digest) => project_labels(
+            &row,
+            previous_labels::reconciled().chain(std::iter::once((
+                "channel_meta_oauth_sessions",
+                &["assets_encrypted"][..],
+            ))),
+        )?,
         Some(
-            previous_labels::REATTACH_WINDOW_DIGEST
+            previous_labels::THREAD_EVENT_DIGEST
+            | previous_labels::REATTACH_WINDOW_DIGEST
             | previous_labels::APPROVAL_PROPOSAL_DIGEST
             | previous_labels::LEARNING_PROPOSAL_DIGEST
             | previous_labels::CMA_REQUEST_DIGEST
@@ -1273,12 +1286,29 @@ pub async fn lookup_finding(
 /// malformed material records a finite finding and does not starve later rows.
 pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> AppResult<()> {
     let db = super::transaction_service::durable_database(db);
+    let runs = db.collection::<Document>(RUNS);
+    let mut available = doc! {
+        "_id": RUN_ID, "generation": generation, "phase": "running",
+        "$expr": {"$lte": ["$lease_until", "$$NOW"]},
+    };
+    // Authenticate the generation before taking its lease. Match the same
+    // registry and provider proof when claiming it after the asynchronous check.
+    let proof = runs
+        .find_one(available.clone())
+        .projection(doc! {"_id":0, "generation":1, "registry_digest":1, "provider_proof":1})
+        .await?
+        .ok_or_else(lost)?;
+    verify_generation(keys, &proof).await?;
+    available.extend(proof);
     let token = uuid::Uuid::new_v4().to_string();
-    let run=db.collection::<Document>(RUNS).find_one_and_update(
-        doc!{"_id":RUN_ID,"generation":generation,"phase":"running","$expr":{"$lte":["$lease_until","$$NOW"]}},
-        vec![doc!{"$set":{"lease_token":&token,"lease_until":{"$add":["$$NOW",120_000]}}}])
-        .return_document(ReturnDocument::After).await?.ok_or_else(lost)?;
-    verify_generation(keys, &run).await?;
+    let run = runs
+        .find_one_and_update(
+            available,
+            vec![doc! {"$set":{"lease_token":&token,"lease_until":{"$add":["$$NOW",120_000]}}}],
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(lost)?;
     let index =
         usize::try_from(run.get_i32("entry").map_err(|_| invalid())?).map_err(|_| invalid())?;
     if index == REGISTRY.len() {

@@ -288,6 +288,7 @@ async fn org_guest_defaults_explicit_off_mints_revision_but_omitted_enabled_does
         &f.org.admin,
         &f.channel,
         serde_json::from_value(json!({"daily_credits":"1","expected_revision":""})).unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -306,6 +307,7 @@ async fn org_guest_defaults_explicit_off_mints_revision_but_omitted_enabled_does
         &f.org.admin,
         &f.channel,
         serde_json::from_value(json!({"enabled":false,"expected_revision":""})).unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -352,6 +354,7 @@ async fn org_guest_defaults_preview_is_metadata_only_and_performs_no_writes() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &f.agent.id,
@@ -368,6 +371,7 @@ async fn org_guest_defaults_preview_is_metadata_only_and_performs_no_writes() {
             preview::load(
                 &db,
                 &f.org.state.encryption_keys,
+                &f.org.state.config.base_url,
                 actor,
                 &f.bot.id,
                 &f.agent.id,
@@ -450,6 +454,7 @@ async fn org_guest_defaults_preview_matches_reuse_retarget_and_recovery() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &f.agent.id,
@@ -469,6 +474,7 @@ async fn org_guest_defaults_preview_matches_reuse_retarget_and_recovery() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &target.id,
@@ -507,6 +513,7 @@ async fn org_guest_defaults_preview_matches_reuse_retarget_and_recovery() {
     let facts = preview::load(
         &db,
         &f.org.state.encryption_keys,
+        &f.org.state.config.base_url,
         &f.org.admin,
         &f.bot.id,
         &f.agent.id,
@@ -645,10 +652,10 @@ async fn org_guest_defaults_new_binding_needs_no_wallet_and_recovers_saved_off()
         assert!(validate_in_session(&db,&mut tx,&origin,&f.org.org,&f.agent.id,false).await.is_err());
         threads.update_one(doc! {"channel_id":&f.channel.id,"partition":"private"},doc! {"$set":{"owner_seen":true}}).await.unwrap();
         validate_in_session(&db,&mut tx,&origin,&f.org.org,&f.agent.id,false).await.unwrap();
-        management::update(&db,&f.org.admin,&f.channel,serde_json::from_value(json!({"enabled":false})).unwrap()).await.unwrap();
+        management::update(&db,&f.org.admin,&f.channel,serde_json::from_value(json!({"enabled":false})).unwrap(),None).await.unwrap();
         reload(&mut f).await;
         db.collection::<Document>("billing_wallet").delete_many(doc! {}).await.unwrap();
-        assert!(management::update(&db,&f.org.admin,&f.channel,serde_json::from_value(json!({"enabled":true})).unwrap()).await.is_err());
+        assert!(management::update(&db,&f.org.admin,&f.channel,serde_json::from_value(json!({"enabled":true})).unwrap(),None).await.is_err());
         crate::handlers::nyxbot::disconnect(&f.org.state,&f.org.admin,&f.channel.id).await.unwrap();
         let (restored,_) = Box::pin(crate::handlers::nyxbot::connect(&f.org.state,&f.org.admin,None,&f.bot.id,&f.agent)).await.unwrap();
         assert!(!restored.org_specialist.as_ref().unwrap().guests.enabled);
@@ -1294,13 +1301,13 @@ async fn org_guest_defaults_admin_off_wins_concurrent_and_just_completed_migrati
             serde_json::from_value(json!({"enabled":false,"expected_revision":""})).unwrap();
         if migrate_first {
             defaults::sweep(&db).await.unwrap();
-            management::update(&db, &f.org.admin, &f.channel, input)
+            management::update(&db, &f.org.admin, &f.channel, input, None)
                 .await
                 .unwrap();
         } else {
             let (migration, save) = tokio::join!(
                 defaults::sweep(&db),
-                management::update(&db, &f.org.admin, &f.channel, input)
+                management::update(&db, &f.org.admin, &f.channel, input, None)
             );
             migration.unwrap();
             save.unwrap();
@@ -1484,6 +1491,7 @@ async fn org_guest_defaults_notice_lists_effective_frozen_services_and_keeps_the
         &f.org.admin,
         &f.channel,
         serde_json::from_value(json!({"enabled":false})).unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -1529,6 +1537,7 @@ async fn org_guest_defaults_off_save_preserves_unavailable_services_and_missing_
         &f.channel,
         serde_json::from_value(json!({"enabled":false,"expected_revision":carried.revision}))
             .unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -1540,14 +1549,15 @@ async fn org_guest_defaults_off_save_preserves_unavailable_services_and_missing_
     assert_eq!(saved.service_ids, carried.service_ids);
     assert_eq!(saved.service_authority, carried.service_authority);
     assert_eq!(saved.daily_credits, None);
-    assert!(management::update(&db,&f.org.admin,&f.channel,serde_json::from_value(json!({"enabled":false,"service_ids":["removed-service"],"expected_revision":saved.revision})).unwrap()).await.is_err());
+    assert!(management::update(&db,&f.org.admin,&f.channel,serde_json::from_value(json!({"enabled":false,"service_ids":["removed-service"],"expected_revision":saved.revision})).unwrap(),None).await.is_err());
     assert!(matches!(
         management::update(
             &db,
             &f.org.admin,
             &f.channel,
             serde_json::from_value(json!({"enabled":true,"expected_revision":saved.revision}))
-                .unwrap()
+                .unwrap(),
+            None
         )
         .await,
         Err(AppError::BillingNotConfigured(_))
@@ -2102,6 +2112,7 @@ async fn org_guest_defaults_already_on_without_wallet_accepts_services_and_noop_
             &f.org.admin,
             &f.channel,
             serde_json::from_value(input).unwrap(),
+            None,
         )
         .await
         .unwrap();
@@ -2112,6 +2123,7 @@ async fn org_guest_defaults_already_on_without_wallet_accepts_services_and_noop_
         &f.org.admin,
         &f.channel,
         serde_json::from_value(json!({"enabled":true})).unwrap(),
+        None,
     )
     .await
     .unwrap_err();
@@ -2188,13 +2200,13 @@ async fn org_guest_defaults_restored_admin_off_wins_concurrent_and_completed_swi
             serde_json::from_value(json!({"enabled":false,"expected_revision":revision})).unwrap();
         if migrate_first {
             defaults::sweep(&db).await.unwrap();
-            management::update(&db, &f.org.admin, &f.channel, input)
+            management::update(&db, &f.org.admin, &f.channel, input, None)
                 .await
                 .unwrap();
         } else {
             let (a, b) = tokio::join!(
                 defaults::sweep(&db),
-                management::update(&db, &f.org.admin, &f.channel, input)
+                management::update(&db, &f.org.admin, &f.channel, input, None)
             );
             a.unwrap();
             b.unwrap();
@@ -2207,7 +2219,8 @@ async fn org_guest_defaults_restored_admin_off_wins_concurrent_and_completed_swi
                 &f.org.admin,
                 &f.channel,
                 serde_json::from_value(json!({"enabled":false,"expected_revision":revision}))
-                    .unwrap()
+                    .unwrap(),
+                None
             )
             .await
             .is_err(),

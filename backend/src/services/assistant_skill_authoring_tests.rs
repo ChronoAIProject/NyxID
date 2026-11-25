@@ -79,6 +79,9 @@ pub(crate) async fn contextualize(
     }
 }
 
+#[path = "assistant_skill_authoring_meta_lifecycle_tests.rs"]
+mod meta_lifecycle;
+
 fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
@@ -3207,6 +3210,16 @@ async fn verified_checkpoint_survives_pin_failure_without_republishing() {
         fresh_preview["current_skills_revision"],
         row.agent_skills_revision + 1
     );
+    let original_card_preview =
+        review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &allowed.id)
+            .await
+            .unwrap();
+    assert!(
+        original_card_preview["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("renew"))
+    );
     let axum::Json(renewal) = crate::handlers::assistant_agent_learning::approve(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
@@ -4939,6 +4952,204 @@ async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_ide
         1
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_meta_skill_claim_preserves_b_input_and_proof_on_public_creation_and_recovery() {
+    use crate::models::{
+        assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        assistant_conversation::{ChannelTurnContext, TurnOrigin},
+        channel_bot::ChannelBot,
+    };
+    use crate::services::{assistant_nyxagent as engine, channel_meta_service as meta};
+    async fn finish(
+        state: &AppState,
+        row: &crate::models::assistant_conversation::AssistantConversation,
+    ) {
+        engine::finish_turn(
+            &state.db,
+            row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Finished".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let f = fixture("meta_authored_skill_source").await;
+    let db = &f.state.db;
+    let a = crate::services::channel_adapters::meta::tests::registered_bot(
+        &f.state,
+        &f.owner,
+        "instagram",
+    )
+    .await;
+    let mut b = crate::services::channel_adapters::meta::tests::registered_bot(
+        &f.state,
+        &f.owner,
+        "instagram",
+    )
+    .await;
+    b.platform_bot_id = "444".into();
+    db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&b.id}, &b)
+        .await
+        .unwrap();
+    for bot in [&a, &b] {
+        crate::services::transaction_service::run_db_only(db, &(db, bot), |tx, &(db, bot)| {
+            Box::pin(meta::scopes::ensure_current(db, tx, bot, true))
+        })
+        .await
+        .unwrap();
+    }
+    let context = |bot: &ChannelBot| -> ChannelTurnContext {
+        bson::from_document(doc! {"meta_grant":bson::to_bson(&meta::scopes::reference(bot).unwrap()).unwrap(),
+        "source_event_id":Uuid::new_v4().to_string(),"channel_id":Uuid::new_v4().to_string(),"channel_bot_id":&bot.id,
+        "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true}).unwrap()
+    };
+    finish(&f.state, &f.row).await;
+    let request: engine::TurnRequest =
+        serde_json::from_value(json!({"conversation_id":&f.row.id,"text":"A direct question"}))
+            .unwrap();
+    let mut start = engine::TurnStart::from(&request);
+    start.origin = TurnOrigin::Channel;
+    start.channel_context = Some(context(&a));
+    let a_turn = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let mut queued = team::event("message", "B asks for a skill".into(), None);
+    queued.channel_message = Some("B asks for a skill".into());
+    queued.channel_contexts = vec![context(&b)];
+    engine::push_events(db, &f.owner, &f.row.id, vec![queued])
+        .await
+        .unwrap()
+        .unwrap();
+    finish(&f.state, &a_turn).await;
+    let request: engine::TurnRequest =
+        serde_json::from_value(json!({"conversation_id":&f.row.id,"text":"Process B question"}))
+            .unwrap();
+    let mut start = engine::TurnStart::from(&request);
+    start.origin = TurnOrigin::Event;
+    let b_turn = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let b_chat =
+        crate::services::assistant_authority_tests::chat_for_row(&f.state, &f.owner, &b_turn).await;
+    let first = draft_in_chat(&f, &b_chat).await.unwrap();
+    let proposal = first["proposal_id"].as_str().unwrap();
+    let card_id = first["acknowledgement_id"].as_str().unwrap();
+    let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    let card = cards.find_one(doc! {"_id":card_id}).await.unwrap().unwrap();
+    assert_eq!(card.creation_turn_id, b_chat.turn_id);
+    assert_eq!(card.requested_turn_id, b_chat.turn_id);
+    let claim = db
+        .collection::<bson::Document>(AUTHORED_CLAIMS_COLLECTION_NAME)
+        .find_one(doc! {"claim.proposal_id":proposal})
+        .await
+        .unwrap()
+        .unwrap();
+    let claim = claim.get_document("claim").unwrap();
+    assert_eq!(
+        claim.get_str("requested_turn_id"),
+        Ok(b_chat.turn_id.as_deref().unwrap())
+    );
+    assert!(claim.get_str("initiating_input_id").is_ok());
+    assert_eq!(claim.get_array("meta_contexts").unwrap().len(), 1);
+    cards.delete_one(doc! {"_id":card_id}).await.unwrap();
+    finish(&f.state, &b_turn).await;
+    let request: engine::TurnRequest = serde_json::from_value(
+        json!({"conversation_id":&f.row.id,"text":"Independent later web question"}),
+    )
+    .unwrap();
+    let later = engine::begin_turn(db, &f.owner, &request, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let caller = another_authoring_chat(&f).await;
+    let activity = engine::activity_started_for_turn(
+        db,
+        &f.owner,
+        &caller.conversation_id,
+        caller.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let recovered = crate::services::machine_activity_service::ACTIVITY_ID
+        .scope(Some(activity.clone()), draft_in_chat(&f, &caller))
+        .await
+        .unwrap();
+    let recovered = cards
+        .find_one(doc! {"_id":recovered["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.creation_turn_id, card.creation_turn_id);
+    assert_eq!(recovered.requested_turn_id, card.requested_turn_id);
+    assert_eq!(
+        bson::to_bson(&recovered.meta_contexts).unwrap(),
+        bson::to_bson(&card.meta_contexts).unwrap()
+    );
+    let caller_row = engine::get(db, &f.owner, &caller.conversation_id)
+        .await
+        .unwrap();
+    assert!(
+        caller_row
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|entry| entry.id == activity
+                && entry
+                    .decision
+                    .as_ref()
+                    .is_some_and(|decision| decision.id == recovered.id))
+    );
+    let original_home = engine::get(db, &f.owner, &later.id).await.unwrap();
+    assert!(
+        !original_home
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|entry| entry.id == activity)
+    );
+    finish(&f.state, &later).await;
+    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&a.id},doc! {"$set":{"is_active":false,"meta_binding.provider_revoked":true,"meta_binding.subscription":"removed"}}).await.unwrap();
+    let service = meta::MetaService::from(&f.state);
+    let cutoff = bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(1));
+    let mut done = false;
+    for _ in 0..80 {
+        if meta::scope_erasure::pass(
+            &f.state,
+            &service,
+            &a.id,
+            &meta::scopes::reference(&a).unwrap().grant_id,
+            cutoff,
+        )
+        .await
+        .unwrap()
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done);
+    assert_eq!(
+        acks::decide(db, &f.owner, &f.row.id, &recovered.id, true)
+            .await
+            .unwrap()
+            .status,
+        "allowed"
+    );
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]

@@ -1745,6 +1745,24 @@ async fn group_cards_mark_the_visible_group_and_opening_it_reads_them_without_re
         None
     );
     let card = action_card(&f, &row, &researcher.id, "Delete service g?").await;
+    let turn_id = &row.active_turn.as_ref().unwrap().turn_id;
+    assert_eq!(card.requested_turn_id.as_ref(), Some(turn_id));
+    acks::record_auto_allowed(
+        db,
+        &chat_authority(&row, &researcher.id),
+        "read_item",
+        &json!({}),
+        &acks::AutoAllowed {
+            class: acks::OwnerActionClass::Read,
+            mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            reason: "approval",
+        },
+        "Read the group item",
+    )
+    .await;
+    assert_eq!(db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .count_documents(doc! {"conversation_id":&row.id,"requested_turn_id":turn_id,"decided_by":"access_mode"})
+        .await.unwrap(),1);
     let rows = rows_of(&f, &f.owner).await;
     assert_eq!(rows.len(), 1);
     let pending = &rows[0];

@@ -146,14 +146,19 @@ export function useTelegramBotProfile() {
   });
 }
 
+interface DeleteChannelBotResult {
+  webhook_cleanup?: string;
+  local_delivery_stopped?: boolean;
+}
+
 export function useDeleteChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (
       id: string,
-    ): Promise<{ webhook_cleanup?: string } | undefined> => {
-      return api.delete<{ webhook_cleanup?: string } | undefined>(
+    ): Promise<DeleteChannelBotResult | undefined> => {
+      return api.delete<DeleteChannelBotResult | undefined>(
         `/channel-bots/${id}`,
       );
     },

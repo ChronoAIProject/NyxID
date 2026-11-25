@@ -1264,40 +1264,47 @@ async fn push_failure_event(
     if !code.requires_new_package() || row.source != ProposalSource::Authored {
         return Ok(());
     }
-    let ack = db
-        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-            crate::models::assistant_acknowledgement::COLLECTION_NAME,
-        )
-        .find_one(
-            if let Some(ack_id) = publication.acknowledgement_id.as_deref() {
-                doc! {"_id":ack_id,"user_id":&row.owner_id}
-            } else {
-                doc! {"user_id":&row.owner_id,"tool_name":TOOL,
-                "authored_skill.proposal_id":&row.id,
-                "authored_skill.revision":row.revision}
-            },
-        )
-        .sort(doc! {"created_at":-1})
-        .session(&mut *session)
-        .await?;
-    let (conversation, routing, invocation_id) = if let Some(ack) = ack {
-        (ack.conversation_id, ack.routing, ack.invocation_id)
-    } else if let Some(claim) = db
-        .collection::<DraftOrigin>(
-            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
-        )
-        .find_one(doc! {"claim.proposal_id": &row.id, "owner_id": &row.owner_id})
-        .session(&mut *session)
-        .await?
+    let (conversation, routing, invocation_id, contexts) = if let Some(origin) =
+        super::assistant_skill_authoring::saved_origin(db, session, row).await?
     {
         (
-            claim.claim.conversation_id,
-            claim.claim.routing,
-            claim.claim.invocation_id,
+            origin.conversation_id,
+            origin.routing,
+            origin.invocation_id,
+            origin.meta_contexts,
         )
     } else {
-        return Ok(());
+        let mut filter = doc! {"user_id": &row.owner_id, "tool_name": TOOL,
+        "authored_skill.proposal_id": &row.id, "authored_skill.revision": row.revision};
+        if let Some(id) = publication.acknowledgement_id.as_deref() {
+            filter.insert("_id", id);
+        }
+        let Some(ack) = db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(filter)
+            .sort(doc! {"created_at": -1})
+            .session(&mut *session)
+            .await?
+        else {
+            return Ok(());
+        };
+        (
+            ack.conversation_id,
+            ack.routing,
+            ack.invocation_id,
+            ack.meta_contexts,
+        )
     };
+    // A definitive validation failure can settle after consent ends. Its
+    // optional repair notice still requires the original delivery authority.
+    if !super::async_service_operation::meta_lineage::contexts_current(db, session, &contexts)
+        .await?
+    {
+        return Ok(());
+    }
+    super::async_service_operation::meta_lineage::fence(db, session, &contexts, true).await?;
     let event_id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!(
@@ -1340,6 +1347,7 @@ async fn push_failure_event(
     event = crate::models::assistant_acknowledgement::bind_continuation(routing.as_ref(), event)
         .for_invocation(invocation_id.as_deref());
     event.id = event_id;
+    event.channel_contexts = contexts;
     push_publication_event(db, session, &conversation, &row.owner_id, &event).await
 }
 
@@ -2355,6 +2363,7 @@ async fn approve_core(
                     .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id})
                     .session(&mut *session).await?.ok_or_else(conflict)?;
                 let mut next = fresh.publication.clone().ok_or_else(conflict)?;
+                super::assistant_skill_authoring::fence_proposal_in_session(&db,session,&fresh).await?;
                 if fresh.scope_digest.is_some() && next.reduced_scope_acceptance.as_ref().is_some_and(|consent| consent.revision != fresh.revision || consent.approval_digest != digest) { return Err(conflict()); }
 
                 if publication::binding(&fresh, &next, agent_for_claim.skills_revision) != binding { return Err(conflict()); }
@@ -2613,6 +2622,9 @@ async fn mark_started(
             // same owner barrier. A request held in package validation cannot
             // start an external publication after erasure was accepted.
             super::erasure_admission::fence_in_session(&db, &row.owner_id, session).await?;
+            let original=db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(filter.clone()).session(&mut *session).await?.ok_or_else(conflict)?;
+            super::assistant_skill_authoring::fence_proposal_in_session(&db,session,&original).await?;
             fence_invocation_publication(&db, session, &row, &publication).await?;
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                 .update_one(filter.clone(), vec![doc! {"$set":{"publication.started":true,"publication.dispatched_at":{"$ifNull":["$publication.dispatched_at",bson::DateTime::now()]},"publication.last_stage":"publish"}}])
@@ -3204,6 +3216,40 @@ impl AuthoredCardActions {
 /// dispatched offers only Reprepare (any card of the draft, live or expired)
 /// and Discard/Deny; after a rebuild, older cards offer ShowUpdatedDraft
 /// until the new package has its card.
+pub(crate) fn renewal_eligible(
+    row: &AssistantAgentLearningProposal,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    skills_revision: i64,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let (Some(p), Some(reference)) = (row.publication.as_ref(), card.authored_skill.as_ref())
+    else {
+        return false;
+    };
+    row.source == ProposalSource::Authored
+        && UNDISPATCHED_STATUSES.contains(&row.status.as_str())
+        && p.lease_expires_at.is_none_or(|expiry|expiry<=now)
+        // A new confirmation can reconcile an existing publication at the
+        // current skills revision; it never permits another dispatch.
+        && (undispatched_status(row) || (dispatched(p) && !attach_refused(row)))
+        && !review_required_failure(row)
+        && (!legacy_package(p, None) || dispatched(p))
+        && card.status != "denied"
+        && card.user_id == row.owner_id
+        && card.tool_name.as_deref() == Some(TOOL)
+        && reference.proposal_id == row.id
+        && reference.agent_id == row.agent_id
+        && reference.revision == row.revision
+        && card.arguments_digest.as_deref()
+            == Some(
+                acks::arguments_digest(&publication::binding(row, p, reference.skills_revision))
+                    .as_str(),
+            )
+        && (card.expires_at <= now
+            || card.status == "expired"
+            || reference.skills_revision != skills_revision)
+}
+
 async fn actions_for_card(
     state: &AppState,
     actor: &str,
@@ -3310,9 +3356,7 @@ async fn actions_for_card(
     if !effective && (card.status != "pending" || !card_live) {
         actions.push(AuthoredAction::Discard);
     }
-    if package_publishable
-        && (!card_live || !current_revision)
-        && !lease_live
+    if renewal_eligible(row, card, agent.skills_revision, now)
         && !actions.iter().any(|action| {
             matches!(
                 action,

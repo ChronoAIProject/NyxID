@@ -190,6 +190,62 @@ pub async fn create_conversation(
     default_agent: bool,
     allow_agent_initiated: bool,
 ) -> AppResult<ChannelConversation> {
+    create_conversation_with_default_policy(
+        db,
+        user_id,
+        channel_bot_id,
+        platform,
+        platform_conversation_id,
+        platform_conversation_type,
+        platform_sender_id,
+        agent_api_key_id,
+        default_agent,
+        allow_agent_initiated,
+        None,
+    )
+    .await
+}
+
+/// Direct Meta customer setup may claim an unassigned default, but cannot
+/// replace an explicit default selected concurrently through ordinary routing.
+pub(crate) async fn create_meta_default(
+    db: &mongodb::Database,
+    owner: &str,
+    bot_id: &str,
+    platform: &str,
+    key: &str,
+    callback: &str,
+) -> AppResult<ChannelConversation> {
+    create_conversation_with_default_policy(
+        db,
+        owner,
+        Some(bot_id),
+        platform,
+        "*",
+        "private",
+        None,
+        key,
+        true,
+        false,
+        Some(callback),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_conversation_with_default_policy(
+    db: &mongodb::Database,
+    user_id: &str,
+    channel_bot_id: Option<&str>,
+    platform: &str,
+    platform_conversation_id: &str,
+    platform_conversation_type: &str,
+    platform_sender_id: Option<&str>,
+    agent_api_key_id: &str,
+    default_agent: bool,
+    allow_agent_initiated: bool,
+    expected_callback: Option<&str>,
+) -> AppResult<ChannelConversation> {
     // Verify the API key exists and belongs to the user
     let api_key = db
         .collection::<ApiKey>(API_KEYS)
@@ -222,7 +278,7 @@ pub async fn create_conversation(
     };
 
     if channel_bot_id.is_some() {
-        insert_bot_conversation(db, &conversation).await?;
+        insert_bot_conversation(db, &conversation, expected_callback).await?;
     } else {
         insert_device_conversation(db, &conversation).await?;
     }
@@ -283,8 +339,10 @@ async fn insert_device_conversation(
 async fn insert_bot_conversation(
     db: &mongodb::Database,
     conversation: &ChannelConversation,
+    expected_callback: Option<&str>,
 ) -> AppResult<()> {
     use super::api_key_mutation_service::{map_transaction_error, transaction_result};
+    let expected_callback = expected_callback.map(str::to_owned);
     let db = db.clone();
     let conversation = conversation.clone();
     let mut session = db.client().start_session().await?;
@@ -319,7 +377,22 @@ async fn insert_bot_conversation(
                     )
                     .await?;
                     fence_route_key(&db, &conversation.agent_api_key_id, session).await?;
-                    if conversation.default_agent {
+                    if let Some(callback) = &expected_callback {
+                        let key = db.collection::<ApiKey>(API_KEYS).find_one(doc! {
+                            "_id": &conversation.agent_api_key_id, "user_id": &conversation.user_id,
+                            "is_active": true, "callback_url": callback,
+                        }).session(&mut *session).await?;
+                        let key = key.ok_or_else(|| AppError::Conflict("The specialist callback changed during setup".into()))?;
+                        ensure_route_agent(&key, &conversation.user_id)?;
+                        if db.collection::<ChannelConversation>(COLLECTION_NAME).find_one(doc! {
+                            "channel_bot_id": bot_id, "is_active": true, "$or": [
+                                {"user_id": &conversation.user_id, "default_agent": true, "retired_by_transfer": {"$ne": true}},
+                                {"platform_conversation_id": "*", "platform_sender_id": null}
+                            ],
+                        }).session(&mut *session).await?.is_some() {
+                            return Err(AppError::Conflict("This bot has another default or unscoped wildcard route".into()));
+                        }
+                    } else if conversation.default_agent {
                         db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
                     doc! { "channel_bot_id": bot_id, "user_id": &conversation.user_id,
                         "default_agent": true, "is_active": true },
@@ -564,7 +637,16 @@ async fn mutate_bot_conversation(
                 fence_route_key(&db, key, session).await?;
                 pin_fenced_key(&mut filter, &set, key);
             }
-            if default {
+            let reconcile_default = if !default
+                && super::channel_adapters::meta::is_meta(&current.platform)
+                && set.get_bool("is_active") == Ok(true)
+            {
+                let live = db.collection::<ChannelConversation>(COLLECTION_NAME)
+                    .find_one(filter.clone()).session(&mut *session).await?
+                    .ok_or_else(|| AppError::Conflict("Conversation changed before update".into()))?;
+                set.get_bool("default_agent").unwrap_or(live.default_agent)
+            } else { default };
+            if reconcile_default {
                 db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
                     doc! {"channel_bot_id": bot, "user_id": &current.user_id, "default_agent": true, "is_active": true, "_id": {"$ne": &current.id}},
                     doc! {"$set": {"default_agent": false, "updated_at": bson::DateTime::now()}}

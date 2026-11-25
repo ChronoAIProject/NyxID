@@ -953,7 +953,16 @@ async fn send_update_impl(
         use crate::services::{channel_text_preparation as preparation,channel_text_delivery as journal};
         let saved_plan = if let Some(turn) = saved_turn {
             let key = crate::services::channel_supplemental_delivery::saved_key(turn,origin);
-            Some(journal::begin(&state.db,&key,&row.user_id,&event.id,&crate::services::channel_reply_plan::fingerprint(&reply_parts),reply_parts.len()).await?)
+            let bot = crate::services::channel_bot_service::get_bot_for_user(
+                &state.db,
+                &row.channel_bot_id,
+                row.bot_owner_id.as_deref().unwrap_or(&row.user_id),
+            ).await?;
+            Some(journal::begin_parented(
+                &state.db, &key, &row.user_id, &event.id,
+                &crate::services::channel_reply_plan::fingerprint(&reply_parts),
+                reply_parts.len(), &bot,
+            ).await?)
         } else {None};
         let mut outcome = "reply_confirmed";
         for (index, part) in reply_parts.into_iter().enumerate() {

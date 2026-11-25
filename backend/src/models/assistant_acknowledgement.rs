@@ -5,6 +5,9 @@ pub const COLLECTION_NAME: &str = "assistant_acknowledgements";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAcknowledgement {
+    /// Original admitted Meta sources for data-bearing decision continuations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meta_contexts: Vec<super::assistant_conversation::ChannelTurnContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_execution: Option<super::assistant_conversation::ActivityExecution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

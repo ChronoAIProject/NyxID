@@ -19,6 +19,24 @@ use crate::services::channel_platform::{
     BotCredentials, BotIdentity, PlatformAdapter, RegistrationDescriptor, RegistrationValues,
 };
 
+pub(crate) async fn resolve_bot_owner_for_write(
+    db: &mongodb::Database,
+    actor: &str,
+    bot_id: &str,
+) -> AppResult<(String, ChannelBot)> {
+    let bot = get_bot(db, bot_id).await?;
+    let access = super::org_service::resolve_owner_access(db, actor, &bot.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::ChannelBotNotFound(bot_id.to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this channel bot".to_string(),
+        ));
+    }
+    Ok((bot.user_id.clone(), bot))
+}
+
 /// A new bot or the owner's existing manager connection. Reused connections
 /// require live verification and never return a webhook secret.
 pub struct CreateBotResult {
@@ -32,6 +50,13 @@ pub enum SecretPatch<'a> {
     Unchanged,
     Clear,
     Set(&'a str),
+}
+
+/// Keep the human actor separate from the bot's personal or organization owner.
+#[derive(Clone, Copy)]
+pub struct UpdateBotAuthority<'a> {
+    pub actor_id: &'a str,
+    pub owner_id: &'a str,
 }
 
 pub struct UpdateBotParams<'a> {
@@ -122,10 +147,15 @@ async fn write_registration_fields(
 ) -> AppResult<()> {
     for field in descriptor.all_fields() {
         // Token construction and verification are handled by the adapter.
-        if field.name == "bot_token" {
+        if field.name == "bot_token" || field.storage.is_empty() {
             continue;
         }
         if let Some(value) = fields.get(field.name) {
+            if field.secret {
+                // The shared record update authors the replacement marker
+                // atomically with its ciphertext and continuity generation.
+                unset.insert(format!("secret_context_versions.{}", field.storage), "");
+            }
             if value.is_empty() && field.clearable {
                 unset.insert(field.storage, "");
             } else if field.secret {
@@ -176,6 +206,7 @@ pub async fn create_bot(
         http_client,
         adapter,
         user_id,
+        user_id,
         label,
         fields,
         None,
@@ -190,6 +221,7 @@ pub(crate) async fn create_bot_linked(
     encryption_keys: &EncryptionKeys,
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
+    actor_id: &str,
     user_id: &str,
     label: Option<&str>,
     fields: &RegistrationValues<'_>,
@@ -230,6 +262,7 @@ pub(crate) async fn create_bot_linked(
         config,
         encryption_keys,
         adapter,
+        Some(actor_id),
         user_id,
         &label,
         fields,
@@ -260,11 +293,12 @@ pub(crate) fn default_label(identity: &BotIdentity) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn persist_verified_bot(
+pub(crate) async fn persist_verified_bot(
     db: &mongodb::Database,
     config: &AppConfig,
     encryption_keys: &EncryptionKeys,
     adapter: &dyn PlatformAdapter,
+    actor_id: Option<&str>,
     user_id: &str,
     label: &str,
     fields: &RegistrationValues<'_>,
@@ -354,6 +388,29 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        meta_binding: super::channel_adapters::meta::is_meta(adapter.platform_id()).then(|| {
+            crate::models::channel_bot::MetaCredentialBinding {
+                operator_suspended: false,
+                grant_reconnect_required: false,
+                provider_revoked: false,
+                erasure_requested: false,
+                grant_id: uuid::Uuid::new_v4().to_string(),
+                authorized_at: Some(Utc::now()),
+                events_since: None,
+                generation: 1,
+                grant_start_generation: 1,
+                token_fingerprint: super::channel_adapters::meta::token_fingerprint(
+                    effective_token,
+                ),
+                grant_actor_id: actor_id.unwrap_or(user_id).into(),
+                grant_subject_id: String::new(),
+                app_id: fields.get("app_id").unwrap_or_default().into(),
+                exclusive_routing_verified: fields.get("verification_token") == Some("exclusive"),
+                subscription: "pending".into(),
+                next_reconcile_at: None,
+                expires_at: None,
+            }
+        }),
         manager_instance: None,
         diagnostics: Default::default(),
         x_events: None,
@@ -596,6 +653,7 @@ pub(crate) async fn create_managed_bot_linked(
             config,
             keys,
             adapter,
+            Some(owner),
             owner,
             label,
             &RegistrationValues::default(),
@@ -650,6 +708,7 @@ pub(crate) async fn create_managed_bot_linked(
         config,
         keys,
         adapter,
+        Some(owner),
         owner,
         label,
         &fields,
@@ -720,6 +779,7 @@ pub(crate) async fn insert_registered_bot_linked(
                 telegram_request_revision,
                 link_claim,
                 None,
+                None,
             ),
         )
         .await
@@ -730,6 +790,7 @@ pub(crate) async fn insert_registered_bot_linked(
             capacity,
             telegram_request_revision,
             link_claim,
+            None,
             None,
         )
         .await
@@ -752,9 +813,19 @@ pub(crate) async fn insert_approved_telegram_bot(
             Some(request.revision),
             None,
             Some(request),
+            None,
         ),
     )
     .await
+}
+
+pub(crate) async fn insert_meta_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    session: &crate::models::channel_meta::OAuthSession,
+) -> AppResult<()> {
+    insert_registered_bot_inner(db, bot, capacity, None, None, None, Some(session)).await
 }
 
 async fn insert_registered_bot_inner(
@@ -764,6 +835,7 @@ async fn insert_registered_bot_inner(
     telegram_request_revision: Option<i64>,
     link_claim: Option<&super::channel_connect_link_service::Claim>,
     captured_request: Option<&crate::models::telegram_bot_request::TelegramBotRequest>,
+    meta_session: Option<&crate::models::channel_meta::OAuthSession>,
 ) -> AppResult<()> {
     use super::api_key_mutation_service::{map_transaction_error, transaction_result};
     use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
@@ -780,9 +852,10 @@ async fn insert_registered_bot_inner(
     let mut bot = bot.clone();
     let link_claim = link_claim.cloned();
     let captured_request = captured_request.cloned();
+    let meta_session = meta_session.cloned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = async {
-            db.collection::<bson::Document>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$inc": {"channel_bot_registration_revision": 1_i64}}).session(&mut *session).await?;
+            super::channel_signing_migration::registration_fence(&db, session).await?;
             let approved_setup = if let Some(request) = &captured_request {
                 super::platform_provisioning_service::fence_request(&db, request, true, session).await?
             } else {
@@ -792,8 +865,39 @@ async fn insert_registered_bot_inner(
                 }
                 None
             };
+            if let Some(meta) = &meta_session {
+                super::channel_meta_service::MetaService::fence_installation_authority(
+                    &db,
+                    session,
+                    &meta.actor_id,
+                    &bot.user_id,
+                    &bot.platform,
+                    meta.reconnect_bot_id.is_none(),
+                )
+                .await?;
+            } else if super::channel_adapters::meta::is_meta(&bot.platform) {
+                let actor = bot
+                    .meta_binding
+                    .as_ref()
+                    .map(|binding| binding.grant_actor_id.as_str())
+                    .ok_or_else(|| AppError::Conflict("Missing Meta grant authority".into()))?;
+                super::channel_meta_service::MetaService::fence_installation_authority(
+                    &db,
+                    session,
+                    actor,
+                    &bot.user_id,
+                    &bot.platform,
+                    true,
+                )
+                .await?;
+            }
+            if let Some(meta)=&meta_session {super::channel_meta_service::fence_setup_link(&db,session,meta).await?;}
             let bots = db.collection::<ChannelBot>(COLLECTION_NAME);
             if let Some(existing) = bots.find_one(doc! {"_id": &bot.id}).session(&mut *session).await? {
+                if let Some(meta) = &meta_session {
+                    let completed = db.collection::<bson::Document>(crate::models::channel_meta::SESSIONS).find_one(doc! {"_id":&meta.id,"actor_id":&meta.actor_id,"owner_id":&bot.user_id,"status":"completed","selected_asset_id":&bot.platform_bot_id,"bot_id":&bot.id}).session(&mut *session).await?;
+                    if completed.is_some() && existing.platform == bot.platform && existing.user_id == bot.user_id && existing.platform_bot_id == bot.platform_bot_id { return Ok(()); }
+                }
                 if telegram_request_revision.is_some() && existing.is_active && existing.user_id == bot.user_id && existing.platform_bot_id == bot.platform_bot_id { return Ok(()); }
                 return Err(AppError::Conflict("Bot registration already exists".into()));
             }
@@ -854,6 +958,10 @@ async fn insert_registered_bot_inner(
             } else if telegram_request_revision.is_some() {
                 super::channel_connect_link_service::associate_telegram(&db, &mut *session, &bot).await?;
             }
+            if let Some(meta)=&meta_session {
+                let binding=bot.meta_binding.as_ref().ok_or_else(||AppError::Conflict("Missing Meta grant authority".into()))?;
+                super::channel_meta_service::fence_grant_in_session(&db,session,&bot.platform,&binding.app_id,&binding.grant_subject_id,meta.created_at).await?;
+            }
             let mut inserted = bot.clone();
             if !inserted.secret_context_versions.is_empty() && inserted.credential_continuity.is_none() {
                 super::channel_credential_continuity::initialize(&mut inserted)?;
@@ -862,6 +970,23 @@ async fn insert_registered_bot_inner(
                 inserted.credential_continuity = Some(value);
             }
             bots.insert_one(&inserted).session(&mut *session).await?;
+            if super::channel_adapters::meta::is_meta(&bot.platform) {
+                super::channel_meta_service::scopes::ensure_current(&db,session,&inserted,true).await?;
+            }
+            if let Some(meta) = &meta_session {
+                let done = db.collection::<bson::Document>(crate::models::channel_meta::SESSIONS).update_one(
+                    doc! {"_id":&meta.id,"actor_id":&meta.actor_id,"owner_id":&bot.user_id,"status":"installing","selected_asset_id":&bot.platform_bot_id,"bot_id":&bot.id,"expires_at":{"$gt":bson::DateTime::now()}},
+                    doc! {"$set":{"status":"completed","expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(2))},"$unset":{"assets_encrypted":""}},
+                ).session(&mut *session).await?;
+                if done.matched_count != 1 { return Err(AppError::Conflict("Meta connection claim changed".into())); }
+                if let Some(link_id)=&meta.connect_link_id {
+                    let associated=db.collection::<bson::Document>(crate::models::channel_connect_link::COLLECTION_NAME).update_one(
+                        doc! {"_id":link_id,"status":"pending","connection_id":&meta.id,"user_id":&bot.user_id,"platform":&bot.platform,"bot_id":null},
+                        doc! {"$set":{"bot_id":&bot.id}},
+                    ).session(&mut *session).await?;
+                    if associated.matched_count!=1 {return Err(AppError::Conflict("Tracked setup changed".into()));}
+                }
+            }
             if let Some(setup) = approved_setup {
                 let installation = db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
                     .find_one(doc! {"setup_id": &setup.id, "channel_bot_id": &bot.id}).session(&mut *session).await?
@@ -1184,6 +1309,33 @@ pub fn update_bot<'a>(
     user_id: &'a str,
     params: UpdateBotParams<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ChannelBot>> + Send + 'a>> {
+    update_bot_as_actor(
+        db,
+        encryption_keys,
+        http_client,
+        adapter,
+        bot_id,
+        UpdateBotAuthority {
+            actor_id: user_id,
+            owner_id: user_id,
+        },
+        params,
+    )
+}
+
+/// Update a channel bot while retaining the acting principal separately from
+/// the resource owner.  Manual organization-bot credential writes use this
+/// entry point so the actor's live membership and administrator role are
+/// fenced in the same transaction as the final CAS update.
+pub fn update_bot_as_actor<'a>(
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    http_client: &'a reqwest::Client,
+    adapter: &'a dyn PlatformAdapter,
+    bot_id: &'a str,
+    authority: UpdateBotAuthority<'a>,
+    params: UpdateBotParams<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ChannelBot>> + Send + 'a>> {
     // Bound the caller's future size across nested lifecycle/ingress work.
     // This preserves the normal executor stack and all existing effect fences.
     Box::pin(update_bot_serialized(
@@ -1192,7 +1344,7 @@ pub fn update_bot<'a>(
         http_client,
         adapter,
         bot_id,
-        user_id,
+        authority,
         params,
     ))
 }
@@ -1203,7 +1355,7 @@ async fn update_bot_serialized(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
-    user_id: &str,
+    authority: UpdateBotAuthority<'_>,
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
     if params.x_events.is_some() {
@@ -1216,7 +1368,7 @@ async fn update_bot_serialized(
                 http_client,
                 adapter,
                 bot_id,
-                user_id,
+                authority,
                 params,
             ),
         )
@@ -1232,7 +1384,7 @@ async fn update_bot_serialized(
             http_client,
             adapter,
             bot_id,
-            user_id,
+            authority,
             params,
         ),
     )
@@ -1245,10 +1397,11 @@ async fn update_bot_inner(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
-    user_id: &str,
+    authority: UpdateBotAuthority<'_>,
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
-    let bot = get_bot_for_user(db, bot_id, user_id).await?;
+    let UpdateBotAuthority { actor_id, owner_id } = authority;
+    let bot = get_bot_for_user(db, bot_id, owner_id).await?;
     if bot.credential_source == "telegram_manager" && !params.fields().0.is_empty() {
         return Err(AppError::ValidationError(
             "Update this bot's token in Admin > Platform Credentials > Telegram — bot creation."
@@ -1339,6 +1492,16 @@ async fn update_bot_inner(
     let descriptor = adapter.registration();
     let fields = params.fields();
     descriptor.validate(&fields, true)?;
+    let is_meta = super::channel_adapters::meta::is_meta(&bot.platform);
+    if is_meta
+        && let Some(confirmation) = params.verification_token
+        && (confirmation != "exclusive" || params.bot_token.is_none())
+    {
+        return Err(AppError::ValidationError(
+            "Submit the exclusive routing confirmation together with the replacement inbox token"
+                .into(),
+        ));
+    }
     if !fields.0.is_empty() {
         unset_doc.insert("last_verification", "");
     }
@@ -1357,9 +1520,19 @@ async fn update_bot_inner(
     )
     .await?;
 
-    if let Some(bot_token_encrypted) =
-        maybe_rebuild_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?
-    {
+    if is_meta && !fields.0.is_empty() {
+        super::transaction_service::run_db_only(db, &(db, &bot), |tx, &(db, bot)| {
+            Box::pin(super::channel_meta_service::scopes::fence_reconnect(
+                db, tx, bot,
+            ))
+        })
+        .await?;
+    }
+    let rebuilt_bot_token =
+        maybe_rebuild_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?;
+    let meta_token_replacement = is_meta && rebuilt_bot_token.is_some();
+    if let Some(bot_token_encrypted) = rebuilt_bot_token {
+        unset_doc.insert("secret_context_versions.bot_token_encrypted", "");
         set_doc.insert(
             "bot_token_encrypted",
             bson::Binary {
@@ -1369,27 +1542,155 @@ async fn update_bot_inner(
         );
     }
 
-    let mut filter = doc! {"_id":bot_id,"user_id":user_id};
+    let meta_rotation = is_meta && !fields.0.is_empty();
+    if meta_rotation {
+        if meta_token_replacement && let Some(token) = params.bot_token {
+            set_doc.insert(
+                "meta_binding.token_fingerprint",
+                super::channel_adapters::meta::token_fingerprint(token),
+            );
+        }
+        let binding = bot.meta_binding.as_ref().ok_or_else(|| {
+            AppError::Conflict("Meta inbox is missing credential authority".into())
+        })?;
+        let held = binding.operator_suspended || binding.subscription == "suspended";
+        let needs_reconnect = binding.provider_revoked
+            || binding.grant_reconnect_required
+            || binding.subscription == "reconnect_required";
+
+        if meta_token_replacement {
+            if bot.credential_source != "platform" && !binding.exclusive_routing_verified {
+                if params.verification_token != Some("exclusive") {
+                    return Err(AppError::ValidationError("Confirm exclusive inbox routing with verification_token=exclusive together with the verified replacement token".into()));
+                }
+                set_doc.insert("meta_binding.exclusive_routing_verified", true);
+            }
+            set_doc.insert("meta_binding.grant_reconnect_required", false);
+            set_doc.insert("meta_binding.provider_revoked", false);
+            set_doc.insert(
+                "meta_binding.events_since",
+                bson::DateTime::from_chrono(Utc::now()),
+            );
+            set_doc.insert("error", bson::Bson::Null);
+            set_doc.insert("diagnostics.last_webhook_error", bson::Bson::Null);
+            set_doc.insert("diagnostics.subscription_state", bson::Bson::Null);
+            if held {
+                set_doc.insert("diagnostics.failure_reason", "meta_delivery_suspended");
+            } else {
+                set_doc.insert("diagnostics.failure_reason", bson::Bson::Null);
+            }
+        }
+        let subscription = if held {
+            "suspended"
+        } else if meta_token_replacement {
+            "pending"
+        } else if needs_reconnect {
+            "reconnect_required"
+        } else {
+            "pending"
+        };
+        set_doc.insert("meta_binding.subscription", subscription);
+        set_doc.insert("meta_binding.next_reconcile_at", bson::DateTime::now());
+        set_doc.insert(
+            "status",
+            if held {
+                "suspended"
+            } else if needs_reconnect && !meta_token_replacement {
+                "failed"
+            } else {
+                "pending_webhook"
+            },
+        );
+        set_doc.insert("webhook_registered", false);
+    }
+    let mut filter = doc! {"_id":bot_id,"user_id":owner_id};
     if !fields.0.is_empty() {
         filter.extend(super::channel_credential_continuity::physical_filter(&bot)?);
     }
-    if !Box::pin(super::channel_credential_continuity::update_credentials(
-        db,
-        encryption_keys,
-        adapter,
-        &bot,
-        filter,
-        set_doc,
-        unset_doc,
-    ))
-    .await?
-    {
+    let changed = if is_meta {
+        filter.insert("is_active", true);
+        if !filter.contains_key("ownership_version") {
+            filter.insert("ownership_version", bot.ownership_version);
+        }
+        filter.insert("platform_bot_id", &bot.platform_bot_id);
+        filter.insert(
+            "meta_binding.generation",
+            bot.meta_binding.as_ref().map(|binding| binding.generation),
+        );
+        if meta_rotation {
+            set_doc.insert(
+                "meta_binding.generation",
+                bot.meta_binding
+                    .as_ref()
+                    .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::Conflict("Inbox generation exhausted".into()))?,
+            );
+        }
+        let context = (
+            db.clone(),
+            encryption_keys,
+            adapter,
+            actor_id.to_owned(),
+            owner_id.to_owned(),
+            bot.clone(),
+            meta_rotation,
+            filter,
+            set_doc,
+            unset_doc,
+        );
+        super::transaction_service::run_db_only(
+            db,
+            &context,
+            |tx, (db, keys, adapter, actor, owner, bot, rotating, filter, set, unset)| {
+                Box::pin(async move {
+                    super::channel_meta_service::MetaService::fence_installation_authority(
+                        db,
+                        tx,
+                        actor,
+                        owner,
+                        &bot.platform,
+                        false,
+                    )
+                    .await?;
+                    if *rotating {
+                        super::channel_meta_service::scopes::fence_reconnect(db, tx, bot).await?;
+                    }
+                    super::channel_credential_continuity::update_credentials_in_session(
+                        db,
+                        tx,
+                        keys,
+                        *adapter,
+                        bot,
+                        filter.clone(),
+                        set.clone(),
+                        unset.clone(),
+                    )
+                    .await
+                })
+            },
+        )
+        .await?
+    } else {
+        Box::pin(super::channel_credential_continuity::update_credentials(
+            db,
+            encryption_keys,
+            adapter,
+            &bot,
+            filter,
+            set_doc,
+            unset_doc,
+        ))
+        .await?
+    };
+    if !changed {
         return Err(AppError::Conflict(
             "Bot credentials or verification changed. Run verification again.".into(),
         ));
     }
 
-    get_bot_for_user(db, bot_id, user_id).await
+    get_bot_for_user(db, bot_id, owner_id).await
 }
 
 pub fn webhook_url(base_url: &str, bot: &ChannelBot) -> String {
@@ -1401,7 +1702,10 @@ pub fn webhook_url(base_url: &str, bot: &ChannelBot) -> String {
                 .map(|id| format!("/{id}"))
                 .unwrap_or_default()
         )
-    } else if bot.platform == "x" && bot.credential_source == "connection" {
+    } else if (bot.platform == "x" && bot.credential_source == "connection")
+        || (super::channel_adapters::meta::is_meta(&bot.platform)
+            && bot.credential_source == "platform")
+    {
         super::channel_connection_webhook_service::callback_url(base, &bot.platform)
     } else {
         format!("{base}/api/v1/webhooks/channel/{}/{}", bot.platform, bot.id)
@@ -1915,14 +2219,17 @@ pub async fn find_active_webhook_bot(
     credential_source: &str,
     target: &str,
 ) -> AppResult<Option<ChannelBot>> {
-    Ok(db
-        .collection(COLLECTION_NAME)
-        .find_one(doc! {
-            "platform": platform, "credential_source": credential_source,
-            "platform_bot_id": target, "is_active": true,
-            "status": { "$in": ["active", "pending_webhook"] }
-        })
-        .await?)
+    let deliverable = doc! {"status": {"$in": ["active", "pending_webhook"]}};
+    let mut filter = doc! {
+        "platform": platform, "credential_source": credential_source,
+        "platform_bot_id": target, "is_active": true,
+    };
+    if super::channel_adapters::meta::is_meta(platform) {
+        filter.insert("$or", bson::bson!([deliverable, {"meta_binding.operator_suspended": true}, {"meta_binding.subscription": "suspended"}]));
+    } else {
+        filter.extend(deliverable);
+    }
+    Ok(db.collection(COLLECTION_NAME).find_one(filter).await?)
 }
 
 /// Persist a subscription check. A missing subscription records its stable
@@ -2215,6 +2522,133 @@ pub fn delete_bot<'a>(
     ))
 }
 
+/// Normal HTTP deletion has the full application state available. Manual Meta
+/// registrations can therefore reuse the provider erasure path after their
+/// subscription is confirmed removed; managed OAuth grants stay retained for
+/// signed provider cleanup.
+pub async fn delete_bot_with_state(
+    state: &crate::AppState,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    user_id: &str,
+) -> AppResult<Option<&'static str>> {
+    delete_bot_with_state_as_actor(state, adapter, bot_id, user_id, user_id).await
+}
+
+pub async fn delete_bot_with_state_as_actor(
+    state: &crate::AppState,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    user_id: &str,
+    actor: &str,
+) -> AppResult<Option<&'static str>> {
+    let bot = get_bot_for_user(&state.db, bot_id, user_id).await?;
+    delete_bot_observed_with_state(state, adapter, &bot, actor).await
+}
+
+pub(crate) async fn delete_bot_observed_with_state(
+    state: &crate::AppState,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    actor: &str,
+) -> AppResult<Option<&'static str>> {
+    let bot_id = bot.id.as_str();
+    let user_id = bot.user_id.as_str();
+    let manual_meta = super::channel_adapters::meta::is_meta(&bot.platform)
+        && bot.credential_source != "platform";
+    let result = if super::channel_adapters::meta::is_meta(&bot.platform) {
+        delete_meta_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            bot,
+            actor,
+        )
+        .await?
+    } else {
+        delete_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            adapter,
+            bot_id,
+            user_id,
+        )
+        .await?
+    };
+    if manual_meta && result == Some("removed") {
+        let current = match get_bot_for_user(&state.db, bot_id, user_id).await {
+            Ok(current) => current,
+            Err(AppError::ChannelBotNotFound(_))
+                if super::channel_meta_service::grants::completion_for(
+                    &state.db,
+                    bot_id,
+                    &bot.meta_binding
+                        .as_ref()
+                        .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                        .grant_id,
+                )
+                .await? =>
+            {
+                return Ok(Some("removed"));
+            }
+            Err(error) => return Err(error),
+        };
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_manual_before_purge_authority").await;
+        if current.credential_source != bot.credential_source
+            || current
+                .meta_binding
+                .as_ref()
+                .map(|binding| &binding.grant_id)
+                != bot.meta_binding.as_ref().map(|binding| &binding.grant_id)
+            || !super::channel_meta_service::grants::manual_purge_authorized(&state.db, &current)
+                .await?
+        {
+            return Err(AppError::Conflict(
+                "Manual inbox deletion authority changed".into(),
+            ));
+        }
+        let grant_id = current
+            .meta_binding
+            .as_ref()
+            .map(|binding| binding.grant_id.as_str())
+            .unwrap_or_default();
+        if super::channel_meta_service::scope_erasure::required(&state.db, bot_id, grant_id).await?
+        {
+            // Delivery and the subscription are already stopped. Local pages
+            // continue through the durable manual obligation and sweeper;
+            // ordinary progress is a successful Delete, not a conflict.
+            super::channel_meta_service::scope_erasure::manual_pass(state, &current).await?;
+        } else {
+            super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant_id).await?;
+        }
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn delete_meta_bot(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    encryption_keys: &EncryptionKeys,
+    bot: &ChannelBot,
+    actor: &str,
+) -> AppResult<Option<&'static str>> {
+    super::channel_meta_service::MetaService {
+        db,
+        config,
+        http: http_client,
+        keys: encryption_keys,
+        endpoints: Default::default(),
+    }
+    .delete_snapshot(actor, bot)
+    .await
+}
+
 async fn delete_bot_dispatch(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -2225,6 +2659,9 @@ async fn delete_bot_dispatch(
     user_id: &str,
 ) -> AppResult<Option<&'static str>> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
+    if super::channel_adapters::meta::is_meta(&bot.platform) {
+        return delete_meta_bot(db, config, http_client, encryption_keys, &bot, user_id).await;
+    }
     if bot.platform == "telegram" {
         return super::telegram_new_service::with_operation(
             db,
@@ -2567,16 +3004,96 @@ pub(crate) async fn claim_owner_aurinko_lifecycle(
 /// marker is written. A crash after the remote effect repeats an idempotent
 /// removal using the same bot/connection and never claims a wider grant.
 pub(crate) async fn erase_personal_bot(
-    db: &mongodb::Database,
-    config: &AppConfig,
-    http: &reqwest::Client,
-    keys: &EncryptionKeys,
+    state: &crate::AppState,
     adapter: &dyn PlatformAdapter,
     owner: &str,
     bot_id: &str,
 ) -> AppResult<()> {
-    let durable = super::transaction_service::durable_database(db);
+    let durable = super::transaction_service::durable_database(&state.db);
     let db = &durable;
+    let config = &state.config;
+    let http = &state.http_client;
+    let keys = &state.encryption_keys;
+    if super::channel_adapters::meta::is_meta(adapter.platform_id()) {
+        let accepted = db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":owner,"is_active":false,"platform_personal_deleting":true})
+            .await?;
+        if accepted.is_none() {
+            return Err(AppError::Forbidden("Personal erasure is not active".into()));
+        }
+        let bot = get_bot_for_user(db, bot_id, owner).await?;
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":bot_id,"user_id":owner},
+                doc! {"$set":{"meta_account_retiring":true}},
+            )
+            .await?;
+        let manual_purge =
+            super::channel_meta_service::grants::manual_purge_authorized(db, &bot).await?;
+        super::channel_meta_service::MetaService {
+            db,
+            config,
+            http,
+            keys,
+            endpoints: Default::default(),
+        }
+        .disconnect(&bot)
+        .await?;
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_account_after_disconnect").await;
+        let stopped = match get_bot_for_user(db, bot_id, owner).await {
+            Ok(stopped) => stopped,
+            Err(AppError::ChannelBotNotFound(_))
+                if super::channel_meta_service::grants::completion_for(
+                    db,
+                    bot_id,
+                    &bot.meta_binding
+                        .as_ref()
+                        .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                        .grant_id,
+                )
+                .await? =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let same_grant_generation = stopped
+            .meta_binding
+            .as_ref()
+            .zip(bot.meta_binding.as_ref())
+            .is_some_and(|(live, captured)| {
+                live.grant_id == captured.grant_id && live.generation == captured.generation
+            });
+        if (manual_purge && same_grant_generation)
+            || super::channel_meta_service::grants::manual_purge_authorized(db, &stopped).await?
+        {
+            let grant = &stopped
+                .meta_binding
+                .as_ref()
+                .ok_or_else(|| AppError::Conflict("Inbox grant is missing".into()))?
+                .grant_id;
+            if super::channel_meta_service::scope_erasure::required(db, bot_id, grant).await? {
+                // Progress keeps the ordinary channel domain pending while
+                // the exact manual obligation drains its bounded pages.
+                super::channel_meta_service::scope_erasure::manual_pass(state, &stopped).await?;
+            } else {
+                super::personal_erasure_service::erase_provider_inbox(state, bot_id, grant).await?;
+            }
+            return Ok(());
+        }
+        // Personal erasure retires only the departing owner's authority. A
+        // signed provider request independently authorizes any wider purge.
+        super::channel_meta_journal_erasure::attribute_legacy(
+            db,
+            &bot,
+            &state.token_exchange_cache,
+        )
+        .await?;
+        super::channel_meta_service::provider::retire_account_inbox(db, owner, bot_id).await?;
+        return Ok(());
+    }
     super::channel_retry_ingress::with_lifecycle(db, true, bot_id, async {
         super::channel_retry_ingress::with_ingress(db, bot_id, async {
             let mut tx=db.client().start_session().await?;
@@ -2636,6 +3153,68 @@ pub(crate) async fn erase_personal_bot(
             Ok(())
         }).await
     }).await
+}
+
+/// Serialize a human owner's management action with account disable, erasure,
+/// organization departure and administrator demotion. Cleanup workers that
+/// retire lost authority deliberately do not use this actor-facing fence.
+pub(crate) async fn fence_owner_management(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    owner: &str,
+) -> AppResult<()> {
+    super::org_membership_authority::fence_live_member(db, actor, tx).await?;
+    if actor == owner {
+        if db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {
+                "_id": owner,
+                "is_active": true,
+                "platform_personal_deleting": {"$ne": true},
+            })
+            .session(&mut *tx)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::Forbidden("Inbox owner is unavailable".into()));
+        }
+    } else {
+        super::org_membership_authority::fence_org(db, owner, tx).await?;
+        if db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {
+                "_id": owner,
+                "user_type": "org",
+                "is_active": true,
+                "platform_personal_deleting": {"$ne": true},
+            })
+            .session(&mut *tx)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::Forbidden(
+                "Inbox organization is unavailable".into(),
+            ));
+        }
+        if db
+            .collection::<bson::Document>("org_memberships")
+            .find_one(doc! {
+                "org_user_id": owner,
+                "member_user_id": actor,
+                "role": "admin",
+                "revoked_at": null,
+            })
+            .session(&mut *tx)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::Forbidden(
+                "Organization administrator access changed during inbox setup".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2749,6 +3328,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,

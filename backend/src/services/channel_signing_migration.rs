@@ -323,7 +323,10 @@ fn consumers(collection: &str, source: &Document) -> Vec<Document> {
     consumers
 }
 
-async fn registration_fence(db: &Database, session: &mut ClientSession) -> AppResult<()> {
+pub(super) async fn registration_fence(
+    db: &Database,
+    session: &mut ClientSession,
+) -> AppResult<()> {
     db.collection::<Document>(platform_settings::COLLECTION_NAME)
         .update_one(
             doc! {"_id":platform_settings::PLATFORM_SETTINGS_ID},

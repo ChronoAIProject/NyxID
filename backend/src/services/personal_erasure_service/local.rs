@@ -163,6 +163,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner,"$or":[{"event_kind":{"$ne":"sms_send"}},{"billing_finalized":true}]},
         ),
         (m::channel_adapter::CLAIMS, doc! {"user_id":owner}),
+        (
+            m::channel_meta::SESSIONS,
+            doc! {"$or":[{"owner_id":owner},{"actor_id":owner}]},
+        ),
         (m::channel_email::SUBSCRIPTIONS, doc! {"user_id":owner}),
         (m::channel_email::SENDS, doc! {"user_id":owner}),
         (m::channel_email::BATCHES, doc! {"user_id":owner}),
@@ -914,6 +918,22 @@ pub(super) async fn erase_page(
                 &mut tx,
             )
             .await?;
+        }
+        if collection == crate::models::channel_bot::COLLECTION_NAME {
+            // Meta control rows are keyed by bot and provider participant, so
+            // they cannot be found through the owner's user_id inventory.  A
+            // bot row is still present in this transaction; remove its
+            // participant identifiers before the parent is erased.
+            db.collection::<Document>(crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME)
+                .delete_many(
+                    doc! {"namespace": "meta-inbox-inbound", "channel_bot_id": {"$in": &ids}},
+                )
+                .session(&mut tx)
+                .await?;
+            db.collection::<Document>(crate::services::channel_adapters::meta::CONTROLS)
+                .delete_many(doc! {"bot_id": {"$in": &ids}})
+                .session(&mut tx)
+                .await?;
         }
         db.collection::<Document>(collection)
             .delete_many(doc! {"$and":[filter, {"_id":{"$in":ids}}]})

@@ -1,4 +1,5 @@
 import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
+import { ChannelMetaCallbackPage } from "@/pages/channel-meta-callback";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -1019,6 +1020,12 @@ export const channelBotSetupRoute = createRoute({
   component: ChannelBotSetupPage,
 });
 
+const channelMetaCallbackRoute = createRoute({
+  path: "/channel-bots/meta-callback/$platform",
+  getParentRoute: () => rootRoute,
+  component: ChannelMetaCallbackPage,
+});
+
 const channelBotDetailRoute = createRoute({
   path: "/channel-bots/$botId",
   getParentRoute: () => dashboardLayout,
@@ -1336,6 +1343,7 @@ const routeTree = rootRoute.addChildren([
   loginCodeRoute,
   loginAgentKeyRoute,
   channelBotSetupRoute,
+  channelMetaCallbackRoute,
   connectLinkRoute,
   channelConnectLinkRoute,
   connectLinkReturnRoute,

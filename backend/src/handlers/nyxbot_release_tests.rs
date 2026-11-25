@@ -747,10 +747,13 @@ async fn release_activation_and_stale_reclaimer_have_one_winner() {
             &state.db,
             OWNER,
             &row.id,
-            row.route_id.as_deref().unwrap(),
-            None,
-            true,
-            "fresh-hash",
+            continuity::ActivationBinding {
+                route_id: row.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: true,
+                link_hash: "fresh-hash",
+                expected_callback: None,
+            },
         )
         .await;
         if expired {
@@ -874,10 +877,13 @@ async fn continuity_restores_stable_chats_policy_verified_owners_and_both_reply_
             &state.db,
             OWNER,
             &next.id,
-            next.route_id.as_deref().unwrap(),
-            None,
-            false,
-            "fresh-link-hash",
+            continuity::ActivationBinding {
+                route_id: next.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: false,
+                link_hash: "fresh-link-hash",
+                expected_callback: None,
+            },
         )
         .await
         .unwrap();
@@ -999,10 +1005,13 @@ async fn continuity_failed_restoration_and_disconnect_cannot_consume_predecessor
             &state.db,
             OWNER,
             &next.id,
-            next.route_id.as_deref().unwrap(),
-            None,
-            true,
-            "fresh"
+            continuity::ActivationBinding {
+                route_id: next.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: true,
+                link_hash: "fresh",
+                expected_callback: None,
+            }
         )
         .await
         .is_err()
@@ -1029,10 +1038,13 @@ async fn continuity_failed_restoration_and_disconnect_cannot_consume_predecessor
             &state.db,
             OWNER,
             &next.id,
-            next.route_id.as_deref().unwrap(),
-            None,
-            true,
-            "fresh"
+            continuity::ActivationBinding {
+                route_id: next.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: true,
+                link_hash: "fresh",
+                expected_callback: None,
+            }
         )
         .await
         .is_err()
@@ -1426,10 +1438,13 @@ async fn continuity_newest_incompatible_predecessor_blocks_older_history_and_con
         &state.db,
         OWNER,
         &next.id,
-        next.route_id.as_deref().unwrap(),
-        None,
-        true,
-        "fresh",
+        continuity::ActivationBinding {
+            route_id: next.route_id.as_deref().unwrap(),
+            predecessor_id: None,
+            default_agent: true,
+            link_hash: "fresh",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -1464,19 +1479,25 @@ async fn continuity_newest_incompatible_predecessor_blocks_older_history_and_con
             &state.db,
             OWNER,
             &one.id,
-            one.route_id.as_deref().unwrap(),
-            Some(&previous.id),
-            true,
-            "one"
+            continuity::ActivationBinding {
+                route_id: one.route_id.as_deref().unwrap(),
+                predecessor_id: Some(&previous.id),
+                default_agent: true,
+                link_hash: "one",
+                expected_callback: None,
+            }
         ),
         continuity::activate(
             &state.db,
             OWNER,
             &two.id,
-            two.route_id.as_deref().unwrap(),
-            Some(&previous.id),
-            true,
-            "two"
+            continuity::ActivationBinding {
+                route_id: two.route_id.as_deref().unwrap(),
+                predecessor_id: Some(&previous.id),
+                default_agent: true,
+                link_hash: "two",
+                expected_callback: None,
+            }
         )
     );
     // A successor that lost the predecessor claim must not activate without it.
@@ -1499,10 +1520,13 @@ async fn continuity_newest_incompatible_predecessor_blocks_older_history_and_con
         &state.db,
         OWNER,
         &next.id,
-        next.route_id.as_deref().unwrap(),
-        Some(&abandoned.id),
-        true,
-        "fresh",
+        continuity::ActivationBinding {
+            route_id: next.route_id.as_deref().unwrap(),
+            predecessor_id: Some(&abandoned.id),
+            default_agent: true,
+            link_hash: "fresh",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -1708,10 +1732,13 @@ async fn release_unknown_activation_reply_and_unavailable_reread_never_delete_ad
         &state.db,
         OWNER,
         &row.id,
-        row.route_id.as_deref().unwrap(),
-        None,
-        true,
-        "committed-link",
+        continuity::ActivationBinding {
+            route_id: row.route_id.as_deref().unwrap(),
+            predecessor_id: None,
+            default_agent: true,
+            link_hash: "committed-link",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -1912,10 +1939,13 @@ async fn release_concurrent_activation_and_expiry_reclamation_commit_one_outcome
                 &state.db,
                 OWNER,
                 &row.id,
-                row.route_id.as_deref().unwrap(),
-                None,
-                true,
-                "racing-link"
+                continuity::ActivationBinding {
+                    route_id: row.route_id.as_deref().unwrap(),
+                    predecessor_id: None,
+                    default_agent: true,
+                    link_hash: "racing-link",
+                    expected_callback: None,
+                }
             ),
             release::retire_attempt(&state, &reserved.id, ReleaseReason::StaleSetup)
         );
@@ -2003,10 +2033,13 @@ async fn continuity_activation_policy_sync_survives_a_crash_before_inline_sync()
         &state.db,
         OWNER,
         &row.id,
-        row.route_id.as_deref().unwrap(),
-        None,
-        true,
-        "crash-safe-link",
+        continuity::ActivationBinding {
+            route_id: row.route_id.as_deref().unwrap(),
+            predecessor_id: None,
+            default_agent: true,
+            link_hash: "crash-safe-link",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();

@@ -769,3 +769,5 @@ mod independent_credential_tests {
 
 #[cfg(test)]
 mod integration_tests;
+
+pub(crate) use channel::erase_provider_inbox;

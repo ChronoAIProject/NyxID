@@ -315,6 +315,58 @@ async fn raw_proxy_gate_lazily_records_one_activity_and_exact_connected_result()
 }
 
 #[tokio::test]
+async fn aborted_meta_card_binding_leaves_request_decision_and_proxy_flags_clear() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let f = Box::pin(orchestrator_fixture("meta_decision_commit")).await;
+    let scope = ProxyActivity::new(uuid::Uuid::new_v4().to_string());
+    let used = scope.used.clone();
+    let pending = Arc::new(AtomicBool::new(false));
+    DECISION_PENDING
+        .scope(
+            pending.clone(),
+            PROXY_ACTIVITY.scope(scope, async {
+                let mut session = f.state.db.client().start_session().await.unwrap();
+                session.start_transaction().await.unwrap();
+                bind_meta_in_session(
+                    &f.state.db,
+                    &f.chat,
+                    "acknowledgement",
+                    "aborted-card",
+                    &mut session,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                session.abort_transaction().await.unwrap();
+                assert!(!used.load(Ordering::Relaxed) && !pending.load(Ordering::Relaxed));
+                assert!(activities(&f).await.is_empty());
+
+                session.start_transaction().await.unwrap();
+                let binding = bind_meta_in_session(
+                    &f.state.db,
+                    &f.chat,
+                    "acknowledgement",
+                    "committed-card",
+                    &mut session,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                session.commit_transaction().await.unwrap();
+                binding.publish_after_commit();
+                assert!(used.load(Ordering::Relaxed) && pending.load(Ordering::Relaxed));
+                assert_eq!(activities(&f).await.len(), 1);
+            }),
+        )
+        .await;
+    crate::services::security_readiness_service::stop_test_replica(&f.state.db).await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn authored_skill_requires_exact_pinned_publication() {
     let f = Box::pin(orchestrator_fixture("decision_skill")).await;
     let id = start(&f, &f.chat).await;

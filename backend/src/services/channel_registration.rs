@@ -328,6 +328,17 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
 }
 
 #[cfg(test)]
+pub(crate) async fn bind_fixture_fields(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    id: &str,
+    fields: &[&str],
+) {
+    let bot = super::channel_bot_service::get_bot(db, id).await.unwrap();
+    super::channel_credential_continuity::rewrap_fixture(db, keys, &bot, fields).await;
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::channel_adapters::resolve_adapter;

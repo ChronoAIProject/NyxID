@@ -1252,6 +1252,53 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
 }
 
 #[tokio::test]
+async fn assistant_meta_delete_reports_local_stop_and_remote_cleanup() {
+    let f = orchestrator_fixture("assistant_meta_delete_cleanup").await;
+    let (_, _, _, mut bot) = super::channel_adapters::meta::tests::fixture("messenger").await;
+    bot.user_id = f.owner.clone();
+    bot.meta_binding.as_mut().unwrap().grant_actor_id = f.owner.clone();
+    // Unusable local credentials deterministically leave the unsubscribe pending.
+    bot.bot_token_encrypted.clear();
+    let bots = f
+        .state
+        .db
+        .collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        );
+    bots.insert_one(&bot).await.unwrap();
+    let args = json!({"bot_id": &bot.id});
+    let summary = f
+        .tools()
+        .action_summary(&f.owner, "delete_channel_bot", &args)
+        .await
+        .unwrap();
+    assert!(summary.contains("guest conversations, message records and delivery history"));
+    let failed = call(&f, "delete_channel_bot", args.clone()).await;
+    assert_eq!(
+        failed,
+        json!({"local_delivery_stopped": true, "webhook_cleanup": "failed",
+            "next_step": "NyxID has stopped delivery and will retry removing the inbox subscription."})
+    );
+    let stopped = bots.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
+    assert!(!stopped.is_active);
+    assert_eq!(
+        stopped.meta_binding.unwrap().subscription,
+        "removal_pending"
+    );
+    // Provider revocation confirms that retry no longer needs a remote token.
+    bots.update_one(
+        doc! {"_id": &bot.id},
+        doc! {"$set": {"meta_binding.provider_revoked": true}},
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call(&f, "delete_channel_bot", args).await,
+        json!({"local_delivery_stopped": true, "webhook_cleanup": "removed"})
+    );
+}
+
+#[tokio::test]
 async fn orchestrator_confirms_destructive_actions_by_default_and_audits_every_tool() {
     native_inventory(false).await;
 }
@@ -1373,7 +1420,10 @@ async fn native_inventory(full: bool) {
     )
     .await;
     call(&f, "delete_channel_route", json!({"route_id": route["id"]})).await;
-    call(&f, "delete_channel_bot", json!({"bot_id": bot})).await;
+    assert_eq!(
+        call(&f, "delete_channel_bot", json!({"bot_id": bot})).await,
+        json!({"deleted": true})
+    );
     call(
         &f,
         "set_service_enabled",
