@@ -1231,14 +1231,16 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Finish circle. Permission, startup, capture and stopping retain the same toolbar.
   Finish adds the words to the draft for editing and explicit Send. Dictation
   errors and their Settings/Dismiss actions sit outside, above the composer pill
-  (user decision 2026-11-11). On narrow phones on both iOS and Android an idle
+  (user decision 2026-11-11). On every window on both iOS and Android an idle
   Home, private, contextual or crew composer is one row:
   unfocused with an empty or whitespace-only draft (the draft itself is never
   trimmed), Attach, dictation and Send overlay its text line and the permission
-  pill hides. Focus, non-whitespace text, attachments, uploads or dictation
-  restore two rows without remounting the input. Wide layouts retain their
-  full-width text row and existing toolbar. Input and toolbar use the same
-  compact layout on ordinary and corner-sensor phones. On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
+  pill hides. Focus, non-whitespace text or active dictation restore two rows
+  without remounting the input. Attachments retain their own preview strip;
+  uploads do not expand an idle text input. Crew recipients appear above the
+  active input. Input and toolbar use the same compact layout on ordinary and
+  corner-sensor phones, iPad and wide windows (user clarification 2026-11-24).
+  On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
   first tap; dragging the transcript dismisses the keyboard. The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages

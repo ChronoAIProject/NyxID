@@ -14,6 +14,7 @@ import {
   notificationTime,
   notificationSentence,
   notificationTitle,
+  notificationMatchesSearch,
   unreadForSource,
 } from "./notificationPresentation";
 import { notificationSchema } from "./notificationContracts";
@@ -30,6 +31,21 @@ const row = (overrides: Record<string, unknown>) =>
     updated_at: "2026-11-10T08:05:00Z",
     ...overrides,
   });
+
+test("search matches visible identities, source, platform and message words regardless of case or full-width input", () => {
+  const item = row({
+    title: "Daily report",
+    preview: "Bookings verified through December",
+    actor: { type: "agent", name: "jolly-a2", display_name: "Jolly A2", kind: "specialist" },
+    source: { type: "conversation", id: C, label: "Front desk" },
+    participants: [{ type: "person", name: "Calvin Tan" }],
+    platform: "lark",
+  });
+  for (const query of ["", " \n ", "daily", "BOOKINGS december", "Jolly verified", "ＪＯＬＬＹ", "front desk", "calvin", "lark"])
+    assert.equal(notificationMatchesSearch(item, query), true, query);
+  assert.equal(notificationMatchesSearch(item, "jolly missing"), false);
+  assert.equal(notificationMatchesSearch(item, C), false, "internal ids are not searchable copy");
+});
 
 test("badge caps at 99+, count chips start at two and labels read naturally", () => {
   assert.equal(notificationBadge(0), "");
