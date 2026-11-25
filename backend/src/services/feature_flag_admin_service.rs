@@ -270,6 +270,9 @@ async fn mutate_in_session(
     actor: &AuditActor,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<WriteResult> {
+    if let Some(platform) = key.strip_prefix("channels:") {
+        flags::fence_meta_enrollment_in_session(db, platform, session).await?;
+    }
     let now = bson::DateTime::now();
     let mut output = WriteResult {
         definition: definition.clone(),

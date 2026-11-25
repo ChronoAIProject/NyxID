@@ -70,16 +70,52 @@ pub(crate) async fn adopt_private_partition(
     })).await
 }
 
+#[cfg(test)]
 pub(crate) async fn lane(
     db: &Database,
     origin: &ChannelOrigin,
     actor: &str,
     agent: &str,
 ) -> AppResult<(String, bool)> {
+    lane_for_grant(db, origin, actor, agent, None).await
+}
+
+pub(crate) async fn lane_for_grant(
+    db: &Database,
+    origin: &ChannelOrigin,
+    actor: &str,
+    agent: &str,
+    grant: Option<&crate::models::channel_meta::GrantRef>,
+) -> AppResult<(String, bool)> {
     let e = origin.org_execution.as_ref().ok_or_else(super::denied)?;
     let filter = doc! {"channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":actor,
     "agent_id":agent,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,"sender_hash":if e.guest {e.sender_hash.as_str()} else {""}};
     let rows = db.collection::<Document>(LANES);
+    if let Some(grant) = grant {
+        let reserved = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+        let lane=crate::services::transaction_service::run_db_only(db,&(db,grant,&filter,&reserved,e),|tx,&(db,grant,filter,reserved,e)| {
+            Box::pin(async move {
+                crate::services::channel_meta_service::scopes::fence_reference(db,tx,grant,true).await?;
+                db.collection::<Document>(LANES).find_one_and_update(filter.clone(),vec![doc! {"$set":{
+                    "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},"org_id":{"$literal":&e.org_id},
+                    "created_at":{"$ifNull":["$created_at","$$NOW"]},
+                    "conversation_id":{"$cond":[{"$eq":["$meta_grant.grant_id",&grant.grant_id]},"$conversation_id",reserved]},
+                    "meta_grant":{"$literal":bson::to_bson(grant).map_err(|_|super::denied())?},
+                    "channel_bot_id":{"$literal":&grant.bot_id},
+                }}]).upsert(true).return_document(mongodb::options::ReturnDocument::After).session(tx).await?.ok_or_else(super::denied)
+            })
+        }).await?;
+        let id = lane
+            .get_str("conversation_id")
+            .map_err(|_| super::denied())?
+            .to_owned();
+        let exists = db
+            .collection::<Document>("assistant_conversations")
+            .find_one(doc! {"_id":&id,"user_id":actor})
+            .await?
+            .is_some();
+        return Ok((id, exists));
+    }
     let result=rows.update_one(filter.clone(),doc!{"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),
         "org_id":&e.org_id,"conversation_id":format!("nyxa-{}",uuid::Uuid::new_v4().simple()),"created_at":bson::DateTime::now()}}).upsert(true).await;
     if let Err(error) = result

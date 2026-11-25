@@ -48,6 +48,15 @@ pub(crate) async fn migrate_snapshot(
         let bytes = bson::from_document::<Bytes>(bson::doc! {"bytes":value})
             .map_err(|_| invalid())?
             .bytes;
+        if collection == crate::models::channel_bot::COLLECTION_NAME
+            && *field == super::channel_credential_continuity::TOKEN
+            && bytes.is_empty()
+            && super::channel_credential_continuity::has_empty_token(
+                &bson::from_document(source.clone()).map_err(|_| invalid())?,
+            )
+        {
+            continue;
+        }
         if record_field::verify_current(
             keys,
             collection,

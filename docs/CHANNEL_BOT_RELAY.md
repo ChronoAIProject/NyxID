@@ -2,6 +2,13 @@
 
 > **ADR-013 update (2026-04-09):** Channel Bot Relay is now a **pure passthrough gateway** per ADR-013. NyxID never stores message bodies, media bytes, outbound captions/filenames, or raw webhook payloads; inbound attachment routing metadata is retained in `channel_messages` for authorized downloads. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents must return 202 and post replies via `POST /api/v1/channel-relay/reply`. See NyxID#221, ADR-013, and [`docs/CHANNEL_EVENT_GATEWAY.md`](./CHANNEL_EVENT_GATEWAY.md) for the full rationale. The earlier deprecation-in-favor-of-service-connections direction (NyxID#191) has been recalled: channel relay and the new HTTP Event Gateway are the first-class inbound paths.
 
+## Messenger and Instagram customer inboxes
+
+See [Messenger and Instagram setup, lifecycle and App Review](META_CHANNELS.md) for
+the dedicated app configuration, routing prerequisites, customer/guest setup,
+bound text replies, incident controls and live verification dependencies. Both
+platforms use this relay and independent default-off per-person enrollment.
+
 ## Overview
 
 The passthrough storage rule applies to relay transport. When NyxBot is the

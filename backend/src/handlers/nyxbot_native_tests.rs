@@ -2039,8 +2039,19 @@ async fn supplemental_native_progress_leaves_primary_replay_intact() {
         for audit in audits { assert_eq!(audit.get_document("event_data").unwrap().get_str("reason"), Ok("native_progress_unsupported")); }
         wiremock::Mock::given(wiremock::matchers::path("/events/opaque-native-ref/replies"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"delivery":{"outcome":"confirmed"}})))
-            .expect(1).mount(&gateway).await;
+            .expect(2).mount(&gateway).await;
         deliver_to(&state,&conversation,origin,"independent result",None).await;
+        let turn = Uuid::new_v4().to_string();
+        for _ in 0..2 {
+            assert_eq!(native_responses::send_supplemental(
+                &state, &channel, origin, &conversation.id, "saved native result", Some(&turn),
+            ).await.unwrap(), "confirmed");
+        }
+        let saved_key = crate::services::channel_supplemental_delivery::saved_key(&turn, origin);
+        let plan = crate::services::channel_text_delivery::load(&state.db, &saved_key).await.unwrap().unwrap();
+        assert_eq!(plan.channel_bot_id.as_deref(), Some(channel.channel_bot_id.as_str()));
+        assert_eq!(plan.user_id, channel.user_id);
+        assert_eq!(plan.source_id, event.id);
         gateway.verify().await;
         let audit=state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc!{"event_type":"nyxbot_channel_supplemental_delivery","event_data.purpose":"team_result"}).await.unwrap().unwrap();
         assert_eq!(audit.get_document("event_data").unwrap().get_str("egress"),Ok("gateway_event"));

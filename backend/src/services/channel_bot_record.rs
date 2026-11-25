@@ -23,13 +23,7 @@ fn invalid() -> AppError {
 }
 
 pub(super) fn external_token(bot: &ChannelBot, field: &str) -> bool {
-    field == continuity::TOKEN
-        && bot.bot_token_encrypted.is_empty()
-        && matches!(
-            bot.credential_source.as_str(),
-            "connection" | "telegram_manager"
-        )
-        && !bot.secret_context_versions.contains_key(field)
+    field == continuity::TOKEN && continuity::has_empty_token(bot)
 }
 
 pub(super) async fn encrypt(

@@ -56,6 +56,9 @@ mod guest_model_tests;
 #[path = "nyxbot_turn_context_tests.rs"]
 mod turn_context_tests;
 
+#[path = "nyxbot_meta_customer_tests.rs"]
+mod meta_customer_tests;
+
 const LEGACY_PROVENANCE: crate::services::nyxbot_watch_service::ReportProvenance =
     crate::services::nyxbot_watch_service::ReportProvenance::LEGACY;
 const OWNER: &str = "12345678-1234-4123-8123-1234567890ab";
@@ -523,6 +526,7 @@ async fn issue_owner_link(state: &AppState, row: &NyxbotChannel) -> LinkInstruct
         &row.user_id,
         false,
         &sha256_hex(code.as_bytes()),
+        None,
     )
     .await
     .unwrap();

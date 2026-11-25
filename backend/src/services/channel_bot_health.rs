@@ -80,6 +80,9 @@ pub fn failure_code(error: &AppError) -> &'static str {
     use crate::services::channel_adapters::x::{X_FORBIDDEN_ACCESS, X_FORBIDDEN_SCOPES};
     match error {
         AppError::ChannelPlatformError(message) => {
+            if message.starts_with("Meta send acceptance is unknown") {
+                return "meta_send_uncertain";
+            }
             if message == super::telegram_formatting::REJECTED {
                 return "telegram_text_rejected";
             }
@@ -96,6 +99,16 @@ pub fn failure_code(error: &AppError) -> &'static str {
                 Some(429) => codes::RATE_LIMITED,
                 Some(500..=599) => codes::PROVIDER_UNAVAILABLE,
                 _ => codes::PROVIDER_ERROR,
+            }
+        }
+        AppError::ChannelConversationNotReachable(reason) if reason.starts_with("meta:") => {
+            match reason.as_str() {
+                "meta:window_closed" => "meta_window_closed",
+                "meta:reply_token_expired" => "meta_reply_token_expired",
+                "meta:inbox_control_lost" => "meta_inbox_control_lost",
+                "meta:reconnect_required" => codes::RECONNECT_REQUIRED,
+                "meta:platform_suspended" | "meta:inbox_suspended" => "meta_delivery_suspended",
+                _ => "meta_authority_changed",
             }
         }
         AppError::ChannelConversationNotReachable(_) => codes::RECIPIENT_UNREACHABLE,
@@ -286,6 +299,17 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             "reconnect",
             "This organization connection lost live administrator authority. An organization admin must reconnect it after restoring access.".into(),
         ),
+        "meta_window_closed"=>advice("none","The Meta 24-hour reply window closed for that message. A newer customer message can authorize a new reply.".into()),
+        "meta_reply_token_expired"=>advice("none","The NyxID reply token expired before the Meta window. Reply to a newer inbound message.".into()),
+        "meta_send_uncertain"=>advice("none","Meta send acceptance is uncertain. Inspect the delivery journal and native inbox; do not automatically resend.".into()),
+        "meta_inbox_control_lost" => if facts.platform == "instagram" {
+            advice("reconnect", "Instagram reported that this app lost control of the conversation. Repair routing in Instagram and reconnect this inbox with fresh consent. An ordinary Verify preserves the recorded loss of control.".into())
+        } else {
+            advice("verify", "This app does not control the customer conversation. Repair routing in Meta and wait for authoritative thread ownership proof before replying.".into())
+        },
+        "meta_control_unavailable"=>advice("verify","Meta control ownership could not be read after bounded retries. Check Graph availability and Page routing, then verify this inbox; the message was not forwarded.".into()),
+        "meta_delivery_suspended"=>advice("verify","Delivery is suspended. Restore the platform gate if needed, then verify and resume this inbox.".into()),
+        "meta_authority_changed"=>advice("reconnect","The inbox binding or credential authority changed. Reconnect and answer a new customer message.".into()),
         "discord_event_webhooks_wrong_endpoint" => advice("verify", "Event Webhooks do not deliver ordinary bot chat messages. The Interactions Endpoint URL under General Information is optional and only needed for slash commands/components. Ordinary chat uses NyxBot's Discord gateway when enabled for your account; other relay bots need channel:discord-gateway. Enable Message Content Intent in Discord.".into()),
         "discord_gateway_intents_required" => advice("verify", "Enable Message Content Intent in Discord Developer Portal > Bot > Privileged Gateway Intents (verified apps need approval). NyxID retries automatically within five minutes.".into()),
         "discord_gateway_invalid_token" | "discord_gateway_identity_mismatch" => advice("reconnect", "Replace this Discord bot's token in NyxID with the token for the same bot. The Gateway session will restart automatically.".into()),

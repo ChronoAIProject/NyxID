@@ -114,10 +114,12 @@ async fn response(
                 state.config.base_url
             ))
         } else {
-            descriptor.webhook_secret_field.map(|_| {
+            (descriptor.webhook_secret_field.is_some()
+                || crate::services::channel_adapters::meta::is_meta(&platform))
+            .then(|| {
                 format!(
                     "{}/api/v1/webhooks/channel/{platform}/platform",
-                    state.config.base_url
+                    state.config.base_url.trim_end_matches('/')
                 )
             })
         },

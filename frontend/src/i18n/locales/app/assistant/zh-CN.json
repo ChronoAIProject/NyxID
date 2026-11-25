@@ -782,6 +782,7 @@
   "Service already updated": "服务已更新",
   "Service connection": "服务连接",
   "Service credential rotated": "服务凭据已轮换",
+  "Service permissions still apply. The organization pays for guest usage when guest access is enabled.": "服务权限仍然适用。启用访客访问后，组织承担访客使用服务的费用。",
   "Service permissions still apply. Visitor usage is billed to you.": "服务权限仍然适用。访客用量的费用由你支付。",
   "Service routing updated": "服务路由已更新",
   "Session ID": "会话 ID",

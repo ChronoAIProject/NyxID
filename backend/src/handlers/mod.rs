@@ -255,4 +255,5 @@ pub mod assistant_system_skills;
 mod platform_model_gateway;
 pub mod platform_models;
 
+pub mod channel_meta;
 pub mod crash_reports;

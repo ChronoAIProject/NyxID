@@ -36,7 +36,10 @@ pub use admission::Admission;
 pub use node_routes::verify_node_route;
 pub use pools::pinned_pool_member;
 mod bootstrap;
+mod card_binding;
 pub use bootstrap::{begin_model_attempt, finish_model_attempt};
+#[cfg(test)]
+pub(crate) use card_binding::publish as publish_card_binding;
 mod authority;
 pub use authority::{connection_binding, org_card_binding};
 mod availability;
@@ -900,13 +903,13 @@ async fn check_inner(
             if refusal["error"] == "acknowledgement_required"
                 && let Some(id) = refusal["acknowledgement_id"].as_str()
             {
-                db.collection::<Document>(COLLECTION).update_one(doc! {"_id": id}, doc! {"$setOnInsert": {
+                card_binding::publish(db,chat,id,doc! {
                             "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                             "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
                             "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
                             "binding": &approval, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
                             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
-                        }}).upsert(true).await?;
+                        }).await?;
             }
             let mut refusal = refusal;
             if instruction_required {
@@ -968,13 +971,13 @@ async fn attach_org_offer(
     let refusal =
         super::assistant_connection_service::org_refusal(db, chat, service, refusal).await?;
     if let Some(id) = refusal["acknowledgement_id"].as_str() {
-        db.collection::<Document>(COLLECTION).update_one(doc! {"_id":id},doc! {"$setOnInsert":{
+        card_binding::publish(db,chat,id,doc! {
             "kind":"card_binding","user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
             "api_key_id":&chat.api_key_id,"turn_id":&chat.turn_id,"connection_id":&service.id,
             "owner_id":&service.user_id,"catalog_service_id":&service.catalog_service_id,
             "binding":binding,"operation":bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
             "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(25))
-        }}).upsert(true).await?;
+        }).await?;
     }
     Ok(refusal)
 }

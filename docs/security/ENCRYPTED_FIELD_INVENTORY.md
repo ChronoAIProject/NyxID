@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 42 implemented adapters
-and 7 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 42 implemented adapters
+and 8 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -75,6 +75,7 @@ A collection may use separate adapters for different fields.
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
+| `channel_meta_oauth_sessions` | `assets_encrypted` | — | Pending |
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
 and a separate field path for each webhook. System, dynamic and ownerless
@@ -86,10 +87,19 @@ compares the exact observed client document before replacing stored material.
 Channel bot writers bind each local credential to its bot ID, owner and field when
 contextual writes are enabled. The adapter verifies the six fields and preserves
 verification, native-entry, Discord resume and Aurinko pins across storage rewrites.
-Telegram manager and connection-backed bots can use an empty local token. Shared signing
+Telegram manager, connection-backed and exactly revoked/removed Meta bots can
+retain an unmarked empty local token. The adapter preserves that retired sentinel;
+strict readers never interpret it as a contextual envelope. Shared signing
 producers prepare their dependent bots before rewrap. A real replacement starts a
 new field generation. Owner transfer rebinds local credentials and retires the old
 generations in the transaction that moves the bot and its routes.
+Meta manual credential PATCH, OAuth installation/reconnect and confirmed
+Instagram refresh use this same record writer. Disconnect and signed
+deauthorization retire only the captured current grant's token, clear its
+decoder marker and advance its credential generation. Meta's grant/owner
+transaction also owns the raw BSON credential write and any newly captured
+shared signer fence. Storage rewrap preserves the retained logical pins;
+transfer authenticates and rebinds the current transaction's source row.
 [Bot record adapter](../../backend/src/services/channel_bot_record.rs) · [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
 
 Each CMA request copy uses its own stored collection, row ID, user ID and field.
@@ -258,7 +268,8 @@ reported separately from authenticated ciphertext.
 
 After all serving replicas upgrade, start a fresh verification generation.
 Status uses the stored registry digest to select field and collection labels.
-For the two known previous registries it reports their original spellings and positions.
+For recognized historical registries it reports their original spellings and positions.
+Digests with identical field names and positions share the same label mapping.
 An unknown or missing digest returns aggregate totals, the mismatch blocker,
 a null current collection and an empty field list. Resume, rewrap and finding
 resolution require the live registry contract.

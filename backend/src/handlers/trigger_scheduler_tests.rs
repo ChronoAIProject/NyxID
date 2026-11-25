@@ -1334,6 +1334,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            meta_contexts: Vec::new(),
             activity_execution: None,
             automation_work: None,
             execution_task: None,

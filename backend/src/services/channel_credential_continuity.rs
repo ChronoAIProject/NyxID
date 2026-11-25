@@ -133,6 +133,20 @@ pub(super) fn select(
         .unwrap_or(dependencies)
 }
 
+/// A token can live outside this record or have been retired by the Meta worker.
+/// A live managed token and every context-marked token must still authenticate.
+pub(super) fn has_empty_token(bot: &ChannelBot) -> bool {
+    bot.bot_token_encrypted.is_empty()
+        && !bot.secret_context_versions.contains_key(TOKEN)
+        && (matches!(
+            bot.credential_source.as_str(),
+            "connection" | "telegram_manager"
+        ) || (super::channel_adapters::meta::is_meta(&bot.platform)
+            && bot.meta_binding.as_ref().is_some_and(|binding| {
+                binding.provider_revoked || (!bot.is_active && binding.subscription == "removed")
+            })))
+}
+
 pub(super) fn field_pin(bot: &ChannelBot, field: &str) -> AppResult<String> {
     let bytes = super::channel_registration::stored_secret(bot, field)?.ok_or_else(invalid)?;
     if let Some(evidence) = verified(bot)? {
@@ -193,8 +207,16 @@ pub(super) fn initialize(bot: &mut ChannelBot) -> AppResult<()> {
     Ok(())
 }
 
-/// Prepared rows can still be updated with compatible legacy envelopes after writer rollback.
-pub(super) async fn update_credentials(
+/// One prepared raw-record mutation. Both ordinary writers and Meta's
+/// authorized transactions use this exact BSON predicate and source fence.
+struct CredentialUpdate {
+    filter: Document,
+    update: Document,
+    snapshot: Option<super::platform_entry_credentials::EntryCredentialSnapshot>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_update(
     db: &mongodb::Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     adapter: &dyn super::channel_platform::PlatformAdapter,
@@ -202,32 +224,47 @@ pub(super) async fn update_credentials(
     mut filter: Document,
     mut set: Document,
     mut unset: Document,
-) -> AppResult<bool> {
+    tx: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Option<CredentialUpdate>> {
     let rows = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
     let touches_secret = FIELDS
         .iter()
-        .any(|f| set.contains_key(*f) || unset.contains_key(*f));
+        .any(|field| set.contains_key(*field) || unset.contains_key(*field));
     let mut snapshot = None;
     if touches_secret {
         filter.extend(physical_filter(bot)?);
-        // Either BSON byte representation is valid. Fence the raw document used to
-        // build the successor, including siblings on a first legacy promotion.
+        // Read the actual representation (Binary or the legacy byte array).
+        // Never compare a reserialized model to the stored BSON envelope.
         for field in FIELDS {
             filter.remove(field);
         }
-        let Some(raw) = rows.find_one(filter.clone()).await? else {
-            return Ok(false);
+        let query = rows.find_one(filter.clone());
+        let raw = if let Some(tx) = tx {
+            query.session(tx).await?
+        } else {
+            query.await?
         };
+        let Some(raw) = raw else { return Ok(None) };
         let current = super::channel_bot_record::decode(&raw)?;
         if bson::to_document(&current).map_err(|_| invalid())?
             != bson::to_document(bot).map_err(|_| invalid())?
         {
-            return Ok(false);
+            return Ok(None);
         }
         filter = super::record_storage::exact_document_predicate(&raw);
+        // Secret null clears a column. Version markers are authored once as a
+        // whole map below, avoiding overlapping parent/dotted Mongo updates.
+        for field in FIELDS {
+            if matches!(set.get(field), Some(Bson::Null)) {
+                set.remove(field);
+                unset.insert(field, "");
+            }
+            set.remove(format!("secret_context_versions.{field}"));
+            unset.remove(format!("secret_context_versions.{field}"));
+        }
         let evidence = match verified(bot)? {
             Some(previous) => Some(previous.clone()),
-            None if keys.contextual_record_writes() => {
+            None if keys.contextual_record_writes() || !bot.secret_context_versions.is_empty() => {
                 let entry = super::platform_entry_credentials::EntryCredentialSnapshot::load(
                     db, adapter, bot,
                 )
@@ -246,29 +283,86 @@ pub(super) async fn update_credentials(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
-    if let Some(entry) = snapshot {
+    Ok(Some(CredentialUpdate {
+        filter,
+        update,
+        snapshot,
+    }))
+}
+
+impl CredentialUpdate {
+    async fn apply(
+        &self,
+        db: &mongodb::Database,
+        tx: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        let changed = db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(self.filter.clone(), self.update.clone())
+            .session(&mut *tx)
+            .await?
+            .matched_count
+            == 1;
+        if changed
+            && let Some(entry) = &self.snapshot
+            && !entry.fence_sources_for_rewrap(db, tx).await?
+        {
+            return Err(invalid());
+        }
+        Ok(changed)
+    }
+}
+
+/// Prepared rows remain writable with compatible envelopes after writer rollback.
+pub(super) async fn update_credentials(
+    db: &mongodb::Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    bot: &ChannelBot,
+    filter: Document,
+    set: Document,
+    unset: Document,
+) -> AppResult<bool> {
+    let Some(prepared) = prepare_update(db, keys, adapter, bot, filter, set, unset, None).await?
+    else {
+        return Ok(false);
+    };
+    if prepared.snapshot.is_some() {
         let db = super::transaction_service::durable_database(db);
         return super::transaction_service::run_db_only(
             &db,
-            &(&db, rows, entry, filter, update),
-            |tx, (db, rows, entry, filter, update)| {
-                Box::pin(async move {
-                    let changed = rows
-                        .update_one(filter.clone(), update.clone())
-                        .session(&mut *tx)
-                        .await?
-                        .matched_count
-                        == 1;
-                    if changed && !entry.fence_sources_for_rewrap(db, tx).await? {
-                        return Err(invalid());
-                    }
-                    Ok(changed)
-                })
-            },
+            &(&db, prepared),
+            |tx, (db, prepared)| Box::pin(prepared.apply(db, tx)),
         )
         .await;
     }
-    Ok(rows.update_one(filter, update).await?.matched_count == 1)
+    Ok(db
+        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(prepared.filter, prepared.update)
+        .await?
+        .matched_count
+        == 1)
+}
+
+/// Join record preparation, the raw write and shared signer fence to the
+/// caller's grant/owner transaction. Provider I/O stays outside its retries.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn update_credentials_in_session(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    bot: &ChannelBot,
+    filter: Document,
+    set: Document,
+    unset: Document,
+) -> AppResult<bool> {
+    let Some(prepared) =
+        prepare_update(db, keys, adapter, bot, filter, set, unset, Some(&mut *tx)).await?
+    else {
+        return Ok(false);
+    };
+    prepared.apply(db, tx).await
 }
 
 fn replacement(
@@ -292,20 +386,24 @@ fn replacement(
         evidence
             .generations
             .insert(field.into(), uuid::Uuid::new_v4().to_string());
-        if keys.contextual_record_writes() && set.contains_key(field) {
+        if keys.contextual_record_writes()
+            && set.get(field).is_some_and(|value| {
+                !(field == TOKEN && matches!(value,Bson::Binary(bytes) if bytes.bytes.is_empty()))
+            })
+        {
             versions.insert(field.to_owned(), 3);
         } else {
             versions.remove(field);
         }
     }
-    if versions != bot.secret_context_versions {
-        let value = bson::to_bson(&versions).map_err(|_| invalid())?;
-        target.insert("secret_context_versions", value.clone());
-        if versions.is_empty() {
-            unset.insert("secret_context_versions", "");
-        } else {
-            set.insert("secret_context_versions", value);
-        }
+    let value = bson::to_bson(&versions).map_err(|_| invalid())?;
+    target.insert("secret_context_versions", value.clone());
+    set.remove("secret_context_versions");
+    unset.remove("secret_context_versions");
+    if versions.is_empty() {
+        unset.insert("secret_context_versions", "");
+    } else {
+        set.insert("secret_context_versions", value);
     }
     let updated = bson::from_document(target).map_err(|_| invalid())?;
     sign(&updated, &mut evidence)?;
@@ -512,6 +610,17 @@ pub(super) async fn rewrap_fixture(
     let coll = crate::models::channel_bot::COLLECTION_NAME;
     let rows = db.collection::<Document>(coll);
     let source = rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+    let current = super::channel_bot_record::decode(&source).unwrap();
+    let mut fields: Vec<_> = fields
+        .iter()
+        .copied()
+        .filter(|field| !super::channel_bot_record::external_token(&current, field))
+        .collect();
+    for field in current.secret_context_versions.keys() {
+        if !fields.contains(&field.as_str()) {
+            fields.push(field.as_str());
+        }
+    }
     assert!(
         super::record_field_service::migrate_snapshot(
             db,
@@ -519,7 +628,7 @@ pub(super) async fn rewrap_fixture(
             coll,
             &source,
             &bot.user_id,
-            fields
+            &fields
         )
         .await
         .unwrap()

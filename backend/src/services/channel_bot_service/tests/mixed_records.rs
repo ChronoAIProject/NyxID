@@ -84,6 +84,7 @@ async fn create(
         cfg,
         keys,
         adapter,
+        Some(OWNER),
         OWNER,
         id,
         &fields,
@@ -436,6 +437,66 @@ async fn channel_bot_mixed_records() {
         _ => panic!("unexpected fixture operation"),
     }
     std::fs::write(file.unwrap(), bson::to_vec(&bundle).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn contextual_channel_field_replacement_and_clear_preserve_untouched_decoders() {
+    let db = crate::test_utils::connect_transaction_test_database("mixed_channel_updates").await;
+    let cfg = crate::test_utils::test_app_config();
+    let mut keys = EncryptionKeys::from_config(&cfg);
+    let adapter = RecordingAdapter {
+        seen_tokens: Default::default(),
+    };
+    let fixture = create(&db, &cfg, &keys, &adapter).await;
+    keys.set_contextual_record_writes(false);
+    let row = fixture.get_document("row").unwrap();
+    let id = row.get_str("_id").unwrap();
+    db.collection::<Document>(COLLECTION_NAME)
+        .replace_one(doc! {"_id": id}, row)
+        .await
+        .unwrap();
+    let updated = update_bot(
+        &db,
+        &keys,
+        &reqwest::Client::new(),
+        &adapter,
+        id,
+        OWNER,
+        UpdateBotParams {
+            label: None,
+            bot_token: None,
+            x_events: None,
+            app_id: None,
+            app_secret: Some("replacement-secret"),
+            verification_token: None,
+            encrypt_key: SecretPatch::Clear,
+        },
+    )
+    .await
+    .unwrap();
+    for field in [TOKEN, APP, ENCRYPT] {
+        assert!(!updated.secret_context_versions.contains_key(field));
+    }
+    assert_eq!(updated.secret_context_versions.get(VERIFY), Some(&3));
+    assert_eq!(
+        decrypt_bot_token(&keys, &updated).await.unwrap().as_str(),
+        "app:replacement-secret"
+    );
+    for (field, expected) in [
+        (APP, Some("replacement-secret")),
+        (VERIFY, Some("verify")),
+        (ENCRYPT, None),
+    ] {
+        let value = crate::services::channel_registration::open_secret(&keys, &updated, field)
+            .await
+            .unwrap();
+        assert_eq!(
+            value
+                .as_deref()
+                .map(|bytes| std::str::from_utf8(bytes).unwrap()),
+            expected
+        );
+    }
 }
 
 #[tokio::test]

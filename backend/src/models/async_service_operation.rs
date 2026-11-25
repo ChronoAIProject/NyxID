@@ -113,6 +113,10 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    /// Original Meta sources only; no display labels or provider credentials.
+    /// Follows this watch's lifetime and survives inbound event expiry.
+    #[serde(default)]
+    pub meta_contexts: Vec<super::assistant_conversation::ChannelTurnContext>,
     /// Server-admitted original task, never caller-supplied authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,

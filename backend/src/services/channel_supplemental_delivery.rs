@@ -364,12 +364,43 @@ fn result_destination(origin: &ChannelOrigin) -> String {
         .thread
         .as_ref()
         .map(|b| (&b.child_id, b.generation, b.channel_generation, &b.agent_id));
-    let encoded = serde_json::to_vec(&(&origin.nyxbot_channel_id, &origin.partition, binding))
+    destination_hash(
+        &origin.nyxbot_channel_id,
+        &origin.partition,
+        binding.map(|(child, generation, channel_generation, agent)| {
+            (
+                child.as_str(),
+                generation,
+                channel_generation,
+                agent.as_str(),
+            )
+        }),
+    )
+}
+
+fn destination_hash(
+    channel: &str,
+    partition: &str,
+    binding: Option<(&str, i64, i64, &str)>,
+) -> String {
+    let encoded = serde_json::to_vec(&(channel, partition, binding))
         .expect("destination identifiers serialize");
     let mut hash = Sha256::new();
     hash.update(b"nyxbot-supplemental-result-v1\0");
     hash.update(encoded);
     format!("{:x}", hash.finalize())
+}
+
+pub(crate) fn saved_destination_key(
+    turn: &str,
+    channel: &str,
+    partition: &str,
+    binding: Option<(&str, i64, i64, &str)>,
+) -> String {
+    format!(
+        "saved-result:{turn}:{}",
+        destination_hash(channel, partition, binding)
+    )
 }
 
 pub(crate) fn saved_key(turn: &str, origin: &ChannelOrigin) -> String {

@@ -83,7 +83,17 @@ pub(crate) async fn bind_in_session(
     executing: bool,
     session: &mut ClientSession,
 ) -> AppResult<Option<ActivityBinding>> {
-    bind_inner(db, chat, kind, id, executing, Some(session), false).await
+    bind_inner(db, chat, kind, id, executing, Some(session), false, false).await
+}
+
+pub(crate) async fn bind_meta_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    kind: &str,
+    id: &str,
+    session: &mut ClientSession,
+) -> AppResult<Option<ActivityBinding>> {
+    bind_inner(db, chat, kind, id, false, Some(session), false, true).await
 }
 
 /// Called only at trusted gates, after their owner/key/turn checks. The update
@@ -96,7 +106,7 @@ pub async fn bind(
     executing: bool,
     session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
-    bind_inner(db, chat, kind, id, executing, session, true)
+    bind_inner(db, chat, kind, id, executing, session, true, false)
         .await
         .map(|_| ())
 }
@@ -110,6 +120,7 @@ async fn bind_inner(
     executing: bool,
     mut session: Option<&mut ClientSession>,
     publish_flags: bool,
+    require_match: bool,
 ) -> AppResult<Option<ActivityBinding>> {
     let Some(execution) = execution(chat) else {
         return Ok(None);
@@ -172,13 +183,12 @@ async fn bind_inner(
             "active_turn.activities.id": &execution.activity_id},
         doc! {"$set": {"active_turn.activities.$.decision": bson::to_bson(&decision).expect("decision metadata")}},
     );
-    match session {
-        Some(session) => {
-            update.session(session).await?;
-        }
-        None => {
-            update.await?;
-        }
+    let changed = match session {
+        Some(session) => update.session(session).await?,
+        None => update.await?,
+    };
+    if require_match && changed.matched_count != 1 {
+        return Err(crate::errors::AppError::AssistantTurnRequired);
     }
     Ok(Some(binding))
 }
