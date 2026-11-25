@@ -325,20 +325,25 @@ pub(super) async fn finish(
         }
     });
     let mut code = code;
-    let encrypted = if let Some(result) = result {
+    let (encrypted, marker) = if let Some(result) = result {
         let raw = Zeroizing::new(serde_json::to_vec(&result).map_err(encoding)?);
         if raw.len() + 2048 > MAX_PAYLOAD {
             code = Some("response_unavailable");
-            None
+            (None, None)
         } else {
-            Some(binary(
-                Slot::V2
-                    .seal(&state.encryption_keys, &row.id, Field::Result, &raw)
-                    .await?,
-            ))
+            let (bytes, marker) = Slot::V2
+                .seal(
+                    &state.encryption_keys,
+                    &row.id,
+                    &row.user_id,
+                    Field::Result,
+                    &raw,
+                )
+                .await?;
+            (Some(binary(bytes)), marker)
         }
     } else {
-        None
+        (None, None)
     };
     let mut session = state.db.client().start_session().await?;
     session.start_transaction().await?;
@@ -349,16 +354,21 @@ pub(super) async fn finish(
         "execution_proposal.v2.state": {"$in": ["preparing", "dispatched"]},
     };
     let mut unset = Slot::V2.unset(&[Field::Payload]);
-    unset.insert("execution_proposal.v2.result_context_version", "");
-    let update = doc! {
-        "$set": {
-            "activity_outcome": activity_outcome,
-            "execution_proposal.v2.state": state_name,
-            "execution_proposal.v2.failure_code": code,
-            "execution_proposal.v2.result": bson::to_bson(&encrypted).map_err(encoding)?,
-        },
-        "$unset": unset,
+    let mut set = doc! {
+        "activity_outcome": activity_outcome,
+        "execution_proposal.v2.state": state_name,
+        "execution_proposal.v2.failure_code": code,
+        "execution_proposal.v2.result": bson::to_bson(&encrypted).map_err(encoding)?,
     };
+    if let Some(version) = marker {
+        set.insert(
+            "execution_proposal.v2.result_context_version",
+            i32::from(version),
+        );
+    } else {
+        unset.insert("execution_proposal.v2.result_context_version", "");
+    }
+    let update = doc! {"$set": set, "$unset": unset};
     if state
         .db
         .collection::<Document>(REQUESTS)

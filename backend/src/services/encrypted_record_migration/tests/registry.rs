@@ -13,7 +13,7 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
         key_was_created: true,
         delivery_credential_encrypted: Some(vec![0xa5]),
     };
-    let mut sources = vec![
+    vec![
         (
             mobile_social::MobileSocialDelivery::COLLECTION_NAME,
             doc! {"ciphertext": &bytes},
@@ -42,14 +42,7 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             assistant_conversation::COLLECTION_NAME,
             doc! {"active_turn": {"restart_admission": {"window": {"input": &bytes}}}},
         ),
-    ];
-    for version in ["v1", "v2", "v3", "v4"] {
-        sources.push((
-            approval_request::COLLECTION_NAME,
-            doc! {"execution_proposal": {version: {"payload": &bytes, "result": &bytes}}},
-        ));
-    }
-    sources
+    ]
 }
 
 #[test]
@@ -178,7 +171,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51"
+        "89dd069d90525725f8d136619f99428d2f040d5176f66c9ef009d640e858c67c"
     );
     for digest in [
         Some(live.as_str()),
@@ -188,6 +181,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
         Some(previous_labels::CMA_REQUEST_DIGEST),
+        Some(previous_labels::LEARNING_PROPOSAL_DIGEST),
         Some(previous_labels::GATEWAY_SETUP_DIGEST),
         Some(previous_labels::EVENT_BINDING_DIGEST),
         Some(previous_labels::CHANNEL_KEY_DIGEST),
@@ -232,7 +226,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 if value == live
                     || matches!(
                         value,
-                        previous_labels::CMA_REQUEST_DIGEST
+                        previous_labels::LEARNING_PROPOSAL_DIGEST
+                            | previous_labels::CMA_REQUEST_DIGEST
                             | previous_labels::GATEWAY_SETUP_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST
                             | previous_labels::CHANNEL_KEY_DIGEST

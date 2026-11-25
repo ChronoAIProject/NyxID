@@ -1,9 +1,9 @@
 //! The mixed-binary driver exchanges raw BSON from the serving writers and the
-//! one-day cleanup. Only the contextual fixture installs a test-built envelope.
+//! one-day cleanup. The writer switch controls the actual stored envelopes.
 use super::*;
 use crate::crypto::{aes::EncryptionKeys, record_field::RecordContext};
 use crate::services::security_readiness_service as readiness;
-use proposals::record::Field;
+use proposals::record::{self, Field};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -34,29 +34,23 @@ async fn capture(
     let row = snapshot(f, id).await;
     let binary = arm(&row, slot).get_binary_generic(field).unwrap();
     let marker = format!("{field}_context_version");
-    assert!(!arm(&row, slot).contains_key(&marker));
-    let version = if slot == "v2" { "v2" } else { "v1" };
-    let suffix = if field == "result" { ":result" } else { "" };
-    let aad = format!("execution-proposal:{version}:{id}{suffix}");
     let keys = &f.state.encryption_keys;
-    let plain = keys.decrypt_with_aad(binary, aad.as_bytes()).await.unwrap();
-    let hash = hex::encode(Sha256::digest(&plain[..]));
-    if !contextual {
-        return (row, hash);
-    }
-    let path = ["execution_proposal", slot, field];
-    let context = RecordContext::new("approval_requests", id, &f.owner, &path).unwrap();
-    let cipher = bson::Binary {
-        subtype: bson::spec::BinarySubtype::Generic,
-        bytes: keys.encrypt_record(&plain, &context).await.unwrap(),
+    let plain = if contextual {
+        assert_eq!(arm(&row, slot).get_i32(&marker), Ok(3));
+        let path = ["execution_proposal", slot, field];
+        let context = RecordContext::new("approval_requests", id, &f.owner, &path).unwrap();
+        keys.decrypt_record(binary, &context).await.unwrap()
+    } else {
+        assert!(!arm(&row, slot).contains_key(&marker));
+        let version = if slot == "v2" { "v2" } else { "v1" };
+        let suffix = if field == "result" { ":result" } else { "" };
+        let aad = format!("execution-proposal:{version}:{id}{suffix}");
+        keys.decrypt_with_aad(binary, aad.as_bytes()).await.unwrap()
     };
-    f.state.db.collection::<Document>("approval_requests").update_one(
-        doc! {"_id": id}, doc! {"$set": {path.join("."):cipher, format!("execution_proposal.{slot}.{marker}"):3_i32}}
-    ).await.unwrap();
-    (snapshot(f, id).await, hash)
+    (row, hex::encode(Sha256::digest(&plain[..])))
 }
 
-async fn lifecycle(version: u32, writes: bool, contextual: bool) -> Document {
+async fn lifecycle(version: u32, writes: bool) -> Document {
     use super::super::proposal_v2_tests as external;
     let (mut f, chat) = match version {
         2 => {
@@ -85,6 +79,9 @@ async fn lifecycle(version: u32, writes: bool, contextual: bool) -> Document {
     };
     let mut keys = test_utils::test_encryption_keys();
     keys.set_contextual_record_writes(writes);
+    keys.set_allow_legacy_record_reads(
+        std::env::var("ALLOW_LEGACY_RECORD_READS").as_deref() != Ok("false"),
+    );
     f.state.encryption_keys = Arc::new(keys);
     if version == 2 {
         external::call(&f, "/proxy/s/execution-fixture/status", "record-fixture").await;
@@ -102,7 +99,7 @@ async fn lifecycle(version: u32, writes: bool, contextual: bool) -> Document {
         .unwrap();
     let id = &row.id;
     let slot = format!("v{version}");
-    let (pending, payload_hash) = capture(&f, id, &slot, "payload", contextual).await;
+    let (pending, payload_hash) = capture(&f, id, &slot, "payload", writes).await;
     let decision = if version == 2 {
         external::choice(&row, "operation")
     } else {
@@ -119,7 +116,7 @@ async fn lifecycle(version: u32, writes: bool, contextual: bool) -> Document {
         Box::pin(external::run(&f, &approved)).await;
     }
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-    let (completed, _) = capture(&f, id, &slot, "result", contextual).await;
+    let (completed, _) = capture(&f, id, &slot, "result", writes).await;
     assert!(!arm(&completed, &slot).contains_key("payload_context_version"));
     for key in [
         "gap_key",
@@ -200,17 +197,24 @@ async fn approval_proposal_records() {
     let writes =
         step == "roundtrip" || std::env::var("CONTEXTUAL_RECORD_WRITES").as_deref() == Ok("true");
     let bundle = match step.as_str() {
-        "write" | "contextual-fixture" | "roundtrip" => {
+        "write" | "roundtrip" => {
             let mut bundle = Document::new();
             for version in 1..=4 {
                 bundle.insert(
                     format!("v{version}"),
-                    Box::pin(lifecycle(version, writes, step != "write")).await,
+                    Box::pin(lifecycle(version, writes)).await,
                 );
             }
             if let Some(path) = file {
                 std::fs::write(path, bson::to_vec(&bundle).unwrap()).unwrap();
             }
+            bundle
+        }
+        "migrate" => {
+            let path = file.unwrap();
+            let mut bundle = bson::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            Box::pin(migrate_retained_rows(&mut bundle)).await;
+            std::fs::write(path, bson::to_vec(&bundle).unwrap()).unwrap();
             bundle
         }
         "read" | "reject" => bson::from_slice(&std::fs::read(file.unwrap()).unwrap()).unwrap(),
@@ -227,12 +231,95 @@ async fn approval_proposal_records() {
     db.drop().await.unwrap();
 }
 
+// A process can lose its lease after committing a source update and before
+// checkpointing it. Resume must authenticate the installed winner.
+async fn migrate_retained_rows(bundle: &mut Document) {
+    use crate::services::encrypted_record_migration as migration;
+    let keys = test_utils::test_encryption_keys();
+    for phase in ["pending", "completed", "cleared"] {
+        let db = test_utils::connect_transaction_test_database("approval_record_migrate").await;
+        let rows = db.collection::<Document>("approval_requests");
+        let generation = migration::start(&db, &keys, migration::Mode::Migrate, None)
+            .await
+            .unwrap();
+        for slot in ["v1", "v2", "v3", "v4"] {
+            let source = bundle
+                .get_document(slot)
+                .unwrap()
+                .get_document(phase)
+                .unwrap();
+            rows.insert_one(source).await.unwrap();
+            if slot == "v1" && phase != "cleared" {
+                assert!(record::migrate(&db, &keys, source).await.unwrap());
+            }
+        }
+        let report = loop {
+            let r = migration::status(&db, &keys).await.unwrap().unwrap();
+            if r.phase == "observed" {
+                break r;
+            }
+            Box::pin(migration::advance(&db, &keys, &generation))
+                .await
+                .unwrap();
+        };
+        assert_eq!(report.scanned, 4);
+        assert_eq!(report.unresolved, 0);
+        assert_eq!(report.rewritten, if phase == "cleared" { 0 } else { 3 });
+        let outcomes: Vec<_> = report
+            .field_outcomes
+            .iter()
+            .filter(|f| f.collection == "approval_requests")
+            .collect();
+        assert_eq!(outcomes.len(), 8);
+        for f in outcomes {
+            let present = match phase {
+                "pending" => f.field.ends_with(".payload"),
+                "completed" => f.field.ends_with(".result"),
+                _ => false,
+            };
+            assert_eq!(
+                (
+                    f.authenticated_current,
+                    f.no_material_observed,
+                    f.verification_blocked
+                ),
+                (i64::from(present), 4 - i64::from(present), 0)
+            );
+        }
+        for slot in ["v1", "v2", "v3", "v4"] {
+            let snapshots = bundle.get_document_mut(slot).unwrap();
+            let source = snapshots.get_document(phase).unwrap();
+            let winner = rows
+                .find_one(doc! {"_id": source.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap();
+            // Compare the entire BSON document outside the two encrypted pairs.
+            let mut expected = source.clone();
+            let dest = expected
+                .get_document_mut("execution_proposal")
+                .unwrap()
+                .get_document_mut(slot)
+                .unwrap();
+            for field in ["payload", "result"] {
+                if dest.get_binary_generic(field).is_ok() {
+                    dest.insert(field, arm(&winner, slot).get(field).unwrap().clone());
+                    dest.insert(format!("{field}_context_version"), 3_i32);
+                }
+            }
+            assert!(expected == winner);
+            snapshots.insert(phase, winner);
+        }
+        db.drop().await.unwrap();
+    }
+}
+
 #[tokio::test]
-async fn approval_proposal_pending_field_outcomes_require_one_well_formed_arm() {
+async fn approval_proposal_field_outcomes_require_one_well_formed_arm() {
     use crate::services::encrypted_record_migration as migration;
     let db = test_utils::connect_transaction_test_database("approval_field_outcomes").await;
     let keys = test_utils::test_encryption_keys();
-    let snapshots = Box::pin(lifecycle(2, false, false)).await;
+    let snapshots = Box::pin(lifecycle(2, false)).await;
     let empty = snapshots.get_document("cleared").unwrap();
     let mut documents = vec![
         doc! {"_id":"ordinary"},
@@ -269,7 +356,7 @@ async fn approval_proposal_pending_field_outcomes_require_one_well_formed_arm() 
         wrong(e.into());
     }
     // Two fully decodable arms also conflict, including an inactive arm with retained bytes.
-    let assistant = Box::pin(lifecycle(3, false, false)).await;
+    let assistant = Box::pin(lifecycle(3, false)).await;
     let pending = assistant.get_document("pending").unwrap();
     let mut competing = original.clone();
     competing.insert("v3", arm(pending, "v3").clone());
@@ -322,7 +409,7 @@ async fn approval_proposal_pending_field_outcomes_require_one_well_formed_arm() 
 
 #[tokio::test]
 async fn approval_proposal_context_binds_user_request_arm_and_field() {
-    let bundle = Box::pin(lifecycle(3, true, true)).await;
+    let bundle = Box::pin(lifecycle(3, true)).await;
     let keys = test_utils::test_encryption_keys();
     for (phase, field) in [("pending", Field::Payload), ("completed", Field::Result)] {
         let raw = bundle.get_document(phase).unwrap();
@@ -375,4 +462,166 @@ async fn approval_proposal_context_binds_user_request_arm_and_field() {
         arm.result_context_version = None;
         assert!(field.open(&keys, &missing_marker).await.is_err());
     }
+}
+
+async fn parked_rewrap(
+    db: &mongodb::Database,
+    source: Document,
+) -> (
+    tokio::task::JoinHandle<bool>,
+    Arc<crate::services::record_field_service::tests::HoldFirstWrap>,
+) {
+    let (keys, pause) = crate::services::record_field_service::tests::pause_first_wrap();
+    let db = db.clone();
+    let worker = tokio::spawn(async move { record::migrate(&db, &keys, &source).await.unwrap() });
+    pause.entered.notified().await;
+    (worker, pause)
+}
+
+#[tokio::test]
+async fn approval_proposal_rewrap_races_dispatch_and_retention_without_another_effect() {
+    use super::super::proposal_v2_tests as external;
+    for dispatch_first in [false, true] {
+        let mut f = Fixture::new("approval_record_dispatch").await;
+        f.enroll(true).await;
+        let mut legacy = test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        f.state.encryption_keys = Arc::new(legacy);
+        external::call(&f, "/proxy/s/execution-fixture/status", "race").await;
+        let requests = f
+            .state
+            .db
+            .collection::<ApprovalRequest>("approval_requests");
+        let requested = requests.find_one(doc! {}).await.unwrap().unwrap();
+        let id = &requested.id;
+        let choice = external::choice(&requested, "operation");
+        let approved = proposals::decide(&f.state, &f.owner, id, &choice)
+            .await
+            .unwrap();
+
+        let claim = if dispatch_first {
+            None
+        } else {
+            Some(
+                proposals::v2::claim_for_test(&f.state, &approved)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        let source = snapshot(&f, id).await;
+        let (worker, pause) = parked_rewrap(&f.state.db, source).await;
+        if dispatch_first {
+            Box::pin(external::run(&f, &approved)).await;
+        }
+        pause.release.notify_one();
+        assert_eq!(worker.await.unwrap(), !dispatch_first);
+        if let Some((resume, adapter)) = claim {
+            // Cross the real send barrier with the claim admitted before rewrap.
+            let mut auth = f.auth().await;
+            proposals::v2::attach_resume(&mut auth, resume.clone()).unwrap();
+            auth.execution_permission
+                .as_ref()
+                .unwrap()
+                .ingress
+                .set(adapter.clone())
+                .ok()
+                .unwrap();
+            let response = Box::pin(crate::handlers::execution_permission_resume::send(
+                &f.state,
+                &auth,
+                resume.effect.clone(),
+                adapter,
+                resume.independent_card_id.clone(),
+            ))
+            .await
+            .unwrap();
+            let response =
+                proposals::v2::complete_response_for_test(&f.state, &approved, &resume, response)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+        }
+        // Two deliveries retain the same pre-rewrap approval and race its live send fence.
+        tokio::join!(
+            Box::pin(external::run(&f, &approved)),
+            Box::pin(external::run(&f, &approved))
+        );
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        let completed = requests.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        assert_eq!(
+            proposals::v2::proposal(&completed).unwrap().state,
+            "completed"
+        );
+
+        requests
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{
+                    "created_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::days(2)),
+                    "execution_proposal.v2.delivered_turn_id":"finished"
+                }},
+            )
+            .await
+            .unwrap();
+        let (worker, pause) = parked_rewrap(&f.state.db, snapshot(&f, id).await).await;
+        Box::pin(proposals::sweep(&f.state)).await.unwrap();
+        pause.release.notify_one();
+        assert!(!worker.await.unwrap());
+        let cleared = snapshot(&f, id).await;
+        for key in [
+            "payload",
+            "payload_context_version",
+            "result",
+            "result_context_version",
+        ] {
+            assert!(!arm(&cleared, "v2").contains_key(key));
+        }
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn approval_proposal_rotation_verifies_both_fields_before_either_is_written() {
+    let db = test_utils::connect_transaction_test_database("approval_record_rotation").await;
+    let keys = test_utils::test_encryption_keys();
+    let mut config = test_utils::test_app_config();
+    config.encryption_key_previous = config.encryption_key.replace("33".repeat(32));
+    let rotated = EncryptionKeys::from_config(&config);
+    let rows = db.collection::<Document>("approval_requests");
+    let bundle = Box::pin(lifecycle(4, true)).await;
+    let mut both = bundle.get_document("pending").unwrap().clone();
+    let result = arm(bundle.get_document("completed").unwrap(), "v4");
+    let selected = both
+        .get_document_mut("execution_proposal")
+        .unwrap()
+        .get_document_mut("v4")
+        .unwrap();
+    for key in ["result", "result_context_version"] {
+        selected.insert(key, result.get(key).unwrap().clone());
+    }
+    let mut broken = both.clone();
+    broken
+        .get_document_mut("execution_proposal")
+        .unwrap()
+        .get_document_mut("v4")
+        .unwrap()
+        .insert("result_context_version", 7);
+    rows.insert_one(&broken).await.unwrap();
+    let id = doc! {"_id":both.get_str("_id").unwrap()};
+    assert!(record::migrate(&db, &rotated, &broken).await.is_err());
+    assert!(rows.find_one(id.clone()).await.unwrap().unwrap() == broken);
+    rows.replace_one(id.clone(), &both).await.unwrap();
+    record::verify(&keys, &both).await.unwrap();
+    assert!(record::verify(&rotated, &both).await.is_err());
+    assert!(record::migrate(&db, &rotated, &both).await.unwrap());
+    let winner = rows.find_one(id).await.unwrap().unwrap();
+    record::verify(&rotated, &winner).await.unwrap();
+    assert!(!record::migrate(&db, &rotated, &winner).await.unwrap());
+    assert!(record::verify(&keys, &winner).await.is_err());
+    db.drop().await.unwrap();
 }

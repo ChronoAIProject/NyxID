@@ -38,6 +38,8 @@ def main():
                         help="exchange learning proposals with the reader-preparation binary")
     parser.add_argument("--approval-readers", action="store_true",
                         help="exchange four versions of pending, completed and cleared approvals")
+    parser.add_argument("--approval-writers", action="store_true",
+                        help="migrate and exchange retained approvals with the dual-reader base")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -99,6 +101,29 @@ def main():
                 run(writer, "registry-write", "generation", writes=True, test=registry)
                 run(writer, "registry-live", "generation", writes=True, test=registry)
                 run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
+
+        if args.approval_writers:
+            for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                run(writer, "write", writer)
+                run(reader, "read", writer)
+            run("base", "write", "base-on", writes=True)
+            run("candidate", "read", "base-on", writes=True)
+            run("candidate", "reject", "base-on", writes=True, legacy=False)
+            run("candidate", "migrate", "base-on", writes=True)
+            run("candidate", "write", "active", writes=True, legacy=False)
+            for fixture in ["base-on", "active"]:
+                for side in ["base", "candidate"]:
+                    run(side, "read", fixture, writes=True, legacy=False)
+                    run(side, "read", fixture, legacy=False)
+            run("candidate", "write", "rollback")
+            run("base", "read", "rollback")
+            run("candidate", "reject", "rollback", legacy=False)
+            registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+            for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                run(writer, "registry-write", "generation", writes=True, test=registry)
+                run(writer, "registry-live", "generation", writes=True, test=registry)
+                run(reader, "registry-" + previous, "generation", test=registry, writes=True)
             return
 
         if args.approval_readers:

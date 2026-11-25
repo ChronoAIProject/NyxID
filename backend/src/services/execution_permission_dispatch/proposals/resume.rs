@@ -325,10 +325,11 @@ pub(crate) async fn resume_turn(
                 }
             }
         };
-        let result = Slot::Assistant(version)
+        let (result, marker) = Slot::Assistant(version)
             .seal(
                 &state.encryption_keys,
                 id,
+                &request.user_id,
                 Field::Result,
                 private_result.as_deref().unwrap_or(&text).as_bytes(),
             )
@@ -338,18 +339,23 @@ pub(crate) async fn resume_turn(
         } else {
             Slot::Assistant(version).unset(&[Field::Payload])
         };
-        unset.insert("execution_proposal.v1.result_context_version", "");
-        let update = doc! {
-            "$set": {
-                "activity_outcome": activity_outcome,
-                "execution_proposal.v1.state": state_name,
-                "execution_proposal.v1.failure_code": code,
-                "execution_proposal.v1.result": binary(result),
-                "execution_proposal.v1.independent_request_id": independent_request,
-                "execution_proposal.v1.independent_card_id": independent_card,
-            },
-            "$unset": unset,
+        let mut set = doc! {
+            "activity_outcome": activity_outcome,
+            "execution_proposal.v1.state": state_name,
+            "execution_proposal.v1.failure_code": code,
+            "execution_proposal.v1.result": binary(result),
+            "execution_proposal.v1.independent_request_id": independent_request,
+            "execution_proposal.v1.independent_card_id": independent_card,
         };
+        if let Some(version) = marker {
+            set.insert(
+                "execution_proposal.v1.result_context_version",
+                i32::from(version),
+            );
+        } else {
+            unset.insert("execution_proposal.v1.result_context_version", "");
+        }
+        let update = doc! {"$set": set, "$unset": unset};
         let mut session = state.db.client().start_session().await?;
         session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name),move |session,(db,id,claim,update,state_name)|Box::pin(async move {
             let result:AppResult<()>=async {
