@@ -878,13 +878,15 @@ NyxAgent is unchanged: every thread is an
 ordinary conversation with its own key.
 
 Native team tools use the `nyxid__` prefix. The authoritative registry is
-`backend/src/services/assistant_team_tools.rs`: `TOOL_NAMES` are NyxBot-only
+`backend/src/services/assistant_team_tools.rs`: `TOOL_NAMES` are NyxBot's tools
 (specialists, personal and collaboration groups, channel bots and chats,
 schedules, sharing, operation and skill management, learning, `settings_link`,
 `update_settings`, and setup links and guides such as `channel_bot_setup_link`,
 `channel_setup_guide`, `machine_setup_link` and `machine_pair`);
 `AGENT_TOOL_NAMES` are available to every agent (`task_status`, memory,
-`post_to_chat`, machine, operation and skill tools). Feature-gated tools such as
+`post_to_chat`, machine, operation and skill tools). A name can appear in both:
+`draft_agent_skill` lets NyxBot draft for any agent it maintains and a specialist
+only for its own agent. Feature-gated tools such as
 `list_notifications` and `draft_agent_skill` are listed only when their feature is
 on, and shared, guest and collaboration chats receive a reduced set.
 `wait_for_subagents` waits at most 120 s. Every agent also has the owner-turn-only, read-only
@@ -999,7 +1001,9 @@ channel bots to NyxBot or a personal specialist (`link_channel_bot` / `PATCH /ch
 relinks it). Telegram bots always use the Agent Event Gateway (catalog slug
 `cmaeg`); bots on other platforms use it when that platform's
 `nyxbot:gateway-{platform}` feature flag is on for the linking person and the
-gateway accepts the platform. On the gateway, NyxID mints a dedicated route key and gateway agent key, creates the
+gateway accepts the platform; a WhatsApp bot is eligible only as a dedicated-app
+BYO bot (managed Embedded Signup bots stay on the relay; see
+[the WhatsApp exception](../CHANNEL_EVENT_GATEWAY.md#native-whatsapp-dedicated-byo-apps-track-2-checkpoint)). On the gateway, NyxID mints a dedicated route key and gateway agent key, creates the
 gateway channel as the owner (the gateway verifies the agent key through
 `GET /users/me`), points the route key's callback at the gateway, and is the
 gateway's `nyxbot` provider under `/api/v1/nyxbot` (Agent Card, bindings,

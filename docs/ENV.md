@@ -139,7 +139,10 @@ are supplied or authorized by this configuration support.
 ### Remote Machine runtime, funding and bootstrap verification
 
 Missing or invalid required values do not stop the server; they keep managed
-Machine admission closed and appear as platform readiness blockers.
+Machine admission closed and appear as platform readiness blockers. The
+signed-ticket verification settings below are not part of that readiness report:
+an invalid or incomplete key makes bootstrap verification unavailable (an error is
+logged) without appearing as a readiness blocker.
 
 | Variable | Requirement | Default | Description |
 |---|---|---|---|
@@ -150,7 +153,7 @@ Machine admission closed and appear as platform readiness blockers.
 | `NYXID_REMOTE_MACHINE_STORAGE_CLASS` | Optional | Cluster default | Unset or blank omits the PVC `storageClassName`; a configured name must be a valid, existing StorageClass. |
 | `NYXID_REMOTE_MACHINE_RUNTIME_CLASS` | Optional | Node default | Unset or blank omits `runtimeClassName`. |
 | `NYXID_REMOTE_MACHINE_PROVIDER_PUBLIC_KEY_FILE`, `NYXID_REMOTE_MACHINE_PROVIDER_ISSUER` | Mode-specific | *(none)* | Signed workload-ticket verification, used only when `NYXID_REMOTE_MACHINE_KUBE_API` is unset. Set both or neither; one alone or an invalid key keeps admission closed. When `NYXID_REMOTE_MACHINE_KUBE_API` is set, bootstrap uses Kubernetes TokenReview and ignores both. |
-| `NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE`, `NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT`, `NYXID_REMOTE_MACHINE_CONTROLLER_IMAGE_DIGEST`, `NYXID_REMOTE_MACHINE_CONTROLLER_CONTAINER` | Optional | *(none)* | Sandbox controller health on the admin platform view only; the first three are needed together (`sha256:<64 hex>` digest), the container is optional. Not a lifecycle prerequisite. |
+| `NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE`, `NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT`, `NYXID_REMOTE_MACHINE_CONTROLLER_IMAGE_DIGEST`, `NYXID_REMOTE_MACHINE_CONTROLLER_CONTAINER` | Optional | *(none)* | Sandbox controller health on the admin platform view only; the first three are needed together (`sha256:<64 lowercase hex>` digest), the container is optional. Not a lifecycle prerequisite. |
 | `NYXID_REMOTE_MACHINE_KUBELET_ENDPOINTS`, `NYXID_REMOTE_MACHINE_KUBELET_CA_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_TOKEN_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_AUDIENCE` | Optional | *(none)* | Direct kubelet Pod-storage collector. Unset or blank endpoints disable it; once endpoints (a JSON map of node name to HTTPS origin) are set, the other three are required. |
 
 See [Remote Machine deployment](../deploy/remote-machine/README.md) for the

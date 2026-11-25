@@ -570,7 +570,7 @@ exact current text; `{login_url}` is the only variable part.
 | Conflict | `desktop_unavailable`, `desktop_busy`, `desktop_runtime_unavailable` | CMA refused the desktop outside the descriptor read; the descriptor read instead returns `available: false` with the same `reason`. |
 | Not found | `CMA resource not found` | CMA answered 404. |
 | Forbidden | `CMA resource access denied` | CMA reported a different owner, or the native route is not permitted. |
-| Validation | `Invalid CMA request` | Invalid identifier, cursor or `Idempotency-Key` (1–200 printable ASCII bytes, without `"` or `\`). |
+| Validation | `Invalid CMA request` | Invalid identifier, cursor or `Idempotency-Key` (1–200 visible ASCII characters with no spaces, excluding `"` and `\`). |
 | Validation | `Direct proxy destination is not permitted` | The CMA destination fails the proxy destination policy. |
 
 **Proxy admission and creation** (catalog CMA requests from MCP or chat keys):
@@ -605,7 +605,7 @@ exact current text; `{login_url}` is the only variable part.
 | Forbidden | `A personal account is required` | The owner is not an active person. |
 | Not found | `Sandbox not found`, `Sandbox was not created through NyxID` | No NyxID-created Sandbox matches. |
 | Not found | `CMA Agent not found`, `CMA Agent parent not found` | No owned Agent or parent reference matches. |
-| Validation | `One Idempotency-Key is required` | A Sandbox command or retirement has no, or more than one, `Idempotency-Key`. |
+| Validation | `One Idempotency-Key is required` | A `pause` or `revive` command, or a retirement, has no, or more than one, `Idempotency-Key` (`recover_creation` takes none). |
 | Validation | `Invalid CMA event cursor` | Stream cursor and `Last-Event-ID` differ, repeat, or are invalid. |
 | Conflict | `cma_sandbox_generation_changed` | The request's generation is stale. |
 | Conflict | `cma_deployment_changed` | The CMA catalog service changed since the reference was created. |
@@ -622,7 +622,7 @@ exact current text; `{login_url}` is the only variable part.
 | --- | --- | --- |
 | Forbidden | `CMA requires this owner's enabled feature and current CMA grant` | The chat is not eligible for CMA tools. |
 | Validation | `Invalid CMA tool arguments` | Arguments are missing or malformed. |
-| Validation | `Use an attachment of at most 32 MiB from this conversation` | `nyxid__cma_save_attachment` names another conversation's or an oversized upload. |
+| Validation | `Use an attachment of at most 32 MiB from this conversation` | `nyxid__cma_save_attachment` names an upload over 32 MiB or from another conversation. An upload outside the current chat's scope is refused earlier as not found. |
 | Conflict | `CMA action access mode changed; confirm again` | The access mode changed after a non-read action was confirmed. |
 | Conflict | `cma_resource_page_too_large` | A `nyxid__list_cma_resources` page exceeds 64 KiB. |
 

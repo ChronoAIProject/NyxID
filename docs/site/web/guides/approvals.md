@@ -39,7 +39,7 @@ Pending requests always appear in the web console, with or without a notificatio
 3. NyxID sends a deep-link — open it in Telegram to complete the link.
 4. Under **Approval notifications**, enable **Telegram**.
 
-When an approval request arrives, NyxID sends a Telegram message with the `action_description` and **Approve** / **Deny** buttons. Tap to decide.
+When an approval request arrives, NyxID sends a Telegram message with the `action_description` and **Approve** / **Deny** buttons. Tap to decide. An execution-permission review is not decided in Telegram: the message links to the web app's Approvals page instead.
 
 :::tip
 Start a conversation with `@NyxIDBot` before linking if NyxID cannot initiate the first message. Bot accounts must receive a message before they can contact a user.
@@ -51,7 +51,7 @@ Start a conversation with `@NyxIDBot` before linking if NyxID cannot initiate th
 2. Accept the push notification permission prompt.
 3. Go to **Settings → Notifications**, enable **Push notifications**.
 
-The push carries no request details: it reads **Approval Required** / *A service is requesting access*, or for an organization approval **Org Approval Required** / *{org name} admins: a service is requesting access*. Tap the notification to open the approval in the app, which loads the details, and decide.
+The visible push text carries no request details: it reads **Approval Required** / *A service is requesting access*, or for an organization approval **Org Approval Required** / *{org name} admins: a service is requesting access*. Tap the notification to open the approval in the app, which loads the details, and decide. The push data can include the request's HTTP method, resource and verb for the app to display; an execution-permission review is marked as not decidable in the app and links to web review instead.
 
 ## Approve or deny a request
 

@@ -131,7 +131,8 @@ consent cards expire. `PATCH /conversations/{id}/access-mode` answers `410 Gone`
 ## 7. Native tools
 
 The authoritative tool registry is `backend/src/services/assistant_team_tools.rs`
-(`TOOL_NAMES` for NyxBot only, `AGENT_TOOL_NAMES` for every agent). Beyond the tools
+(`TOOL_NAMES` for NyxBot, `AGENT_TOOL_NAMES` for every agent; a name such as
+`draft_agent_skill` can appear in both, with a narrower meaning for specialists). Beyond the tools
 described here it includes schedule, sharing, operation, skill, learning,
 collaboration-group, channel-chat and machine-setup tools, `update_settings` (owner
 settings, only when asked) and `channel_setup_guide` (the built-in channel setup
@@ -1544,8 +1545,8 @@ owner's identity and billing and the target's normal grants and credential key.
 The final reply stays in the thread unless `deliver_to` selects an owner-approved
 channel chat or push notification. Chat posting checks live ownership, agent
 assignment, posting permission and bot status again at delivery. Chat outputs
-respect each platform's message limit: up to 64 parts deliver the full reply, and a
-longer reply delivers 63 parts plus a 64th message linking to its full thread in NyxID.
+respect each platform's message limit and the shared 64-part rule in
+[Full saved reply delivery](../TELEGRAM_NEW.md#full-saved-reply-delivery).
 
 Trigger turns have their own budget (30/hour, 300/day by default), use the existing
 owner turn pool, and do not increment or reset `MAX_EVENT_STREAK`. A busy thread,

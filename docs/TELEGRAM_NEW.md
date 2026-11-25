@@ -326,6 +326,11 @@ The planner converts assistant Markdown to Telegram display text with explicit
 per-message entities, so emphasis, links and code do not depend on parsing an
 unfinished Markdown fragment. Native manager and proactive posts use the same
 platform-specific limits (including Slack scalar and Lark JSON-byte accounting).
+A reply that fits in 64 parts is delivered in full. A longer reply delivers 63
+parts and a 64th message saying that the reply exceeds the 64-message limit, with
+a link to the full text in NyxID. (Agent replies through `/channel-relay/reply`
+follow a different rule: more than 64 parts fails before sending; see
+[Complete IM replies](CHANNEL_COMPLETE_REPLIES.md#bounds-and-splitting).)
 
 Authored post requests accept at most 32,768 characters of input. This input
 limit is separate from the platform's single-message limit, so a post can still

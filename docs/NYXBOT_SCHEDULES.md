@@ -439,15 +439,13 @@ the assistant transcript.
 `deliver_to` is `{"type":"thread"}`, `{"type":"notification"}` (push only), or
 `{"type":"chat","chat_id":"..."}`. Chat access is checked both at configuration
 and delivery, through the existing post-to-chat path. Replies longer than one
-platform message are split into parts within the destination platform limit. Up
-to 64 parts deliver the full reply. A longer reply delivers 63 parts and a 64th
-message saying that the reply exceeds the 64-message limit, with a link to the
-NyxID thread that holds the full reply. Push has a concise preview and thread ID.
+platform message are split under the shared 64-part rule in
+[Full saved reply delivery](TELEGRAM_NEW.md#full-saved-reply-delivery). Push has a concise preview and thread ID.
 A run whose saved `deliver_to` targets a chat receives that platform’s one-message
 length guidance in turn-only context, including confirmation continuations and
 specialist reports. Telegram prefers one 4,096-character message; an explicit
 request for long or complete output permits multiple parts. The delivery planner
-splits longer replies under the 64-part rule above. Thread-only runs receive no channel
+splits longer replies under the same 64-part rule. Thread-only runs receive no channel
 length guidance. `list_channel_chats` supplies the same per-destination guidance
 for explicit `post_to_chat` calls.
 
@@ -589,10 +587,8 @@ it excludes HTTP socket/TLS and authentication middleware overhead:
 | Confirmation decision → completed continuation | 177.912 ms | persisted owner decision, scheduler tick, fake NyxAgent |
 | Three-day outage, five-minute cadence | 85.262 ms | 864 missed occurrences; one execution, one summary, one summary audit |
 
-In that recorded run, the 27 scheduler tests then in the suite passed in 64.28
-seconds and the five cron-computation tests passed in 0.73 seconds. These counts
-are a historical record of that run, not the current number of tests. The
-scheduler suite includes admission-deadline and failure-notification regressions
+Historical record (2026-10-15 run): 27 scheduler tests passed in 64.28 seconds
+and five cron-computation tests in 0.73 seconds. The scheduler suite includes admission-deadline and failure-notification regressions
 in addition to these measurements.
 
 The explain test asserts `PROJECTION_COVERED → IXSCAN`, index

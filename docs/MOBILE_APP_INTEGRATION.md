@@ -584,8 +584,8 @@ Every push carries a `type` in its data (FCM `data`; top-level keys in the APNs 
 | `type` | Sent when | Key data fields (besides `type`) |
 |---|---|---|
 | `approval_request` | Alert. An approval request is created and needs this person's decision (owner, or each org admin for an org policy). | `request_id`, `challenge_id` (same value), `deeplink` (`nyxid://challenge/{id}`). Proxy requests: `http_method`, `resource`, `verb` when known. Execution-permission reviews: `decision_kind: "execution_permission"`, `can_decide: "false"`, `review_path`. Org policy: `from_org_policy: "true"`, `org_id`, `org_name` when known |
-| `approval_decision` | Silent. A request is approved or rejected; sent to everyone who received its `approval_request`. | `request_id`, `decision` (`approved` or `rejected`) |
-| `approval_expired` | Silent. The expiry sweep marks a pending request expired; sent to everyone who received its `approval_request`. | `request_id` |
+| `approval_decision` | Silent. A request is approved or rejected; sent to the recipients recorded when its `approval_request` was created (using their current push settings; receipt of the original alert is not checked). | `request_id`, `decision` (`approved` or `rejected`) |
+| `approval_expired` | Silent. The expiry sweep marks a pending request expired; sent to the recipients recorded when its `approval_request` was created (using their current push settings). | `request_id` |
 | `connection_expired` | Alert. A connected service's OAuth connection can no longer be refreshed. | `service_slug`, `user_service_id`, `api_key_id`, `reconnect_url` |
 | `channel_bot_failed`, `channel_bot_restored`, `channel_bot_guest_defaults` | Alert. A channel bot stops working, recovers, or NyxID changes an organization bot's guest access defaults. Sent to the owner, or to every admin of an organization bot. | `bot_id`, `recommended_action`, `url` |
 | `mfa_recovery_used` | Alert. An MFA recovery code was used on the account. | none |

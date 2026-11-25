@@ -388,7 +388,7 @@ Content-Type: application/json
 
 ### Conversation existence is not leakable
 
-The `find_one({_id, is_active, agent_api_key_id, platform: "device"})` query collapses "not found", "inactive", "foreign" and "bot-backed" into a single 401. A caller holding a valid agent key cannot distinguish a foreign conversation from a nonexistent one, or a bot conversation from a device one, via timing or status code. The wildcard 400 check runs *after* the ownership filter, so a 400 is only ever surfaced to legitimate owners.
+The `find_one({_id, is_active, agent_api_key_id, platform: "device"})` query collapses "not found", "inactive", "foreign" and "bot-backed" into a single 401. Every lookup miss returns the same response, so a caller holding a valid agent key cannot tell a foreign, inactive, nonexistent or bot-backed conversation apart by status code. An active device conversation assigned to the caller proceeds to rate limiting and forwarding. The wildcard 400 check runs *after* the ownership filter, so a 400 is only ever surfaced to legitimate owners.
 
 ### Pure passthrough, no payload persistence
 
