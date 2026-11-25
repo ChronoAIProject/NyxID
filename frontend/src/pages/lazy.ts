@@ -6,6 +6,9 @@ export const NyxbotOnboardingPage = lazy(() =>
   })),
 );
 
+export const ActivityPage = lazy(() =>
+  import("@/pages/activity").then((m) => ({ default: m.ActivityPage })),
+);
 export const LandingPage = lazy(() =>
   import("@/pages/landing").then((m) => ({ default: m.LandingPage })),
 );
