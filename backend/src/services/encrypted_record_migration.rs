@@ -58,6 +58,7 @@ enum Adapter {
     GatewayTransport,
     CmaRequest,
     LearningProposal,
+    ReattachWindow,
     ApprovalProposal,
     Setup,
     AgentLogin,
@@ -352,7 +353,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_conversations",
-        adapter: Adapter::Pending,
+        adapter: Adapter::ReattachWindow,
         fields: &["active_turn.restart_admission.window.input"],
     },
     Entry {
@@ -568,7 +569,8 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
         Some(
-            previous_labels::LEARNING_PROPOSAL_DIGEST
+            previous_labels::APPROVAL_PROPOSAL_DIGEST
+            | previous_labels::LEARNING_PROPOSAL_DIGEST
             | previous_labels::CMA_REQUEST_DIGEST
             | previous_labels::GATEWAY_SETUP_DIGEST
             | previous_labels::EVENT_BINDING_DIGEST
@@ -782,6 +784,12 @@ async fn verify(
             Box::pin(super::execution_permission_dispatch::proposals::record::verify(keys, row))
                 .await
         }
+        Adapter::ReattachWindow => {
+            Box::pin(super::assistant_nyxagent_runtime::window_record::verify(
+                keys, row,
+            ))
+            .await
+        }
         Adapter::LearningProposal => {
             Box::pin(super::assistant_learning_record::storage::verify(keys, row)).await
         }
@@ -926,6 +934,12 @@ async fn migrate(
             Box::pin(
                 super::execution_permission_dispatch::proposals::record::migrate(db, keys, row),
             )
+            .await
+        }
+        Adapter::ReattachWindow => {
+            Box::pin(super::assistant_nyxagent_runtime::window_record::migrate(
+                db, keys, row,
+            ))
             .await
         }
         Adapter::LearningProposal => {

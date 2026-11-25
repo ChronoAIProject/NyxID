@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 37 implemented adapters
-and 12 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 41 implemented adapters
+and 8 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -73,7 +73,7 @@ A collection may use separate adapters for different fields.
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
-| `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
+| `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
@@ -108,6 +108,12 @@ Approval payloads and results bind the approval ID, user and selected versioned
 field path. Migration compares the complete source approval before replacing
 retained fields. Dispatch claims and per-effect send receipts keep their own fences.
 
+Reattach input binds the conversation, user, admitted credential and window key.
+Recovery and continuation writers store the marker with the input. Rewrap
+compares the full source conversation so worker takeover, window replacement,
+credential rotation, stop and settlement retain their own fences.
+[Window storage](../../backend/src/services/assistant_reattach_window_record.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
@@ -119,9 +125,6 @@ retained fields. Dispatch claims and per-effect send receipts keep their own fen
   context, the late-delivery target and the queued guest setup payload.
   Gateway responses store an encrypted replay payload.
   [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
-- Assistant recovery retains the encrypted input on the
-  active turn’s restart window.
-  [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and
