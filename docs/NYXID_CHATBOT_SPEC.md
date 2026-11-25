@@ -1,5 +1,7 @@
 # NyxID Chatbot — Feature Spec (Revised)
 
+> **Status:** Historical — the stateless Gemini chatbot it describes is not in the codebase. Current spec: [Assistant Chat](chat/README.md).
+
 > This spec replaces the original v1 spec. All decisions below were validated through an engineering review with an independent outside voice (Codex).
 
 ## Overview

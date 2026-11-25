@@ -1,8 +1,8 @@
 # NyxBot: a persistent personal agent with specialist agents
 
-Status: implemented in 0.31.0 (2026-09-28). The normative contract is
-[08-nyxagent-engine.md](08-nyxagent-engine.md) (Authority, NyxBot agents, Channel
-bots). Base: `main` at `2b6311c0` (0.30.2).
+Status: implemented in 0.31.0 (2026-09-28). This document is the NyxBot team and
+channel design; the engine contract (turns, routes, persistence, authority) is
+[08-nyxagent-engine.md](08-nyxagent-engine.md). Base: `main` at `2b6311c0` (0.30.2).
 
 ## 1. Decision in one paragraph
 
@@ -10,8 +10,9 @@ Every person gets **one persistent personal agent, NyxBot**: their chief of
 staff, in the spirit of Meta's Muse (one agent per person that remembers what
 matters, works across the app and chat apps, keeps working in the background, and
 checks before sensitive actions) and xAI's Grok Bot (persistent, named bots with
-memory that work together, with a Chief of Staff bot). NyxBot runs with Full
-access, remembers durable facts, and delegates to **specialist agents** that the
+memory that work together, with a Chief of Staff bot). NyxBot holds full account
+authority (the owner's [access mode](#access-modes), Auto by default, decides which
+actions it confirms first), remembers durable facts, and delegates to **specialist agents** that the
 user or NyxBot creates: persistent, named agents with a role description, their
 own memory and only the services they were granted. Talk to an agent and that
 agent handles the whole request itself: a specialist you talk to directly
@@ -128,6 +129,13 @@ consent cards expire. `PATCH /conversations/{id}/access-mode` answers `410 Gone`
 `POST /turns` ignores `access_mode`. The conversation-level consent selector is retired. The composer permission selector updates the owner setting described under Access modes.
 
 ## 7. Native tools
+
+The authoritative tool registry is `backend/src/services/assistant_team_tools.rs`
+(`TOOL_NAMES` for NyxBot only, `AGENT_TOOL_NAMES` for every agent). Beyond the tools
+described here it includes schedule, sharing, operation, skill, learning,
+collaboration-group, channel-chat and machine-setup tools, `update_settings` (owner
+settings, only when asked) and `channel_setup_guide` (the built-in channel setup
+procedure).
 
 NyxBot only: `spawn_subagent` (name, description, services, account_read,
 specialty, optional task), `message_subagent` (runs in the specialist's home
@@ -1404,7 +1412,8 @@ direct chats; gateway provider and direct relay.
 
 Role-to-profile routing (NyxBot, specialist, channel, per specialty) is
 admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
-(`ROUTING_ACTIVE = false`): specialists use NyxBot's profile.
+(`ROUTING_ACTIVE = false`): a new specialist starts with NyxBot's model, and each
+agent's threads use that agent's own configured model.
 
 ## 15. Risks
 
@@ -1413,7 +1422,7 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 | Prompt injection through a specialist's tool results asks for more access | Requests carry the user's words; NyxBot's prompt forbids granting on a tool's say-so; account writes are NyxBot-only; proxy approvals still apply; non-involved work cannot request anything and gets `missing_access` |
 | Runaway wake-ups and cost | Event caps, owner pool and limits, NyxAgent caps, out-of-credits handling |
 | Memory stores something sensitive | Bounded notes, credential-shape refusal, owner can review and delete |
-| A stranger reaches a Full-access agent through a chat app | Owner-verified senders only; refusal without a turn |
+| A stranger reaches a Full-access agent through a chat app | Only owner-verified senders act as the owner; others are admitted only as guests where the bot's audience settings allow it (§12a), without owner authority; anyone else gets a refusal without a turn |
 
 ## 16. Decisions (answered 2026-09-28)
 

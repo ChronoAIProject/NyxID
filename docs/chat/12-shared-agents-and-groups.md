@@ -7,7 +7,7 @@ This extends [NyxBot groups and guests](09-nyxbot-orchestrator.md) and the
 [NyxAgent engine](08-nyxagent-engine.md), [agent isolation](../AGENT_ISOLATION.md),
 [connection selection](../API_DISCOVERY.md#connection-selection-and-slug-collisions),
 and [service execution](../NYXBOT_SERVICE_EXECUTION.md) remain the foundations.
-Where this proposal changes behavior, it applies only to explicitly shared
+Where this design changes behavior, it applies only to explicitly shared
 specialists, including in a recipient's own single-person personal groups
 (crews), and the explicit multi-person group surface. Organization groups and
 channel guests retain their contracts.
@@ -126,12 +126,11 @@ New model collections have `COLLECTION_NAME`, UUID-v4 string `_id` values,
 redacted Debug implementations where needed, and BSON datetime helpers. Optional
 dates use `bson_datetime::optional`. Model fields must serialize to MongoDB;
 there is no `skip_serializing`. API responses are dedicated, role-filtered DTOs.
-The storage names below track Phase 1 and the Phase 2 backend foundation. New
-collaboration-group writers remain unmounted until the later review steps in §12.
+The storage names below cover Phase 1 and Phase 2.
 
 ### Agent sharing and memory
 
-| Location | Proposed data and invariants |
+| Location | Data and invariants |
 | --- | --- |
 | `assistant_agent_sharing` | Agent UUID `_id`, authoritative personal `owner_id`, defaulted `enabled: false`, write `version: 0`, authority `revision: 0`, `shared_access` map and explicitly published `memory`. `version` is the optimistic-concurrency token and increments on every non-no-op save; `revision` changes only when sharing is first enabled or an existing recipient's authority changes. A side collection prevents legacy agent replacement from erasing the policy. Empty/absent policy means withheld. Behavior is bound by a digest of persona, description, model, pinned skills and operation grants. Shared recipient projections retain those pinned skill references and metadata; skill package content is untrusted behavior, not owner-private memory. |
 | `assistant_agent_shares` | `agent_id`, authoritative `owner_id`, `subject_kind` (`person`/`org`), `subject_id`, owner-visible `subject_email` for person labels (defaulted for legacy rows), `role` (`manager`/`user`), revision and creator/timestamps. Unique `(agent_id, subject_kind, subject_id)`; indexes for subject-to-agent discovery and agent cleanup. No stored `owner` role: it is derived from ownership. |
@@ -153,8 +152,7 @@ NyxID's append-only marker and operation selection. The shared-users audience ha
 its own stored policy; it must not change channel guest policy. Unlike the
 legacy guest map's implicit `use`, absence here is deny/withhold. Reuse #1996's
 operation-selection representation and intersection semantics rather than
-creating a second permission language. Rebase after `fix/guest-access-1996`
-lands, then use the final names and helpers from that implementation.
+creating a second permission language.
 
 Removing an owner grant atomically removes its shared policy and invalidates
 affected consent/authority generations. Regranting starts withheld, even if the
@@ -171,7 +169,7 @@ consent.
 
 ### Groups and invitations
 
-| Location | Proposed data and invariants |
+| Location | Data and invariants |
 | --- | --- |
 | `AssistantGroup` | Defaulted optional `collaboration` object containing `version: 1`, creator ID and membership revision. For new groups `user_id` remains the personal creator; reuse `participant_user_ids` (1–16 active people), `member_agent_ids` (1–8 specialists), per-actor sticky recipients and lead. |
 | `assistant_group_invites` | Group, creator/issuer, SHA-256 token hash, optional intended person, expiry, acceptance/cancellation timestamps and accepting person. Unique token hash; group/state lookup and expiry cleanup indexes. Raw random 256-bit token is returned once and never logged. |
@@ -218,7 +216,7 @@ otherwise leaving deletes the group after a destructive-action confirmation.
 The last participant's departure deletes the group. Group-management transfer
 never transfers agents, credentials, consents or guest authorizations.
 
-Proposed invite lifetime is seven days, with bounded issuance and acceptance
+Invite lifetime is seven days, with bounded issuance and acceptance
 rate limits. Invitations can be bound to an existing account or be one-use bearer
 links for a signed-in account; acceptance always names the actual person. There
 is no anonymous chat access, email-suffix policy or automatic message delivery.
@@ -759,8 +757,7 @@ defaulted discriminator or revoked key does not fix those readers.
 
 Rollout sequence:
 
-1. Land #1996, rebase this work and verify shared policy uses its final helpers.
-   Ship additive readers, classifiers, indexes and unconditional stored-binding
+1. Ship additive readers, classifiers, indexes and unconditional stored-binding
    enforcement with the flag off. Install indexes before activating writers;
    do not change legacy thread indexes underneath old writers.
 2. Deploy compatible API/auth/proxy/MCP/LLM/worker readers, including alternate
@@ -949,15 +946,14 @@ for its human through the tools, but cannot join, follow or become the requester
 of another participant's chain. Transfer acceptance and invite acceptance remain
 human-only. No invite is sent automatically.
 
-Expected code touchpoints are `models/assistant_{agent,group,conversation}.rs`,
+Code touchpoints are `models/assistant_{agent,group,conversation}.rs`,
 `models/api_key.rs`, new share/consent/memory/binding models and services,
 `org_agent_service`, `org_group_service`, `assistant_team_service`,
 `assistant_nyxagent*`, `assistant_acknowledgement_service`, `assistant_live`,
 upload/attachment/learning cleanup, auth and MCP/proxy/LLM execution adapters,
 `billing/owner_resolver.rs`, readiness/index registration and assistant UI
 schemas/hooks/components. Keep business logic in services, HTTP in handlers and
-models as serde data. Update the normative engine/org/billing docs in the
-implementation phases after the policy is approved.
+models as serde data.
 
 ## 13. Test and verification plan
 
