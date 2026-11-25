@@ -1,0 +1,20 @@
+{
+  "device": "emulator-5572",
+  "restoredSettings": {
+    "defaultService": "null",
+    "size": "Physical size: 1080x2400",
+    "density": "Physical density: 420",
+    "fontScale": "1.0",
+    "accessibility": "null"
+  },
+  "uninstalled": {
+    "dev.nyxid.voicechecks": "Success",
+    "dev.nyxid.voicetest": "Success"
+  },
+  "originalAppsPreserved": [
+    "fun.chronoai.nyxid",
+    "dev.nyxid.nativecheck"
+  ],
+  "remainingReverseMappings": "host-18 tcp:8299 tcp:8299",
+  "recognitionServices": "No services found"
+}

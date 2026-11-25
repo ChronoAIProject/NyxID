@@ -47,6 +47,10 @@ function setup(
       },
     },
   });
+  h.mock(
+    "./recognitionLocales",
+    h.load(fileURLToPath(new URL("./recognitionLocales.ts", import.meta.url))),
+  );
   const module = h.load(
     fileURLToPath(new URL("./useDictationLanguage.ts", import.meta.url)),
   ) as typeof import("./useDictationLanguage");
@@ -157,7 +161,7 @@ for (const rejected of [false, true]) {
     assert.equal(h.value().value, "cmn-Hans-CN");
     assert.equal(h.value().resolved, "cmn-Hans-CN");
     assert.equal(h.value().label, "中文（中国）");
-    assert.match(h.value().explanation!, /language list is unavailable/);
+    assert.match(h.value().explanation!, /did not provide a language list/);
     h.unmount();
   });
 }
