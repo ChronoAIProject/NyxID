@@ -2042,30 +2042,10 @@ pub async fn set_service_config(
             crate::services::approval_policy::validate_rules(&changed)
                 .map_err(AppError::ValidationError)?;
         }
-        let previous: std::collections::HashSet<&str> = existing
-            .as_ref()
-            .into_iter()
-            .flat_map(|cfg| &cfg.rules)
-            .flat_map(|rule| rule.api_key_ids.iter().map(String::as_str))
-            .collect();
-        let ids: std::collections::HashSet<&str> = rules
-            .iter()
-            .flat_map(|rule| rule.api_key_ids.iter().map(String::as_str))
-            .filter(|id| !previous.contains(id))
-            .collect();
-        if !ids.is_empty() {
-            if query.org_id.is_some() {
-                return Err(AppError::ValidationError(
-                    "Organization approval policies cannot be limited to API keys".into(),
-                ));
-            }
-            let ids: Vec<&str> = ids.into_iter().collect();
-            let found = state.db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME).count_documents(doc! {"_id":{"$in":&ids},"user_id":&user_id,"is_active":true,"purpose":{"$nin":["public_nyxbot","shared_entry_transport"]},"$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]}).await?;
-            if found != ids.len() as u64 {
-                return Err(AppError::ValidationError(
-                    "Approval rules can only be limited to your own active API keys".into(),
-                ));
-            }
+        if query.org_id.is_some() && rules.iter().any(|rule| !rule.api_key_ids.is_empty()) {
+            return Err(AppError::ValidationError(
+                "Organization approval policies cannot be limited to API keys".into(),
+            ));
         }
     }
     if body.disabled.is_some() && query.org_id.is_some() {
@@ -2092,6 +2072,8 @@ pub async fn set_service_config(
             default_effect,
             disabled: body.disabled,
             expected_revision: body.expected_revision,
+            #[cfg(test)]
+            collision_hook: None,
         },
     )
     .await?;

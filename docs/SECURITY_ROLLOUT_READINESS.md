@@ -501,6 +501,7 @@ Legacy clients keep their semantics: `default_effect: null` without
 valid, and DELETE without `expected_revision` still revokes every grant for the
 service and expires pending grant-mode requests.
 Do not restart an older binary after authoring new policy fields: it cannot enforce
-those fields, even though updated replicas detect its missing capability. Disable
+those fields or carry personal rule membership through Agent Key rotation, even
+though updated replicas detect its missing capability. Disable
 new authoring and drain all readers before any coordinated rollback that removes
 or converts the new policy data. No rollout tool mutates policy or connections.

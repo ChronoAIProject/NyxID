@@ -2872,6 +2872,8 @@ pub(crate) struct ConfigWriteOptions {
     pub disabled: Option<bool>,
     /// Empty means the editor observed no policy.
     pub expected_revision: Option<String>,
+    #[cfg(test)]
+    pub collision_hook: Option<super::api_key_mutation_service::TransactionCollisionHook>,
 }
 
 pub fn config_revision(config: &ServiceApprovalConfig) -> AppResult<String> {
@@ -2879,6 +2881,180 @@ pub fn config_revision(config: &ServiceApprovalConfig) -> AppResult<String> {
     let bytes = bson::to_vec(config)
         .map_err(|_| AppError::Internal("Could not read policy revision".into()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// Carry only personal rule membership across the committed key lineage.
+/// Rotation has already taken the owner's write fence when inserting the
+/// successor, so even a policy being created concurrently is serialized.
+pub(crate) async fn rotate_personal_rule_memberships_in_session(
+    db: &Database,
+    owner: &str,
+    actor: &str,
+    predecessor: &str,
+    successor: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let configs = db.collection::<Document>(SERVICE_APPROVAL_CONFIGS);
+    let filter = doc! {"user_id": owner, "rules.api_key_ids": predecessor};
+    let mut cursor = configs
+        .find(filter.clone())
+        .projection(doc! {"_id": 1, "service_id": 1, "rules": 1})
+        .sort(doc! {"_id": 1})
+        .session(&mut *session)
+        .await?;
+    let rows: Vec<Document> = cursor.stream(&mut *session).try_collect().await?;
+    if rows.is_empty()
+        || db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": owner})
+            .session(&mut *session)
+            .await?
+            .is_some_and(|user| user.user_type.is_org())
+    {
+        return Ok(());
+    }
+    let ids: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|row| {
+            row.get_str("_id")
+                .and_then(|id| row.get_str("service_id").map(|service| (id, service)))
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|_| AppError::Internal("Invalid approval policy identity".into()))?;
+    // Operate on BSON so absent legacy and unrelated rule fields stay intact.
+    for (row, (id, _)) in rows.iter().zip(&ids) {
+        let mut rules = row
+            .get_array("rules")
+            .map_err(|_| AppError::Internal("Invalid approval rules".into()))?
+            .clone();
+        for rule in &mut rules {
+            let rule = rule
+                .as_document_mut()
+                .ok_or_else(|| AppError::Internal("Invalid approval rule".into()))?;
+            let Ok(members) = rule.get_array_mut("api_key_ids") else {
+                continue;
+            };
+            if !members
+                .iter()
+                .any(|member| member.as_str() == Some(predecessor))
+            {
+                continue;
+            }
+            let mut successor_seen = false;
+            members.retain_mut(|member| {
+                if member.as_str() == Some(predecessor) {
+                    *member = successor.into();
+                }
+                if member.as_str() == Some(successor) {
+                    return !std::mem::replace(&mut successor_seen, true);
+                }
+                true
+            });
+        }
+        let result = configs
+            .update_one(
+                doc! {"_id": *id, "user_id": owner},
+                doc! {"$set": {"rules": rules, "updated_at": bson::DateTime::now()}},
+            )
+            .session(&mut *session)
+            .await?;
+        if result.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Approval policy changed during key rotation".into(),
+            ));
+        }
+    }
+    let mut metadata = required::identifier_pairs("policies", ["policy_id", "service_id"], &ids);
+    metadata.insert("policy_count".into(), ids.len().into());
+    for (field, id) in [
+        ("policy_owner_user_id", owner),
+        ("predecessor_key_id", predecessor),
+        ("successor_key_id", successor),
+    ] {
+        metadata.insert(
+            field.into(),
+            required::text(required::TextField::Identifier, id).into(),
+        );
+    }
+    let audit = AuditActor {
+        user_id: actor.into(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    let intent = required::intent_preserving_actor(
+        &audit,
+        "service_approval_config_key_rotated",
+        Some(metadata.into()),
+    )?;
+    super::security_effect_service::enqueue_in_session(db, session, &[intent]).await
+}
+
+/// Guard both newly selected and retained IDs against a concurrent rotation.
+/// The owner fence is also written by key insertion in the rotation transaction.
+async fn fence_rule_memberships_in_session(
+    db: &Database,
+    owner: &str,
+    service_id: &str,
+    ids: &[&str],
+    session: &mut ClientSession,
+    #[cfg(test)] collision_hook: Option<&super::api_key_mutation_service::TransactionCollisionHook>,
+) -> AppResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if let Some(hook) = collision_hook {
+        hook.begin_attempt();
+    }
+    let current = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(doc! {"user_id": owner, "service_id": service_id})
+        .session(&mut *session)
+        .await?;
+    #[cfg(test)]
+    if let Some(hook) = collision_hook {
+        hook.after_reads().await;
+    }
+    super::erasure_admission::fence_in_session(db, owner, session).await?;
+    let keys = db.collection::<Document>(crate::models::api_key::COLLECTION_NAME);
+    if keys
+        .find_one(doc! {"user_id": owner, "rotation_predecessor_id": {"$in": ids}})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "An approval rule API key was rotated; reload before saving".into(),
+        ));
+    }
+    let previous: HashSet<&str> = current
+        .iter()
+        .flat_map(|cfg| &cfg.rules)
+        .flat_map(|rule| rule.api_key_ids.iter().map(String::as_str))
+        .collect();
+    let new_ids: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| !previous.contains(id))
+        .collect();
+    if !new_ids.is_empty() {
+        let count = keys
+            .count_documents(
+                doc! {"_id": {"$in": new_ids}, "user_id": owner, "is_active": true,
+                "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]},
+                "$or": [{"expires_at": null}, {"expires_at": {"$gt": bson::DateTime::now()}}]},
+            )
+            .session(&mut *session)
+            .await?;
+        if count != new_ids.len() as u64 {
+            return Err(AppError::ValidationError(
+                "Approval rules can only be limited to your own active API keys".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3011,6 +3187,11 @@ pub(crate) async fn set_config_with_options(
         set.extend(newer);
     }
     let update = doc! { "$set": set, "$setOnInsert": set_on_insert };
+    let ids: HashSet<&str> = rules
+        .iter()
+        .flat_map(|rule| rule.api_key_ids.iter().map(String::as_str))
+        .collect();
+    let ids: Vec<&str> = ids.into_iter().collect();
     let mut write_filter = filter.clone();
     // Two audited creators that observed absence must contend for the unique
     // owner/service key even if a transaction body is retried after a conflict.
@@ -3048,12 +3229,41 @@ pub(crate) async fn set_config_with_options(
             existing.is_none(),
             reconcile,
             legacy,
+            user_id,
+            service_id,
+            &ids,
+            &options,
         );
         let result = super::service_history::transaction::run_send(
             db,
             &context,
-            |session, &(source_db, upsert_filter, update, intent, create, reconcile, legacy)| {
+            |session,
+             &(
+                source_db,
+                upsert_filter,
+                update,
+                intent,
+                create,
+                reconcile,
+                legacy,
+                owner,
+                service_id,
+                ids,
+                _options,
+            )| {
                 Box::pin(async move {
+                    transaction_result(
+                        fence_rule_memberships_in_session(
+                            source_db,
+                            owner,
+                            service_id,
+                            ids,
+                            session,
+                            #[cfg(test)]
+                            _options.collision_hook.as_ref(),
+                        )
+                        .await,
+                    )?;
                     let row =
                         upsert_config(source_db, upsert_filter, update, create, session).await?;
                     if reconcile && legacy {
@@ -7176,6 +7386,10 @@ mod tests {
             .await
             .unwrap();
         crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        db.collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "key-a", "user_id": &owner, "is_active": true})
+            .await
+            .unwrap();
         let operation = test_operation();
         for effect in [ApprovalEffect::Deny, ApprovalEffect::RequireApproval] {
             let mut rule: ApprovalRule = serde_json::from_value(serde_json::json!({"resource_pattern":"*","effect":effect,"mode":"per_request","api_key_ids":["key-a"]})).unwrap();
@@ -7519,6 +7733,437 @@ mod policy_durability_tests {
         .await
     }
 
+    async fn rotation_key(db: &Database, owner: &str) -> String {
+        super::super::key_service::create_api_key(
+            db,
+            owner,
+            "rotation fixture",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn rotation_carries_ordered_personal_rules_without_moving_approval_identities() {
+        use super::super::key_service::{self, ApiKeyRotationOutcome};
+        let (state, owner, service) = fixture("policy_rotation_identity").await;
+        let db = &state.db;
+        let predecessor = rotation_key(db, &owner).await;
+        let sibling = rotation_key(db, &owner).await;
+        let successor = Uuid::new_v4().to_string();
+        let configs = db.collection::<Document>(SERVICE_APPROVAL_CONFIGS);
+        let original = get_config(db, &owner, &service).await.unwrap().unwrap();
+        let rules = doc! {"rules": [
+            {"methods": ["POST"], "resource_pattern": "/ask", "effect": "require_approval", "mode": "per_request", "api_key_ids": [&predecessor]},
+            {"methods": ["POST"], "resource_pattern": "/deny", "effect": "deny", "api_key_ids": [&sibling, &predecessor]},
+            {"methods": ["POST"], "resource_pattern": "/allow", "effect": "auto_allow", "api_key_ids": [&predecessor]},
+            {"methods": ["GET"], "resource_pattern": "*", "effect": "auto_allow"}
+        ], "default_effect": null, "grant_expiry_days": null, "disabled": false};
+        configs
+            .update_one(doc! {"_id": &original.id}, doc! {"$set": rules})
+            .await
+            .unwrap();
+        let mut disabled = configs
+            .find_one(doc! {"_id": &original.id})
+            .await
+            .unwrap()
+            .unwrap();
+        disabled.insert("_id", "disabled-policy");
+        disabled.insert("service_id", "disabled-service");
+        disabled.insert("disabled", true);
+        disabled.insert("grant_expiry_days", 11);
+        disabled.insert(
+            "rules",
+            vec![doc! {"effect": "deny", "api_key_ids": [&predecessor, &sibling, &successor]}],
+        );
+        configs.insert_one(&disabled).await.unwrap();
+        let mut other = disabled.clone();
+        other.insert("_id", "other-owner-policy");
+        other.insert("user_id", Uuid::new_v4().to_string());
+        configs.insert_one(&other).await.unwrap();
+        let before = configs
+            .find_one(doc! {"_id": &original.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let reviewed = get_config(db, &owner, &service).await.unwrap().unwrap();
+        let reviewed_revision = config_revision(&reviewed).unwrap();
+        let now = bson::DateTime::now();
+        let grant = doc! {"_id": "predecessor-grant", "user_id": &owner, "service_id": &service,
+        "service_name": "fixture", "requester_type": "api_key", "requester_id": &predecessor,
+        "requester_label": null, "approval_request_id": "predecessor-request", "scope": null,
+        "granted_at": now, "expires_at": bson::DateTime::from_chrono(Utc::now()+Duration::days(1)), "revoked": false};
+        db.collection::<Document>(GRANTS)
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        let pending = doc! {"_id": "predecessor-request", "user_id": &owner, "service_id": &service,
+        "requester_id": &predecessor, "caller_api_key_id": &predecessor, "status": "pending", "fresh_decision": true};
+        db.collection::<Document>(REQUESTS)
+            .insert_one(&pending)
+            .await
+            .unwrap();
+        let intents =
+            db.collection::<Document>(crate::models::security_effect_intent::COLLECTION_NAME);
+        let rotation_audit = doc! {"event.event_type": "service_approval_config_key_rotated"};
+        // Failure after the rule writes must roll back the entire rotation.
+        db.create_collection(crate::models::security_effect_intent::COLLECTION_NAME)
+            .await
+            .unwrap();
+        db.run_command(
+            doc! {"collMod": crate::models::security_effect_intent::COLLECTION_NAME,
+            "validator": {"fixture_required": {"$exists": true}}},
+        )
+        .await
+        .unwrap();
+        let rotate = || {
+            key_service::rotate_api_key_with_scope_authorization_and_id(
+                db,
+                &state.encryption_keys,
+                &owner,
+                Some(&owner),
+                &predecessor,
+                &successor,
+            )
+        };
+        assert!(rotate().await.is_err());
+        assert!(
+            key_service::get_api_key(db, &owner, &predecessor)
+                .await
+                .is_ok()
+        );
+        assert!(
+            key_service::get_api_key(db, &owner, &successor)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            configs
+                .find_one(doc! {"_id": &original.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            configs
+                .find_one(doc! {"_id": "disabled-policy"})
+                .await
+                .unwrap()
+                .unwrap(),
+            disabled
+        );
+        assert_eq!(
+            intents
+                .count_documents(rotation_audit.clone())
+                .await
+                .unwrap(),
+            0
+        );
+        db.run_command(doc! {"collMod": crate::models::security_effect_intent::COLLECTION_NAME, "validator": {}}).await.unwrap();
+        assert!(matches!(
+            rotate().await.unwrap(),
+            ApiKeyRotationOutcome::Created(_)
+        ));
+        assert!(
+            key_service::get_api_key(db, &owner, &predecessor)
+                .await
+                .is_err()
+        );
+        let carried = get_config(db, &owner, &service).await.unwrap().unwrap();
+        let mut expected = reviewed.clone();
+        for rule in &mut expected.rules {
+            for member in &mut rule.api_key_ids {
+                if member == &predecessor {
+                    *member = successor.clone();
+                }
+            }
+        }
+        expected.updated_at = carried.updated_at;
+        assert_eq!(
+            bson::to_document(&carried).unwrap(),
+            bson::to_document(&expected).unwrap()
+        );
+        assert_ne!(config_revision(&carried).unwrap(), reviewed_revision);
+        let disabled_after = configs
+            .find_one(doc! {"_id": "disabled-policy"})
+            .await
+            .unwrap()
+            .unwrap();
+        disabled.insert(
+            "rules",
+            vec![doc! {"effect": "deny", "api_key_ids": [&successor, &sibling]}],
+        );
+        disabled.insert(
+            "updated_at",
+            disabled_after
+                .get_datetime("updated_at")
+                .unwrap()
+                .to_owned(),
+        );
+        assert_eq!(disabled_after, disabled);
+        assert_eq!(
+            configs
+                .find_one(doc! {"_id": "other-owner-policy"})
+                .await
+                .unwrap()
+                .unwrap(),
+            other
+        );
+        assert_eq!(
+            db.collection::<Document>(GRANTS)
+                .find_one(doc! {"_id": "predecessor-grant"})
+                .await
+                .unwrap()
+                .unwrap(),
+            grant
+        );
+        assert_eq!(
+            db.collection::<Document>(REQUESTS)
+                .find_one(doc! {"_id": "predecessor-request"})
+                .await
+                .unwrap()
+                .unwrap(),
+            pending
+        );
+        let ask = super::super::operation_descriptor::build_http_descriptor("POST", "/ask", None);
+        let deny = super::super::operation_descriptor::build_http_descriptor("POST", "/deny", None);
+        let allow =
+            super::super::operation_descriptor::build_http_descriptor("POST", "/allow", None);
+        crate::test_utils::set_test_approval_preference(db, &owner, true).await;
+        for (operation, key, effect) in [
+            (&ask, &successor, ApprovalEffect::RequireApproval),
+            (&deny, &successor, ApprovalEffect::Deny),
+            (&allow, &successor, ApprovalEffect::AutoAllow),
+            (&deny, &sibling, ApprovalEffect::Deny),
+            (&ask, &sibling, ApprovalEffect::AutoAllow),
+        ] {
+            let resolution = resolve_org_aware_approval(
+                db,
+                &owner,
+                &owner,
+                &service,
+                operation,
+                false,
+                Some(key),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolution.effect, effect);
+        }
+        assert!(
+            check_approval(db, &owner, &service, "api_key", &predecessor, false, &ask)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !check_approval(db, &owner, &service, "api_key", &successor, false, &ask)
+                .await
+                .unwrap()
+        );
+        let outcome = evaluate_and_check_with_options(
+            db,
+            &owner,
+            &owner,
+            &service,
+            &ask,
+            Some("api_key"),
+            &successor,
+            false,
+            false,
+            ApprovalOptions::default(),
+            Some(&successor),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::NeedsApproval(_)));
+        assert!(matches!(
+            put(
+                &state,
+                &owner,
+                &service,
+                serde_json::json!({"expected_revision": reviewed_revision, "rules": reviewed.rules})
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            rotate().await.unwrap(),
+            ApiKeyRotationOutcome::AlreadyCommitted(_)
+        ));
+        assert_eq!(
+            intents
+                .count_documents(rotation_audit.clone())
+                .await
+                .unwrap(),
+            1
+        );
+        let audit = intents
+            .find_one(rotation_audit.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = audit
+            .get_document("event")
+            .unwrap()
+            .get_document("event_data")
+            .unwrap();
+        assert_eq!(
+            metadata.get_str("predecessor_key_id"),
+            Ok(predecessor.as_str())
+        );
+        assert_eq!(metadata.get_str("successor_key_id"), Ok(successor.as_str()));
+        assert_eq!(metadata.get_array("policies").unwrap().len(), 2);
+        let new_key = rotation_key(db, &owner).await;
+        assert!(
+            !carried
+                .rules
+                .iter()
+                .any(|rule| rule.api_key_ids.contains(&new_key))
+        );
+        let raw_carried = configs
+            .find_one(doc! {"_id": &original.id})
+            .await
+            .unwrap()
+            .unwrap();
+        key_service::delete_api_key(db, &owner, &successor)
+            .await
+            .unwrap();
+        assert_eq!(
+            configs
+                .find_one(doc! {"_id": &original.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            raw_carried
+        );
+        assert_eq!(intents.count_documents(rotation_audit).await.unwrap(), 1);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rotation_and_keyed_policy_writes_serialize_for_first_membership_and_legacy_saves() {
+        use super::super::{
+            api_key_mutation_service::TransactionCollisionHook,
+            key_service::{self, ApiKeyRotationOutcome},
+        };
+        for (create, legacy) in [(true, false), (true, true), (false, false), (false, true)] {
+            let (state, owner, service) = fixture("policy_rotation_race").await;
+            let db = &state.db;
+            let predecessor = rotation_key(db, &owner).await;
+            let successor = Uuid::new_v4().to_string();
+            let configs = db.collection::<Document>(SERVICE_APPROVAL_CONFIGS);
+            let rules: Vec<ApprovalRule> = serde_json::from_value(
+                serde_json::json!([{"effect": "deny", "api_key_ids": [&predecessor]}]),
+            )
+            .unwrap();
+            if create {
+                configs
+                    .delete_one(doc! {"user_id": &owner, "service_id": &service})
+                    .await
+                    .unwrap();
+            } else if legacy {
+                configs
+                    .update_one(
+                        doc! {"user_id": &owner, "service_id": &service},
+                        doc! {"$set": {"rules": bson::to_bson(&rules).unwrap()}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let current = get_config(db, &owner, &service).await.unwrap();
+            let expected_revision = (!legacy).then(|| {
+                current
+                    .as_ref()
+                    .map(|cfg| config_revision(cfg).unwrap())
+                    .unwrap_or_default()
+            });
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let save_hook = TransactionCollisionHook::new(barrier.clone());
+            let rotation_hook = TransactionCollisionHook::new(barrier);
+            let (save, rotation) = tokio::join!(
+                set_config_with_options(
+                    db,
+                    &owner,
+                    &service,
+                    "fixture",
+                    Some(false),
+                    None,
+                    Some(&rules),
+                    None,
+                    test_config_audit(&owner),
+                    ConfigWriteOptions {
+                        expected_revision,
+                        collision_hook: Some(save_hook.clone()),
+                        ..Default::default()
+                    }
+                ),
+                key_service::rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
+                    db,
+                    &state.encryption_keys,
+                    &owner,
+                    Some(&owner),
+                    &predecessor,
+                    &successor,
+                    rotation_hook.clone()
+                )
+            );
+            assert!(matches!(
+                rotation.unwrap(),
+                ApiKeyRotationOutcome::Created(_)
+            ));
+            assert!(save_hook.attempts() > 1 || rotation_hook.attempts() > 1);
+            let after = get_config(db, &owner, &service).await.unwrap();
+            if save.is_ok() || (!create && legacy) {
+                assert_eq!(
+                    after.as_ref().unwrap().rules[0].api_key_ids,
+                    vec![successor.clone()]
+                );
+            } else {
+                assert!(matches!(
+                    save,
+                    Err(AppError::Conflict(_)) | Err(AppError::ValidationError(_))
+                ));
+            }
+            assert!(after.iter().all(|cfg| {
+                cfg.rules
+                    .iter()
+                    .all(|r| !r.api_key_ids.contains(&predecessor))
+            }));
+            // The old client cannot restore the inactive predecessor even without a revision.
+            assert!(matches!(
+                set_config_with_options(
+                    db,
+                    &owner,
+                    &service,
+                    "fixture",
+                    Some(false),
+                    None,
+                    Some(&rules),
+                    None,
+                    test_config_audit(&owner),
+                    ConfigWriteOptions::default()
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+            db.drop().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn exact_no_op_preserves_legacy_policy_grant_and_pending_bytes() {
         let (state, owner, service) = fixture("policy_exact_noop").await;
@@ -7819,6 +8464,12 @@ mod policy_durability_tests {
     #[tokio::test]
     async fn pending_reconciliation_uses_exact_key_and_ssh_evidence() {
         let (state, owner, service) = fixture("policy_pending_evidence").await;
+        state
+            .db
+            .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "key-a", "user_id": &owner, "is_active": true})
+            .await
+            .unwrap();
         let now = bson::DateTime::now();
         for (id, key, protocol) in [
             ("a", Some("key-a"), Some("ssh")),

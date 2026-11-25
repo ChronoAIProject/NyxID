@@ -1325,6 +1325,15 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     ));
                 }
                 key_mutations::insert_one_for_actor(&db, &successor, actor_id.as_deref(), Some(&mut *session)).await?;
+                super::approval_service::rotate_personal_rule_memberships_in_session(
+                    &db,
+                    &user_id,
+                    actor_id.as_deref().unwrap_or(&user_id),
+                    &old_key.id,
+                    &successor.id,
+                    &mut *session,
+                )
+                .await?;
                 let assistant_managed =
                     super::assistant_agent_credential_service::adopt_rotated_key(
                         &db,
