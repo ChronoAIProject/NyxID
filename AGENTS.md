@@ -54,9 +54,6 @@ Main maintainers review spec changes nightly ([`docs/SPEC_MAINTENANCE.md`](docs/
 - After a hotfix lands, merge `main` back into `dev` using **Create a merge commit** before cutting the next rollup.
 - GitHub runs `Main Merge Guard` from the default branch on `pull_request_target`. Retargeting a PR reruns the guard against its new base.
 
-
-<!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->
-
 ## Contents of this file
 
 - Project Overview
@@ -824,6 +821,7 @@ All font choices, colors, spacing, and aesthetic direction are defined there.
 Do not deviate without explicit user approval.
 In QA mode, flag any code that doesn't match DESIGN.md.
 
+<!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->
 ## Consensus R&D Foundational Invariants (managed by consensus-rnd)
 
 - FI-001 AI outputs are untrusted by default; before entering the mainline they must pass independent checks, including the applicable mix of consensus, review, or automated verification.
