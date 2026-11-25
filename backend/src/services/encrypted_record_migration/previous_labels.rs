@@ -216,3 +216,6 @@ pub(super) const CHANNEL_KEY_DIGEST: &str =
 
 pub(super) const EVENT_BINDING_DIGEST: &str =
     "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
+
+pub(super) const GATEWAY_SETUP_DIGEST: &str =
+    "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
