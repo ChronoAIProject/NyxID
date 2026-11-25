@@ -1,21 +1,27 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { creditsLabel, knownTotal } from "@/lib/billing-display";
 import type { BillingUsageRow } from "@/schemas/billing";
 
 const lanes = [
   {
     key: "grant_credits_micros",
-    label: "Credit grants",
+    get label() {
+      return translateUi("Credit grants");
+    },
     color: "var(--color-success)",
   },
   {
     key: "allowance_credits_micros",
-    label: "Allowances",
+    get label() {
+      return translateUi("Allowances");
+    },
     color: "var(--color-warning)",
   },
   {
     key: "wallet_credits_micros",
-    label: "Wallet",
+    get label() {
+      return translateUi("Wallet");
+    },
     color: "var(--color-info)",
   },
 ] as const;
@@ -44,12 +50,15 @@ export function BillingFundingChart({ rows }: { rows: BillingUsageRow[] }) {
   const barLabel = hasKnownFunding
     ? values
         .filter((lane) => lane.known.sum > 0n)
-        .map(
-          (lane) =>
-            `${lane.label}: ${lane.display.text} credits (${percentage(lane.known.sum, totalKnown)}%)`,
+        .map((lane) =>
+          t("{{label}}: {{amount}} credits ({{percent}}%)", {
+            label: lane.label,
+            amount: lane.display.text,
+            percent: percentage(lane.known.sum, totalKnown),
+          }),
         )
         .join(", ")
-    : "No known funding values for this period";
+    : t("No known funding values for this period");
 
   return (
     <section className="funding-visual" aria-label={t("Funding composition")}>
