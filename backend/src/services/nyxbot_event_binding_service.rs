@@ -218,6 +218,7 @@ pub(crate) async fn create(
     let producer_key_id = format!("nyxid-{}", &id[..8]);
     let now = Utc::now();
     let mut row = NyxbotEventBinding {
+        org_use_revision: agent.org_use_revision,
         id: id.clone(),
         user_id: owner.into(),
         agent_id: agent.id.clone(),
@@ -335,14 +336,22 @@ pub(crate) async fn create(
         }
         // Preparation may have been rewrapped while the gateway call was in flight.
         // Publish only the remote identity and the completed setup state.
-        let saved = state
-            .db
-            .collection::<NyxbotEventBinding>(COLLECTION_NAME)
-            .update_one(preparing.clone(), doc! {"$set":{
-                "gateway_channel_id":&row.gateway_channel_id, "provider_binding_id":&row.provider_binding_id,
-                "gateway_version":row.gateway_version, "custom_event_url":&row.custom_event_url,
-                "status":"ready", "updated_at":bson::DateTime::now()}})
-            .await?;
+        let update = doc! {"$set":{
+            "gateway_channel_id":&row.gateway_channel_id, "provider_binding_id":&row.provider_binding_id,
+            "gateway_version":row.gateway_version, "custom_event_url":&row.custom_event_url,
+            "status":"ready", "updated_at":bson::DateTime::now()}};
+        let bindings = state.db.collection::<NyxbotEventBinding>(COLLECTION_NAME);
+        let saved = if agent.user_id == owner {
+            bindings.update_one(preparing.clone(), update).await?
+        } else {
+            let context = (&state.db, owner, &agent, &bindings, &preparing, &update);
+            super::transaction_service::run_db_only(&state.db, &context, |tx, (db, owner, agent, bindings, filter, update)| {
+                Box::pin(async move {
+                    super::org_agent_service::fence_maintenance(db, tx, owner, agent).await?;
+                    Ok(bindings.update_one((*filter).clone(), (*update).clone()).session(tx).await?)
+                })
+            }).await?
+        };
         if saved.matched_count != 1 {
             return Err(AppError::Conflict("custom_binding_changed".into()));
         }
@@ -530,9 +539,20 @@ pub(crate) async fn authorize_provider(
     if owner.is_none() {
         return Err(AppError::Forbidden("custom_event_owner_unavailable".into()));
     }
-    let agent = target_agent(state, &row.user_id, &row.agent_id).await?;
-    if agent.user_id != row.agent_owner_id {
+    let agent = assistant_team_service::agent(&state.db, &row.user_id, &row.agent_id).await?;
+    if agent.destroyed_at.is_some()
+        || agent.user_id != row.agent_owner_id
+        || agent.org_use_revision != row.org_use_revision
+    {
         return Err(AppError::Forbidden("agent_target_changed".into()));
+    }
+    if row.user_id != agent.user_id {
+        // Only an organization can own a foreign target on a custom binding.
+        let access =
+            super::org_agent_service::access(&state.db, &row.user_id, &agent.user_id).await?;
+        if !super::org_agent_service::specialist_rights(&row.user_id, &agent, &access).can_use {
+            return Err(AppError::Forbidden("agent_target_unavailable".into()));
+        }
     }
     Ok(agent)
 }

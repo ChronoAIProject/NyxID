@@ -341,7 +341,16 @@ pub(crate) async fn nyxbot_home(state: &AppState, owner: &str) -> AppResult<Assi
 }
 
 /// Queue events on a thread and wake it.
-pub(crate) async fn notify(
+pub(crate) fn notify<'a>(
+    state: &'a AppState,
+    owner: &'a str,
+    conversation_id: &'a str,
+    events: Vec<crate::models::assistant_conversation::AgentEvent>,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(notify_inner(state, owner, conversation_id, events))
+}
+
+async fn notify_inner(
     state: &AppState,
     owner: &str,
     conversation_id: &str,
@@ -495,39 +504,12 @@ pub(crate) async fn after_turn(
             .as_ref()
             .is_some_and(|w| matches!(w.role.as_str(), "direct" | "group"))
         && !row.guest_turn
-        && let Some(report) = match settled_report_target(state, row, turn).await {
-            Ok(target) => target,
-            Err(_) => return,
-        }
+        && let Err(error) = wake_settled_report(state, row, turn, text, error).await
     {
-        let target = report.target;
-        let agent = match team::agent_for_conversation(&state.db, row).await {
-            Ok(agent) => agent,
-            Err(_) => return,
-        };
-        let queued = if report.published {
-            // The exact assignment result was queued in the settlement transaction.
-            Ok(None)
-        } else {
-            let (text, code, created_at) = report.reply.as_ref().map_or_else(
-                || (text, error.map(|error| error.code), chrono::Utc::now()),
-                |(text, code, created_at)| (text.as_str(), code.as_deref(), *created_at),
-            );
-            let completion_event =
-                team::specialist_settled_event(&agent, turn, text, code, created_at);
-            engine::push_events(&state.db, owner, &target, vec![completion_event]).await
-        };
-        if queued.is_err() {
-            if turn.delegated_images.assignment.is_some() {
-                tracing::warn!(target: "nyxid::assistant_delegated_images",
-                    actor_id = owner, source_agent_id = %agent.id,
-                    source_conversation_id = %row.id, source_turn_id = %turn.turn_id,
-                    recipient_conversation_id = %target, code = "text_fallback_unavailable",
-                    "Delegated text-only settlement notice could not be queued");
-            }
-            return;
-        }
-        Box::pin(wake(state, owner, &target)).await;
+        tracing::debug!(
+            error_code = error.error_code(),
+            "Specialist report wake deferred"
+        );
     }
     // Wake whoever has queued work now that a slot is free.
     wake(state, owner, &row.id).await;
@@ -625,6 +607,40 @@ pub(crate) async fn after_turn(
         .await;
     }
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+}
+
+async fn wake_settled_report(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    text: &str,
+    error: Option<&TurnError>,
+) -> AppResult<()> {
+    let Some(report) = settled_report_target(state, row, turn).await? else {
+        return Ok(());
+    };
+    if !report.published {
+        let agent = team::agent_for_conversation(&state.db, row).await?;
+        let (text, code, created_at) = report.reply.as_ref().map_or_else(
+            || (text, error.map(|error| error.code), chrono::Utc::now()),
+            |(text, code, created_at)| (text.as_str(), code.as_deref(), *created_at),
+        );
+        let event = team::specialist_settled_event(row, &agent, turn, text, code, created_at);
+        if let Err(error) =
+            engine::push_events(&state.db, &row.user_id, &report.target, vec![event]).await
+        {
+            if turn.delegated_images.assignment.is_some() {
+                tracing::warn!(target: "nyxid::assistant_delegated_images",
+                    actor_id = %row.user_id, source_agent_id = %agent.id,
+                    source_conversation_id = %row.id, source_turn_id = %turn.turn_id,
+                    recipient_conversation_id = %report.target, code = "text_fallback_unavailable",
+                    "Delegated text-only settlement notice could not be queued");
+            }
+            return Err(error);
+        }
+    }
+    Box::pin(wake(state, &row.user_id, &report.target)).await;
+    Ok(())
 }
 
 struct SpecialistReport {
@@ -2554,37 +2570,32 @@ async fn dispatch_agent_settings(
                 )
                 .await?;
             }
-            let mut agent = team::update_agent(
+            let agent = team::patch_agent(
                 db,
-                owner,
+                &crate::services::audit_service::AuditActor {
+                    user_id: owner.into(),
+                    ip_address: None,
+                    user_agent: None,
+                    api_key_id: Some(chat.api_key_id.clone()),
+                    api_key_name: None,
+                },
                 &agent.id,
-                args["name"].as_str(),
-                args["description"].as_str(),
-                team::AgentStyle {
-                    display_name: args["display_name"].as_str(),
-                    persona: args["persona"].as_str(),
-                    voice_instructions: None,
+                team::AgentPatch {
+                    name: args["name"].as_str(),
+                    description: args["description"].as_str(),
+                    style: team::AgentStyle {
+                        display_name: args["display_name"].as_str(),
+                        persona: args["persona"].as_str(),
+                        voice_instructions: None,
+                    },
+                    policy: team::AgentPolicy {
+                        model: args["model"].as_str(),
+                        access_mode_override: None,
+                    },
+                    checking_notice: None,
                 },
             )
             .await?;
-            if let Some(model) = args["model"].as_str() {
-                agent = team::set_agent_policy(
-                    db,
-                    &crate::services::audit_service::AuditActor {
-                        user_id: owner.into(),
-                        ip_address: None,
-                        user_agent: None,
-                        api_key_id: Some(chat.api_key_id.clone()),
-                        api_key_name: None,
-                    },
-                    &agent.id,
-                    team::AgentPolicy {
-                        model: Some(model),
-                        access_mode_override: None,
-                    },
-                )
-                .await?;
-            }
             (
                 json!({"agent": agent.name, "id": agent.id, "model": agent.model,
                     "display_name": agent.display_name, "persona": agent.persona}),
@@ -3493,13 +3504,18 @@ pub async fn list_agents(
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let (agents, destroyed_truncated) = agent_responses(
+    let (mut agents, destroyed_truncated) = agent_responses(
         &state,
         &owner,
         query.include_destroyed.unwrap_or(false),
         None,
     )
     .await?;
+    if super::login_client_context::require_first_party_human(&auth).is_err() {
+        for agent in &mut agents {
+            agent.summary.can_govern = false;
+        }
+    }
     Ok(Json(json!({
         "agents": agents,
         "destroyed_truncated": destroyed_truncated,
@@ -3766,6 +3782,31 @@ pub async fn guest_readiness(
     ))
 }
 
+#[derive(Serialize)]
+pub struct OrgAccessResponse {
+    maintainers: Option<Vec<String>>,
+    users: Option<Vec<String>>,
+    revision: i64,
+    authoring_available: bool,
+}
+
+pub async fn get_org_access(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<OrgAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let agent = crate::services::org_agent_service::governed_agent(&state.db, &actor, &id).await?;
+    Ok(Json(OrgAccessResponse {
+        maintainers: agent.org_maintainer_user_ids,
+        users: agent.org_user_ids,
+        revision: agent.org_access_revision,
+        authoring_available: false,
+    }))
+}
+
 /// One agent with its memory, threads and pending requests.
 pub async fn get_agent(
     State(state): State<AppState>,
@@ -3775,12 +3816,14 @@ pub async fn get_agent(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
-    let response = agent_responses(&state, &owner, true, Some(&agent))
+    let mut response = agent_responses(&state, &owner, true, Some(&agent))
         .await?
         .0
         .into_iter()
         .find(|row| row.summary.id == agent.id)
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    response.summary.can_govern &=
+        super::login_client_context::require_first_party_human(&auth).is_ok();
     let now = Utc::now();
     let threads = if response.summary.can_use {
         team::threads_for(&state.db, &owner, &agent, 100).await?
@@ -3865,34 +3908,26 @@ pub async fn update_agent(
     if let Some(model) = body.model.as_deref() {
         super::assistant_nyxagent::require_available_model(&state, &auth, model).await?;
     }
-    let mut agent = team::update_agent(
+    let agent = team::patch_agent(
         &state.db,
-        &owner,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
         &id,
-        body.name.as_deref(),
-        body.description.as_deref(),
-        team::AgentStyle {
-            display_name: body.display_name.as_deref(),
-            persona: body.persona.as_deref(),
-            voice_instructions: body.voice_instructions.as_deref(),
-        },
-    )
-    .await?;
-    if body.model.is_some() || body.access_mode_override.is_some() {
-        agent = team::set_agent_policy(
-            &state.db,
-            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
-            &agent.id,
-            team::AgentPolicy {
+        team::AgentPatch {
+            name: body.name.as_deref(),
+            description: body.description.as_deref(),
+            style: team::AgentStyle {
+                display_name: body.display_name.as_deref(),
+                persona: body.persona.as_deref(),
+                voice_instructions: body.voice_instructions.as_deref(),
+            },
+            policy: team::AgentPolicy {
                 model: body.model.as_deref(),
                 access_mode_override: body.access_mode_override,
             },
-        )
-        .await?;
-    }
-    if let Some(enabled) = body.channel_checking_notice {
-        agent = team::set_channel_checking_notice(&state.db, &owner, &agent.id, enabled).await?;
-    }
+            checking_notice: body.channel_checking_notice,
+        },
+    )
+    .await?;
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
         "persona": agent.persona, "voice_instructions": agent.voice_instructions, "model": agent.model,

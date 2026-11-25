@@ -323,6 +323,13 @@ async fn update_membership_in_session(
         .await?;
     }
     if role.is_some_and(|r| !r.can_proxy()) {
+        crate::services::org_agent_service::prune_member(
+            db,
+            transaction,
+            &current.org_user_id,
+            &current.member_user_id,
+        )
+        .await?;
         org_channel_service::lifecycle::revoke_member_in_session(
             db,
             &mut *transaction,
@@ -434,6 +441,8 @@ async fn revoke_membership_in_session(
             "Membership changed; reload before removal".into(),
         ));
     }
+    crate::services::org_agent_service::prune_member(db, transaction, org_user_id, member_user_id)
+        .await?;
     org_channel_service::lifecycle::revoke_member_in_session(
         db,
         &mut *transaction,

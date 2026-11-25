@@ -2632,21 +2632,20 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
     }
     let mut readiness_by_agent = std::collections::HashMap::new();
     let on = thread_follow::enabled(state, owner).await?;
+    let manageable = crate::services::org_channel_service::management::manageable_agents(
+        &state.db, owner, &rows,
+    )
+    .await?;
     let mut channel_agents = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        if let Some(binding) = &row.org_specialist {
-            let access =
-                crate::services::org_agent_service::access(&state.db, owner, &binding.org_id)
-                    .await?;
-            if crate::services::org_agent_service::can_use(&access) {
-                let admin = matches!(
-                    access,
-                    crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
-                );
-                value["can_manage"] = json!(admin);
-            }
+        if row.org_specialist.is_some() {
+            value["can_manage"] = json!(
+                row.agent_id
+                    .as_ref()
+                    .is_some_and(|id| manageable.contains(id))
+            );
         }
         if let Some(intake) = intake.get(&row.channel_bot_id) {
             value["discord_intake"] = json!(intake);
@@ -7969,6 +7968,7 @@ mod custom_event_contract_tests {
 
     fn binding() -> NyxbotEventBinding {
         NyxbotEventBinding {
+            org_use_revision: 0,
             id: "binding-a".into(),
             user_id: "owner".into(),
             agent_id: "agent".into(),

@@ -43,6 +43,8 @@ pub struct GuestPolicy {
 /// `guest` identities execute as the org, never as the linking administrator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Execution {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub org_use_revision: i64,
     pub version: u8,
     pub org_id: String,
     pub revision: String,
@@ -80,4 +82,8 @@ pub struct SenderLink {
 pub struct GuestUsage {
     pub channel_id: String,
     pub sender_hash: String,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }

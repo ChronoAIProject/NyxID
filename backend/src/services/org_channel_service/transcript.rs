@@ -37,7 +37,7 @@ pub(crate) async fn adopt_private_partition(
         gateway.to_owned(),
     );
     crate::services::transaction_service::run_db_only(db, &context, |tx, (db, channel, relay, gateway)| Box::pin(async move {
-        super::fence_management(db, tx, channel, &channel.user_id).await?;
+        super::fence_binding_authority(db, tx, channel, &channel.user_id,false).await?;
         let binding = channel.org_specialist.as_ref().ok_or_else(super::denied)?;
         let threads = db.collection::<crate::models::nyxbot_channel::NyxbotThread>("nyxbot_threads");
         let Some(legacy) = threads.find_one(doc!{"channel_id":&channel.id,"user_id":&channel.user_id,"kind":"private",

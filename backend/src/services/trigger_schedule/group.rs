@@ -67,10 +67,11 @@ pub async fn post(
         group.clone(),
         text.to_owned(),
         recipients.clone(),
+        roster,
         work.clone(),
         settings.max_group_handoffs,
     );
-    let message = super::super::transaction_service::run_db_only(db, &ctx, |session, (db, chat, snapshot, text, recipients, work, hops)| {
+    let message = super::super::transaction_service::run_db_only(db, &ctx, |session, (db, chat, snapshot, text, recipients, roster, work, hops)| {
         Box::pin(async move {
             let run = continuation::register_in_session(db, &chat.user_id, &chat.conversation_id, chat.turn_id.as_deref().ok_or(AppError::AssistantTurnRequired)?, work, recipients.len() as u32, session).await?;
             let mut group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(doc! {"_id": &snapshot.id, "user_id": &chat.user_id, "member_agent_ids": &snapshot.member_agent_ids}, doc! {"$inc": {"message_count": 1_i64}, "$set": {"updated_at": date(Utc::now()), "last_message_at": date(Utc::now())}}).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Group changed".into()))?;
@@ -85,7 +86,7 @@ pub async fn post(
             };
             let request = group.followers[index].automation.as_mut().expect("bound follower");
             if request.dispatches.len() + recipients.len() > continuation::DISPATCH_LIMIT as usize { return Err(AppError::Conflict("automation_dispatch_limit".into())); }
-            for agent in recipients { request.dispatches.push(Dispatch {id: Uuid::new_v4().to_string(), agent_id: agent.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
+            for agent in recipients { request.dispatches.push(Dispatch {org_use_revision:roster.iter().find(|a| &a.id == agent).ok_or(AppError::AssistantTurnRequired)?.org_use_revision, id: Uuid::new_v4().to_string(), agent_id: agent.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
             let request_id = request.id.clone();
             let message = message(&group, &request_id, "agent", Some(&chat.agent_id), Some(&chat.agent_name), text, recipients);
             db.collection::<GroupMessage>(MESSAGES).insert_one(&message).session(&mut *session).await?;
@@ -201,6 +202,9 @@ pub async fn admit(
                 }
         })
         .ok_or(AppError::AssistantTurnRequired)?;
+    if dispatch.org_use_revision != row.org_use_revision {
+        return Err(AppError::AssistantTurnRequired);
+    }
     dispatch.state = "running".into();
     dispatch.thread_id = Some(row.id.clone());
     dispatch.turn_id = Some(turn.into());
@@ -259,7 +263,9 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
             };
             #[cfg(test)]
             super::super::durable_wake_tests::after("automation_group_member_read").await;
-            let unavailable = !roster.iter().any(|a| a.id == dispatch.agent_id);
+            let unavailable = !roster.iter().any(|a| {
+                a.id == dispatch.agent_id && a.org_use_revision == dispatch.org_use_revision
+            });
             let suspected_loss = if reply.is_none()
                 && !unavailable
                 && let (Some(thread), Some(turn)) = (&dispatch.thread_id, &dispatch.turn_id)
@@ -359,7 +365,7 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     }
                     db.collection::<Document>(RUNS).update_one(doc! {"_id": &run.id}, doc! {"$inc": {"coordinator.dispatches": accepted.len() as i64}}).session(&mut *session).await?;
                     request.dispatches[di].state = "settled".into();
-                    for id in &accepted { request.dispatches.push(Dispatch {id: Uuid::new_v4().to_string(), agent_id: id.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
+                    for id in &accepted { request.dispatches.push(Dispatch {org_use_revision:roster.iter().find(|a| &a.id == id).ok_or(AppError::AssistantTurnRequired)?.org_use_revision, id: Uuid::new_v4().to_string(), agent_id: id.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
                     group.message_count += 1;
                     let name = roster.iter().find(|a| a.id == dispatch.agent_id).map(|a| a.name.as_str()).unwrap_or("unavailable member");
                     let text = if let Some(error) = error {format!("{name} failed ({error}).")} else if refused.is_empty() {text.into()} else {format!("{text}\nNyxID: handoffs refused by automation/group limits: {}", refused.join(", "))};

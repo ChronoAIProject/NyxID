@@ -273,6 +273,7 @@ pub async fn create(
     let members = resolve_members(db, owner, member_ids).await?;
     let now = Utc::now();
     let group = AssistantGroup {
+        pending_org_use_revisions: Default::default(),
         collaboration: None,
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: owner.into(),
@@ -516,7 +517,14 @@ pub async fn members(db: &Database, owner: &str, group: &AssistantGroup) -> AppR
                     .iter()
                     .any(|p| p.id == agent.user_id && p.user_type.is_person());
             let available = agent.destroyed_at.is_none()
-                && (owners.contains(&agent.user_id) || has_shared_access)
+                && (owner == agent.user_id
+                    || has_shared_access
+                    || (owners.contains(&agent.user_id)
+                        && memberships.iter().any(|m| {
+                            m.org_user_id == agent.user_id
+                                && super::org_agent_service::member_rights(owner, &agent, m.role)
+                                    .can_use
+                        })))
                 && (!super::org_group_service::is_org(group) || agent.user_id == group.user_id);
             let owner_name = people
                 .iter()
@@ -934,7 +942,7 @@ pub(crate) async fn append_member_reply(
         &[],
         attachments,
         None,
-        Some(&row.id),
+        Some(row),
     )
     .await
 }
@@ -950,9 +958,13 @@ async fn append_following_bound(
     recipients: &[String],
     extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     follower: Option<&str>,
-    source_thread: Option<&str>,
+    source: Option<&AssistantConversation>,
 ) -> AppResult<GroupMessage> {
-    let source_thread = source_thread.map(str::to_owned);
+    let source_thread = source.map(|row| row.id.clone());
+    let member_source = source.and_then(|row| {
+        super::org_agent_service::ordinary_member_org(row)
+            .map(|org| (org.to_owned(), row.org_use_revision))
+    });
     let filter = owner_filter(owner, group_id)?;
     let db = db.clone();
     let owner = owner.to_owned();
@@ -983,6 +995,11 @@ async fn append_following_bound(
                     .await?
                     .ok_or_else(not_found)?;
                 if let Some(thread_id) = &source_thread {
+                    if let Some((org, revision)) = &member_source
+                        && !super::org_agent_service::use_revision_is_live(&db, session, &owner, org,
+                            agent_id.as_deref().ok_or_else(not_found)?, *revision).await? {
+                        return Err(not_found());
+                    }
                     if agent_id.as_ref().is_none_or(|id| !group.member_agent_ids.contains(id)) {
                         return Err(not_found());
                     }
@@ -1214,14 +1231,51 @@ pub fn mentions(text: &str, members: &[AssistantAgent]) -> Vec<String> {
 
 /// Address members: they answer once they are free.
 pub async fn address(db: &Database, owner: &str, group_id: &str, ids: &[String]) -> AppResult<()> {
+    queue_addresses(db, owner, group_id, ids, address_update(owner, ids, &[])).await
+}
+
+/// Store the revision taken from the same roster that selected each recipient.
+pub(crate) async fn address_members(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    ids: &[String],
+    members: &[Member],
+) -> AppResult<()> {
+    let update = address_update(owner, ids, members);
+    queue_addresses(db, owner, group_id, ids, update).await
+}
+
+pub(crate) fn address_update(owner: &str, ids: &[String], members: &[Member]) -> bson::Document {
+    let mut revisions = bson::Document::new();
+    for member in members
+        .iter()
+        .filter(|m| m.user_id != owner && !m.shared && ids.contains(&m.id))
+    {
+        revisions.insert(
+            format!("pending_org_use_revisions.{}", member.id),
+            member.org_use_revision,
+        );
+    }
+    let mut update = doc! {"$addToSet":{"pending_agent_ids":{"$each":ids}}};
+    if !revisions.is_empty() {
+        update.insert("$set", revisions);
+    }
+    update
+}
+
+async fn queue_addresses(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    ids: &[String],
+    update: bson::Document,
+) -> AppResult<()> {
     if ids.is_empty() {
         return Ok(());
     }
     db.collection::<AssistantGroup>(GROUPS)
-        .update_one(
-            owner_filter(owner, group_id)?,
-            doc! {"$addToSet": {"pending_agent_ids": {"$each": ids}}},
-        )
+        .update_one(owner_filter(owner, group_id)?, update)
         .await?;
     Ok(())
 }

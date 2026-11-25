@@ -125,7 +125,7 @@ pub async fn create(
     input: CreateInput,
 ) -> AppResult<CreatedTrigger> {
     let label = validate_label(&input.label)?;
-    validate_associations(
+    let assistant_target_owner = validate_associations(
         db,
         &input.user_id,
         input.user_service_id.as_deref(),
@@ -204,6 +204,7 @@ pub async fn create(
         }
     }
     let trigger = Trigger {
+        assistant_target_owner,
         secret_context_versions,
         id: id.clone(),
         source: input.source,
@@ -456,7 +457,7 @@ pub async fn update(
         .delivery
         .filter(|delivery| *delivery != current.delivery)
     {
-        validate_associations(
+        next.assistant_target_owner = validate_associations(
             db,
             &current.user_id,
             current.user_service_id.as_deref(),
@@ -547,6 +548,7 @@ pub async fn update(
                 let mut set = doc! {
                     "label": &saved.label,
                     "status": bson::to_bson(&saved.status).map_err(serialization_error)?,
+                    "assistant_target_owner":bson::to_bson(&saved.assistant_target_owner).map_err(serialization_error)?,
                     "delivery": bson::to_bson(&saved.delivery).map_err(serialization_error)?,
                     "delivery_secret_encrypted": encrypted,
                     "secret_context_versions":bson::to_bson(&saved.secret_context_versions).map_err(serialization_error)?,
@@ -1456,7 +1458,7 @@ pub(crate) async fn validate_associations(
     user_id: &str,
     user_service_id: Option<&str>,
     delivery: &TriggerDelivery,
-) -> AppResult<()> {
+) -> AppResult<Option<crate::models::trigger::AssistantTargetOwner>> {
     if let Some(service_id) = user_service_id {
         let exists = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find_one(doc! { "_id": service_id, "user_id": user_id })
@@ -1478,12 +1480,21 @@ pub(crate) async fn validate_associations(
             ));
         }
         let agent = super::assistant_team_service::agent(db, user_id, agent_id).await?;
+        let access = super::org_agent_service::resolve_agent_access(db, user_id, &agent).await?;
         if agent.destroyed_at.is_some() {
             return Err(AppError::ValidationError(
                 "Target agent was destroyed".into(),
             ));
         }
         super::assistant_nyxagent::require_enabled(db, user_id).await?;
+        return Ok(Some(crate::models::trigger::AssistantTargetOwner {
+            agent_id: agent.id,
+            owner_id: if access.is_some_and(|a| a.shared().is_none()) {
+                agent.user_id
+            } else {
+                user_id.to_owned()
+            },
+        }));
     }
     if let TriggerDelivery::Agent { conversation_id } = delivery {
         let exists = db
@@ -1500,7 +1511,7 @@ pub(crate) async fn validate_associations(
             return Err(AppError::TriggerDeliveryUnsupported);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn validate_verification(verification: &TriggerVerification) -> AppResult<()> {
@@ -1924,6 +1935,7 @@ mod tests {
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
+            assistant_target_owner: None,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,

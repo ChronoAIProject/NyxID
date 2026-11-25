@@ -246,7 +246,7 @@ async fn handoffs(
         db.collection::<AssistantGroup>(GROUPS)
             .update_one(
                 doc! {"_id":&group.id,"user_id":&row.user_id},
-                doc! {"$addToSet":{"pending_agent_ids":{"$each":addressed}}},
+                groups::address_update(&row.user_id, &addressed, &members),
             )
             .session(tx)
             .await?;

@@ -273,6 +273,8 @@ pub async fn set_schedule_job(
 
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
+        org_specialist_owner_id: None,
+        org_use_revision: 0,
         coordinator: None,
         work: None,
         trigger_generation: None,
@@ -370,6 +372,79 @@ pub(crate) async fn insert_run(
         >= 2
     {
         run.reason = Some("queue_full".into());
+    }
+    if let TriggerDelivery::Assistant { agent_id, .. } = &trigger.delivery {
+        // Persist the target even for a denied occurrence. Re-adding a person must
+        // never turn a previously refused occurrence into eligible queued work.
+        let org = match trigger
+            .assistant_target_owner
+            .as_ref()
+            .filter(|target| &target.agent_id == agent_id)
+            .map(|target| target.owner_id.as_str())
+        {
+            Some(owner) if owner == run.user_id => None,
+            Some(owner) => Some(owner.to_owned()),
+            None => {
+                let agent = db
+                    .collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .find_one(doc! {"_id":agent_id})
+                    .projection(doc! {"user_id":1})
+                    .session(&mut *session)
+                    .await?;
+                let owner = agent.as_ref().and_then(|a| a.get_str("user_id").ok());
+                let mut org = None;
+                if let Some(owner) = owner {
+                    let resolved = if owner == run.user_id {
+                        Some(owner)
+                    } else {
+                        let identity = db
+                            .collection::<Document>("users")
+                            .find_one(doc! {"_id":owner})
+                            .projection(doc! {"user_type":1})
+                            .session(&mut *session)
+                            .await?;
+                        identity.as_ref().map(|row| {
+                            if row.get_str("user_type") == Ok("org") {
+                                org = Some(owner.to_owned());
+                                owner
+                            } else {
+                                run.user_id.as_str()
+                            }
+                        })
+                    };
+                    if let Some(resolved) = resolved {
+                        db.collection::<Document>(TRIGGERS)
+                            .update_one(
+                                doc! {"_id":&trigger.id},
+                                doc! {"$set":{"assistant_target_owner":{"agent_id":agent_id,"owner_id":resolved}}},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                    }
+                }
+                org
+            }
+        };
+        if let Some(org) = org {
+            run.agent_id = Some(agent_id.clone());
+            match super::org_agent_service::fence_member_use(
+                db,
+                session,
+                &run.user_id,
+                &org,
+                agent_id,
+                false,
+            )
+            .await
+            {
+                Ok(revision) => run.org_use_revision = revision,
+                Err(AppError::Forbidden(_) | AppError::NotFound(_)) => {
+                    run.reason = Some("target_unavailable".into())
+                }
+                Err(error) => return Err(error),
+            }
+            run.org_specialist_owner_id = Some(org);
+        }
     }
     db.collection::<TriggerRun>(RUNS)
         .insert_one(&run)
@@ -1075,11 +1150,20 @@ pub fn admit_turn<'a>(
     claim: &'a TurnClaim,
     thread: &'a str,
     turn: &'a str,
+    org_use_revision: i64,
     session: &'a mut ClientSession,
 ) -> futures::future::BoxFuture<'a, AppResult<Option<crate::models::trigger_run::AutomationWork>>> {
     // Keep the schedule's transaction state out of the enclosing owner-turn
     // admission future, which also carries the assistant's authority fences.
-    Box::pin(admit_turn_inner(db, owner, claim, thread, turn, session))
+    Box::pin(admit_turn_inner(
+        db,
+        owner,
+        claim,
+        thread,
+        turn,
+        org_use_revision,
+        session,
+    ))
 }
 
 async fn admit_turn_inner(
@@ -1088,6 +1172,7 @@ async fn admit_turn_inner(
     claim: &TurnClaim,
     thread: &str,
     turn: &str,
+    org_use_revision: i64,
     session: &mut ClientSession,
 ) -> AppResult<Option<crate::models::trigger_run::AutomationWork>> {
     let now = Utc::now();
@@ -1140,6 +1225,11 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
+    if run.org_use_revision != org_use_revision
+        || run.reason.as_deref() == Some("target_unavailable")
+    {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
     if let Some(blocking_run_id) = find_running_blocker(db, &run, Some(session)).await? {
         return Err(match trigger.overlap {
             crate::models::trigger_schedule::OverlapPolicy::Skip => {
@@ -1399,6 +1489,11 @@ pub(crate) async fn run_thread_in_session(
         .session(&mut *session)
         .await?
         .ok_or(AppError::TriggerDeliveryRecordNotFound)?;
+    if current.org_use_revision != agent.org_use_revision
+        || current.reason.as_deref() == Some("target_unavailable")
+    {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
     // This write serializes simultaneous first runs and fences edited targets.
     let current_trigger = db
         .collection::<Trigger>(TRIGGERS)
