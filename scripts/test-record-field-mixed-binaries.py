@@ -36,6 +36,8 @@ def main():
                         help="exchange both request copies across two dual-reader revisions")
     parser.add_argument("--learning-writers", action="store_true",
                         help="exchange learning proposals with the reader-preparation binary")
+    parser.add_argument("--approval-readers", action="store_true",
+                        help="exchange four versions of pending, completed and cleared approvals")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -97,6 +99,18 @@ def main():
                 run(writer, "registry-write", "generation", writes=True, test=registry)
                 run(writer, "registry-live", "generation", writes=True, test=registry)
                 run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
+
+        if args.approval_readers:
+            for writes in (False, True):
+                for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                    run(writer, "write", "legacy", writes=writes)
+                    run(reader, "read", "legacy", writes=writes)
+            run("candidate", "reject", "legacy", legacy=False)
+            run("candidate", "contextual-fixture", "current", writes=True)
+            run("candidate", "read", "current", writes=True, legacy=False)
+            run("candidate", "read", "current", legacy=False)
+            run("base", "reject", "current")
             return
 
         run("base", "write", "old")
