@@ -57,6 +57,7 @@ enum Adapter {
     EventBinding,
     GatewayTransport,
     CmaRequest,
+    LearningProposal,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -184,7 +185,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_agent_learning_proposals",
-        adapter: Adapter::Pending,
+        adapter: Adapter::LearningProposal,
         fields: &[
             "scope_encrypted",
             "body_encrypted",
@@ -566,7 +567,8 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
         Some(
-            previous_labels::GATEWAY_SETUP_DIGEST
+            previous_labels::CMA_REQUEST_DIGEST
+            | previous_labels::GATEWAY_SETUP_DIGEST
             | previous_labels::EVENT_BINDING_DIGEST
             | previous_labels::CHANNEL_KEY_DIGEST
             | previous_labels::WHATSAPP_DIGEST
@@ -774,6 +776,9 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::LearningProposal => {
+            Box::pin(super::assistant_learning_record::storage::verify(keys, row)).await
+        }
         Adapter::CmaRequest => {
             super::assistant_cma_request_record::verify(keys, entry.collection, row).await
         }
@@ -911,6 +916,12 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::LearningProposal => {
+            Box::pin(super::assistant_learning_record::storage::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::CmaRequest => {
             super::assistant_cma_request_record::migrate(db, keys, entry.collection, row).await
         }
@@ -1470,6 +1481,7 @@ mod tests {
     mod cma_requests;
     mod event_bindings;
     mod gateway_transport;
+    mod learning_proposals;
     mod registry;
     mod swaps;
     mod webhooks;

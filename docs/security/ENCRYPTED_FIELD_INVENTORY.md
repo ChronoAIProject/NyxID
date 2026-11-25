@@ -44,7 +44,7 @@ A collection may use separate adapters for different fields.
 | `user_services` | `default_request_headers` | [default_header_service.rs](../../backend/src/services/default_header_service.rs) | Implemented |
 | `personal_erasure_effects` | `capability_encrypted` | [personal_erasure_service/provider.rs](../../backend/src/services/personal_erasure_service/provider.rs) | Implemented |
 | `agent_key_login_requests` | `delivery_credential_encrypted` | [agent_login_record_service.rs](../../backend/src/services/agent_login_record_service.rs) | Implemented |
-| `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | — | Pending |
+| `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | [assistant_learning_record_storage.rs](../../backend/src/services/assistant_learning_record_storage.rs) | Implemented |
 | `assistant_async_operations` | `result_encrypted` | [async_service_operation.rs](../../backend/src/services/async_service_operation.rs) | Implemented |
 | `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
@@ -98,6 +98,12 @@ document before updating the envelope and its marker. An uncertain creation
 retains its request and idempotency key through rewrap and recovery.
 [CMA request storage](../../backend/src/services/assistant_cma_request_record.rs)
 
+Learning proposal writers use the record-write switch for the body, scope and
+publication interface. Each field binds the proposal, owner and agent. The
+interface also binds its publication operation. Migration compares the exact
+source document and preserves terminal body sentinels and publication leases.
+[Proposal storage](../../backend/src/services/assistant_learning_record_storage.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
@@ -105,12 +111,6 @@ retains its request and idempotency key through rewrap and recovery.
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
-- Learning proposal readers use the body, scope and publication interface version
-  markers independently. Each contextual field binds the proposal ID, owner and
-  agent. The interface also binds the publication operation. Writers use the
-  historical format in both positions of `CONTEXTUAL_RECORD_WRITES`, so serving
-  these proposals still requires legacy reads.
-  [Proposal readers](../../backend/src/services/assistant_learning_record.rs)
 - NyxBot keeps the latest event reference on the thread. The event holds its
   context, the late-delivery target and the queued guest setup payload.
   Gateway responses store an encrypted replay payload.

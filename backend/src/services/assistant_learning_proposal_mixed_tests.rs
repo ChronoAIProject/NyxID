@@ -1,8 +1,6 @@
 //! Shared by the two binaries in the record-field compatibility driver.
 use super::*;
-use crate::{
-    crypto::aes::EncryptionKeys, services::assistant_skill_authoring::tests::contextualize,
-};
+use crate::crypto::aes::EncryptionKeys;
 use bson::Document;
 use std::sync::Arc;
 
@@ -19,20 +17,27 @@ async fn written(keys: Arc<EncryptionKeys>) -> Document {
     );
     for kind in ["authored", "learned"] {
         let row = bundle.get_document(kind).unwrap();
-        assert!(!row.contains_key("body_context_version"));
-        assert!(!row.contains_key("scope_context_version"));
-        keys.decrypt(row.get_binary_generic("body_encrypted").unwrap())
-            .await
-            .unwrap();
+        let expected = keys.contextual_record_writes().then_some(3);
+        assert_eq!(row.get_i32("body_context_version").ok(), expected);
+        assert!(row.get_binary_generic("body_encrypted").is_ok());
+        assert_eq!(
+            row.get_i32("scope_context_version").ok(),
+            expected.filter(|_| kind == "authored")
+        );
         if kind == "authored" {
             let p = row.get_document("publication").unwrap();
-            assert!(!p.contains_key("interface_context_version"));
-            keys.decrypt(row.get_binary_generic("scope_encrypted").unwrap())
-                .await
-                .unwrap();
-            keys.decrypt(p.get_binary_generic("interface_encrypted").unwrap())
-                .await
-                .unwrap();
+            assert_eq!(p.get_i32("interface_context_version").ok(), expected);
+            assert!(row.get_binary_generic("scope_encrypted").is_ok());
+            assert!(p.get_binary_generic("interface_encrypted").is_ok());
+        }
+        if expected.is_none() {
+            assert!(
+                !row.contains_key("body_context_version")
+                    && !row.contains_key("scope_context_version")
+            );
+            if let Ok(p) = row.get_document("publication") {
+                assert!(!p.contains_key("interface_context_version"));
+            }
         }
     }
     bundle
@@ -132,18 +137,22 @@ async fn change(state: &AppState, bundle: &mut Document, clear: bool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(!next.contains_key("body_context_version"));
+    if clear || !state.encryption_keys.contextual_record_writes() {
+        assert!(!next.contains_key("body_context_version"));
+    } else {
+        assert_eq!(next.get_i32("body_context_version"), Ok(3));
+    }
     for sibling in ["scope_encrypted", "scope_context_version", "scope_digest"] {
         assert_eq!(next.get(sibling), raw.get(sibling), "{sibling}");
     }
     if clear {
         assert!(!next.contains_key("body_encrypted"));
     } else {
-        state
-            .encryption_keys
-            .decrypt(next.get_binary_generic("body_encrypted").unwrap())
-            .await
-            .unwrap();
+        let row = bson::from_document(next.clone()).unwrap();
+        assert_eq!(
+            draft(state, &row).await.unwrap().description,
+            "Edited weekly review"
+        );
     }
     bundle.insert("authored", next);
 }
@@ -163,33 +172,41 @@ async fn learning_proposal_mixed_records() {
     );
     state.encryption_keys = Arc::new(keys);
     let mut bundle: Document = match step.as_str() {
-        "roundtrip" | "write" | "contextual-fixture" => {
-            Box::pin(written(state.encryption_keys.clone())).await
-        }
+        "roundtrip" | "write" => Box::pin(written(state.encryption_keys.clone())).await,
         _ => bson::from_slice(&std::fs::read(file.as_ref().unwrap()).unwrap()).unwrap(),
     };
     match step.as_str() {
-        "roundtrip" | "contextual-fixture" => {
-            for kind in ["authored", "learned"] {
-                contextualize(
-                    &state.encryption_keys,
-                    bundle.get_document_mut(kind).unwrap(),
-                )
-                .await;
-            }
-            check_read(&state, &bundle, false).await;
+        "read" | "reject" | "write" | "roundtrip" => {
+            check_read(&state, &bundle, step == "reject").await
         }
-        "read" | "reject" | "write" => check_read(&state, &bundle, step == "reject").await,
+        "migrate" => {
+            let proposals = db.collection::<Document>(PROPOSALS_COLLECTION_NAME);
+            for name in ["learned", "authored"] {
+                let source = bundle.get_document(name).unwrap();
+                proposals.insert_one(source).await.unwrap();
+                assert!(
+                    record::storage::migrate(&db, &state.encryption_keys, source)
+                        .await
+                        .unwrap()
+                );
+                let current = proposals
+                    .find_one(doc! {"_id":source.get_str("_id").unwrap()})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                record::storage::verify(&state.encryption_keys, &current)
+                    .await
+                    .unwrap();
+                bundle.insert(name, current);
+            }
+        }
         "replace" | "clear" | "replace-contextual" | "clear-contextual" => {
             change(&state, &mut bundle, step.starts_with("clear")).await;
         }
         _ => panic!("unknown learning fixture step"),
     }
     if let Some(file) = file
-        && matches!(
-            step.as_str(),
-            "write" | "contextual-fixture" | "replace" | "clear"
-        )
+        && matches!(step.as_str(), "write" | "migrate" | "replace" | "clear")
     {
         std::fs::write(file, bson::to_vec(&bundle).unwrap()).unwrap();
     }

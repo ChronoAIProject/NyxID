@@ -3215,7 +3215,9 @@ async fn learning_proposal_context_selects_each_field_and_preserves_absent_and_e
     };
     let db = crate::test_utils::connect_transaction_test_database("proposal_reader_branches").await;
     let state = crate::test_utils::test_app_state(db.clone());
-    let bundle = Box::pin(mixed_authored_row(state.encryption_keys.clone())).await;
+    let mut legacy_keys = crate::test_utils::test_encryption_keys();
+    legacy_keys.set_contextual_record_writes(false);
+    let bundle = Box::pin(mixed_authored_row(std::sync::Arc::new(legacy_keys))).await;
     let mut raw = bundle.get_document("authored").unwrap().clone();
     let legacy: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
     contextualize(&state.encryption_keys, &mut raw).await;

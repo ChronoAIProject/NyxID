@@ -219,3 +219,6 @@ pub(super) const EVENT_BINDING_DIGEST: &str =
 
 pub(super) const GATEWAY_SETUP_DIGEST: &str =
     "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
+
+pub(super) const CMA_REQUEST_DIGEST: &str =
+    "2586a1add34bc8bf42b81e020c60c6d2d14d4b3567cb29c2c8bf976d5100a99e";

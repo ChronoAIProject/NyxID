@@ -1331,9 +1331,19 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         .find_one(doc! {"_id": &run.agent_id})
         .await?
         .map_or(0, |agent| agent.skills_revision);
+    let id = Uuid::new_v4().to_string();
+    let (body_encrypted, body_context_version) = super::assistant_learning_record::Field::Body
+        .seal(
+            &state.encryption_keys,
+            &id,
+            &run.owner_id,
+            &run.agent_id,
+            &body,
+        )
+        .await?;
     let proposal = AssistantAgentLearningProposal {
         source: Default::default(),
-        id: Uuid::new_v4().to_string(),
+        id,
         agent_id: run.agent_id.clone(),
         owner_id: run.owner_id.clone(),
         run_id: run.id.clone(),
@@ -1352,8 +1362,8 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         scope_digest: None,
         evidence: run.evidence.clone(),
         body_bytes: body.len() as i64,
-        body_encrypted: state.encryption_keys.encrypt(&body).await?,
-        body_context_version: None,
+        body_encrypted,
+        body_context_version,
         created_at: now,
         updated_at: now,
     };
