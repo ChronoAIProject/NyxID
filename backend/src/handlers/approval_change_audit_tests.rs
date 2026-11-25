@@ -99,6 +99,9 @@ impl Change {
                 Path(f.service.clone()),
                 Query(Default::default()),
                 Json(approvals::SetServiceApprovalConfigRequest {
+                    disabled: None,
+                    expected_revision: None,
+                    grant_expiry_days: None,
                     approval_required: Some(true),
                     approval_mode: Some(ApprovalMode::PerRequest),
                     rules: None,
@@ -147,17 +150,25 @@ async fn change_request_commands() {
                 ("find", CONFIGS),
                 ("find", "notification_channels"),
                 ("insert", "notification_channels"),
+                // The baseline also reads this policy's remembered-approval expiry.
+                ("find", CONFIGS),
                 ("insert", GRANTS),
                 ("insert", INTENTS),
                 ("commitTransaction", ""),
             ],
+            // Callers without a revision keep the legacy reconciliation,
+            // committed with the policy write.
             (Set, _) => vec![
                 ("findAndModify", CONFIGS),
+                ("update", GRANTS),
+                ("update", REQUESTS),
                 ("insert", INTENTS),
                 ("commitTransaction", ""),
             ],
             (Delete, _) => vec![
                 ("delete", CONFIGS),
+                ("update", GRANTS),
+                ("update", REQUESTS),
                 ("insert", INTENTS),
                 ("commitTransaction", ""),
             ],
@@ -178,7 +189,7 @@ async fn change_request_commands() {
         let outside = match change {
             Web | Telegram => 1,
             Set => 5,
-            Delete => 4,
+            Delete => 2,
         };
         assert_eq!(commands.len(), expected.len() + outside, "{commands:?}");
         println!(
@@ -446,39 +457,83 @@ async fn legacy_mode_conflict_commits_expiry_without_an_approval() {
 }
 
 #[tokio::test]
-async fn cleanup_errors_preserve_the_committed_policy_occurrence_and_retry_contract() {
+async fn cleanup_errors_roll_back_policy_and_retry_commits_one_audit_occurrence() {
     for change in [Set, Delete] {
         let f = Fixture::new().await;
         change.prepare(&f, true).await;
+        let configs = f.rows(CONFIGS).await;
+        let grants = f.rows(GRANTS).await;
+        let requests = f.rows(REQUESTS).await;
         reject_writes(&f, GRANTS).await;
         assert!(matches!(
             change.call(&f, f.auth()).await,
             Err(crate::errors::AppError::DatabaseError(_))
         ));
-        let configs = f.rows(CONFIGS).await;
-        if change == Set {
-            assert_eq!(configs[0].get_str("approval_mode"), Ok("per_request"));
-        } else {
-            assert!(configs.is_empty());
-        }
-        assert_eq!(f.rows(INTENTS).await.len(), 1);
-        assert_eq!(f.rows(GRANTS).await[0].get_bool("revoked"), Ok(false));
-        assert_eq!(f.rows(REQUESTS).await[0].get_str("status"), Ok("pending"));
+        assert_eq!(f.rows(CONFIGS).await, configs);
+        assert_eq!(f.rows(GRANTS).await, grants);
+        assert_eq!(f.rows(REQUESTS).await, requests);
+        assert!(f.rows(INTENTS).await.is_empty());
+        assert!(f.rows(AUDIT).await.is_empty());
         f.state
             .db
             .run_command(doc! {"collMod":GRANTS,"validator":{}})
             .await
             .unwrap();
-        let retry = change.call(&f, f.auth()).await;
-        if change == Delete {
-            assert!(matches!(retry, Err(crate::errors::AppError::NotFound(_))));
-            assert_eq!(f.rows(INTENTS).await.len(), 1);
+        change.call(&f, f.auth()).await.unwrap();
+        if change == Set {
+            assert_eq!(
+                f.rows(CONFIGS).await[0].get_str("approval_mode"),
+                Ok("per_request")
+            );
         } else {
-            retry.unwrap();
-            assert_eq!(f.rows(INTENTS).await.len(), 2);
+            assert!(f.rows(CONFIGS).await.is_empty());
         }
         assert_eq!(f.rows(GRANTS).await[0].get_bool("revoked"), Ok(true));
         assert_eq!(f.rows(REQUESTS).await[0].get_str("status"), Ok("expired"));
+        let intents = f.rows(INTENTS).await;
+        assert_eq!(intents.len(), 1);
+
+        // A legacy DELETE still reports not found after success and appends
+        // nothing. A legacy PUT keeps its pre-revision contract: every save is
+        // written and audited, so an identical retry appends one new intent.
+        let retry = change.call(&f, f.auth()).await;
+        if change == Delete {
+            assert!(matches!(retry, Err(crate::errors::AppError::NotFound(_))));
+            assert_eq!(f.rows(INTENTS).await, intents);
+            relay_twice(&f, &intents[0], change.event()).await;
+            assert_eq!(f.rows(AUDIT).await.len(), 1);
+        } else {
+            retry.unwrap();
+            let after = f.rows(INTENTS).await;
+            assert_eq!(after.len(), 2);
+            assert!(after.contains(&intents[0]));
+            // Each save is chained exactly once, even when its intent replays.
+            let db = &f.state.db;
+            security_effect_service::sweep(db, &f.state.encryption_keys)
+                .await
+                .unwrap();
+            db.collection::<Document>(INTENTS)
+                .insert_one(&intents[0])
+                .await
+                .unwrap();
+            security_effect_service::sweep(db, &f.state.encryption_keys)
+                .await
+                .unwrap();
+            assert!(f.rows(INTENTS).await.is_empty());
+            let mut audited: Vec<_> = f
+                .rows(AUDIT)
+                .await
+                .iter()
+                .map(|row| row.get_str("_id").unwrap().to_owned())
+                .collect();
+            audited.sort();
+            let mut expected: Vec<_> = after
+                .iter()
+                .map(|row| row.get_str("_id").unwrap().to_owned())
+                .collect();
+            expected.sort();
+            assert_eq!(audited, expected);
+        }
         crate::test_utils::drop_test_database(&f.state.db).await;
     }
 }
@@ -586,6 +641,9 @@ async fn creating_policy_loser_returns_the_winner_and_runs_its_cleanup_without_a
                 Path(f.service.clone()),
                 Query(Default::default()),
                 Json(approvals::SetServiceApprovalConfigRequest {
+                    disabled: None,
+                    expected_revision: None,
+                    grant_expiry_days: None,
                     approval_required: Some(true),
                     approval_mode: Some(ApprovalMode::Grant),
                     rules: None,

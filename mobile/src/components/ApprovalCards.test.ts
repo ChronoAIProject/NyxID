@@ -1,3 +1,4 @@
+import * as challengeUiState from "../features/activity/challengeUiState";
 import { translationTestMocks } from "../i18n/translationTestHarness";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -27,6 +28,7 @@ function loadCard(
   }).outputText;
   const mocks: Record<string, unknown> = {
     ...translationTestMocks,
+    "../features/activity/challengeUiState":challengeUiState,
     react: { useMemo: (create: () => unknown) => create() },
     "react/jsx-runtime": {
       jsx: (type: string, props: unknown) => ({ type, props }),
@@ -352,6 +354,11 @@ test("approval and activity cards retain base native paragraph identity", () => 
     assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/, name);
     assert.doesNotMatch(source, /[^a-zA-Z]height: \d/, `${name}: no fixed row height`);
   }
+});
+
+test("the pending card displays its frozen policy duration instead of the account duration", () => {
+  const tree=ChallengeCard({challenge:{...request,approval_mode:"grant",grant_expiry_days:2},grantDurationLabel:"7 days"});
+  const text=textContent(tree);assert.ok(text.includes("2 days"));assert.ok(!text.includes("7 days"));
 });
 
 test("large-text history keeps its outcome inside the wide body below the summary", () => {

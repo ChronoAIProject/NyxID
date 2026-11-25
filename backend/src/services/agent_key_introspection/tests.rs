@@ -418,3 +418,93 @@ async fn child_credential_expiry_and_revocation_are_enforced() {
 }
 
 mod restrictions;
+
+#[tokio::test]
+async fn key_limited_policy_only_withholds_service_evidence_from_its_key() {
+    let f = Fixture::new().await.unwrap();
+    let other = key_service::create_api_key(
+        &f.db,
+        &f.owner,
+        "other",
+        "proxy",
+        None,
+        None,
+        Some(std::slice::from_ref(&f.connection)),
+        None,
+        Some(false),
+        Some(false),
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    for service in [&f.service, &f.connection] {
+        for effect in ["deny", "require_approval"] {
+            let configs = f.db.collection::<mongodb::bson::Document>(APPROVAL_CONFIGS);
+            configs.insert_one(doc! {"_id":Uuid::new_v4().to_string(),"user_id":&f.owner,"service_id":service,"service_name":"resource",
+                "approval_required":true,"approval_mode":"per_request","rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":[&f.key.id]}],
+                "created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()}).await.unwrap();
+            assert!(
+                f.evidence().await.is_err(),
+                "{effect}/{service}: listed key"
+            );
+            assert!(
+                introspect(&f.db, &f.client, &f.service, &other.full_key)
+                    .await
+                    .is_ok(),
+                "{effect}/{service}: sibling key"
+            );
+            // General rules keep the conservative whole-service refusal for both keys.
+            configs
+                .update_many(doc! {}, doc! {"$set":{"rules.0.api_key_ids":[]}})
+                .await
+                .unwrap();
+            assert!(f.evidence().await.is_err());
+            assert!(
+                introspect(&f.db, &f.client, &f.service, &other.full_key)
+                    .await
+                    .is_err()
+            );
+            configs.delete_many(doc! {}).await.unwrap();
+            assert!(f.evidence().await.is_ok());
+        }
+    }
+    // An unrelated keyed connection policy must not mask the implicit global floor.
+    f.db.collection::<mongodb::bson::Document>(APPROVAL_CONFIGS).insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"user_id":&f.owner,"service_id":&f.connection,"service_name":"resource",
+        "approval_required":false,"rules":[{"resource_pattern":"*","effect":"deny","api_key_ids":[&f.key.id]}],
+        "created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()}).await.unwrap();
+    f.db.collection::<UserService>(CONNECTIONS)
+        .update_one(
+            doc! {"_id":&f.connection},
+            doc! {"$set":{"source":"manual"}},
+        )
+        .await
+        .unwrap();
+    crate::test_utils::set_test_approval_preference(&f.db, &f.owner, true).await;
+    assert!(
+        introspect(&f.db, &f.client, &f.service, &other.full_key)
+            .await
+            .is_err()
+    );
+    // P1a deliberately leaves organization policy decisions at their baseline.
+    f.db.collection::<User>(USERS)
+        .update_one(doc! {"_id": &f.owner}, doc! {"$set": {"user_type": "org"}})
+        .await
+        .unwrap();
+    let connection =
+        f.db.collection::<UserService>(CONNECTIONS)
+            .find_one(doc! {"_id": &f.connection})
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        !allows_service_wide_approval(&f.db, &f.owner, &f.service, &connection, Some(&other.id))
+            .await
+            .unwrap()
+    );
+    crate::test_utils::drop_test_database(&f.db).await;
+}

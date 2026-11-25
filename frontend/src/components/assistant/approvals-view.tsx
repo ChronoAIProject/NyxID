@@ -17,8 +17,9 @@ import {
   SegmentedControlTrigger,
   SegmentedControlContent,
 } from "@/components/ui/segmented-control";
+import { ApprovalRules } from "./approval-rules";
 import { WorkspacePageHeader } from "./workspace-page-header";
-import { useDecideApproval } from "@/hooks/use-approvals";
+import { useDecideApproval, useServiceApprovalConfigs } from "@/hooks/use-approvals";
 import { useAssistantApprovals } from "@/hooks/use-assistant-workspace";
 import { ApiError } from "@/lib/api-client";
 import type { AssistantApprovalEntry } from "@/lib/assistant/approvals";
@@ -179,7 +180,19 @@ function HistorySection({
 export function ApprovalsView() {
   useUiTranslation();
   const approvals = useAssistantApprovals();
-  const [tab, setTab] = useState("pending");
+  const protections = useServiceApprovalConfigs();
+  const [chosenTab, setTab] = useState<string | null>(null);
+  // With nothing waiting and nothing set up, the useful place to land is Rules.
+  // Decided once per visit, so saving the first protection does not move the tab.
+  const [landingTab, setLandingTab] = useState<string | null>(null);
+  if (landingTab === null && !approvals.isLoading && !approvals.isError && protections.data) {
+    setLandingTab(
+      approvals.pending.length === 0 && protections.data.configs?.length === 0
+        ? "rules"
+        : "pending",
+    );
+  }
+  const tab = chosenTab ?? landingTab ?? "pending";
   useEffect(() => {
     if (!approvals.isError) return;
     toast.error(translateErrorMessage("Could not load approvals"), {
@@ -221,19 +234,23 @@ export function ApprovalsView() {
       <WorkspacePageHeader
         column
         title={translateUi("Approvals")}
-        description={translateUi("Review actions waiting for your permission. Decisions here, in Telegram or on mobile stay in sync.")}
+        description={translateUi("Review actions waiting for your permission and choose which actions need it. Decisions here, in Telegram or on mobile stay in sync.")}
       />
       <SegmentedControl
         value={tab}
         onValueChange={setTab}
         className="max-w-2xl space-y-6"
       >
-        <SegmentedControlList aria-label={translateUi("Approval status")} className="max-w-80">
+        <SegmentedControlList aria-label={translateUi("Approval status")} className="max-w-96">
           <SegmentedControlTrigger value="pending">{translateUi("Pending (")}{pending.length})
           </SegmentedControlTrigger>
           <SegmentedControlTrigger value="history">{translateUi("History")}</SegmentedControlTrigger>
+          <SegmentedControlTrigger value="rules">{translateUi("Rules")}</SegmentedControlTrigger>
         </SegmentedControlList>
-        {approvals.isError ? (
+        <SegmentedControlContent value="rules">
+          <ApprovalRules />
+        </SegmentedControlContent>
+        {tab === "rules" ? null : approvals.isError ? (
           <GroupedList footer={translateUi("Approvals may be out of date until the backend responds.")}>
             <GroupedRow asChild interactive>
               <button onClick={approvals.refetch}>
@@ -241,7 +258,7 @@ export function ApprovalsView() {
             </GroupedRow>
           </GroupedList>
         ) : null}
-        {approvals.isLoading ? (
+        {tab === "rules" ? null : approvals.isLoading ? (
           <div
             role="status"
             aria-label={translateUi("Loading approvals")}

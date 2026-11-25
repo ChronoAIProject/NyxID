@@ -70,7 +70,10 @@ async fn resolve_approval_mode(
         .session(session)
         .await?;
 
-    Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
+    Ok(per_service
+        .filter(|c| !c.disabled)
+        .map(|c| c.approval_mode)
+        .unwrap_or_default())
 }
 
 /// Resolve the explicit preference without materializing lazy notification settings.
@@ -119,6 +122,7 @@ pub async fn user_requires_approval(
 /// the owner has not configured one.
 #[derive(Debug, Clone)]
 pub struct ApprovalResolution {
+    pub fresh_decision: bool,
     pub required: bool,
     pub mode: ApprovalMode,
     pub effect: ApprovalEffect,
@@ -154,6 +158,8 @@ pub enum ApprovalOutcome {
 /// `actor_user_id` is the human/API key making the call. `service_owner_user_id`
 /// is the user_id that owns the resolved `UserService` -- the actor for
 /// personal services, the org for org-shared ones.
+/// `api_key_id` explicitly identifies the calling NyxID key, or is `None`
+/// when the caller has no key. Org policy evaluation retains its existing semantics.
 pub async fn resolve_org_aware_approval(
     db: &Database,
     actor_user_id: &str,
@@ -161,6 +167,7 @@ pub async fn resolve_org_aware_approval(
     service_id: &str,
     descriptor: &OperationDescriptor,
     is_auto_connected: bool,
+    api_key_id: Option<&str>,
 ) -> AppResult<ApprovalResolution> {
     // Step 1: if the resolved service is org-owned and the org has a
     // policy, use it. We detect "org-owned" by looking up the owner's
@@ -180,11 +187,21 @@ pub async fn resolve_org_aware_approval(
             .find_one(doc! {
                 "user_id": service_owner_user_id,
                 "service_id": service_id,
+                "disabled": {"$ne":true},
             })
             .await?
     {
-        let decision = approval_policy::evaluate(&org_config, descriptor);
+        // Org rules retain the keyless cascade in this phase. The caller key
+        // selects only actor rules until the separate org-policy rollout (P1b).
+        let decision = approval_policy::evaluate(&org_config, descriptor, None).unwrap_or(
+            approval_policy::ApprovalPolicyDecision {
+                effect: ApprovalEffect::AutoAllow,
+                mode: org_config.approval_mode.clone(),
+                grant_scope: None,
+            },
+        );
         return Ok(ApprovalResolution {
+            fresh_decision: false,
             required: decision.effect == ApprovalEffect::RequireApproval,
             mode: decision.mode,
             effect: decision.effect,
@@ -200,8 +217,10 @@ pub async fn resolve_org_aware_approval(
         .find_one(doc! { "user_id": actor_user_id, "service_id": service_id })
         .await?;
 
-    let (required, mode, effect, grant_scope) = if let Some(cfg) = actor_config {
-        let decision = approval_policy::evaluate(&cfg, descriptor);
+    let actor_decision = actor_config
+        .as_ref()
+        .and_then(|cfg| approval_policy::evaluate(cfg, descriptor, api_key_id));
+    let (required, mode, effect, grant_scope) = if let Some(decision) = actor_decision {
         (
             decision.effect == ApprovalEffect::RequireApproval,
             decision.mode,
@@ -232,6 +251,9 @@ pub async fn resolve_org_aware_approval(
     };
 
     Ok(ApprovalResolution {
+        fresh_decision: actor_config.as_ref().is_some_and(|cfg| {
+            approval_policy::key_requires_fresh_decision(cfg, descriptor, api_key_id)
+        }),
         required,
         mode,
         effect,
@@ -248,6 +270,7 @@ pub async fn evaluate_deny_only(
     service_id: &str,
     descriptor: &OperationDescriptor,
     is_auto_connected: bool,
+    api_key_id: Option<&str>,
 ) -> AppResult<bool> {
     let resolution = resolve_org_aware_approval(
         db,
@@ -256,8 +279,18 @@ pub async fn evaluate_deny_only(
         service_id,
         descriptor,
         is_auto_connected,
+        api_key_id,
     )
     .await?;
+    let mut resolution = resolution;
+    super::assistant_model_observer::exempt_personal_requirement(
+        actor_user_id,
+        service_id,
+        &mut resolution,
+    );
+    if resolution.required && resolution.fresh_decision {
+        return Err(AppError::ApprovalUnsupported);
+    }
     Ok(resolution.effect == ApprovalEffect::Deny)
 }
 
@@ -272,6 +305,7 @@ pub async fn evaluate_and_check(
     requester_id: &str,
     bypass_approval_flow: bool,
     is_auto_connected: bool,
+    api_key_id: Option<&str>,
 ) -> AppResult<ApprovalOutcome> {
     evaluate_and_check_with_options(
         db,
@@ -284,6 +318,7 @@ pub async fn evaluate_and_check(
         bypass_approval_flow,
         is_auto_connected,
         ApprovalOptions::default(),
+        api_key_id,
     )
     .await
 }
@@ -300,6 +335,7 @@ pub async fn evaluate_and_check_with_options(
     bypass_approval_flow: bool,
     is_auto_connected: bool,
     options: ApprovalOptions,
+    api_key_id: Option<&str>,
 ) -> AppResult<ApprovalOutcome> {
     let mut resolution = resolve_org_aware_approval(
         db,
@@ -308,6 +344,7 @@ pub async fn evaluate_and_check_with_options(
         service_id,
         descriptor,
         is_auto_connected,
+        api_key_id,
     )
     .await?;
 
@@ -370,6 +407,7 @@ pub async fn evaluate_and_check_with_options(
 
 /// An assistant approval bypass is returned to the dispatcher so its receipt
 /// is written only after successful execution. Explicit deny rules still win.
+/// Every caller explicitly supplies its NyxID key, or `None` when none exists.
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_for_chat(
     db: &Database,
@@ -382,6 +420,7 @@ pub async fn evaluate_for_chat(
     bypass: bool,
     auto_connected: bool,
     chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    api_key_id: Option<&str>,
 ) -> AppResult<(
     ApprovalOutcome,
     Option<super::assistant_acknowledgement_service::AutoAllowed>,
@@ -400,6 +439,7 @@ pub async fn evaluate_for_chat(
             service_id,
             descriptor,
             auto_connected,
+            api_key_id,
         )
         .await?;
         if owner_policy.required || owner_policy.effect == ApprovalEffect::Deny {
@@ -419,10 +459,12 @@ pub async fn evaluate_for_chat(
         bypass,
         auto_connected,
         chat.map_or_else(ApprovalOptions::default, |chat| chat.approval_options()),
+        api_key_id,
     )
     .await?;
     super::assistant_model_observer::evaluated_policy(actor, service_id, &outcome).await?;
     if let ApprovalOutcome::NeedsApproval(ref pending) = outcome
+        && !pending.resolution.fresh_decision
         && let Some(chat) = chat.filter(|chat| !chat.guest)
         && acks::effective_access_mode(db, chat).await?
             == crate::models::assistant_settings::AccessMode::Autopilot
@@ -608,6 +650,9 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub fresh_decision: bool,
+    pub caller_api_key_id: Option<String>,
+    pub protocol: Option<String>,
     pub(super) connected_request_id: Option<String>,
     pub(super) connected_deadline: Option<chrono::DateTime<Utc>>,
     pub approval: ApprovalOptions,
@@ -624,6 +669,9 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            fresh_decision: false,
+            caller_api_key_id: None,
+            protocol: Some(descriptor.protocol.summary_prefix().into()),
             connected_request_id: None,
             connected_deadline: None,
             approval: ApprovalOptions::default(),
@@ -711,6 +759,14 @@ pub async fn create_approval_request(
             group.conversation_id, group.request_id
         );
     }
+    // Callers coalesce exactly as before unless the owner's own policy for this
+    // service has key-limited rules, where each key needs its own decision.
+    if let Some(key) = &operation.caller_api_key_id
+        && !from_org_policy
+        && personal_policy_is_key_limited(db, user_id, service_id).await?
+    {
+        idempotency_key = format!("{idempotency_key}:key:{key}");
+    }
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
         if let Some(binding) = operation.exact_service.as_ref()
@@ -764,7 +820,30 @@ pub async fn create_approval_request(
             .connected_deadline
             .unwrap_or_else(|| now + Duration::seconds(i64::from(timeout_secs)));
 
+        let grant_expiry_days_snapshot = if approval_mode == ApprovalMode::Grant {
+            let policy = get_config(db, user_id, service_id)
+                .await?
+                .filter(|cfg| !cfg.disabled)
+                .and_then(|cfg| cfg.grant_expiry_days);
+            Some(crate::models::approval_request::GrantExpiryDefault {
+                policy_override: policy.is_some(),
+                days: match policy {
+                    Some(days) => days,
+                    None => {
+                        notification_service::get_or_create_channel(db, user_id)
+                            .await?
+                            .grant_expiry_days
+                    }
+                },
+            })
+        } else {
+            None
+        };
         let request = ApprovalRequest {
+            fresh_decision: operation.fresh_decision,
+            caller_api_key_id: operation.caller_api_key_id.clone(),
+            approval_protocol: operation.protocol.clone(),
+            grant_expiry_days_snapshot,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -1040,6 +1119,10 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        fresh_decision: false,
+        caller_api_key_id: None,
+        approval_protocol: None,
+        grant_expiry_days_snapshot: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: None,
@@ -1483,8 +1566,33 @@ impl DecisionMutation {
                 channel
             }
         };
-        let grant_expiry =
-            resolve_grant_expiry(self.now, self.duration_sec, channel.grant_expiry_days);
+        // The protection's own duration wins over the account-wide default.
+        let policy_days = db
+            .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .find_one(doc! {"user_id":&updated.user_id,"service_id":&updated.service_id})
+            .session(&mut *session)
+            .await?
+            .filter(|config| !config.disabled)
+            .and_then(|config| config.grant_expiry_days);
+        let snapshot = updated.grant_expiry_days_snapshot.as_ref();
+        let default_days = snapshot
+            .map(|s| s.days)
+            .or(policy_days)
+            .unwrap_or(channel.grant_expiry_days);
+        let policy_cap = snapshot
+            .filter(|s| s.policy_override)
+            .map(|s| s.days)
+            .or_else(|| {
+                if snapshot.is_none() {
+                    policy_days
+                } else {
+                    None
+                }
+            });
+        let duration = self
+            .duration_sec
+            .map(|seconds| policy_cap.map_or(seconds, |days| seconds.min(i64::from(days) * 86400)));
+        let grant_expiry = resolve_grant_expiry(self.now, duration, default_days);
         let grant = ApprovalGrant {
             execution_review: None,
             execution_last_used_at: None,
@@ -1721,7 +1829,7 @@ pub(super) async fn retire_full_access_chat_requests(
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
     };
-    let mut filter = doc! {"execution_proposal": null, "status": "pending", "requester_type": "user",
+    let mut filter = doc! {"execution_proposal": null, "fresh_decision":{"$ne":true}, "status": "pending", "requester_type": "user",
     "requester_label": {"$ne": bson::Bson::Null}, "created_at": {"$lte": sweep_time}};
     if let Some(user) = user {
         filter.insert("requester_id", user);
@@ -2332,6 +2440,8 @@ async fn read_request(
 }
 
 fn service_config_supports_grants(config: &ServiceApprovalConfig) -> bool {
+    // Inventory keeps remembered approvals manageable while a policy is disabled.
+    // Execution independently resolves the active policy before grant reuse.
     config.approval_mode == ApprovalMode::Grant
         || config.rules.iter().any(|rule| {
             rule.effect == ApprovalEffect::RequireApproval && rule.mode == ApprovalMode::Grant
@@ -2707,6 +2817,11 @@ pub(crate) async fn set_service_approval_config(
     rules: Option<&[ApprovalRule]>,
     default_effect: Option<&ApprovalEffect>,
 ) -> AppResult<ServiceApprovalConfig> {
+    // These component fixtures exercise policy semantics on a supporting fleet.
+    // Mixed-version tests use the real handler/options API and seed their own evidence.
+    if rules.is_some_and(|rules| rules.iter().any(|rule| !rule.api_key_ids.is_empty())) {
+        super::security_readiness_service::ready_test_replica(db).await;
+    }
     set_config(
         db,
         user_id,
@@ -2733,10 +2848,82 @@ pub(crate) async fn set_config(
     default_effect: Option<&ApprovalEffect>,
     audit: ConfigAudit,
 ) -> AppResult<ServiceApprovalConfig> {
+    set_config_with_options(
+        db,
+        user_id,
+        service_id,
+        service_name,
+        approval_required,
+        approval_mode,
+        rules,
+        default_effect,
+        audit,
+        ConfigWriteOptions::default(),
+    )
+    .await
+}
+
+pub const RULES_READINESS: &str = "approvals:personal-rules-v1";
+
+#[derive(Clone, Default)]
+pub(crate) struct ConfigWriteOptions {
+    pub grant_expiry_days: Option<Option<u32>>,
+    pub default_effect: Option<Option<ApprovalEffect>>,
+    pub disabled: Option<bool>,
+    /// Empty means the editor observed no policy.
+    pub expected_revision: Option<String>,
+}
+
+pub fn config_revision(config: &ServiceApprovalConfig) -> AppResult<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = bson::to_vec(config)
+        .map_err(|_| AppError::Internal("Could not read policy revision".into()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn set_config_with_options(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    service_name: &str,
+    approval_required: Option<bool>,
+    approval_mode: Option<&ApprovalMode>,
+    rules: Option<&[ApprovalRule]>,
+    default_effect: Option<&ApprovalEffect>,
+    audit: ConfigAudit,
+    options: ConfigWriteOptions,
+) -> AppResult<ServiceApprovalConfig> {
     let now = bson::DateTime::from_chrono(Utc::now());
-    let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
     let filter = doc! { "user_id": user_id, "service_id": service_id };
-    let existing = collection.find_one(filter.clone()).await?;
+    let existing_document = db
+        .collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(filter.clone())
+        .await?;
+    let existing: Option<ServiceApprovalConfig> = existing_document
+        .clone()
+        .map(bson::from_document)
+        .transpose()
+        .map_err(|_| AppError::Internal("Could not read policy".into()))?;
+    if let Some(days) = options.grant_expiry_days.flatten()
+        && !(MIN_GRANT_EXPIRY_DAYS..=MAX_GRANT_EXPIRY_DAYS).contains(&days)
+    {
+        return Err(AppError::ValidationError(
+            "grant_expiry_days must be between 1 and 365".into(),
+        ));
+    }
+    if let Some(expected) = &options.expected_revision {
+        let actual = existing
+            .as_ref()
+            .map(config_revision)
+            .transpose()?
+            .unwrap_or_default();
+        if expected != &actual {
+            return Err(AppError::Conflict(
+                "Approval policy changed; reload before saving".into(),
+            ));
+        }
+    }
     let (approval_required, approval_mode, rules, default_effect) = resolve_service_config_update(
         existing.as_ref(),
         approval_required,
@@ -2745,7 +2932,38 @@ pub(crate) async fn set_config(
         default_effect,
     )?;
 
-    let intent = audit.set_intent(
+    let default_effect = options.default_effect.clone().unwrap_or(default_effect);
+    let days = options
+        .grant_expiry_days
+        .unwrap_or_else(|| existing.as_ref().and_then(|cfg| cfg.grant_expiry_days));
+    let disabled = options
+        .disabled
+        .unwrap_or_else(|| existing.as_ref().is_some_and(|cfg| cfg.disabled));
+    // Callers without a reviewed revision keep the original contract: every
+    // save is written, audited and reconciled, and the last write wins.
+    let legacy = options.expected_revision.is_none();
+    if !legacy
+        && let Some(existing) = &existing
+        && existing.approval_required == approval_required
+        && existing.approval_mode == approval_mode
+        && existing.rules == rules
+        && existing.default_effect == default_effect
+        && existing.grant_expiry_days == days
+        && existing.disabled == disabled
+    {
+        return Ok(existing.clone());
+    }
+    if disabled || days.is_some() || rules.iter().any(|r| !r.api_key_ids.is_empty()) {
+        super::security_readiness_service::require_serving(db, RULES_READINESS).await?;
+    }
+    let reconcile = legacy
+        || existing.as_ref().is_none_or(|old| {
+            old.approval_required != approval_required
+                || old.approval_mode != approval_mode
+                || old.rules != rules
+                || old.default_effect != default_effect
+        });
+    let mut intent = audit.set_intent(
         user_id,
         service_id,
         service_name,
@@ -2754,69 +2972,154 @@ pub(crate) async fn set_config(
         rules.len(),
         default_effect.as_ref(),
     )?;
+    if let crate::models::security_effect_intent::SecurityEffect::Audit { event } =
+        &mut intent.effect
+        && let Some(data) = event.event_data.as_mut()
+    {
+        if options.grant_expiry_days.is_some() {
+            data["grant_expiry_days"] = serde_json::json!(days);
+        }
+        if options.disabled.is_some() {
+            data["disabled"] = serde_json::json!(disabled);
+        }
+    }
     let rules_bson = bson::to_bson(&rules)
         .map_err(|e| AppError::Internal(format!("Failed to serialize approval rules: {e}")))?;
     let effect_bson = bson::to_bson(&default_effect).map_err(|e| {
         AppError::Internal(format!("Failed to serialize approval default effect: {e}"))
     })?;
     let config_id = uuid::Uuid::new_v4().to_string();
-    let update = doc! {
-        "$set": {
-            "approval_required": approval_required,
-            "approval_mode": approval_mode.as_str(),
-            "rules": rules_bson,
-            "default_effect": effect_bson,
-            "service_name": service_name,
-            "updated_at": now,
-        },
-        "$setOnInsert": {
-            "_id": &config_id,
-            "user_id": user_id,
-            "service_id": service_id,
-            "created_at": now,
-        }
+    let mut set = doc! {
+        "approval_required": approval_required,
+        "approval_mode": approval_mode.as_str(),
+        "rules": rules_bson,
+        "default_effect": effect_bson,
+        "service_name": service_name,
+        "updated_at": now,
     };
+    let mut set_on_insert = doc! {
+        "_id": &config_id,
+        "user_id": user_id,
+        "service_id": service_id,
+        "created_at": now,
+    };
+    // A legacy writer cannot see the newer fields, so it never rewrites them.
+    let newer = doc! { "disabled": disabled, "grant_expiry_days": days.map(i64::from) };
+    if legacy {
+        set_on_insert.extend(newer);
+    } else {
+        set.extend(newer);
+    }
+    let update = doc! { "$set": set, "$setOnInsert": set_on_insert };
     let mut write_filter = filter.clone();
     // Two audited creators that observed absence must contend for the unique
     // owner/service key even if a transaction body is retried after a conflict.
-    if existing.is_none() {
+    if legacy && existing.is_some() {
+        // Last write wins for callers without a reviewed revision.
+    } else if existing.is_some() {
+        // Compare the complete observed policy, including same-millisecond
+        // edits, so retrying a transaction cannot overwrite another editor.
+        let observed = existing_document
+            .as_ref()
+            .expect("existing policy document");
+        for (field, value) in observed {
+            write_filter.insert(field, value.clone());
+        }
+        for field in [
+            "disabled",
+            "grant_expiry_days",
+            "rules",
+            "default_effect",
+            "approval_mode",
+        ] {
+            if !observed.contains_key(field) {
+                write_filter.insert(field, doc! {"$exists":false});
+            }
+        }
+    } else {
         write_filter.insert("_id", &config_id);
     }
     for _attempt in 0..2 {
-        let mut session = db.client().start_session().await?;
-        let (source_db, upsert_filter, update, intent) = (
-            db.clone(),
-            write_filter.clone(),
-            update.clone(),
-            intent.clone(),
+        let context = (
+            db,
+            &write_filter,
+            &update,
+            &intent,
+            existing.is_none(),
+            reconcile,
+            legacy,
         );
-        let result = session
-            .start_transaction()
-            .write_concern(mongodb::options::WriteConcern::majority())
-            .and_run2(async move |session| {
-                let row = upsert_config(&source_db, &upsert_filter, &update, session).await?;
-                transaction_result(
-                    super::security_effect_service::enqueue_in_session(
-                        &source_db,
-                        session,
-                        std::slice::from_ref(&intent),
-                    )
-                    .await,
-                )?;
-                Ok(row)
-            })
-            .await;
+        let result = super::service_history::transaction::run_send(
+            db,
+            &context,
+            |session, &(source_db, upsert_filter, update, intent, create, reconcile, legacy)| {
+                Box::pin(async move {
+                    let row =
+                        upsert_config(source_db, upsert_filter, update, create, session).await?;
+                    if reconcile && legacy {
+                        transaction_result(
+                            legacy_reconcile_grant_state_in_session(source_db, &row, session).await,
+                        )?;
+                    } else if reconcile {
+                        transaction_result(
+                            reconcile_grant_state_in_session(source_db, &row, session).await,
+                        )?;
+                    }
+                    transaction_result(
+                        super::security_effect_service::enqueue_in_session(
+                            source_db,
+                            session,
+                            std::slice::from_ref(intent),
+                        )
+                        .await,
+                    )?;
+                    Ok(row)
+                })
+            },
+        )
+        .await;
         let cfg = match result {
             Ok(cfg) => cfg,
             Err(error) if error.get_custom::<ConfigCreationRace>().is_some() => {
-                let Some(winner) = collection.find_one(filter.clone()).await? else {
+                if options.expected_revision.is_some() || existing.is_some() {
+                    return Err(AppError::Conflict(
+                        "Approval policy changed; reload before saving".into(),
+                    ));
+                }
+                // A legacy caller has no reviewed revision. Preserve its
+                // creation-race contract by returning the current winner and
+                // reconciling that policy, including a winner written by an
+                // older replica. The losing proposal produces no audit event.
+                let context = (db, &filter);
+                let winner = super::service_history::transaction::run_send(
+                    db,
+                    &context,
+                    |session, &(db, filter)| {
+                        Box::pin(async move {
+                            let winner = db
+                                .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+                                .find_one(filter.clone())
+                                .session(&mut *session)
+                                .await?;
+                            if let Some(winner) = &winner {
+                                transaction_result(
+                                    legacy_reconcile_grant_state_in_session(db, winner, session)
+                                        .await,
+                                )?;
+                            }
+                            Ok(winner)
+                        })
+                    },
+                )
+                .await
+                .map_err(map_transaction_error)?;
+                let Some(winner) = winner else {
                     continue;
                 };
                 winner
             }
             Err(error) => return Err(map_transaction_error(error)),
         };
-        reconcile_grant_state_for_config(db, user_id, service_id, &cfg).await?;
         return Ok(cfg);
     }
     Err(AppError::Conflict(
@@ -2831,12 +3134,13 @@ async fn upsert_config(
     db: &Database,
     filter: &Document,
     update: &Document,
+    create: bool,
     session: &mut ClientSession,
 ) -> mongodb::error::Result<ServiceApprovalConfig> {
     let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
     collection
         .find_one_and_update(filter.clone(), update.clone())
-        .upsert(true)
+        .upsert(create)
         .return_document(ReturnDocument::After)
         .session(session)
         .await
@@ -2848,68 +3152,143 @@ async fn upsert_config(
             }
         })?
         .ok_or_else(|| {
-            super::api_key_mutation_service::abort_transaction(AppError::Internal(
-                "Upsert returned no document".into(),
+            super::api_key_mutation_service::abort_transaction(AppError::Conflict(
+                "Approval policy changed; reload before saving".into(),
             ))
         })
 }
 
+pub const MIN_GRANT_EXPIRY_DAYS: u32 = 1;
+pub const MAX_GRANT_EXPIRY_DAYS: u32 = 365;
+
 /// Delete a per-service approval config (revert to global default).
 /// Because the global default mode is `PerRequest`, deleting any override
-/// effectively switches the service to `per_request`. Active grants are
-/// revoked unconditionally so they don't linger (see #146). The revoke is
-/// idempotent, so retries after partial failure still clean up.
+/// effectively switches the service to `per_request`. Legacy service grants,
+/// pending requests and the audit intent change atomically with the policy.
+#[cfg(test)]
 pub(crate) async fn delete_service_approval_config(
     db: &Database,
     user_id: &str,
     service_id: &str,
     audit: ConfigAudit,
 ) -> AppResult<()> {
+    delete_config_with_revision(db, user_id, service_id, audit, None).await
+}
+
+pub(crate) async fn delete_config_with_revision(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    audit: ConfigAudit,
+    expected_revision: Option<&str>,
+) -> AppResult<()> {
     let intent = audit.delete_intent(user_id, service_id)?;
     let filter = doc! {"user_id":user_id,"service_id":service_id};
-    let deleted = {
-        let db = db.clone();
-        let mut session = db.client().start_session().await?;
-        session
-            .start_transaction()
-            .write_concern(mongodb::options::WriteConcern::majority())
-            .and_run2(async move |session| {
-                let count = db
-                    .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+    let context = (db, &filter, &intent, expected_revision, user_id, service_id);
+    let deleted = super::service_history::transaction::run_send(
+        db,
+        &context,
+        |session, &(db, filter, intent, expected_revision, user_id, service_id)| {
+            Box::pin(async move {
+                if let Some(expected) = expected_revision {
+                    let current = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+                        .find_one(filter.clone())
+                        .session(&mut *session)
+                        .await?;
+                    if let Some(current) = current {
+                        let actual = transaction_result(config_revision(&current))?;
+                        if expected != actual {
+                            return transaction_result(Err(AppError::Conflict(
+                                "Approval policy changed; reload before removing".into(),
+                            )));
+                        }
+                    }
+                }
+                let count = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
                     .delete_one(filter.clone())
                     .session(&mut *session)
                     .await?
                     .deleted_count;
+                // Legacy DELETE stays a full revocation: every active grant for
+                // the service (including execution permissions) and pending
+                // grant-mode requests, even when a retry finds the policy gone.
+                // It now commits with the deletion instead of after it.
+                if expected_revision.is_none() {
+                    db.collection::<ApprovalGrant>(GRANTS)
+                        .update_many(
+                            doc! {"user_id": user_id, "service_id": service_id, "revoked": false},
+                            revoke_grant_update(Utc::now()),
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    db.collection::<ApprovalRequest>(REQUESTS)
+                        .update_many(
+                            doc! {
+                                "user_id": user_id, "service_id": service_id, "status": "pending",
+                                "approval_mode": {"$in": ["grant", null]},
+                            },
+                            doc! {"$set": {"status": "expired", "decided_at": bson::DateTime::now()}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                } else if count == 1 {
+                    // Revision-aware removal preserves execution permissions
+                    // and proposals.
+                    db.collection::<ApprovalGrant>(GRANTS)
+                        .update_many(
+                            doc! {"user_id": user_id, "service_id": service_id, "revoked": false, "execution": null},
+                            doc! {"$set": {"revoked": true}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    db.collection::<ApprovalRequest>(REQUESTS)
+                        .update_many(
+                            doc! {"user_id": user_id, "service_id": service_id, "status": "pending", "execution_proposal": null},
+                            doc! {"$set": {"status": "expired", "decided_at": bson::DateTime::now()}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
                 if count == 1 {
                     transaction_result(
                         super::security_effect_service::enqueue_in_session(
-                            &db,
-                            session,
-                            std::slice::from_ref(&intent),
-                        )
-                        .await,
+                            db, session, std::slice::from_ref(intent),
+                        ).await,
                     )?;
                 }
                 Ok(count)
             })
-            .await
-            .map_err(map_transaction_error)?
-    };
+        },
+    )
+    .await
+    .map_err(map_transaction_error)?;
 
-    // Always revoke grants and cancel pending grant-mode requests regardless
-    // of deleted_count. If a previous attempt deleted the config but failed on
-    // cleanup, this retry still cleans up. Both operations are no-ops when
-    // nothing matches.
-    revoke_grants_for_service(db, user_id, service_id, false).await?;
-    cancel_pending_grant_requests(db, user_id, service_id, false).await?;
-
-    if deleted == 0 {
+    if expected_revision.is_none() && deleted == 0 {
         return Err(AppError::NotFound(
             "Per-service approval config not found".to_string(),
         ));
     }
 
     Ok(())
+}
+
+/// Whether an enabled personal policy limits any rule to specific API keys.
+async fn personal_policy_is_key_limited(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<bool> {
+    Ok(db
+        .collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+        .count_documents(doc! {
+            "user_id": user_id,
+            "service_id": service_id,
+            "disabled": {"$ne": true},
+            "rules.api_key_ids.0": {"$exists": true},
+        })
+        .limit(1)
+        .await?
+        > 0)
 }
 
 fn compute_idempotency_key(
@@ -2996,8 +3375,19 @@ fn resolve_service_config_update(
         .map(<[ApprovalRule]>::to_vec)
         .or_else(|| existing.map(|config| config.rules.clone()))
         .unwrap_or_default();
-    approval_policy::validate_rules(&resolved_rules).map_err(AppError::ValidationError)?;
+    if existing.is_none_or(|config| config.rules != resolved_rules) {
+        if resolved_rules.len() > approval_policy::MAX_APPROVAL_RULES {
+            return Err(AppError::ValidationError("Too many approval rules".into()));
+        }
+        let changed: Vec<_> = resolved_rules
+            .iter()
+            .filter(|rule| existing.is_none_or(|cfg| !cfg.rules.contains(rule)))
+            .cloned()
+            .collect();
+        approval_policy::validate_rules(&changed).map_err(AppError::ValidationError)?;
+    }
 
+    // Omission always preserves the stored default. Explicit null clears it.
     let resolved_default_effect = default_effect
         .cloned()
         .or_else(|| existing.and_then(|config| config.default_effect.clone()));
@@ -3010,71 +3400,7 @@ fn resolve_service_config_update(
     ))
 }
 
-/// Reconcile persisted grants and pending grant-mode requests after a policy
-/// update. Top-level grant mode retains service-wide and scoped state. With a
-/// rule-only grant capability, service-wide legacy state is invalid but scoped
-/// state remains eligible for the current evaluator to check operation by
-/// operation. `evaluate_and_check` consults a stored grant only after the live
-/// policy selects `Grant` for that operation, so a retained scope cannot bypass
-/// a newly selected `PerRequest` rule. The trade-off is stale scoped rows: when
-/// one grant rule remains, scopes created by removed or narrowed grant rules
-/// stay stored and visible until expiry or explicit revocation. Comparing two
-/// wildcard scope languages is not expressible through `grant_scope_covers`,
-/// which checks one concrete operation. When no grant capability remains, all
-/// grant state is invalid.
-async fn reconcile_grant_state_for_config(
-    db: &Database,
-    user_id: &str,
-    service_id: &str,
-    config: &ServiceApprovalConfig,
-) -> AppResult<()> {
-    if config.approval_mode == ApprovalMode::Grant {
-        return Ok(());
-    }
-
-    let unscoped_only = service_config_supports_grants(config);
-    revoke_grants_for_service(db, user_id, service_id, unscoped_only).await?;
-    cancel_pending_grant_requests(db, user_id, service_id, unscoped_only).await?;
-    Ok(())
-}
-
-/// Cancel pending grant-mode approval requests for a (user, service) pair.
-/// When `unscoped_only` is true, scoped requests remain eligible for live
-/// rule-level evaluation and only service-wide legacy requests are cancelled.
-///
-/// Uses `$in: ["grant", null]` to also catch legacy requests that pre-date the
-/// `approval_mode` field -- those deserialize as `Grant` via
-/// `legacy_approval_mode_default` but have no stored value in MongoDB.
-async fn cancel_pending_grant_requests(
-    db: &Database,
-    user_id: &str,
-    service_id: &str,
-    unscoped_only: bool,
-) -> AppResult<()> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let mut filter = doc! {
-        "user_id": user_id,
-        "service_id": service_id,
-        "status": "pending",
-        "approval_mode": { "$in": ["grant", null] },
-    };
-    if unscoped_only {
-        // `{ field: null }` matches both explicit null and a missing field,
-        // which covers every service-wide legacy request representation.
-        filter.insert("grant_scope", bson::Bson::Null);
-    }
-    db.collection::<ApprovalRequest>(REQUESTS)
-        .update_many(
-            filter,
-            doc! { "$set": { "status": "expired", "decided_at": now } },
-        )
-        .await?;
-    Ok(())
-}
-
-/// Revoke active grants for a (user, service) pair. When `unscoped_only` is
-/// true, scoped grants remain eligible for live rule-level evaluation and only
-/// service-wide legacy grants are revoked.
+#[cfg(test)]
 async fn revoke_grants_for_service(
     db: &Database,
     user_id: &str,
@@ -3245,12 +3571,21 @@ mod tests {
         specialist.role = crate::models::assistant_conversation::AgentRole::Subagent;
         let deadline = |mode: ApprovalMode, descriptor: OperationDescriptor, chat| {
             let db = &f.state.db;
+            let caller_key = &f.chat.api_key_id;
             async move {
                 let mut operation = ApprovalRequestOperation::from_descriptor(&descriptor, None);
+                operation.fresh_decision = true;
+                operation.caller_api_key_id = Some(caller_key.clone());
+                let expected_key = operation.caller_api_key_id.clone();
+                let expected_protocol = operation.protocol.clone();
                 let mut waiter =
                     ConnectedWait::for_service(db, &mode, &mut operation, &descriptor, chat, 300)
                         .await
                         .unwrap();
+                assert!(operation.fresh_decision);
+                assert_eq!(operation.caller_api_key_id, expected_key);
+                assert_eq!(operation.protocol, expected_protocol);
+                assert_eq!(operation.connected_request_id, waiter.occurrence);
                 // This policy check created no row to clean up.
                 waiter.occurrence = None;
                 operation.connected_deadline
@@ -3558,6 +3893,7 @@ mod tests {
                 false,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
             .await
             .unwrap(),
@@ -3588,6 +3924,7 @@ mod tests {
                 false,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
         };
         let ApprovalOutcome::NeedsApproval(pending) = evaluate().await.unwrap() else {
@@ -3609,6 +3946,7 @@ mod tests {
                 true,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
             .await
             .unwrap(),
@@ -3648,6 +3986,7 @@ mod tests {
                 true,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
             .await
             .unwrap(),
@@ -3827,7 +4166,8 @@ mod tests {
                         Some("api_key"),
                         "agent",
                         false,
-                        false
+                        false,
+                        None,
                     )
                     .await
                     .unwrap(),
@@ -3981,6 +4321,7 @@ mod tests {
                 "guest",
                 false,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -4103,6 +4444,7 @@ mod tests {
             "agent",
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -4111,7 +4453,7 @@ mod tests {
         );
         assert!(matches!(
             evaluate_and_check(
-                &db, &owner, &org, &service, &read, None, "session", true, false
+                &db, &owner, &org, &service, &read, None, "session", true, false, None,
             )
             .await
             .unwrap(),
@@ -4131,7 +4473,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             evaluate_and_check(
-                &db, &owner, &org, &service, &read, None, "session", true, true
+                &db, &owner, &org, &service, &read, None, "session", true, true, None,
             )
             .await
             .unwrap(),
@@ -4146,6 +4488,10 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            fresh_decision: false,
+            caller_api_key_id: None,
+            approval_protocol: None,
+            grant_expiry_days_snapshot: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -4562,8 +4908,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_service_config_update_handles_defaults_for_key_limited_rules() {
+        let keyed = ApprovalRule {
+            mandatory_review: false,
+            methods: vec![],
+            resource_pattern: "*".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::Deny,
+            mode: ApprovalMode::PerRequest,
+            api_key_ids: vec!["key-a".to_string()],
+        };
+        let existing = ServiceApprovalConfig {
+            disabled: false,
+            grant_expiry_days: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "user1".to_string(),
+            service_id: "svc1".to_string(),
+            service_name: "OpenAI".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::PerRequest,
+            rules: vec![],
+            default_effect: Some(ApprovalEffect::RequireApproval),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let rules = [keyed];
+
+        // Partial clients omit the default to preserve its existing meaning.
+        // The HTTP tri-state options support an explicit null to clear it.
+        let (_, _, _, preserved) =
+            resolve_service_config_update(Some(&existing), None, None, Some(&rules), None)
+                .expect("ok");
+        assert_eq!(preserved, Some(ApprovalEffect::RequireApproval));
+
+        // Key rules plus a default for everyone else is a valid combined policy.
+        let (_, _, _, combined) = resolve_service_config_update(
+            Some(&existing),
+            None,
+            None,
+            Some(&rules),
+            Some(&ApprovalEffect::AutoAllow),
+        )
+        .expect("ok");
+        assert_eq!(combined, Some(ApprovalEffect::AutoAllow));
+    }
+
+    #[test]
     fn resolve_service_config_update_preserves_existing_mode_when_omitted() {
         let existing = ServiceApprovalConfig {
+            disabled: false,
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "user1".to_string(),
             service_id: "svc1".to_string(),
@@ -4876,6 +5270,8 @@ mod tests {
     #[test]
     fn service_config_grant_capability_includes_rule_level_grant_mode() {
         let mut config = ServiceApprovalConfig {
+            disabled: false,
+            grant_expiry_days: None,
             id: "cfg-1".to_string(),
             user_id: "user-1".to_string(),
             service_id: "svc-1".to_string(),
@@ -4894,6 +5290,7 @@ mod tests {
             verbs: vec![],
             effect: ApprovalEffect::RequireApproval,
             mode: ApprovalMode::Grant,
+            api_key_ids: vec![],
         });
 
         assert!(service_config_supports_grants(&config));
@@ -4971,11 +5368,13 @@ mod tests {
         let mut requests = Vec::new();
         for (id, label, status) in [
             ("full", full_key.name.as_str(), "pending"),
+            ("fresh", full_key.name.as_str(), "pending"),
             ("auto", auto_key.name.as_str(), "pending"),
             ("general", general.name.as_str(), "pending"),
             ("decided", full_key.name.as_str(), "approved"),
         ] {
             let mut request = make_request(id, status);
+            request.fresh_decision = id == "fresh";
             request.user_id = f.owner.clone();
             request.requester_id = f.owner.clone();
             request.requester_type = "user".into();
@@ -4999,8 +5398,8 @@ mod tests {
             .await
             .unwrap()
             .len(),
-            1,
-            "reads do not retire pre-upgrade asks"
+            2,
+            "reads retain legacy and fresh asks"
         );
         acks::retire_full_access_confirmations(&f.state.db, None, None)
             .await
@@ -5023,7 +5422,7 @@ mod tests {
             full.decision_idempotency_key,
             again.decision_idempotency_key
         );
-        for id in ["auto", "general"] {
+        for id in ["auto", "general", "fresh"] {
             let kept = get_request(&f.state.db, id).await.unwrap();
             assert_eq!(kept.status, "pending");
             assert!(kept.decided_at.is_none());
@@ -5067,6 +5466,10 @@ mod tests {
         );
         assert_eq!(
             get_request(&f.state.db, "general").await.unwrap().status,
+            "pending"
+        );
+        assert_eq!(
+            get_request(&f.state.db, "fresh").await.unwrap().status,
             "pending"
         );
         f.state.db.drop().await.unwrap();
@@ -5134,6 +5537,7 @@ mod tests {
             false,
             false,
             Some(&f.chat),
+            None,
         )
         .await
         .unwrap();
@@ -5152,6 +5556,39 @@ mod tests {
             1
         );
         assert_eq!(queries.iter().filter(|q| q.as_str() == GRANTS).count(), 1);
+        db.collection::<Document>(SERVICE_APPROVAL_CONFIGS).update_one(
+            doc! {"service_id": &service}, doc! {"$set": {"rules": [{"resource_pattern": "*", "effect": "require_approval", "mode": "per_request", "api_key_ids": [&f.chat.api_key_id]}]}},
+        ).await.unwrap();
+        for key in [f.chat.api_key_id.as_str(), "another-key"] {
+            let (outcome, receipt) = evaluate_for_chat(
+                &db,
+                &f.owner,
+                &f.owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                &f.owner,
+                false,
+                false,
+                Some(&f.chat),
+                Some(key),
+            )
+            .await
+            .unwrap();
+            if key == f.chat.api_key_id {
+                assert!(
+                    matches!(outcome, ApprovalOutcome::NeedsApproval(pending) if pending.resolution.fresh_decision)
+                );
+                assert!(receipt.is_none());
+            } else {
+                assert!(matches!(outcome, ApprovalOutcome::Allowed { .. }));
+            }
+        }
+        db.collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(doc! {"service_id": &service}, doc! {"$set": {"rules": []}})
+            .await
+            .unwrap();
+
         crate::services::assistant_settings_service::update(
             &db,
             &f.owner,
@@ -5173,6 +5610,7 @@ mod tests {
             false,
             false,
             Some(&f.chat),
+            None,
         )
         .await
         .unwrap();
@@ -5206,6 +5644,7 @@ mod tests {
             false,
             false,
             Some(&f.chat),
+            None,
         )
         .await
         .unwrap();
@@ -5275,6 +5714,8 @@ mod tests {
     ) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            disabled: false,
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -5325,6 +5766,10 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            fresh_decision: false,
+            caller_api_key_id: None,
+            approval_protocol: None,
+            grant_expiry_days_snapshot: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -5482,6 +5927,7 @@ mod tests {
             "agent-1",
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -5517,6 +5963,7 @@ mod tests {
             "agent-1",
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6082,6 +6529,7 @@ mod tests {
             verbs: vec![],
             effect: ApprovalEffect::RequireApproval,
             mode: ApprovalMode::Grant,
+            api_key_ids: vec![],
         };
         set_service_approval_config(
             &db,
@@ -6159,6 +6607,7 @@ mod tests {
                 verbs: vec![],
                 effect: ApprovalEffect::RequireApproval,
                 mode: ApprovalMode::PerRequest,
+                api_key_ids: vec![],
             },
             ApprovalRule {
                 mandatory_review: false,
@@ -6167,6 +6616,7 @@ mod tests {
                 verbs: vec![],
                 effect: ApprovalEffect::RequireApproval,
                 mode: ApprovalMode::Grant,
+                api_key_ids: vec![],
             },
         ];
         set_service_approval_config(
@@ -6205,6 +6655,7 @@ mod tests {
             requester_id,
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6319,6 +6770,7 @@ mod tests {
             &service_id,
             &operation,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6357,6 +6809,7 @@ mod tests {
             &service_id,
             &operation,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6387,10 +6840,17 @@ mod tests {
         insert_channel(&db, &channel).await;
 
         let operation = test_operation();
-        let resolution =
-            resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id, &operation, false)
-                .await
-                .unwrap();
+        let resolution = resolve_org_aware_approval(
+            &db,
+            &actor_id,
+            &actor_id,
+            &service_id,
+            &operation,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::default());
         assert_eq!(resolution.primary_owner_user_id, actor_id);
@@ -6414,6 +6874,7 @@ mod tests {
             &service_id,
             &test_operation(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -6431,6 +6892,7 @@ mod tests {
             "agent-1",
             false,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -6488,6 +6950,7 @@ mod tests {
                 &service_id,
                 &test_operation(),
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -6523,6 +6986,7 @@ mod tests {
             &service_id,
             &test_operation(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -6599,6 +7063,7 @@ mod tests {
             verbs: vec![],
             effect: ApprovalEffect::RequireApproval,
             mode: ApprovalMode::Grant,
+            api_key_ids: vec![],
         });
         insert_config(&db, &config).await;
 
@@ -6696,4 +7161,861 @@ mod tests {
         let still_pending = get_request(&db, &req2.id).await.unwrap();
         assert_eq!(still_pending.status, "pending");
     }
+    #[tokio::test]
+    async fn caller_key_reaches_all_evaluation_layers_without_changing_bypass_or_fallback() {
+        let db = crate::test_utils::connect_test_database("approval_caller_key")
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        let service = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let operation = test_operation();
+        for effect in [ApprovalEffect::Deny, ApprovalEffect::RequireApproval] {
+            let mut rule: ApprovalRule = serde_json::from_value(serde_json::json!({"resource_pattern":"*","effect":effect,"mode":"per_request","api_key_ids":["key-a"]})).unwrap();
+            for limited in [true, false] {
+                if !limited {
+                    rule.api_key_ids.clear();
+                }
+                set_service_approval_config(
+                    &db,
+                    &owner,
+                    &service,
+                    "Caller key",
+                    Some(true),
+                    Some(&ApprovalMode::PerRequest),
+                    Some(&[rule.clone()]),
+                    None,
+                )
+                .await
+                .unwrap();
+                for key in [Some("key-a"), Some("key-b"), None] {
+                    let applies = !limited || key == Some("key-a");
+                    let resolution = resolve_org_aware_approval(
+                        &db, &owner, &owner, &service, &operation, false, key,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        resolution.effect,
+                        if applies {
+                            effect.clone()
+                        } else {
+                            ApprovalEffect::AutoAllow
+                        }
+                    );
+                    let deny_only =
+                        evaluate_deny_only(&db, &owner, &owner, &service, &operation, false, key)
+                            .await;
+                    if limited && applies && effect == ApprovalEffect::RequireApproval {
+                        assert!(
+                            matches!(deny_only, Err(AppError::ApprovalUnsupported)),
+                            "a key-specific Ask cannot be silently satisfied on a noninteractive path"
+                        );
+                    } else {
+                        assert_eq!(
+                            deny_only.unwrap(),
+                            applies && effect == ApprovalEffect::Deny
+                        );
+                    }
+                    for bypass in [false, true] {
+                        let (outcome, _) = evaluate_for_chat(
+                            &db,
+                            &owner,
+                            &owner,
+                            &service,
+                            &operation,
+                            Some("api_key"),
+                            "requester-is-independent",
+                            bypass,
+                            false,
+                            None,
+                            key,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(
+                            matches!(outcome, ApprovalOutcome::Denied),
+                            applies && effect == ApprovalEffect::Deny
+                        );
+                        assert_eq!(
+                            matches!(outcome, ApprovalOutcome::NeedsApproval(_)),
+                            applies && effect == ApprovalEffect::RequireApproval && !bypass
+                        );
+                    }
+                }
+            }
+        }
+        // A key-only policy must not suppress the existing implicit global floor.
+        let rule = serde_json::from_value(
+            serde_json::json!({"resource_pattern":"*","effect":"deny","api_key_ids":["key-a"]}),
+        )
+        .unwrap();
+        set_service_approval_config(
+            &db,
+            &owner,
+            &service,
+            "Caller key",
+            None,
+            None,
+            Some(&[rule]),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, true).await;
+        for key in [Some("key-b"), None] {
+            assert!(
+                resolve_org_aware_approval(&db, &owner, &owner, &service, &operation, false, key)
+                    .await
+                    .unwrap()
+                    .required
+            );
+            assert!(
+                !resolve_org_aware_approval(&db, &owner, &owner, &service, &operation, true, key)
+                    .await
+                    .unwrap()
+                    .required
+            );
+        }
+        crate::test_utils::drop_test_database(&db).await;
+    }
+}
+
+pub(crate) async fn get_config(
+    db: &Database,
+    owner: &str,
+    service: &str,
+) -> AppResult<Option<ServiceApprovalConfig>> {
+    Ok(db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(doc! {"user_id":owner,"service_id":service})
+        .await?)
+}
+
+/// The original policy-save reconciliation for callers without a reviewed
+/// revision: a non-grant policy revokes every active service grant (scoped
+/// grants survive when rules can still grant) and expires pending grant-mode
+/// requests in the same scope.
+async fn legacy_reconcile_grant_state_in_session(
+    db: &Database,
+    config: &ServiceApprovalConfig,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    if config.disabled || config.approval_mode == ApprovalMode::Grant {
+        return Ok(());
+    }
+    let unscoped_only = service_config_supports_grants(config);
+    let mut grants = doc! {
+        "user_id": &config.user_id, "service_id": &config.service_id, "revoked": false,
+    };
+    let mut requests = doc! {
+        "user_id": &config.user_id, "service_id": &config.service_id,
+        "status": "pending", "approval_mode": { "$in": ["grant", null] },
+    };
+    if unscoped_only {
+        grants.insert("scope", bson::Bson::Null);
+        requests.insert("grant_scope", bson::Bson::Null);
+    }
+    db.collection::<ApprovalGrant>(GRANTS)
+        .update_many(grants, revoke_grant_update(Utc::now()))
+        .session(&mut *session)
+        .await?;
+    db.collection::<ApprovalRequest>(REQUESTS)
+        .update_many(
+            requests,
+            doc! { "$set": { "status": "expired", "decided_at": bson::DateTime::now() } },
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(())
+}
+
+/// Policy, pending-request invalidation and grant reconciliation commit once.
+/// Key-only changes retain unrelated grants and explicit execution permissions;
+/// every use still evaluates the live operation policy before consulting a grant.
+async fn reconcile_grant_state_in_session(
+    db: &Database,
+    config: &ServiceApprovalConfig,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    if config.disabled {
+        return Ok(());
+    }
+    let key_only = !config.rules.is_empty()
+        && config.rules.iter().all(|r| !r.api_key_ids.is_empty())
+        && config.default_effect.is_none();
+    if !key_only && config.approval_mode != ApprovalMode::Grant {
+        let mut filter = doc! {"user_id":&config.user_id,"service_id":&config.service_id,"revoked":false,"execution":null};
+        if service_config_supports_grants(config) {
+            filter.insert("scope", bson::Bson::Null);
+        }
+        db.collection::<ApprovalGrant>(GRANTS)
+            .update_many(filter, doc! {"$set":{"revoked":true}})
+            .session(&mut *session)
+            .await?;
+    }
+    let mut cursor = db.collection::<ApprovalRequest>(REQUESTS).find(doc! {"user_id":&config.user_id,"service_id":&config.service_id,"status":"pending","execution_proposal":null}).session(&mut *session).await?;
+    let pending: Vec<ApprovalRequest> = cursor.stream(&mut *session).try_collect().await?;
+    for request in pending {
+        let has_key_rules = config.rules.iter().any(|rule| !rule.api_key_ids.is_empty());
+        let Some(protocol) = request.approval_protocol.as_deref() else {
+            // Older requests do not record the authenticated key or protocol.
+            // Retain them; the admitted caller's live-policy recheck governs use.
+            if !has_key_rules
+                && request.approval_mode == ApprovalMode::Grant
+                && !service_config_supports_grants(config)
+            {
+                db.collection::<ApprovalRequest>(REQUESTS)
+                    .update_one(
+                        doc! {"_id":&request.id,"status":"pending"},
+                        doc! {"$set":{"status":"expired","decided_at":bson::DateTime::now()}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+            }
+            continue;
+        };
+        let protocol = match protocol {
+            "proxy" => super::operation_descriptor::Protocol::Http,
+            "mcp" => super::operation_descriptor::Protocol::Mcp,
+            "ssh" => super::operation_descriptor::Protocol::Ssh,
+            "llm" => super::operation_descriptor::Protocol::Llm,
+            _ => continue,
+        };
+        let verb = match request.verb.as_deref() {
+            Some("read") => crate::models::service_approval_config::ApprovalVerb::Read,
+            Some("write") => crate::models::service_approval_config::ApprovalVerb::Write,
+            Some("destructive") => {
+                crate::models::service_approval_config::ApprovalVerb::Destructive
+            }
+            _ => continue,
+        };
+        let descriptor = OperationDescriptor {
+            protocol,
+            verb,
+            method: request.http_method.clone(),
+            resource: request.resource.clone(),
+            summary: request.operation_summary.clone(),
+        };
+        let key = request.caller_api_key_id.as_deref();
+        if let Some(decision) = approval_policy::evaluate(config, &descriptor, key)
+            && (decision.effect != ApprovalEffect::RequireApproval
+                || decision.mode != request.approval_mode)
+        {
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .update_one(
+                    doc! {"_id":&request.id,"status":"pending"},
+                    doc! {"$set":{"status":"expired","decided_at":bson::DateTime::now()}},
+                )
+                .session(&mut *session)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod policy_durability_tests {
+    use super::*;
+    use crate::models::service_approval_config::ApprovalVerb;
+    use crate::{handlers::approvals, test_utils::*};
+    use axum::{
+        Json,
+        extract::{Path, Query, State},
+    };
+
+    async fn fixture(name: &str) -> (crate::AppState, String, String) {
+        let db = connect_transaction_test_database(name).await;
+        super::super::security_readiness_service::ready_test_replica(&db).await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let service = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&owner, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_one(test_user_service(
+            &service, &owner, "fixture", "endpoint", None, None,
+        ))
+        .await
+        .unwrap();
+        let now = bson::DateTime::now();
+        db.collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "user_id": &owner,
+                "service_id": &service,
+                "service_name": "fixture",
+                "approval_required": true,
+                "approval_mode": "grant",
+                "default_effect": "deny",
+                "rules": [
+                    {
+                        "methods": ["EXEC"],
+                        "resource_pattern": "git *",
+                        "verbs": ["write"],
+                        "effect": "require_approval",
+                        "mode": "grant"
+                    },
+                    {
+                        "methods": ["GET"],
+                        "resource_pattern": "/status",
+                        "verbs": [],
+                        "effect": "deny",
+                        "mode": "per_request"
+                    },
+                    {
+                        "methods": ["GET"],
+                        "resource_pattern": "/**",
+                        "verbs": [],
+                        "effect": "auto_allow",
+                        "mode": "per_request"
+                    }
+                ],
+                "created_at": now,
+                "updated_at": now
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>(GRANTS)
+            .insert_one(doc! {
+                "_id": "legacy-grant",
+                "user_id": &owner,
+                "service_id": &service,
+                "requester_type": "user",
+                "requester_id": &owner,
+                "scope": null,
+                "revoked": false,
+                "expires_at": bson::DateTime::from_chrono(Utc::now()+Duration::days(7))
+            })
+            .await
+            .unwrap();
+        (test_app_state(db), owner, service)
+    }
+
+    async fn put(
+        state: &crate::AppState,
+        owner: &str,
+        service: &str,
+        body: serde_json::Value,
+    ) -> AppResult<axum::Json<approvals::ServiceApprovalConfigItem>> {
+        approvals::set_service_config(
+            State(state.clone()),
+            test_auth_user(owner),
+            Default::default(),
+            Path(service.into()),
+            Query(Default::default()),
+            Json(serde_json::from_value(body).unwrap()),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn exact_no_op_preserves_legacy_policy_grant_and_pending_bytes() {
+        let (state, owner, service) = fixture("policy_exact_noop").await;
+        let configs = state.db.collection::<Document>(SERVICE_APPROVAL_CONFIGS);
+        let before = configs
+            .find_one(doc! {"service_id": &service})
+            .await
+            .unwrap()
+            .unwrap();
+        let cfg = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        let grant = state
+            .db
+            .collection::<Document>(GRANTS)
+            .find_one(doc! {"_id": "legacy-grant"})
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = put(
+            &state,
+            &owner,
+            &service,
+            serde_json::json!({
+                "approval_required": cfg.approval_required,
+                "approval_mode": cfg.approval_mode,
+                "rules": cfg.rules,
+                "default_effect": cfg.default_effect,
+                "grant_expiry_days": null,
+                "disabled": false,
+                "expected_revision": config_revision(&cfg).unwrap()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            before,
+            configs
+                .find_one(doc! {"service_id": &service})
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            grant,
+            state
+                .db
+                .collection::<Document>(GRANTS)
+                .find_one(doc! {"_id": "legacy-grant"})
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(crate::models::security_effect_intent::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_days_handler_leaves_policy_and_grants_unchanged() {
+        let (state, owner, service) = fixture("policy_invalid_days").await;
+        let before = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(put(&state,&owner,&service,serde_json::json!({"approval_mode": "per_request","rules": [],"default_effect": "deny","grant_expiry_days": 366})).await.is_err());
+        assert_eq!(
+            config_revision(&before).unwrap(),
+            config_revision(
+                &get_config(&state.db, &owner, &service)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let grant = state
+            .db
+            .collection::<Document>(GRANTS)
+            .find_one(doc! {"_id": "legacy-grant"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.get_bool("revoked"), Ok(false));
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_never_mix_rules_and_days_and_stale_save_cannot_resurrect() {
+        let (state, owner, service) = fixture("policy_concurrent_days").await;
+        let cfg = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        let revision = config_revision(&cfg).unwrap();
+        let (a, b) = tokio::join!(
+            put(
+                &state,
+                &owner,
+                &service,
+                serde_json::json!({"rules": [],"default_effect": "deny","grant_expiry_days": 1,"expected_revision": revision})
+            ),
+            put(
+                &state,
+                &owner,
+                &service,
+                serde_json::json!({"rules": [],"default_effect": "auto_allow","grant_expiry_days": 9,"expected_revision": revision})
+            )
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        let cfg = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            (cfg.default_effect.as_ref(), cfg.grant_expiry_days),
+            (Some(ApprovalEffect::Deny), Some(1)) | (Some(ApprovalEffect::AutoAllow), Some(9))
+        ));
+        let current = config_revision(&cfg).unwrap();
+        delete_config_with_revision(
+            &state.db,
+            &owner,
+            &service,
+            test_config_audit(&owner),
+            Some(&current),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(put(&state,&owner,&service,serde_json::json!({"rules": cfg.rules,"approval_required": true,"expected_revision": current})).await,Err(AppError::Conflict(_))));
+        assert!(
+            get_config(&state.db, &owner, &service)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_restores_global_default_without_rewriting_rules() {
+        let (state, owner, service) = fixture("policy_disabled").await;
+        let cfg = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = put(
+            &state,
+            &owner,
+            &service,
+            serde_json::json!({"disabled": true,"expected_revision": config_revision(&cfg).unwrap()}),
+        )
+        .await
+        .unwrap();
+        let disabled = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.rules, disabled.rules);
+        assert_eq!(cfg.default_effect, disabled.default_effect);
+        let read =
+            crate::services::operation_descriptor::build_http_descriptor("GET", "/status", None);
+        let result =
+            resolve_org_aware_approval(&state.db, &owner, &owner, &service, &read, false, None)
+                .await
+                .unwrap();
+        assert_eq!(result.effect, ApprovalEffect::AutoAllow);
+        assert!(!approval_policy::has_policy_for_key(&disabled, None));
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn issued_duration_defaults_are_frozen_and_explicit_shorter_decisions_survive() {
+        let (state, owner, service) = fixture("policy_frozen_expiry").await;
+        state
+            .db
+            .collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! {"service_id": &service},
+                doc! {"$set": {"grant_expiry_days": 2}},
+            )
+            .await
+            .unwrap();
+        let descriptor =
+            crate::services::operation_descriptor::build_http_descriptor("POST", "/write", None);
+        for custom in [Some(30_i64 * 86400), Some(3600)] {
+            let requester = uuid::Uuid::new_v4().to_string();
+            let request = create_approval_request(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                &service,
+                "Fixture",
+                "fixture",
+                "user",
+                &requester,
+                None,
+                ApprovalRequestOperation::from_descriptor(&descriptor, None),
+                ApprovalMode::Grant,
+                300,
+                vec![owner.clone()],
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(request.grant_expiry_days_snapshot.as_ref().unwrap().days, 2);
+            state
+                .db
+                .collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+                .update_one(
+                    doc! {"service_id": &service},
+                    doc! {"$set": {"grant_expiry_days": 9}},
+                )
+                .await
+                .unwrap();
+            process_decision(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &request.id,
+                true,
+                custom,
+                None,
+                "mobile",
+            )
+            .await
+            .unwrap();
+            let grant = state
+                .db
+                .collection::<ApprovalGrant>(GRANTS)
+                .find_one(doc! {"approval_request_id": &request.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = custom.unwrap().min(2 * 86400);
+            assert!(((grant.expires_at - grant.granted_at).num_seconds() - expected).abs() <= 1);
+            state
+                .db
+                .collection::<Document>(SERVICE_APPROVAL_CONFIGS)
+                .update_one(
+                    doc! {"service_id": &service},
+                    doc! {"$set": {"grant_expiry_days": 2}},
+                )
+                .await
+                .unwrap();
+        }
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_fleet_refuses_new_rule_authoring_without_partial_mutation() {
+        let (state, owner, service) = fixture("policy_mixed_fleet").await;
+        let before = get_config(&state.db, &owner, &service)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .db
+            .collection::<Document>(crate::models::security_replica::COLLECTION_NAME)
+            .update_many(doc! {}, doc! {"$pull": {"capabilities": RULES_READINESS}})
+            .await
+            .unwrap();
+        assert!(matches!(
+            put(
+                &state,
+                &owner,
+                &service,
+                serde_json::json!({"grant_expiry_days": 3,"default_effect": "auto_allow"})
+            )
+            .await,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+        assert_eq!(
+            config_revision(&before).unwrap(),
+            config_revision(
+                &get_config(&state.db, &owner, &service)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_reconciliation_uses_exact_key_and_ssh_evidence() {
+        let (state, owner, service) = fixture("policy_pending_evidence").await;
+        let now = bson::DateTime::now();
+        for (id, key, protocol) in [
+            ("a", Some("key-a"), Some("ssh")),
+            ("b", Some("key-b"), Some("ssh")),
+            ("legacy", None, None),
+        ] {
+            state.db.collection::<Document>(REQUESTS).insert_one(doc! {
+                "_id": id,"user_id": &owner,"service_id": &service,"service_name": "Fixture","service_slug": "fixture",
+                "requester_type": "user","requester_id": &owner,"caller_api_key_id": key,"approval_protocol": protocol,
+                "operation_summary": "ssh:EXEC rm file","http_method": "EXEC","resource": "rm file","verb": "write",
+                "idempotency_key": id,"status": "pending","approval_mode": "grant","created_at": now,
+                "expires_at": bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10))
+            }).await.unwrap();
+        }
+        let rules:Vec<ApprovalRule>=serde_json::from_value(serde_json::json!([
+            {"methods": ["EXEC"],"resource_pattern": "rm *","verbs": ["write"],"effect": "deny","api_key_ids": ["key-a"]},
+            {"methods": [],"resource_pattern": "*","verbs": [],"effect": "require_approval","mode": "grant"}
+        ])).unwrap();
+        set_config_with_options(
+            &state.db,
+            &owner,
+            &service,
+            "Fixture",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+            Some(&rules),
+            Some(&ApprovalEffect::RequireApproval),
+            test_config_audit(&owner),
+            // A revision-aware editor saving the reviewed policy; callers
+            // without a revision keep the legacy reconciliation contract.
+            ConfigWriteOptions {
+                expected_revision: Some(
+                    config_revision(
+                        &get_config(&state.db, &owner, &service)
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for (id, status) in [("a", "expired"), ("b", "pending"), ("legacy", "pending")] {
+            assert_eq!(get_request(&state.db, id).await.unwrap().status, status);
+        }
+        let descriptor = OperationDescriptor {
+            protocol: super::super::operation_descriptor::Protocol::Ssh,
+            verb: ApprovalVerb::Write,
+            method: Some("EXEC".into()),
+            resource: Some("rm file".into()),
+            summary: "Remove file".into(),
+        };
+        assert!(
+            recheck_after_decision(
+                &state.db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                false,
+                Some("key-a"),
+                &ApprovalMode::Grant
+            )
+            .await
+            .is_err()
+        );
+        recheck_after_decision(
+            &state.db,
+            &owner,
+            &owner,
+            &service,
+            &descriptor,
+            false,
+            Some("key-b"),
+            &ApprovalMode::Grant,
+        )
+        .await
+        .unwrap();
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hidden_expired_keys_and_org_auth_cannot_author_personal_scopes() {
+        let (state, owner, service) = fixture("policy_key_ownership").await;
+        for (id, purpose, expiry) in [
+            ("public", "public_nyxbot", None),
+            ("shared", "shared_entry_transport", None),
+            (
+                "expired",
+                "agent",
+                Some(bson::DateTime::from_chrono(
+                    Utc::now() - Duration::minutes(1),
+                )),
+            ),
+        ] {
+            state.db.collection::<Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {"_id": id,"user_id": &owner,"is_active": true,"purpose": purpose,"expires_at": expiry}).await.unwrap();
+            assert!(matches!(
+                put(
+                    &state,
+                    &owner,
+                    &service,
+                    serde_json::json!({"rules": [{"effect": "deny","api_key_ids": [id]}]})
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        state
+            .db
+            .collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id": &owner}, doc! {"$set": {"user_type": "org"}})
+            .await
+            .unwrap();
+        for body in [
+            serde_json::json!({"disabled": true}),
+            serde_json::json!({"rules": [{"effect": "auto_allow","api_key_ids": ["org-key"]}]}),
+        ] {
+            assert!(matches!(
+                put(&state, &owner, &service, body).await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        state.db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn scoped_ask_is_fresh_but_ordinary_ask_keeps_legacy_behavior() {
+        let mut cfg = bson::from_document::<ServiceApprovalConfig>(doc! {
+            "_id": "policy",
+            "user_id": "owner",
+            "service_id": "service",
+            "service_name": "Service",
+            "approval_required": true,
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now()
+        })
+        .unwrap();
+        let operation =
+            crate::services::operation_descriptor::build_http_descriptor("POST", "/write", None);
+        cfg.rules = vec![ApprovalRule {
+            mandatory_review: false,
+            methods: vec![],
+            resource_pattern: "*".into(),
+            verbs: vec![ApprovalVerb::Write],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::PerRequest,
+            api_key_ids: vec!["key-a".into()],
+        }];
+        assert!(approval_policy::key_requires_fresh_decision(
+            &cfg,
+            &operation,
+            Some("key-a")
+        ));
+        assert!(!approval_policy::key_requires_fresh_decision(
+            &cfg,
+            &operation,
+            Some("key-b")
+        ));
+        cfg.rules[0].api_key_ids.clear();
+        assert!(!approval_policy::key_requires_fresh_decision(
+            &cfg,
+            &operation,
+            Some("key-a")
+        ));
+        cfg.disabled = true;
+        assert!(approval_policy::evaluate(&cfg, &operation, None).is_none());
+    }
+}
+
+/// Waiters retain their authenticated caller and prepared descriptor. Recheck
+/// those live inputs after a decision so even a pre-snapshot pending record
+/// cannot resume through a subsequently added Deny or fresh per-request floor.
+#[allow(clippy::too_many_arguments)]
+pub async fn recheck_after_decision(
+    db: &Database,
+    actor: &str,
+    owner: &str,
+    service: &str,
+    descriptor: &OperationDescriptor,
+    auto_connected: bool,
+    key: Option<&str>,
+    issued_mode: &ApprovalMode,
+) -> AppResult<()> {
+    let current =
+        resolve_org_aware_approval(db, actor, owner, service, descriptor, auto_connected, key)
+            .await?;
+    if current.effect == ApprovalEffect::Deny
+        || (current.required
+            && current.mode == ApprovalMode::PerRequest
+            && *issued_mode == ApprovalMode::Grant)
+    {
+        return Err(AppError::Forbidden(
+            "Approval policy changed; request approval again".into(),
+        ));
+    }
+    Ok(())
 }

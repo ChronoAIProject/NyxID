@@ -1361,6 +1361,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         // auto-connected source to exempt from the global fallback here.
         false,
         auth_user.assistant_chat.as_deref(),
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
     if let Some(connection) = connection {
@@ -1399,6 +1400,8 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.fresh_decision = pending.resolution.fresh_decision;
+    request_operation.caller_api_key_id = auth_user.api_key_id.clone();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth_user.assistant_group_id.as_deref(),
@@ -1438,6 +1441,17 @@ pub(crate) async fn authorize_ssh_access_for_connection(
                 &state.config.frontend_url,
             )
         })?;
+    approval_service::recheck_after_decision(
+        &state.db,
+        &approval_owner_user_id,
+        owner_for_resolution,
+        service_id,
+        operation,
+        false,
+        auth_user.api_key_id.as_deref(),
+        &approval_request.approval_mode,
+    )
+    .await?;
 
     Ok(auth_context)
 }
@@ -2191,5 +2205,79 @@ mod tests {
     #[test]
     fn max_ssh_banner_bytes_is_4kb() {
         assert_eq!(MAX_SSH_BANNER_BYTES, 4096);
+    }
+    #[tokio::test]
+    async fn ssh_exec_tunnel_and_terminal_honor_only_the_calling_keys_block() {
+        use super::{
+            AppError, AuthMethod, authorize_ssh_access_for_operation, operation_descriptor,
+        };
+        use crate::models::user::UserType;
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+        let db = connect_test_database("ssh_key_rules").await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        db.collection(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(ssh_service_row(&id, &owner, "private"))
+            .await
+            .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let state = test_app_state(db.clone());
+        let mut auth = test_auth_user(&owner);
+        auth.auth_method = AuthMethod::ApiKey;
+        auth.api_key_id = Some("key-a".into());
+        for (kind, command) in [
+            (
+                operation_descriptor::SshOperationKind::Exec,
+                Some("ls /tmp"),
+            ),
+            (operation_descriptor::SshOperationKind::Tunnel, None),
+            // Web terminals use the same whole-session Tunnel descriptor.
+            (operation_descriptor::SshOperationKind::Tunnel, None),
+        ] {
+            let operation = operation_descriptor::build_ssh_descriptor(kind, command);
+            let configs = db.collection::<mongodb::bson::Document>("service_approval_configs");
+            configs.insert_one(mongodb::bson::doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"service_id":&id,"service_name":"SSH",
+                "approval_required":false,"rules":[{"resource_pattern":"*","effect":"deny","api_key_ids":["key-a"]}],
+                "created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()}).await.unwrap();
+            for (key, denied) in [(Some("key-a"), true), (Some("key-b"), false), (None, false)] {
+                auth.api_key_id = key.map(str::to_owned);
+                // Browser Session bypass must still honor general Deny.
+                auth.auth_method = if key.is_some() {
+                    AuthMethod::ApiKey
+                } else {
+                    AuthMethod::Session
+                };
+                let result =
+                    authorize_ssh_access_for_operation(&state, &auth, &id, &operation).await;
+                assert_eq!(
+                    matches!(result, Err(AppError::Forbidden(_))),
+                    denied,
+                    "{key:?}/{operation:?}: {result:?}"
+                );
+                if !denied {
+                    result.unwrap();
+                }
+            }
+            configs
+                .update_many(
+                    mongodb::bson::doc! {},
+                    mongodb::bson::doc! {"$set":{"rules.0.api_key_ids":[]}},
+                )
+                .await
+                .unwrap();
+            for key in [Some("key-a"), Some("key-b"), None] {
+                auth.api_key_id = key.map(str::to_owned);
+                assert!(matches!(
+                    authorize_ssh_access_for_operation(&state, &auth, &id, &operation).await,
+                    Err(AppError::Forbidden(_))
+                ));
+            }
+            configs.delete_many(mongodb::bson::doc! {}).await.unwrap();
+        }
+        crate::test_utils::drop_test_database(&db).await;
     }
 }

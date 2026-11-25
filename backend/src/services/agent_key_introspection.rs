@@ -141,7 +141,9 @@ pub async fn introspect(
             Err(error) if is_unavailable(&error) => return Err(error),
             Err(_) => continue,
         }
-        if !allows_service_wide_approval(db, &subject, &service.id, &connection).await? {
+        if !allows_service_wide_approval(db, &subject, &service.id, &connection, Some(&key.id))
+            .await?
+        {
             continue;
         }
         if service.platform_key.is_some() {
@@ -187,6 +189,7 @@ async fn allows_service_wide_approval(
     owner: &str,
     catalog_id: &str,
     connection: &UserService,
+    api_key_id: Option<&str>,
 ) -> AppResult<bool> {
     let configs: Vec<ServiceApprovalConfig> = db
         .collection::<ServiceApprovalConfig>(APPROVAL_CONFIGS)
@@ -194,8 +197,31 @@ async fn allows_service_wide_approval(
         .await?
         .try_collect()
         .await?;
+    // Keep organization policy evaluation unchanged in P1a. Org key rules
+    // are handled by the separate org-aware policy rollout (P1b).
+    let org_policy = if configs
+        .iter()
+        .any(|config| config.rules.iter().any(|rule| !rule.api_key_ids.is_empty()))
+    {
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id": owner})
+            .await?
+            .is_some_and(|user| user.user_type.is_org())
+    } else {
+        false
+    };
+    let configs: Vec<_> = configs
+        .iter()
+        .filter(|config| !config.disabled)
+        .filter(|config| {
+            org_policy || super::approval_policy::has_policy_for_key(config, api_key_id)
+        })
+        .collect();
     if configs.iter().any(|config| {
-        !config.rules.is_empty()
+        config
+            .rules
+            .iter()
+            .any(|rule| org_policy || super::approval_policy::rule_applies_to_key(rule, api_key_id))
             || match config.default_effect {
                 Some(ApprovalEffect::AutoAllow) => false,
                 Some(_) => true,
