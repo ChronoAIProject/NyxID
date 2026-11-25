@@ -125,6 +125,21 @@ impl AsyncFixture {
                             Json(json!({"error":"signed_owner_identity_required"})),
                         ).into_response();
                     }
+                    if method == axum::http::Method::GET
+                        && matches!(uri.path(), "/api/v1/agents" | "/api/v1/sandboxes")
+                    {
+                        match status_phase.as_str() {
+                            "auth-refused" => return (
+                                StatusCode::UNAUTHORIZED,
+                                Json(json!({"code":"not_authenticated","detail":"untrusted provider detail"})),
+                            ).into_response(),
+                            "temporarily-unavailable" => return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({"code":"temporarily_unavailable"})),
+                            ).into_response(),
+                            _ => {}
+                        }
+                    }
                     let _submission_permit = if method == axum::http::Method::POST
                         && uri.path() == "/api/v2/agents/agt_coffee/responses"
                     {
@@ -406,6 +421,14 @@ async fn cma_fixture() -> AsyncFixture {
         .unwrap()
         .unwrap();
     for (name, method, path, parameters, body) in [
+        ("list_cma_agents", "GET", "/api/v1/agents", json!([]), None),
+        (
+            "list_cma_sandboxes",
+            "GET",
+            "/api/v1/sandboxes",
+            json!([]),
+            None,
+        ),
         (
             "post_api_v1_agents",
             "POST",
@@ -480,6 +503,80 @@ async fn cma_fixture() -> AsyncFixture {
         endpoints.insert_one(&endpoint).await.unwrap();
     }
     a
+}
+
+#[tokio::test]
+async fn nyxbot_stops_cma_dispatches_after_a_definitive_authentication_refusal() {
+    let a = cma_fixture().await;
+    let auth = authenticate(&a.f).await;
+    let agents = "sandbox__list_cma_agents";
+    let sandboxes = "sandbox__list_cma_sandboxes";
+    async fn error_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+        envelope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+
+    *a.phase.lock().unwrap() = "temporarily-unavailable".into();
+    assert!(
+        error_text(call(&a.f, &auth, agents, json!({})).await)
+            .await
+            .contains("503")
+    );
+    *a.phase.lock().unwrap() = "auth-refused".into();
+    let first = error_text(call(&a.f, &auth, agents, json!({})).await).await;
+
+    // Reauthenticate each callback and switch operation and entry point. The
+    // refusal belongs to this turn's resolved connection, not the tool name.
+    let refreshed = authenticate(&a.f).await;
+    let second = error_text(direct_call(&a.f, &refreshed, sandboxes, json!({})).await).await;
+    let third = error_text(call(&a.f, &refreshed, agents, json!({})).await).await;
+    assert_eq!(
+        *a.calls.lock().unwrap(),
+        ["/api/v1/agents", "/api/v1/agents"]
+    );
+
+    for text in [first, second, third] {
+        let notice: Value =
+            serde_json::from_str(text.strip_prefix("Error (401): ").unwrap_or(&text)).unwrap();
+        assert_eq!(notice["error"], "not_authenticated");
+        assert_eq!(notice["status"], 401);
+        assert_eq!(notice["retryable"], false);
+        assert!(
+            notice["message"]
+                .as_str()
+                .unwrap()
+                .contains("CMA connection in NyxID")
+        );
+        assert!(
+            notice["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("End this turn")
+        );
+        assert!(!text.contains("untrusted provider detail"));
+    }
+
+    *a.phase.lock().unwrap() = "succeeded".into();
+    a.f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &a.f.row.id},
+            doc! {"$set":{"active_turn.turn_id": uuid::Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    let next = authenticate(&a.f).await;
+    let page = result(call(&a.f, &next, sandboxes, json!({})).await, false).await;
+    assert!(page["sandboxes"].is_array(), "{page}");
+    assert_eq!(a.calls.lock().unwrap().last().unwrap(), "/api/v1/sandboxes");
 }
 
 async fn cma_existing_agent_fixture() -> AsyncFixture {

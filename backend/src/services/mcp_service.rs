@@ -5923,6 +5923,14 @@ impl ToolResponse {
         }
     }
 
+    fn cma_authentication_refusal() -> Self {
+        let mut response = Self::policy_refusal(
+            super::assistant_service_execution::cma::AuthenticationRefusal::reply(),
+        );
+        response.status = 401;
+        response
+    }
+
     pub(crate) fn is_body_too_large(&self) -> bool {
         self.body_error == Some(ToolResponseBodyError::TooLarge)
     }
@@ -6243,6 +6251,19 @@ pub fn execute_tool_resolved<'a>(
                 "Shared streams require admitted server HTTP proxy execution".into(),
             ));
         }
+        let cma_auth_refusal =
+            super::assistant_service_execution::cma::AuthenticationRefusal::for_call(
+                exec_ctx.assistant_chat,
+                &target,
+                &service.service_id,
+            );
+        if let Some(refusal) = &cma_auth_refusal
+            && refusal.already_refused(db).await?
+        {
+            return Ok(McpToolExecutionOutcome::Response(
+                ToolResponse::cma_authentication_refusal(),
+            ));
+        }
         let resource_source = super::resource_adapter::source(
             service,
             endpoint,
@@ -6324,6 +6345,21 @@ pub fn execute_tool_resolved<'a>(
             return execution.await;
         }
         let mut outcome = hold_tool_capacity(lease, execution).await?;
+        if let (Some(refusal), McpToolExecutionOutcome::Response(response)) =
+            (&cma_auth_refusal, &mut outcome)
+            && matches!(response.origin, ToolResponseOrigin::Downstream)
+            && response.body_error.is_none()
+            && super::assistant_service_execution::cma::definitive_authentication_refusal(
+                response.status,
+                &response.text,
+            )
+        {
+            refusal.record(db).await?;
+            // This reply came from CMA. Preserve its downstream provenance for
+            // async submission settlement, projecting only its recovery text.
+            response.text =
+                super::assistant_service_execution::cma::AuthenticationRefusal::reply().to_string();
+        }
         if let (Some(kind), McpToolExecutionOutcome::Response(response)) = (im_kind, &mut outcome)
             && matches!(response.origin, ToolResponseOrigin::Downstream)
         {
