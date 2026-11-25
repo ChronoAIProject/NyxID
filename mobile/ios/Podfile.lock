@@ -2941,7 +2941,7 @@ SPEC CHECKSUMS:
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
   NyxCrashReporter: 779adad086b3772feaf9a134b7006d680de23574
   NyxPdfThumbnail: 9b38ca88c7b611ea73789c991e2db1fa43bf8b96
-  NyxPerformance: 1bab8960500b5dba4a985cf0ef80db655b82447f
+  NyxPerformance: 33914ce8f8f9902d0983301dd5a0c4061e7f3d01
   NyxWatch: 0ed4c96aa7b2158879824be3f48c19b397291b23
   PLCrashReporter: db59ef96fa3d25f3650040d02ec2798cffee75f2
   RCTDeprecation: 5045f20b2cc1239bf422764004338c720684a22f

@@ -1,8 +1,8 @@
 Pod::Spec.new do |s|
   s.name = 'NyxPerformance'
   s.version = '1.0.0'
-  s.summary = 'Consent-scoped native display cadence and peak memory'
-  s.description = 'Bounded native display cadence and process peak RSS measurements, without content, persistence or transport.'
+  s.summary = 'Consent-scoped native launch, display cadence and peak memory'
+  s.description = 'Bounded native launch milestones, display cadence and process peak RSS measurements, with a destination-bound consent mirror and no content or transport.'
   s.license = { :type => 'Apache-2.0' }
   s.author = 'NyxID'
   s.homepage = 'https://github.com/ChronoAIProject/NyxID'

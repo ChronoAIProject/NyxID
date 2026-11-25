@@ -22,6 +22,7 @@ import {
   chatSurfaceStyles,
 } from "./ChatSurface";
 import { TranscriptViewport } from "./TranscriptViewport";
+import { useLaunchInput } from "../../lib/performance/launchPerformance";
 import { useChatNativeFrames } from "../../lib/performance/useNativePerformance";
 import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
@@ -635,6 +636,12 @@ export function AssistantScreen({
       conversation?.active_turn?.stop_requested,
   });
   const voiceAvailable = trailingControl.kind === "voice";
+  const launchInputLayout = useLaunchInput(
+    "chat_composer",
+    focused && canCompose && (homeVisible || transcriptScroll.ready) && !sheet && !dictation.active &&
+      !voiceThread && !openingVoice && !voicePreferencesOpen && !uploads.picking && !uploads.session.sending,
+    draftKey,
+  );
   const voiceContext = useRef({
     agentId: assistant.agentId,
     conversationId: assistant.conversationId,
@@ -2063,6 +2070,7 @@ export function AssistantScreen({
               </Label>
             ) : null}
             <ChatComposerInput
+              onInputLayout={launchInputLayout}
               dictation={dictation}
               value={draft}
               onChangeText={updateDraft}

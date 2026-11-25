@@ -1,7 +1,8 @@
 # Native performance measurements
 
-This local Expo module measures chat frame timing and reads the process peak
-resident memory from the OS when a sampled frame window ends. The JavaScript
+This local Expo module measures application launch milestones and chat frame
+timing, and reads the process peak resident memory from the OS when a sampled
+frame window ends. The JavaScript
 consent layer in `src/lib/performance` supplies a valid, sampled grant before
 calling `startFrames` and rechecks it before sending the result.
 
@@ -32,12 +33,36 @@ Percentiles may round up by less than one millisecond. Do not average window P95
 as a global frame P95. JS projects a closed set of numeric fields and rechecks
 consent epoch, visibility and scope before submitting a result.
 
+Launch measurement requires a pre-existing native consent mirror bound to the
+build's configured performance destination. The mirror contains only a SHA-256
+binding; the module does not transmit it. `setLaunchConsent(null)` invalidates
+the current launch immediately. Granting consent during a launch authorizes a
+subsequent cold launch or real background-to-foreground transition, without
+reviving the launch that was already in progress. Rehydrating the same prior
+grant preserves an eligible launch. JavaScript remains responsible for checking
+the authoritative saved choice and current consent epoch before transmission.
+
+On iOS, the supported cold origin is `didFinishLaunching`, excluding pre-main
+time. A hot origin is `willEnterForeground` following `didEnterBackground`.
+App-active uses `didBecomeActive`. The first-frame source is explicitly
+`ios_window_commit_then_display_link_proxy`: a normal application window's
+layer transaction completes and a later display-link callback occurs. This
+proxy does not prove React Native content presentation or GPU completion.
+Display observation starts only for a previously authorized launch.
+
+`getLaunchSnapshot` exposes the launch kind, a process-local launch ID and
+elapsed milestone values. `measureLaunchMilestone(id)` returns an elapsed value
+only for the same authorized launch while the app is active. JavaScript combines
+it with the visible, enabled login or chat input and navigation/overlay checks
+to measure interaction readiness. Native launch values are bounded to two
+minutes and contain no content or absolute timestamps.
+
 The pure native histogram checks under `tests/` cover dynamic 120/60 Hz budgets,
 invalid input, observation/time caps, Android callback drops and overflow values.
 For Swift, run from `mobile/`:
 
 ```sh
-xcrun swiftc modules/nyx-performance/ios/FrameHistogram.swift modules/nyx-performance/tests/main.swift -o /tmp/nyx-performance-swift-histogram-tests
+xcrun swiftc modules/nyx-performance/ios/FrameHistogram.swift modules/nyx-performance/ios/LaunchTimingState.swift modules/nyx-performance/tests/main.swift -o /tmp/nyx-performance-swift-histogram-tests
 /tmp/nyx-performance-swift-histogram-tests
 ```
 

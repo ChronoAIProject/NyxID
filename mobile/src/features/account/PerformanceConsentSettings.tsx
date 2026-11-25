@@ -84,7 +84,7 @@ export function PerformanceConsentSettings() {
     <SettingsGroup
       title={t("Performance metrics")}
       footer={t(
-        "Share chat response times, frame rate, JavaScript responsiveness, and peak app memory use from this device. This setting is independent of account usage analytics and is off by default.",
+        "Share app launch, first frame, input readiness, chat response times, frame rate, JavaScript responsiveness, and peak app memory use from this device. This setting is independent of account usage analytics and is off by default.",
       )}
     >
       <SettingsRow

@@ -1,4 +1,5 @@
 import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
+import { useLaunchLifecycle, useLaunchShell, launchSplashHidden } from "../lib/performance/launchPerformance";
 import { usePerformanceLifecycle } from "../lib/performance/useNativePerformance";
 import { newAssistantChatParams } from "./assistantChatParams";
 import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
@@ -197,6 +198,7 @@ export default function App() {
 function AppContent() {
   useAppLanguage();
   usePerformanceLifecycle();
+  useLaunchLifecycle();
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,
@@ -283,7 +285,7 @@ function AppContent() {
   const ready = fontsLoaded || fontLoadTimeout;
   useEffect(() => {
     if (ready) {
-      SplashScreen.hideAsync().catch(() => {
+      SplashScreen.hideAsync().then(launchSplashHidden).catch(() => {
         /* already hidden — fine */
       });
     }
@@ -570,6 +572,7 @@ function ThemedAppShell({
     sheetOpen: false,
   });
   const sidebarOpen = !persistentSidebar && drawerPresented;
+  useLaunchShell(currentRouteName && navigationRef.getCurrentRoute()?.key, !!currentRouteName && !sidebarOpen && !accessibility.sheetOpen && !navigationBlocked);
   const workspaceAccessibility = useMemo(
     () => ({ ...accessibility, sidebarOpen }),
     [accessibility, sidebarOpen],

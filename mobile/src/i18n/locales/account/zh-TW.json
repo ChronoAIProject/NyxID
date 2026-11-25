@@ -234,7 +234,7 @@
   "Setup key": "設定金鑰",
   "Setup key copied. Add it to your authenticator.": "設定密鑰已複製。請將它新增至驗證器。",
   "Setup was cancelled. Try again.": "設定已取消，請再試一次。",
-  "Share chat response times, frame rate, JavaScript responsiveness, and peak app memory use from this device. This setting is independent of account usage analytics and is off by default.": "分享此裝置上的聊天回應時間、影格率、JavaScript 回應狀況和應用程式記憶體峰值。此設定獨立於帳戶使用情況分析，預設關閉。",
+  "Share app launch, first frame, input readiness, chat response times, frame rate, JavaScript responsiveness, and peak app memory use from this device. This setting is independent of account usage analytics and is off by default.": "分享此裝置上的應用程式啟動、首幀、輸入欄位就緒與聊天回應時間，以及影格率、JavaScript 回應狀況和應用程式記憶體峰值。此設定獨立於帳戶使用情況分析，預設關閉。",
   "Share performance metrics": "分享效能指標",
   "Share performance metrics on this device": "在此裝置上分享效能指標",
   "Shown to people you share agents and groups with.": "向與您共用代理和羣組的人顯示。",

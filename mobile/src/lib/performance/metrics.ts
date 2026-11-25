@@ -1,3 +1,5 @@
+import { nativePerformance } from "./nativePerformance";
+import type { LaunchTiming } from "./launchRuntime";
 import Constants from "expo-constants";
 import { nativeBuildVersion, nativeApplicationVersion } from "expo-application";
 import { Platform } from "react-native";
@@ -10,6 +12,7 @@ import type { ChatTurnTimings } from "../../features/assistant/assistantTurnPerf
 import type { JsTaskTiming } from "./jsTaskWindow";
 
 type PerformanceEvents = {
+  "mobile.perf_launch": LaunchTiming;
   "mobile.perf_js_tasks": JsTaskTiming;
   "mobile.perf_chat_turn": ChatTurnTimings;
   "mobile.perf_frames": FrameTiming & { scenario: FrameScenario };
@@ -45,19 +48,57 @@ function readDestination() {
 }
 const destination = readDestination();
 const preferenceKey = "nyxid.performance-sharing.v1";
+const launchBinding = extra?.PERFORMANCE_LAUNCH_BINDING;
+let mirrorWrites = Promise.resolve();
+let preferenceChanged = false;
+function mirrorLaunchGrant(enabled: boolean) {
+  const binding =
+    destination &&
+    typeof launchBinding === "string" &&
+    /^[0-9a-f]{64}$/.test(launchBinding)
+      ? launchBinding
+      : null;
+  const write = mirrorWrites.then(() =>
+    nativePerformance?.setLaunchConsent?.(enabled ? binding : null),
+  );
+  mirrorWrites = write.catch(() => {});
+  return write;
+}
 const consent = createPerformanceConsent(
   destination && JSON.stringify([destination.host, destination.token]),
   () => AsyncStorage.getItem(preferenceKey),
-  (value) =>
-    value === null
-      ? AsyncStorage.removeItem(preferenceKey)
-      : AsyncStorage.setItem(preferenceKey, value),
+  async (value) => {
+    if (value === null) {
+      // Attempt both removals even if one durable store fails. The UI can retry.
+      await Promise.all([
+        AsyncStorage.removeItem(preferenceKey),
+        mirrorLaunchGrant(false),
+      ]);
+    } else {
+      await AsyncStorage.setItem(preferenceKey, value);
+      try {
+        await mirrorLaunchGrant(true);
+      } catch (error) {
+        await AsyncStorage.removeItem(preferenceKey);
+        throw error;
+      }
+    }
+  },
   () => extra?.APP_ENV === "dev" || Math.random() < 0.1,
 );
 export const isPerformanceConfigured = () => destination !== null;
 export const getPerformanceConsentEpoch = consent.current;
-export const hydratePerformanceConsent = consent.hydrate;
-export const setPerformanceConsent = consent.set;
+export async function hydratePerformanceConsent() {
+  await consent.hydrate();
+  // This also migrates an existing installation's grant. Native setters never
+  // arm a launch already in progress and ignore repeated current bindings.
+  if (!preferenceChanged) await mirrorLaunchGrant(consent.current() !== null);
+}
+export const getPerformanceColdGrant = consent.coldGrant;
+export function setPerformanceConsent(enabled: boolean) {
+  preferenceChanged = true;
+  return consent.set(enabled);
+}
 export const subscribePerformanceConsent = consent.subscribe;
 export const beginPerformanceSample = consent.begin;
 let client: PerformancePostHog | undefined;

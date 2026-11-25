@@ -8,12 +8,17 @@ import { PerformancePostHog } from "./posthogTransport";
 // The Expo Jest preset preserves import(), which ordinarily requires Node's
 // experimental VM modules flag. The shared harness compiles the production
 // entry point to CommonJS and injects this exact SDK class at its lazy import.
-function loadMetrics() {
+function loadMetrics(
+  nativeLaunch: {
+    setLaunchConsent(binding: string | null): Promise<void>;
+  } | null = null,
+) {
   const harness = hookHarness({
     "expo-constants": {
       expoConfig: {
         extra: {
           APP_ENV: "dev",
+          PERFORMANCE_LAUNCH_BINDING: "a".repeat(64),
           PERFORMANCE_POSTHOG_TOKEN: destination.token,
           PERFORMANCE_POSTHOG_HOST: destination.host,
         },
@@ -26,6 +31,7 @@ function loadMetrics() {
     "react-native": { Platform },
     "@react-native-async-storage/async-storage": AsyncStorage,
     "./consent": { createPerformanceConsent },
+    "./nativePerformance": { nativePerformance: nativeLaunch },
     "./posthogTransport": { PerformancePostHog },
   });
   return harness.load(
@@ -74,7 +80,7 @@ afterEach(async () => {
   jest.useRealTimers();
 });
 
-test("three consented measurements produce only direct single-event batches with the expected properties", async () => {
+test("consented measurements produce only direct single-event batches with the expected properties", async () => {
   expect(metrics.beginPerformanceSample()).toBeNull();
   await metrics.setPerformanceConsent(true);
   const epoch = metrics.beginPerformanceSample();
@@ -107,6 +113,15 @@ test("three consented measurements produce only direct single-event batches with
     first_text_ms: 230,
     first_text_commit_ms: 248,
   } as const;
+  const launch = {
+    startup_kind: "cold",
+    milestone: "first_frame",
+    target: "application",
+    duration_ms: 391,
+    origin_source: "ios_did_finish_launching",
+    measurement_source: "ios_window_commit_then_display_link_proxy",
+  } as const;
+  metrics.submitPerformanceSample(epoch, "mobile.perf_launch", launch);
   metrics.submitPerformanceSample(epoch, "mobile.perf_js_tasks", jsTasks);
   metrics.submitPerformanceSample(epoch, "mobile.perf_frames", frames);
   metrics.submitPerformanceSample(epoch, "mobile.perf_chat_turn", chat);
@@ -114,6 +129,7 @@ test("three consented measurements produce only direct single-event batches with
   resume();
   await jest.advanceTimersByTimeAsync(60_000);
   const events = [
+    ["mobile.perf_launch", launch],
     ["mobile.perf_js_tasks", jsTasks],
     ["mobile.perf_frames", frames],
     ["mobile.perf_chat_turn", chat],
@@ -198,4 +214,24 @@ test("revoking consent before dispatch drops pending work even if consent is gra
   metrics.submitPerformanceSample(old, "mobile.perf_chat_turn", chat);
   await settle();
   expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("the device mirrors only the current project's grant and never reauthorizes the current cold launch on opt-in", async () => {
+  const writes: Array<string | null> = [];
+  const bridge = {
+    setLaunchConsent: async (binding: string | null) => {
+      writes.push(binding);
+    },
+  };
+  const first = loadMetrics(bridge);
+  await first.hydratePerformanceConsent();
+  expect(writes).toEqual([null]);
+  await first.setPerformanceConsent(true);
+  expect(await first.getPerformanceColdGrant()).toBeNull();
+  const restarted = loadMetrics(bridge);
+  await restarted.hydratePerformanceConsent();
+  expect(await restarted.getPerformanceColdGrant()).not.toBeNull();
+  await restarted.setPerformanceConsent(false);
+  expect(writes).toEqual([null, "a".repeat(64), "a".repeat(64), null]);
+  expect(await restarted.getPerformanceColdGrant()).toBeNull();
 });

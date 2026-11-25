@@ -13,7 +13,9 @@ test("only a persisted grant for the current destination enables observations af
     assert.equal(consent.begin(), null);
     await consent.hydrate();
     assert.equal(consent.current(), value === "project" ? 1 : null);
+    assert.equal(await consent.coldGrant(), value === "project" ? 1 : null);
     await consent.set(true);
+    assert.equal(await consent.coldGrant(), null);
     assert.notEqual(consent.begin(), null);
   }
 });

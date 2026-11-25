@@ -55,6 +55,9 @@ public class NyxPerformanceModule: Module {
   }
   public func definition() -> ModuleDefinition {
     Name("NyxPerformance")
+    AsyncFunction("setLaunchConsent") { (binding: String?) in try LaunchPerformance.shared.setConsent(binding) }.runOnQueue(.main)
+    AsyncFunction("getLaunchSnapshot") { () -> [String: Any]? in LaunchPerformance.shared.snapshot() }.runOnQueue(.main)
+    AsyncFunction("measureLaunchMilestone") { (id: Int) -> Double? in LaunchPerformance.shared.milestone(id) }.runOnQueue(.main)
     OnAppEntersBackground { DispatchQueue.main.async { self.cancel() } }
     OnDestroy { DispatchQueue.main.async { self.cancel() } }
     AsyncFunction("startFrames") { (token: String) -> Bool in self.start(token) }.runOnQueue(.main)

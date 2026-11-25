@@ -272,6 +272,13 @@ test("navigation can invoke chat header options repeatedly without calling hooks
   let hookCalls = 0;
   const h = hookHarness<E>({
     ...mocks,
+    "../../i18n/appTranslation": { translateApp: (phrase: string) => phrase },
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => {
+        hookCalls++;
+        return { t: (phrase: string) => phrase };
+      },
+    },
     "../../theme/ThemeContext": {
       useTheme: () => {
         hookCalls++;
@@ -296,7 +303,7 @@ test("navigation can invoke chat header options repeatedly without calling hooks
     assert.equal(hookCalls, 0, "option callback must not run component hooks");
     assert.equal(typeof element.type, "function");
     h.mount(() => (element.type as (props: any) => E)(element.props));
-    assert.equal(hookCalls, 1);
+    assert.equal(hookCalls, 2);
     h.unmount();
     hookCalls = 0;
   }

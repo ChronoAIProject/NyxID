@@ -1,3 +1,4 @@
+import type { LaunchBridge } from "./launchRuntime";
 import { requireOptionalNativeModule } from "expo-modules-core";
 
 export type FrameScenario =
@@ -17,7 +18,7 @@ export type FrameTiming = {
   peak_rss_bytes?: number;
   peak_rss_source?: "android_proc_status_vmhwm" | "ios_getrusage_maxrss";
 };
-export interface NativePerformance {
+export interface NativePerformance extends LaunchBridge {
   startFrames(token: string): Promise<boolean>;
   stopFrames(token: string): Promise<FrameTiming | null>;
   cancelFrames(): Promise<void>;

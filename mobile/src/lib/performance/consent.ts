@@ -8,6 +8,7 @@ export function createPerformanceConsent(
 ) {
   let epoch = 0;
   let enabled = false;
+  let initialGrant: number | null = null;
   let hydration: Promise<void> | undefined;
   let writes = Promise.resolve();
   const listeners = new Set<() => void>();
@@ -21,7 +22,7 @@ export function createPerformanceConsent(
     return (hydration ??= read()
       .then((value) => {
         if (epoch === 0 && value === destination) {
-          epoch++;
+          initialGrant = ++epoch;
           publish(true);
         }
       })
@@ -32,12 +33,17 @@ export function createPerformanceConsent(
   }
   return {
     current,
+    async coldGrant() {
+      await hydrate();
+      return current() === initialGrant ? initialGrant : null;
+    },
     hydrate,
     begin() {
       return enabled && sample() ? epoch : null;
     },
     set(next: boolean) {
       if (!destination) return Promise.resolve();
+      initialGrant = null;
       const revision = ++epoch;
       publish(false);
       // Serialize writes so a superseded grant cannot survive a later withdrawal on disk.

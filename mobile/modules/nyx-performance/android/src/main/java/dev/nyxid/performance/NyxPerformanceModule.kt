@@ -10,7 +10,7 @@ import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
-/** No file/network IO. Observers exist only inside JS-authorized, bounded sessions. */
+/** No network or persistence. Observers and bounded procfs reads require a JS-authorized session. */
 class NyxPerformanceModule : Module() {
   private val main = Handler(Looper.getMainLooper())
   private val sessions = LinkedHashMap<String, FrameHistogram>()
@@ -44,7 +44,12 @@ class NyxPerformanceModule : Module() {
       }
     }
     OnActivityEntersBackground { main.post { pause() } }
-    OnDestroy { main.post { pause() } }
+    OnDestroy { main.post { pause(); LaunchMonitor.invalidate() } }
+    AsyncFunction("setLaunchConsent") { binding: String? ->
+      LaunchMonitor.consent(binding, appContext.currentActivity)
+    }.runOnQueue(Queues.MAIN)
+    AsyncFunction("getLaunchSnapshot") { LaunchMonitor.snapshot() }.runOnQueue(Queues.MAIN)
+    AsyncFunction("measureLaunchMilestone") { launchId: Long -> LaunchMonitor.milestone(launchId) }.runOnQueue(Queues.MAIN)
     AsyncFunction("startFrames") { token: String ->
       val window = appContext.currentActivity?.window
       if (!foreground || window == null || !token.matches(Regex("^[a-z0-9-]{1,64}$")) || sessions.size >= 2 || sessions.containsKey(token)) false

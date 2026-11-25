@@ -5,6 +5,7 @@ const {
   loadEnv,
   resolveProfile,
   appIdentity,
+  performanceLaunchBinding,
 } = require("./scripts/lib/load-env");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { buildNativeLinks } = require("./scripts/lib/native-links");
@@ -16,6 +17,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     warnOnFrontendUrlFallback: true,
   });
   const ident = appIdentity(env);
+  const launchBinding = performanceLaunchBinding(r);
 
   // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
@@ -58,6 +60,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       buildNumber: r.iosBuildNumber,
       associatedDomains,
       infoPlist: {
+        NyxPerformanceLaunchBinding: launchBinding,
         UIBackgroundModes: ["audio", "fetch", "remote-notification"],
         ITSAppUsesNonExemptEncryption: false,
         UISupportedInterfaceOrientations: [
@@ -106,6 +109,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       "./plugins/withFontScaleChanges",
+      ["./plugins/withPerformanceLaunchBinding", { binding: launchBinding }],
       "./plugins/withVoiceAudio",
       "./plugins/withSceneLifecycle",
       "./plugins/withWatchCompanion",
@@ -174,6 +178,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     extra: {
       crashArtifactId: process.env.NYXID_CRASH_ARTIFACT_ID,
       APP_ENV: appEnv,
+      PERFORMANCE_LAUNCH_BINDING: launchBinding,
       PERFORMANCE_POSTHOG_TOKEN: r.performanceToken,
       PERFORMANCE_POSTHOG_HOST: r.performanceHost,
       TELEMETRY_DSN: r.telemetryDsn,

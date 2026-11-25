@@ -300,6 +300,21 @@ function resolveProfile(appEnv, env, options = {}) {
   return resolved;
 }
 
+// Native launch listeners run before JS and must match the saved grant to this build.
+function performanceLaunchBinding(profile) {
+  const { performanceHost, performanceToken } = profile;
+  if (!/^phc_[A-Za-z0-9_-]+$/.test(performanceToken || "")) return "";
+  try {
+    const url = new URL(performanceHost);
+    if (url.protocol !== "https:" || url.username || url.password ||
+      url.pathname !== "/" || url.search || url.hash) return "";
+    return require("node:crypto").createHash("sha256")
+      .update(JSON.stringify([url.origin, performanceToken])).digest("hex");
+  } catch {
+    return "";
+  }
+}
+
 function appIdentity(env) {
   return {
     name: env.APP_NAME || "NyxID Mobile",
@@ -314,6 +329,7 @@ module.exports = {
   resolveProfile,
   validateAndroidGoogleServicesFile,
   appIdentity,
+  performanceLaunchBinding,
   fatal,
   MOBILE_ROOT,
 };

@@ -1,6 +1,6 @@
 # NyxID React Native 性能监控与排查手册
 
-适用范围为 NyxID 的原生 Android / iOS 应用。本分支采集聊天响应、观测帧率、JS 长任务或事件循环延迟、进程内存峰值，并在构建时记录产物大小。下面的看板配置、告警阈值和教学数据分别用于配置与读图。
+适用范围为 NyxID 的原生 Android / iOS 应用。本分支区分冷启动和热启动，分别采集进入前台、首帧和关键输入可用的耗时，同时采集聊天响应、观测帧率、JS 长任务或事件循环延迟、进程内存峰值，并在构建时记录产物大小。下面的看板配置、告警阈值和教学数据分别用于配置与读图。
 
 ## 1. 一个问题该去哪里看
 
@@ -47,7 +47,7 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 ## 3. NyxID 的 PostHog 看板怎么搭
 
-本版设计采用 **RN 客户端 → PostHog**。App 在本机测量，使用 `posthog-react-native` 的即时发送路径向项目的 `/batch/` 接口发送三个自定义事件。客户端配置取自目标 PostHog 项目的公开 Project Token 和接收事件的 host。个人 API key 只用于有管理权限的操作，不能打进 App。构建脚本从构建机直连同一项目，另发一类产物事件。现有产品分析使用 NyxID relay。[PostHog RN SDK](https://posthog.com/docs/libraries/react-native) · [现有产品分析约定](https://github.com/ChronoAIProject/NyxID/blob/9e25a66955abe4a0d8d685392fb4b60d77292e55/docs/TELEMETRY.md)
+本版设计采用 **RN 客户端 → PostHog**。App 在本机测量，使用 `posthog-react-native` 的即时发送路径向项目的 `/batch/` 接口发送四个自定义事件。客户端配置取自目标 PostHog 项目的公开 Project Token 和接收事件的 host。个人 API key 只用于有管理权限的操作，不能打进 App。构建脚本从构建机直连同一项目，另发一类产物事件。现有产品分析使用 NyxID relay。[PostHog RN SDK](https://posthog.com/docs/libraries/react-native) · [现有产品分析约定](https://github.com/ChronoAIProject/NyxID/blob/9e25a66955abe4a0d8d685392fb4b60d77292e55/docs/TELEMETRY.md)
 
 **构建配置**。在对应环境的移动端构建配置中设置 `DEV_PERFORMANCE_POSTHOG_TOKEN` 与 `DEV_PERFORMANCE_POSTHOG_HOST`，或对应的 `PROD_` 变量。Project Settings 里的公开项目 token 以 `phc_` 开头；host 使用实际 HTTPS 接收域名，例如美国区 `https://us.i.posthog.com` 或欧洲区 `https://eu.i.posthog.com`。每个环境独立配置，留空时隐藏性能开关。首次安装需要包含新原生模块的构建。
 
@@ -59,10 +59,21 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 | 事件 | 一条代表什么 | 字段和测量边界 |
 |---|---|---|
+| `mobile.perf_launch` | 一次已授权、被抽中的启动达到一个阶段 | `startup_kind` 为 cold 或 hot。三个阶段共用原生单调时钟起点，分别上报 `app_active`、`first_frame`、`interaction_ready` 的 `duration_ms`。用 `origin_source`、`measurement_source` 和 `target` 区分平台、终点和控件。 |
 | `mobile.perf_chat_turn` | 一轮通过输入框发送的聊天 | `headers_ms`、`first_text_ms`、`first_text_commit_ms` 均从发送操作起算；`duration_ms` 在轮次终态时冻结。 `outcome` 为 completed、no_text、cancelled、error 或 timeout。能看到正文但结束后两秒仍未观察到提交时，省略提交耗时。|
 | `mobile.perf_frames` | 聊天页内一次可观测的拖动或流式输出窗口 | `scenario` 区分 chat_drag、chat_drag_during_stream 和 chat_streaming。`measurement_source`、`duration_ms`、`sample_count`、`over_budget_count` 及 `interval_p50_ms`、`interval_p95_ms`、`interval_max_ms` 描述这一窗口。Android 采 Window FrameMetrics，可用时含 `dropped_callback_count`。iOS 采 CADisplayLink 回调间隔，超预算回调是显示节奏的近似值。Apple 官方动画停顿数据在 Instruments 或 Organizer 核对。|
 | `mobile.perf_js_tasks` | 每次进入前台或在前台开启分享，抽取一次约 10 秒的连续窗口 | `rn_longtask` 表示 RN 能观测已完成的 ≥50 ms JS 任务，报告 `task_count`、最长任务 `max_task_ms` 和超过阈值的累计 `blocked_ms`。如运行时未提供该能力，每 250 ms 测一次定时器延迟，来源为 `event_loop_lag`，单列 `stall_count`、`max_lag_ms`。延迟次数与长任务次数口径不同。窗口中途进后台或撤回即丢弃。 |
 | `mobile.perf_artifact` | 构建工具读取最终产物后发送一次 | `size_bytes` 是文件字节数。按 `platform`、`build_number`、`build_configuration` 和 `artifact_kind` 分组；同构建重报时按最新值显示。APK、AAB、IPA 分别比较。iOS 模拟器的 `simulator_app_uncompressed` 是 .app 内普通文件的逻辑大小之和，跳过符号链接。 |
+
+**启动图应怎样读**。同一平台、构建号和启动类型下，三张图回答三个不同的问题。
+
+| 看板 | 起点到终点 | 读数边界 |
+|---|---|---|
+| 冷启动与热启动 | Android 冷启动从系统的进程启动时点计，热启动从同一 Activity 经后台重新进入 started 状态计，到 Activity 恢复。iOS 冷启动从 didFinishLaunching 计，热启动从 willEnterForeground 计，到 didBecomeActive。 | iOS 冷启动读数从回调开始，系统加载和 pre-main 用 Instruments 单独核验。权限弹窗后的重新激活不构成一次热启动。 |
+| 首帧展示 | 从同一次启动的起点计到应用窗口的第一个可观测帧。Android 用窗口帧指标回调；iOS 用窗口提交后的一次显示节奏回调估算。 | 这是客户端可观测的显示时点；屏幕上是否有业务内容、物理像素哪一刻点亮，可对照系统轨迹或录像。 |
+| 关键交互可用 | 从同一起点计到当前路由无遮挡、已启用的登录邮箱输入框或聊天输入框布局完成并通过就绪检查。 | 每个启动最多一个目标。无对应输入框的页面没有该样本。测试时应实际点击控件并输入字符，检查其在同一页面响应；人的思考或打字等待时间不计入线上耗时。 |
+
+按平台、阶段和 `target` 比较版本的 P50、P95 和样本数。进入前台、绘出首帧和输入可用各有自己的样本数。首次在设置里开启分享，只对后续符合条件的启动生效。
 
 **帧率与内存图**均读取 `mobile.perf_frames`。窗口的 `observed_fps` 为实际观测帧回调数除以经过的秒数。Android 窗口只在应用产生帧时收到回调，静止画面的低值也可能代表没有重绘需求。iOS 记录 CADisplayLink 回调频率。比较同平台、同场景和同构建类型，同时看慢帧占比。窗口结束时读取进程启动以来的常驻内存最高值 `peak_rss_bytes`，Android 取 `/proc/self/status` 的 VmHWM，iOS 取 getrusage 的 ru_maxrss。除以 1,048,576 得到 MiB。读不到的值保留为空；RSS 包含原生和 JS 等内存，排查泄漏需另看多次操作后的占用变化。
 
