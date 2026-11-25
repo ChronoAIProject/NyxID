@@ -14,9 +14,9 @@ reuse any existing index whose first key is the erasure owner predicate and
 add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions. The manifest adds 16 indexes:
-15 stream indexes plus the group-message author index used for attribution
-redaction. Other classified gaps add no index.
+not change retention or ownership decisions. The manifest adds 15 indexes, comprising
+14 stream indexes and the group-message author index used for attribution
+redaction. The reply delivery index on `{user_id:1, inbound_message_id:1}` already covers owner erasure.
 
 Each row below is a real missing prefix on a collection that grows with
 events, messages, requests, or deliveries. Without it, the owner query would
@@ -65,7 +65,6 @@ db.channel_delivery_receipts.createIndex({"user_id": 1}, {name: "personal_erasur
 db.channel_email_batches.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_batches_user_id"});
 db.channel_email_receipts.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_receipts_user_id"});
 db.channel_email_sends.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_sends_user_id"});
-db.channel_reply_deliveries.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_reply_deliveries_user_id"});
 db.nyxbot_events.createIndex({"user_id": 1}, {name: "personal_erasure_owner_nyxbot_events_user_id"});
 db.refresh_tokens.createIndex({"user_id": 1}, {name: "personal_erasure_owner_refresh_tokens_user_id"});
 db.service_change_events.createIndex({"actor.person_id": 1}, {name: "personal_erasure_owner_service_change_events_actor_person_id"});
@@ -94,7 +93,6 @@ rows retain only an opaque actor ID.
 | `trigger_work` | `user_id` | `personal_erasure_owner_trigger_work_user_id` | Per-run and per-notice work inserts (`trigger_schedule::insert_run` and `trigger_schedule::record_terminal_in_session`), plus schedule rows; no TTL bounds stalled work before owner cleanup. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_adapter_events` | `user_id` | `personal_erasure_owner_channel_adapter_events_user_id` | Per-call-turn/SMS event inserts (`call_channels::session::insert_sms_send` and `call_channels::session::admit`); event receipts have no TTL, and settled rows need owner cleanup. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_delivery_receipts` | `user_id` | `personal_erasure_owner_channel_delivery_receipts_user_id` | Per-message receipt upserts (`channel_delivery_service::observe`), with 30-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
-| `channel_reply_deliveries` | `user_id` | `personal_erasure_owner_channel_reply_deliveries_user_id` | Per-reply inserts (`channel_reply_delivery::Delivery::begin`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` | Per-inbound-email receipt writes (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::receive_batch`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` | Per-email-send inserts (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::reply_once`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` | Per-webhook-batch upserts (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::receive_batch`), with 31-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
@@ -140,7 +138,7 @@ registry):
 | `assistant_agent_learning_members`, `assistant_agent_learning_runs`, `assistant_agent_learning_skill_roots`, `assistant_learning_migrations` | Opt-in membership and explicit learning/publication work (`assistant_agent_learning::set_member_opt_in`, `create_run` and `reserve_run`); bounded feature lifecycle rather than every assistant message. |
 | `assistant_async_quotas` | One quota counter per owner (`async_service_operation::reserve_with_artifacts`); replaced resource state rather than an append-only history. |
 | `assistant_group_agent_access`, `assistant_group_agent_proposals`, `assistant_group_invites`, `assistant_group_read_states` | Group access/invite lifecycle and one read-state per participant (`services/collaboration_group_service/membership.rs`, `collaboration_group_service::notifications::ensure_state`); invites/proposals also expire (`collaboration_group_service::ensure_indexes`). |
-| `assistant_skill_draft_attempts`, `assistant_voice_windows`, `assistant_voice_announcements` | Explicit draft attempts expire after a day (`db::ensure_indexes`, `assistant_skill_draft_attempts` expiry index); voice windows are bounded by a voice session (`voice::runtime::checkpoint_windows` and `voice::runtime::settle_windows`), and announcements are expiring coordination (`assistant_voice_announcement::Announcement::expires_at`). |
+| `assistant_skill_draft_attempts`, `assistant_voice_windows` | Explicit draft attempts expire after a day (`db::ensure_indexes`, `assistant_skill_draft_attempts` expiry index). Voice windows are bounded by a voice session (`voice::runtime::checkpoint_windows` and `voice::runtime::settle_windows`). |
 | `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`channel_email::EmailSubscription`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
 | `channel_meta_provider_targets` | Independent retry/proof children of a signed request, keyed only by request/bot/grant UUIDs and optional scope UUID. Pending children have no TTL. After completion, indexed pages apply the parent's 90-day proof deadline before parent TTL is enabled. Excluded from export; no subject, owner list or copied source/content. |
 | `channel_meta_grant_scopes` | One bot/grant UUID pair with keyed subject/binding fingerprints, platform/App ID, generation range, timestamps and independent cleanup proof. Retained erasure bookkeeping, excluded from export; no raw subject, owner list, credentials, participant IDs or copied content. Exact completion releases the app-drain obligation and removes identity, App ID, generation and attribution fields; opaque exact replay proof has no terminal TTL. Subjectless manual retirement removes its unused scope. |
@@ -743,7 +741,7 @@ startup awaits a large-collection build and may be delayed. Pre-build with:
 db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"assistant_messages_account_export"});
 ```
 
-The message index joins the 16 erasure indexes above. Upgrade tests allow
+The message index joins the 15 erasure indexes above. Upgrade tests allow
 precisely the declared additions and preserve the previous
 index set, including on an older-replica startup.
 
@@ -767,21 +765,18 @@ db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_expor
 db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
 ```
 
-The complete additive rollout set is 23 indexes: 16 erasure indexes and seven
-export indexes. Existing definitions remain untouched; the upgrade tests compare
+The additive rollout comprises 15 erasure indexes and six export indexes. Existing definitions remain untouched; the upgrade tests compare
 all definitions before/after and replay the old startup fixture afterward.
 
 
-Four growing history collections also need export selector indexes. Actor selection is
+Three growing history collections also need export selector indexes. Actor selection is
 independent of resource ownership: an organization or group can retain many events
-authored by other people. Attachment selection must cover every origin, including
-tool images without a channel source. These are the only additional selector
+authored by other people. These are the only additional selector
 indexes; small configuration, relationship and lifecycle inventories retain their
 existing index sets.
 
 | Collection | Key/name | Writer/volume justification | Startup build behavior |
 | --- | --- | --- | --- |
-| `assistant_attachments` | `user_id`; `account_export_assistant_attachments_user_id` | `assistant_nyxagent::attach_routed_image` appends a UUID row for each tool image; `assistant_upload_service` also stores upload roots and chunks. `models::assistant_upload_retention::Policy::default` leaves `tool_image_days=None`, retaining tool images with the conversation, so this history has no fixed TTL or total cap. The existing owner-prefix index `assistant_channel_source_unique` is partial on `source.event_key` being a string and cannot serve an export across all origins. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_upload_retention::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
 | `assistant_checkpoints` | `user_id`; `account_export_assistant_checkpoints_user_id` | `assistant_nyxagent::write_checkpoint_in_session` replaces a conversation's checkpoint, but conversation histories grow platform-wide with no fixed retention or total cap. Exporting by person needs a selective owner prefix. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_nyxagent::ensure_account_export_indexes` → `ensure_checkpoint_export_index` → `create_index` before binding listeners. Startup waits for a large build; prebuild below. |
 | `assistant_group_requests` | `actor_user_id`; `account_export_assistant_group_requests_actor_user_id` | `collaboration_group_service::requests::enqueue_with_uploads_ready` appends a UUID request per authored group message. The pending queue cap covers active requests only; settled requests have no TTL. The existing `user_id` owner index and `collaboration.version/actor_user_id` index cannot serve the actor-only export predicate. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `collaboration_group_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
 | `org_channel_messages` | `author_user_id`; `account_export_org_channel_messages_author_user_id` | `org_channel_service::transcript::publish` persists each member-authored transcript row; no transcript TTL. Existing `_id`, `org_id` and `user_id` prefixes cannot select an author's history across organizations. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `org_channel_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
@@ -789,12 +784,12 @@ existing index sets.
 This follows the existing awaited large-collection additions in
 `assistant_nyxagent::ensure_indexes` and the message-history export index above.
 Each owning initializer reuses any non-partial index with the required first key,
-regardless of its name. No existing index is dropped, renamed or rebuilt. The
-fresh, upgrade and mixed-fleet tests include these additions and preserve the
+regardless of its name. The Meta erasure indexes on `assistant_attachments` and
+`assistant_voice_announcements` start with `user_id` and cover their owner reads.
+The fresh, upgrade and mixed-fleet tests include these additions and preserve the
 original definitions. Prebuild on a large deployment before restarting replicas:
 
 ```javascript
-db.assistant_attachments.createIndex({user_id:1}, {name:"account_export_assistant_attachments_user_id"});
 db.assistant_checkpoints.createIndex({user_id:1}, {name:"account_export_assistant_checkpoints_user_id"});
 db.assistant_group_requests.createIndex({actor_user_id:1}, {name:"account_export_assistant_group_requests_actor_user_id"});
 db.org_channel_messages.createIndex({author_user_id:1}, {name:"account_export_org_channel_messages_author_user_id"});
@@ -843,7 +838,6 @@ exports still retain their query timeouts and report unavailable subsections.
 | `assistant_group_read_states.user_id` | **SmallOrResourceBounded**: collaboration_group_service::notifications updates one read position per group/member; ensure_indexes uniquely fences that pair. |
 | `assistant_learning_publication_targets.owner_id` | **SmallOrResourceBounded**: assistant_agent_learning_review reserves a single publication target per skill/version and removes released reservations; ids are target:version, not event UUIDs. |
 | `assistant_skill_draft_attempts.user_id` | **ShortTtl**: db::ensure_indexes fixes the created_at TTL at 86400 seconds; assistant_skill_authoring::record_format_rejection updates one conversation/turn counter. |
-| `assistant_voice_announcements.user_id` | **SmallOrResourceBounded**: voice::announcements stores one announcement per call/request id and expires it 24 hours after the call deadline. |
 | `assistant_voice_windows.user_id` | **SmallOrResourceBounded**: assistant_voice::ensure_indexes uniquely fences billing_request_id; billing::voice reserves deterministic call/window funding records, not audio frames. |
 | `assistant_wire_logs.user_id` | **ShortTtl**: assistant_wire_log_service::WIRE_LOG_TTL_SECS is 15 minutes and record sets expires_at from it. |
 | `auth_device_codes.approved_user_id` | **SmallOrResourceBounded**: auth_device_service writes 10-minute login requests but purge_at is set only after grant cleanup. Pending/approved cleanup can be retried, so AUTH_DEVICE_EXPIRES_IN_SECS is not a fixed retention bound; these are login lifecycle records. |

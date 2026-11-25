@@ -4625,17 +4625,15 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
     .unwrap();
     assert!(hidden.is_empty());
     // A later turn is the same draft, never another proposal or approval card.
-    let turn = Uuid::new_v4().to_string();
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"active_turn.turn_id":&turn}},
+    f.finish_turn(&f.row).await;
+    f.row = f
+        .begin_turn(
+            crate::models::assistant_conversation::TurnOrigin::User,
+            "Review the requested skill",
         )
-        .await
-        .unwrap();
-    f.chat.turn_id = Some(turn);
+        .await;
+    f.chat =
+        super::super::assistant_authority_tests::chat_for_row(&f.state, &f.owner, &f.row).await;
     let activity = super::super::assistant_nyxagent::activity_started_for_turn(
         &f.state.db,
         &f.owner,

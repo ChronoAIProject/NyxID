@@ -3356,7 +3356,8 @@ async fn actions_for_card(
     if !effective && (card.status != "pending" || !card_live) {
         actions.push(AuthoredAction::Discard);
     }
-    if renewal_eligible(row, card, agent.skills_revision, now)
+    if !undispatched_legacy
+        && renewal_eligible(row, card, agent.skills_revision, now)
         && !actions.iter().any(|action| {
             matches!(
                 action,
