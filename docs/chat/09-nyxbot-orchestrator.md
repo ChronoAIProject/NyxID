@@ -1535,7 +1535,8 @@ owner's identity and billing and the target's normal grants and credential key.
 The final reply stays in the thread unless `deliver_to` selects an owner-approved
 channel chat or push notification. Chat posting checks live ownership, agent
 assignment, posting permission and bot status again at delivery. Chat outputs
-respect each platform's message limit; a shortened reply says so and links its full thread.
+respect each platform's message limit: up to 64 parts deliver the full reply, and a
+longer reply delivers 63 parts plus a 64th message linking to its full thread in NyxID.
 
 Trigger turns have their own budget (30/hour, 300/day by default), use the existing
 owner turn pool, and do not increment or reset `MAX_EVENT_STREAK`. A busy thread,

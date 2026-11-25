@@ -438,14 +438,16 @@ contains prompts, payloads or upstream error prose. The complete answer lives in
 the assistant transcript.
 `deliver_to` is `{"type":"thread"}`, `{"type":"notification"}` (push only), or
 `{"type":"chat","chat_id":"..."}`. Chat access is checked both at configuration
-and delivery, through the existing post-to-chat path. Long replies respect the
-destination platform limit and explicitly say they were shortened, with a full
-thread link. Push has a concise preview and thread ID.
+and delivery, through the existing post-to-chat path. Replies longer than one
+platform message are split into parts within the destination platform limit. Up
+to 64 parts deliver the full reply. A longer reply delivers 63 parts and a 64th
+message saying that the reply exceeds the 64-message limit, with a link to the
+NyxID thread that holds the full reply. Push has a concise preview and thread ID.
 A run whose saved `deliver_to` targets a chat receives that platform’s one-message
 length guidance in turn-only context, including confirmation continuations and
 specialist reports. Telegram prefers one 4,096-character message; an explicit
 request for long or complete output permits multiple parts. The delivery planner
-keeps all content and splits longer replies. Thread-only runs receive no channel
+splits longer replies under the 64-part rule above. Thread-only runs receive no channel
 length guidance. `list_channel_chats` supplies the same per-destination guidance
 for explicit `post_to_chat` calls.
 
@@ -554,7 +556,7 @@ Webhook setup links are `/assistant/automations?setup=<watch-id>`. The owner-aut
 an owned, pending, unexpired, unused watch. Creation validates and consumes the
 watch in the trigger-insert transaction, so concurrent submissions cannot reuse
 it. No instruction or label enters the URL. The Triggers developer page remains
-available for inbound secrets and replay; Automations sits next to Assistant.
+available for inbound secrets and replay.
 
 ## Performance measurements
 
@@ -587,9 +589,11 @@ it excludes HTTP socket/TLS and authentication middleware overhead:
 | Confirmation decision → completed continuation | 177.912 ms | persisted owner decision, scheduler tick, fake NyxAgent |
 | Three-day outage, five-minute cadence | 85.262 ms | 864 missed occurrences; one execution, one summary, one summary audit |
 
-The 27 scheduler tests passed in 64.28 seconds; the five cron-computation tests
-passed in 0.73 seconds. The scheduler suite includes admission-deadline and
-failure-notification regressions in addition to these measurements.
+In that recorded run, the 27 scheduler tests then in the suite passed in 64.28
+seconds and the five cron-computation tests passed in 0.73 seconds. These counts
+are a historical record of that run, not the current number of tests. The
+scheduler suite includes admission-deadline and failure-notification regressions
+in addition to these measurements.
 
 The explain test asserts `PROJECTION_COVERED → IXSCAN`, index
 `trigger_work_due {at:1,_id:1}`, `totalDocsExamined = 0`, and

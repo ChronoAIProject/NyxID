@@ -9110,7 +9110,15 @@ Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{
 
 ### Inbound Triggers
 
-Triggers provide a provider-neutral inbound event relay. Management routes accept a normal user token or agent API key and reject delegated, relay, and service-account tokens.
+Triggers provide a provider-neutral inbound event relay. Every `/api/v1/triggers` route rejects delegated, relay, and service-account tokens. The remaining credential rules depend on the route and the trigger:
+
+| Routes | Credentials |
+|---|---|
+| Create, `GET`/`PATCH`/`DELETE /triggers/{id}`, `rotate-secret`, `rotate-delivery-secret`, `deliveries` and `redeliver` on a webhook-source trigger with `webhook`, `agent` or `notification` delivery | A normal user token or agent API key |
+| The same routes on an automation: a trigger with `source: "schedule"` or `assistant` delivery, including a create or `PATCH` that sets `assistant` delivery | A first-party human session only. `GET /triggers` omits automations for other credentials. Automations belong to a person, so create refuses `target_org_id` |
+| `POST /triggers/preview`, `GET /triggers/setup/{id}`, `GET /triggers/{id}/runs`, `POST /triggers/{id}/run` and `POST /triggers/{id}/runs/{run_id}/cancel`, for every trigger | A first-party human session only |
+
+A first-party human session is an account login from the NyxID web app, mobile app or CLI, with no OAuth client ID, API key or delegation. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for automation behaviour.
 
 #### Create and manage
 
@@ -9141,18 +9149,27 @@ Prefer bearer or HMAC verification. Query tokens are supported only for senders 
 `delivery` supports:
 
 - `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once and `delivery_signing_key_id`; outbound delivery uses the timestamp-bound signature and stable-header contract above.
-- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure; it is also the only target with durable cross-replica dedup and the delivery-history/replay contract described below.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure; it is also the only target with the delivery-history/replay contract described below. Dedup differs by target; see [Public ingress](#public-ingress).
 - `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
+- `{"type":"assistant","agent_id":"...","instruction":"..."}` wakes a NyxBot agent as an automation. Its optional fields are described in [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations).
 
-Create returns `trigger`, the one-time inbound `secret`, and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
+Create also accepts the automation fields `source` (`webhook` by default, or `schedule`), `schedule`, `overlap` (`skip` by default, or `queue`) and `watch_id` (the opaque ID of a NyxBot setup link). Trigger responses add `source`, `schedule`, `overlap`, `next_runs`, `next_run_at`, `last_run`, `pause_reason`, and `inbound_url` (webhook-source triggers only).
+
+Create returns `trigger`, the one-time inbound `secret` (webhook-source triggers only), and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
 
 - `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`
-- `PATCH /api/v1/triggers/{id}` for `label`, `status`, or `delivery`
+- `PATCH /api/v1/triggers/{id}` for `label`, `status`, `delivery`, `schedule`, or `overlap`
 - `DELETE /api/v1/triggers/{id}`
 - `POST /api/v1/triggers/{id}/rotate-secret`
 - `POST /api/v1/triggers/{id}/rotate-delivery-secret` for webhook targets; returns a replacement `delivery_signing_secret` and `key_id` once.
 - `GET /api/v1/triggers/{id}/deliveries?page=1&per_page=20` for metadata-only delivery history, newest first (`per_page` maximum 100).
 - `POST /api/v1/triggers/{id}/deliveries/{event_id}/redeliver` to replay a retained encrypted envelope.
+- `POST /api/v1/triggers/preview` with `{"schedule": ...}` returns a `description` and `next_runs` for a schedule specification.
+- `GET /api/v1/triggers/setup/{id}` returns the owner's pending NyxBot setup-link prefill for an automation form.
+- `POST /api/v1/triggers/{id}/run` admits an immediate test run and returns its run metadata.
+- `GET /api/v1/triggers/{id}/runs` and `POST /api/v1/triggers/{id}/runs/{run_id}/cancel`; see [Automation coordinator completion](#automation-coordinator-completion).
+
+These automation routes are specified in [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations).
 
 Changing a trigger's `delivery` through `PATCH` intentionally mints a replacement delivery secret. Use `rotate-delivery-secret` when only key rotation is intended. Receivers should follow the two-key `X-NyxID-Key-Id` rotation procedure documented above.
 
@@ -9160,8 +9177,10 @@ The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <eve
 
 #### Automation coordinator completion
 
-When coordinator completion is enabled and every serving replica advertises
-`automation:coordinator-completion-v2`, newly admitted assistant runs track
+When coordinator completion is enabled and `automation:coordinator-completion-v2`
+is serving-ready (every live generation supports it and activation was recorded after
+that support settled for 90 seconds; advisory roster warnings do not block it; see
+[security readiness](SECURITY_ROLLOUT_READINESS.md)), newly admitted assistant runs track
 specialist assignments and group handoffs through the coordinator's final reply.
 Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
 for the default-off configuration, bounds and downgrade procedure.
@@ -9174,8 +9193,8 @@ pending. The hard deadline terminates the run with `reason: "coordinator_timeout
 `POST /api/v1/triggers/{id}/runs/{run_id}/cancel` returns the owner's updated run
 metadata with HTTP 200. It cancels an enrolled run and fences its delegated work;
 already completed external actions remain completed. This route requires a
-first-party human session and rejects API keys, delegated tokens, service-account
-tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
+first-party human session and rejects API keys, third-party OAuth-client tokens,
+delegated tokens, service-account tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
 
 `GET /api/v1/admin/automation-continuations/readiness` requires admin or operator
 access and returns `configured`, fleet `readiness`, `rollback_safe` and
@@ -9209,8 +9228,9 @@ Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event
 
 Delivery and dedup semantics depend on the target:
 
-- `webhook`: an atomic `trigger_deliveries` insert provides exactly-once admission and durable dedup across replicas and restarts. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
-- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters a best-effort in-memory dedup cache only after success. Dedup is per process, bounded to the configured cache capacity and a five-minute default window, and does not coordinate replicas. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+- `webhook`: an atomic `trigger_deliveries` insert provides unique admission and durable dedup across replicas and restarts for as long as the delivery record is retained (`TRIGGER_DELIVERY_RETENTION_HOURS`, or 72 hours when retention is `0`); after the record expires, the same event ID is admitted again. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
+- `agent` and `notification`: ingress first takes a claim on the trigger and event ID in a shared MongoDB collection, so it applies across replicas. The claim lasts `CHANNEL_EVENT_DEDUP_TTL_SECS` (300 seconds by default) and is not renewed during delivery. Delivery completes before the ingress response. On success the claim is committed and the event ID stays deduplicated for another `CHANNEL_EVENT_DEDUP_TTL_SECS`; on failure the claim is released so a retry can deliver. A repeat that arrives while a claim or committed entry is live returns `duplicate`, even if the claimed attempt later fails. Duplicate delivery remains possible: if delivery outlasts the claim, a concurrent repeat can claim and deliver again, and if the claim is lost before commit after a successful delivery, ingress returns an error and a sender retry can repeat the external effect. Senders should retry failures and consumers should remain idempotent.
+- `assistant`: ingress takes the same shared claim, then admits the run in one MongoDB transaction under a run ID derived from the trigger and event ID. A repeat returns `duplicate` while the claim or committed entry is live; after that, a repeat whose run is still retained in run history returns `accepted` without a second run or transcript event. Admission therefore does not depend on the claim lasting. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for run-history retention.
 
 Webhook-target envelopes are encrypted at rest with the configured encryption keys and removed by a database TTL index after `TRIGGER_DELIVERY_RETENTION_HOURS` (72 hours by default). Delivery list responses never contain payloads. Setting retention to `0` stores metadata for the default 72-hour bounded window but no envelope, makes `replay_available` false, and causes redelivery to return `trigger_delivery_record_not_found` (11606). Agent and notification payloads are never persisted.
 
