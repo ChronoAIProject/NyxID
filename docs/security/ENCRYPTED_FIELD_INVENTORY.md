@@ -105,6 +105,12 @@ retains its request and idempotency key through rewrap and recovery.
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
+- Learning proposal readers use the body, scope and publication interface version
+  markers independently. Each contextual field binds the proposal ID, owner and
+  agent. The interface also binds the publication operation. Writers use the
+  historical format in both positions of `CONTEXTUAL_RECORD_WRITES`, so serving
+  these proposals still requires legacy reads.
+  [Proposal readers](../../backend/src/services/assistant_learning_record.rs)
 - NyxBot keeps the latest event reference on the thread. The event holds its
   context, the late-delivery target and the queued guest setup payload.
   Gateway responses store an encrypted replay payload.

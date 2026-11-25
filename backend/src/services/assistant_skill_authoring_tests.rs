@@ -20,7 +20,74 @@ use wiremock::{
 mod validation_regressions;
 
 #[path = "assistant_learning_recovery_tests.rs"]
-mod recovery;
+pub(crate) mod recovery;
+
+pub(crate) async fn contextualize(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    raw: &mut bson::Document,
+) {
+    use crate::crypto::record_field::RecordContext;
+    use bson::{Binary, spec::BinarySubtype};
+    let row: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
+    for (name, marker, path) in [
+        (
+            "body_encrypted",
+            "body_context_version",
+            vec!["body_encrypted", &row.agent_id],
+        ),
+        (
+            "scope_encrypted",
+            "scope_context_version",
+            vec!["scope_encrypted", &row.agent_id],
+        ),
+        (
+            "interface_encrypted",
+            "interface_context_version",
+            vec![
+                "publication",
+                "interface_encrypted",
+                &row.agent_id,
+                row.publication
+                    .as_ref()
+                    .map_or("", |p| p.operation_id.as_str()),
+            ],
+        ),
+    ] {
+        let parent = if name == "interface_encrypted" {
+            let Ok(p) = raw.get_document_mut("publication") else {
+                continue;
+            };
+            p
+        } else {
+            &mut *raw
+        };
+        let Ok(bytes) = parent.get_binary_generic(name) else {
+            continue;
+        };
+        let clear = keys.decrypt(bytes).await.unwrap();
+        let ctx =
+            RecordContext::new(PROPOSALS_COLLECTION_NAME, &row.id, &row.owner_id, &path).unwrap();
+        let bytes = keys.encrypt_record(&clear, &ctx).await.unwrap();
+        parent.insert(
+            name,
+            Binary {
+                subtype: BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        parent.insert(marker, 3_i32);
+    }
+}
+
+async fn install_contextual(f: &Fixture, id: &str) {
+    let rows = f
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+    let mut raw = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+    contextualize(&f.state.encryption_keys, &mut raw).await;
+    rows.replace_one(doc! {"_id":id}, raw).await.unwrap();
+}
 
 fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
@@ -6019,6 +6086,7 @@ async fn reduced_scope_publication_requires_consent_and_pins_with_metadata_audit
     let (row, card) = make(&f, value).await;
     let skill_id = Uuid::new_v4().to_string();
     mount_publication(&f, &server, &row, &skill_id, "POST").await;
+    install_contextual(&f, &row.id).await;
     assert!(finish(&f, card.clone(), true).await.is_err());
     assert!(
         server
