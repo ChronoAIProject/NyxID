@@ -3334,7 +3334,6 @@ pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
 /// complete account export. Each addition is owned by its writer module.
 #[cfg(test)]
 pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
-    ("assistant_attachments", "user_id"),
     ("assistant_checkpoints", "user_id"),
     ("assistant_group_requests", "actor_user_id"),
     ("org_channel_messages", "author_user_id"),

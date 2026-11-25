@@ -774,13 +774,14 @@ all definitions before/after and replay the old startup fixture afterward.
 Four growing history collections also need export selector indexes. Actor selection is
 independent of resource ownership: an organization or group can retain many events
 authored by other people. Attachment selection must cover every origin, including
-tool images without a channel source. These are the only additional selector
+tool images without a channel source. The non-partial owner-prefix compound
+indexes created by `channel_meta_service::scope_erasure::ensure_indexes` cover
+attachment exports across all origins. These are the only additional selector
 indexes; small configuration, relationship and lifecycle inventories retain their
 existing index sets.
 
 | Collection | Key/name | Writer/volume justification | Startup build behavior |
 | --- | --- | --- | --- |
-| `assistant_attachments` | `user_id`; `account_export_assistant_attachments_user_id` | `assistant_nyxagent::attach_routed_image` appends a UUID row for each tool image; `assistant_upload_service` also stores upload roots and chunks. `models::assistant_upload_retention::Policy::default` leaves `tool_image_days=None`, retaining tool images with the conversation, so this history has no fixed TTL or total cap. The existing owner-prefix index `assistant_channel_source_unique` is partial on `source.event_key` being a string and cannot serve an export across all origins. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_upload_retention::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
 | `assistant_checkpoints` | `user_id`; `account_export_assistant_checkpoints_user_id` | `assistant_nyxagent::write_checkpoint_in_session` replaces a conversation's checkpoint, but conversation histories grow platform-wide with no fixed retention or total cap. Exporting by person needs a selective owner prefix. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_nyxagent::ensure_account_export_indexes` → `ensure_checkpoint_export_index` → `create_index` before binding listeners. Startup waits for a large build; prebuild below. |
 | `assistant_group_requests` | `actor_user_id`; `account_export_assistant_group_requests_actor_user_id` | `collaboration_group_service::requests::enqueue_with_uploads_ready` appends a UUID request per authored group message. The pending queue cap covers active requests only; settled requests have no TTL. The existing `user_id` owner index and `collaboration.version/actor_user_id` index cannot serve the actor-only export predicate. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `collaboration_group_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
 | `org_channel_messages` | `author_user_id`; `account_export_org_channel_messages_author_user_id` | `org_channel_service::transcript::publish` persists each member-authored transcript row; no transcript TTL. Existing `_id`, `org_id` and `user_id` prefixes cannot select an author's history across organizations. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `org_channel_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
@@ -793,7 +794,6 @@ fresh, upgrade and mixed-fleet tests include these additions and preserve the
 original definitions. Prebuild on a large deployment before restarting replicas:
 
 ```javascript
-db.assistant_attachments.createIndex({user_id:1}, {name:"account_export_assistant_attachments_user_id"});
 db.assistant_checkpoints.createIndex({user_id:1}, {name:"account_export_assistant_checkpoints_user_id"});
 db.assistant_group_requests.createIndex({actor_user_id:1}, {name:"account_export_assistant_group_requests_actor_user_id"});
 db.org_channel_messages.createIndex({author_user_id:1}, {name:"account_export_org_channel_messages_author_user_id"});
