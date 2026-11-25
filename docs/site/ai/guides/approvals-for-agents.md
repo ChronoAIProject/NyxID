@@ -61,7 +61,7 @@ Only an eligible request that opts into async approval with the `X-NyxID-Approva
 
 The `request_id` is used to poll for status (async callers, with the same credential) and to display to the user. After approval NyxID sends or resumes the request itself.
 
-If the approval is rejected, expires, or times out, the agent receives `error_code: 7001`:
+For a held (default) request, if the approval is rejected, expires, or times out, the agent receives `error_code: 7001`. An async caller has already received `7000`; after a rejection, its status poll returns HTTP 200 with `status: "rejected"` and `execution.state: "denied"`.
 
 ```json
 {
@@ -103,7 +103,7 @@ Response:
 
 Status values: `pending`, `approved`, `rejected`, `expired`. For an async request, the response also has an `execution` field reporting whether NyxID sent the approved request and its bounded result. Poll with the same credential that made the request.
 
-Poll at a reasonable interval (5–10 seconds). `status` leaves `pending` when the user decides, but an approved async request is only queued at that moment (`execution.state` is `queued`). If you need the outcome, keep polling until `execution.state` reaches a final state such as `completed`, `not_sent` or `unknown`, and check `execution.result_available` before reading `execution.result`. Do not re-send the original request; NyxID sends it.
+Poll at a reasonable interval (5–10 seconds). `status` leaves `pending` when the user decides, but an approved async request is only queued at that moment (`execution.state` is `queued`). If you need the outcome, keep polling until `execution.state` reaches a final state such as `completed`, `not_sent` or `unknown`, and check `execution.result_available` before reading `execution.result`. Do not re-send the original request; NyxID sends it. If a status poll returns HTTP 404 (for example after the request expired and its delivery was abandoned), stop polling, report that the outcome is unavailable, and do not re-send the operation.
 
 ## Set up notification channels
 
@@ -177,7 +177,7 @@ nyxid approval service-configs   # lists all services with approval enabled, inc
 | Symptom | Cause | Fix |
 |---|---|---|
 | User never receives the approval request | No notification channel configured | Run `nyxid notification telegram-link` or install the mobile app |
-| Approval times out before user sees it | Default expiry is short | Increase `APPROVAL_EXPIRY_INTERVAL_SECS` on the server, or set up real-time notifications |
-| Agent receives `7001` immediately | Service returned `approval_failed` without a pending phase | The previous approval request for this `(user, service, requester)` tuple was already rejected. The agent should show `approve_url` |
+| Approval times out before user sees it | The approval wait is short | Increase the approval timeout (`approval_timeout_secs` in notification settings), or set up real-time notifications |
+| Agent receives `7001` immediately | A saved decision already applies to this request (for example an earlier rejection) | Show `approve_url`; do not re-send in a loop |
 | `per_request` service creates grants | Service was reconfigured to `grant` mode | Run `nyxid approval service-configs` to confirm the current mode |
 | Agent loops infinitely on `7000` | Polling without timeout | Add a polling limit and show the user the `request_id` and a link to the web console |

@@ -970,7 +970,7 @@ dry-run/validate, no redirects on shared-credential transport. See docs/TOOLS.md
 NyxBot saved manager replies and proactive text posts use the shared
 `channel_reply_plan`/`channel_text` planner (64 parts) and metadata-only
 `channel_text_deliveries` per-part receipts. Never replace long content with an app
-link within the 64-part limit (beyond it the 64th part links to the remainder), and never replay a sending/uncertain part. Revalidate live authority between effects;
+link (the only link is the overflow notice defined in `docs/TELEGRAM_NEW.md#full-saved-reply-delivery`) or replay a sending/uncertain part. Revalidate live authority between effects;
 retain confirmed prefix IDs on partial outcomes. Pin action-card identities and
 numeric media notice inputs so retries reproduce the plan without storing bodies.
 Discord/WhatsApp assistant text plans pin renderer v2; absent versions replay v1 only. URLs retain their original bytes; Discord escapes syntax by position, and WhatsApp uses native markers with literal code spans (unrepresentable backticks pass through). Slack and Telegram rendering stay unchanged.

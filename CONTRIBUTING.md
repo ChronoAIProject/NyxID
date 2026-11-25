@@ -473,7 +473,8 @@ check evidence:
 ## Documentation
 
 - Update the governing spec in the same PR as the code. Find it in [`docs/README.md`](docs/README.md) or by
-  searching [`docs/spec-index.yaml`](docs/spec-index.yaml) for the path you changed; the rules are in
+  matching the path you changed against the `governs` patterns in
+  [`docs/spec-index.yaml`](docs/spec-index.yaml); the rules are in
   [`AGENTS.md`](AGENTS.md) ("Specs: keep them current as you work").
 - One place per fact: change a fact in its governing spec and link to it from `docs/API.md`,
   `docs/ARCHITECTURE.md` or `README.md` rather than restating it. New endpoints still get a `docs/API.md` entry.
