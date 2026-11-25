@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 44 implemented adapters
-and 6 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 46 implemented adapters
+and 4 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -46,8 +46,8 @@ A collection may use separate adapters for different fields.
 | `agent_key_login_requests` | `delivery_credential_encrypted` | [agent_login_record_service.rs](../../backend/src/services/agent_login_record_service.rs) | Implemented |
 | `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | [assistant_learning_record_storage.rs](../../backend/src/services/assistant_learning_record_storage.rs) | Implemented |
 | `assistant_async_operations` | `result_encrypted` | [async_service_operation.rs](../../backend/src/services/async_service_operation.rs) | Implemented |
-| `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
+| `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | [Device delivery](../../backend/src/services/auth_device_service/record.rs) | Implemented |
+| `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | [Device delivery](../../backend/src/services/auth_device_service/record.rs) | Implemented |
 | `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | [channel_bot_record.rs](../../backend/src/services/channel_bot_record.rs) | Implemented |
 | `channel_connect_links` | `receiver.secret_encrypted` | [channel_connect_link_service.rs](../../backend/src/services/channel_connect_link_service.rs) | Implemented |
@@ -140,13 +140,15 @@ Migration checks the stored snapshot and frame order, fences the complete source
 rewraps the original bytes while preserving replay revision and expiry.
 [Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs)
 
+Device-code delivery binds the request in its actual collection to the approving person
+and session. The v2 Agent Key grant binds its parent and issued child. Migration matches
+the complete stored request before replacing the pair or the nested credential.
+[Device storage](../../backend/src/services/auth_device_service/record.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
   [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
-- V2 device approval stores the credential inside the Agent Key grant. A session
-  grant writes the access and refresh token fields at the top level.
-  [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and

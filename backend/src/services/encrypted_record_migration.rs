@@ -65,6 +65,7 @@ enum Adapter {
     ApprovalProposal,
     Setup,
     AgentLogin,
+    AuthDevice,
     // These are implementation blockers until their service-owned decoders and
     // actual writers are converted. They may not be waived by operator input.
     Pending,
@@ -204,7 +205,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_codes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::AuthDevice,
         fields: &[
             "delivery_access_token_encrypted",
             "delivery_refresh_token_encrypted",
@@ -212,7 +213,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_codes_v2",
-        adapter: Adapter::Pending,
+        adapter: Adapter::AuthDevice,
         fields: &[
             "agent_key_grant.delivery_credential_encrypted",
             "delivery_access_token_encrypted",
@@ -577,13 +578,15 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::EVENT_REPLY_DIGEST | previous_labels::EVENT_WRITERS_DIGEST) => {
-            project_labels(
-                &row,
-                previous_labels::event_reply_draft()
-                    .chain(std::iter::once(previous_labels::META_ASSETS)),
-            )?
-        }
+        Some(
+            previous_labels::EVENT_REPLY_DIGEST
+            | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::DEVICE_BASE_DIGEST,
+        ) => project_labels(
+            &row,
+            previous_labels::event_reply_draft()
+                .chain(std::iter::once(previous_labels::META_ASSETS)),
+        )?,
         Some(previous_labels::EVENT_REPLY_DRAFT_DIGEST) => {
             project_labels(&row, previous_labels::event_reply_draft())?
         }
@@ -839,6 +842,14 @@ async fn verify(
         Adapter::Setup => {
             super::platform_setup_record_service::verify_current_snapshot(keys, row).await
         }
+        Adapter::AuthDevice => {
+            Box::pin(super::auth_device_service::record::verify(
+                keys,
+                entry.collection,
+                row,
+            ))
+            .await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::verify_current_snapshot(keys, row).await
         }
@@ -1006,6 +1017,15 @@ async fn migrate(
         Adapter::Setup => {
             super::platform_setup_record_service::migrate_snapshot(db, keys, row).await
         }
+        Adapter::AuthDevice => {
+            Box::pin(super::auth_device_service::record::migrate(
+                db,
+                keys,
+                entry.collection,
+                row,
+            ))
+            .await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::migrate_snapshot(db, keys, row).await
         }
@@ -1115,6 +1135,9 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
             return Err(invalid());
         }
         let category = match row.get_str("category").ok() {
+            Some(super::auth_device_service::record::ISSUANCE_MISSING) => {
+                super::auth_device_service::record::ISSUANCE_MISSING
+            }
             Some("adapter_not_implemented") => "adapter_not_implemented",
             Some("authentication_binding_or_lifecycle_unresolved") => {
                 "authentication_binding_or_lifecycle_unresolved"
@@ -1491,6 +1514,13 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
                 None
             }
             Err(AppError::DatabaseError(error)) => return Err(AppError::DatabaseError(error)),
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::AuthDevice)
+                    && reason == super::auth_device_service::record::ISSUANCE_MISSING =>
+            {
+                unresolved += 1;
+                Some(super::auth_device_service::record::ISSUANCE_MISSING)
+            }
             Err(_) => {
                 unresolved += 1;
                 Some(if matches!(entry.adapter, Adapter::Pending) {

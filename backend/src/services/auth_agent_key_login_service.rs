@@ -951,30 +951,7 @@ async fn prepare_delivery(
     .await
 }
 
-pub async fn prepare_credential_delivery(
-    db: &Database,
-    encryption: &EncryptionKeys,
-    credential_id: Option<&str>,
-    approved_user_id: Option<&str>,
-    encrypted: Option<&[u8]>,
-    key_was_created: bool,
-) -> AppResult<Delivery> {
-    let plaintext = encryption
-        .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
-        .await?;
-    let credential = crate::crypto::guarded_utf8(plaintext)
-        .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?;
-    prepare_decoded_credential_delivery(
-        db,
-        credential_id,
-        approved_user_id,
-        credential,
-        key_was_created,
-    )
-    .await
-}
-
-async fn prepare_decoded_credential_delivery(
+pub(super) async fn prepare_decoded_credential_delivery(
     db: &Database,
     credential_id: Option<&str>,
     approved_user_id: Option<&str>,

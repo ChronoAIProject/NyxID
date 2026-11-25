@@ -306,13 +306,12 @@ pub async fn redeem(
             .as_ref()
             .ok_or(AppError::LoginCodeInvalid)?;
         Some(
-            agent::prepare_credential_delivery(
+            super::auth_device_service::prepare_grant(
                 db,
                 encryption,
-                Some(&grant.credential_id),
-                Some(&row.user_id),
-                grant.delivery_credential_encrypted.as_deref(),
-                grant.key_was_created,
+                DEVICE_CODES,
+                &request,
+                grant,
             )
             .await?,
         )
@@ -357,9 +356,17 @@ pub async fn redeem(
                 let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {
                     "_id": row.device_request_id.as_deref(), "approved_user_id": &row.user_id,
                     "mfa_policy_revision": &row.mfa_policy_revision, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-                }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-                    "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}}).session(&mut *session).await?;
+                }, doc! {
+                    "$set": {
+                        "status": "delivered",
+                        "delivered_at": bson::DateTime::from_chrono(now),
+                        "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                    },
+                    "$unset": {
+                        "agent_key_grant.delivery_credential_encrypted": "",
+                        "delivery_context_version": "",
+                    },
+                }).session(&mut *session).await?;
                 if claimed.modified_count == 0 {
                     return Err(handoff_claim_error(db, row.device_request_id.as_deref().ok_or(AppError::LoginCodeInvalid)?).await);
                 }
