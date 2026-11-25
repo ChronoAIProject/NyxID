@@ -48,6 +48,8 @@ pub enum CmaGatewayError {
     Forbidden,
     #[error("CMA authorization observation is unavailable")]
     UpstreamAuthorizationUnavailable,
+    #[error("CMA refused authentication for this turn")]
+    TurnAuthenticationRefused,
     #[error("CMA resource state conflicts with this request")]
     Conflict,
     #[error("CMA request timed out")]
@@ -76,6 +78,9 @@ impl From<CmaGatewayError> for AppError {
             )),
             CmaGatewayError::NotFound => Self::NotFound("CMA resource not found".into()),
             CmaGatewayError::Forbidden => Self::Forbidden("CMA resource access denied".into()),
+            CmaGatewayError::TurnAuthenticationRefused => Self::Unauthorized(
+                super::assistant_service_execution::cma::AUTH_REFUSAL_MARKER.into(),
+            ),
             CmaGatewayError::InvalidRequest => Self::ValidationError("Invalid CMA request".into()),
             CmaGatewayError::Conflict => {
                 Self::Conflict("CMA resource state changed; refresh before retrying".into())
@@ -978,6 +983,9 @@ impl CatalogCmaGateway {
         idempotency_key: Option<&str>,
         body: Option<Vec<u8>>,
     ) -> CmaResult<(u16, Value)> {
+        use super::assistant_service_execution::cma::{
+            AuthenticationRefusal, definitive_authentication_refusal_bytes,
+        };
         let (service, owner, base) = self.resolve(owner_id).await?;
         let url = endpoint_url(&base, segments, cursor)?;
         let principal = super::identity_service::Principal::from(&owner);
@@ -1064,12 +1072,33 @@ impl CatalogCmaGateway {
             .await
             .map_err(|_| CmaGatewayError::Forbidden)?;
         }
+        let refusal = self.native_authority.as_ref().and_then(|(chat, _)| {
+            AuthenticationRefusal::for_catalog(Some(chat), &service, &service.base_url)
+        });
+        if let Some(refusal) = &refusal
+            && refusal
+                .already_refused(&self.db)
+                .await
+                .map_err(|_| CmaGatewayError::Unavailable)?
+        {
+            return Err(CmaGatewayError::TurnAuthenticationRefused);
+        }
         let response = client
             .execute(request)
             .await
             .map_err(|e| catalog_http_error(&service, method.as_str(), url.path(), e))?;
         let status = response.status().as_u16();
-        let body = bounded_body(response).await;
+        let bytes = bounded_bytes(response).await;
+        if let (Some(refusal), Ok(bytes)) = (&refusal, &bytes)
+            && definitive_authentication_refusal_bytes(status, bytes)
+        {
+            refusal
+                .record(&self.db)
+                .await
+                .map_err(|_| CmaGatewayError::Unavailable)?;
+            return Err(CmaGatewayError::TurnAuthenticationRefused);
+        }
+        let body = bytes.and_then(parse_body);
         if !(200..300).contains(&status) {
             return Err(map_status(status, body.as_ref().ok(), &base));
         }
@@ -1672,7 +1701,11 @@ fn map_status(status: u16, body: Option<&Value>, base: &Url) -> CmaGatewayError 
     }
 }
 
-async fn bounded_body(mut response: reqwest::Response) -> CmaResult<Value> {
+async fn bounded_body(response: reqwest::Response) -> CmaResult<Value> {
+    parse_body(bounded_bytes(response).await?)
+}
+
+async fn bounded_bytes(mut response: reqwest::Response) -> CmaResult<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
@@ -1690,6 +1723,10 @@ async fn bounded_body(mut response: reqwest::Response) -> CmaResult<Value> {
         }
         bytes.extend_from_slice(&chunk);
     }
+    Ok(bytes)
+}
+
+fn parse_body(bytes: Vec<u8>) -> CmaResult<Value> {
     if bytes.is_empty() {
         return Ok(Value::Null);
     }

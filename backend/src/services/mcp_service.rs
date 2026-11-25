@@ -6256,6 +6256,7 @@ pub fn execute_tool_resolved<'a>(
                 exec_ctx.assistant_chat,
                 &target,
                 &service.service_id,
+                node_route.is_none(),
             );
         if let Some(refusal) = &cma_auth_refusal
             && refusal.already_refused(db).await?

@@ -456,6 +456,25 @@ pub async fn execute(
     name: &str,
     args: &Value,
 ) -> AppResult<super::assistant_account_tools::ToolResult> {
+    use super::assistant_service_execution::cma::{AUTH_REFUSAL_MARKER, AuthenticationRefusal};
+    match execute_native(tools, chat, name, args).await {
+        Err(AppError::Unauthorized(message)) if message == AUTH_REFUSAL_MARKER => {
+            Ok(super::assistant_account_tools::ToolResult {
+                value: AuthenticationRefusal::reply(),
+                is_error: true,
+                permission_request: None,
+            })
+        }
+        result => result,
+    }
+}
+
+async fn execute_native(
+    tools: &super::assistant_account_tools::AccountTools<'_>,
+    chat: &acks::ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<super::assistant_account_tools::ToolResult> {
     use super::assistant_account_tools::ToolResult;
     let live =
         super::assistant_service_execution::live_authority(tools.db, chat, "cma_native_tool")

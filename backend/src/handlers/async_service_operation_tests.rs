@@ -126,7 +126,7 @@ impl AsyncFixture {
                         ).into_response();
                     }
                     if method == axum::http::Method::GET
-                        && matches!(uri.path(), "/api/v1/agents" | "/api/v1/sandboxes")
+                        && matches!(uri.path(), "/api/v1/agents" | "/api/v1/sandboxes" | "/api/v1/sandboxes/sbx_coffee")
                     {
                         match status_phase.as_str() {
                             "auth-refused" => return (
@@ -610,6 +610,75 @@ async fn cma_existing_agent_fixture() -> AsyncFixture {
     .await
     .unwrap();
     a
+}
+
+#[tokio::test]
+async fn nyxbot_native_and_mcp_cma_calls_share_the_turn_authentication_refusal() {
+    use crate::services::{
+        assistant_service_execution::cma::AuthenticationRefusal, feature_flag_service as flags,
+    };
+
+    let a = cma_existing_agent_fixture().await;
+    let db = &a.f.state.db;
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &flags::FlagTarget::User(a.f.owner.clone()),
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    *a.phase.lock().unwrap() = "auth-refused".into();
+    a.calls.lock().unwrap().clear();
+    let expected = AuthenticationRefusal::reply();
+    let auth = authenticate(&a.f).await;
+    for _ in 0..2 {
+        let actual =
+            a.f.tools()
+                .execute(&a.f.auth, "nyxid__list_cma_resources", &json!({}))
+                .await;
+        assert!(actual.is_error, "{}", actual.value);
+        assert_eq!(actual.value, expected);
+    }
+    assert_eq!(*a.calls.lock().unwrap(), ["/api/v1/sandboxes/sbx_coffee"]);
+    let mut independent =
+        crate::services::catalog_service::get_downstream_service_by_slug(db, "cma", &a.f.owner)
+            .await
+            .unwrap();
+    independent.identity_jwt_audience = Some("independent-cma-audience".into());
+    let independent_refusal =
+        AuthenticationRefusal::for_catalog(Some(&a.f.chat), &independent, &independent.base_url)
+            .unwrap();
+    assert!(!independent_refusal.already_refused(db).await.unwrap());
+    let response = call(&a.f, &auth, "sandbox__list_cma_agents", json!({})).await;
+    assert_eq!(result(response, true).await, expected);
+    assert_eq!(*a.calls.lock().unwrap(), ["/api/v1/sandboxes/sbx_coffee"]);
+
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &a.f.row.id},
+            doc! {"$set":{"active_turn.turn_id": uuid::Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    let next = authenticate(&a.f).await;
+    let response = direct_call(&a.f, &next, "sandbox__list_cma_agents", json!({})).await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(text.strip_prefix("Error (401): ").unwrap_or(text)).unwrap(),
+        expected
+    );
+    let native = direct_call(&a.f, &next, "nyxid__list_cma_resources", json!({})).await;
+    assert_eq!(result(native, true).await, expected);
+    assert_eq!(
+        *a.calls.lock().unwrap(),
+        ["/api/v1/sandboxes/sbx_coffee", "/api/v1/agents"]
+    );
 }
 
 async fn reserve_cma_submission(a: &AsyncFixture) -> AsyncServiceOperation {
