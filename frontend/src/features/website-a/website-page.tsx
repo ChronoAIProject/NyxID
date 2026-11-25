@@ -30,6 +30,8 @@ import { VisualMotionProvider } from "./visuals/motion-provider";
 
 const English = lazy(() => import("./generated/en"));
 const Chinese = lazy(() => import("./generated/zh"));
+// The English home page uses the "light night" design, with its own menu and footer.
+const NyxHomePage = lazy(() => import("./nyx-home/nyx-home-page"));
 
 function Website({
   children,
@@ -161,6 +163,15 @@ function Website({
     },
     stopDemo: () => setDemoStopped(true),
   };
+  // The English home page brings its own menu and footer, so it skips this frame.
+  // The public site passes it in as children (its router loads it); the app renders it here.
+  if (language === "en" && route === "/") {
+    return (
+      <WebsiteContext.Provider value={state}>
+        <Suspense fallback={null}>{children ?? <NyxHomePage />}</Suspense>
+      </WebsiteContext.Provider>
+    );
+  }
   const Content = language === "zh" ? Chinese : English;
   const Header = language === "zh" ? ZhHeader : EnHeader;
   const Footer = language === "zh" ? ZhFooter : EnFooter;

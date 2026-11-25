@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ink night mockup</title>
+<meta name="description" content="NyxBot is the AI assistant from NyxID. It does the task in the apps you already use, under rules you set.">
+<!--
+  MOCKUP night-2: "Ink night". Takes nyxid.ai's ink-drawn clouds and its night ground and sets them in motion.
+  Background animation: ink smoke, thousands of particles following a slow flow field and leaving fading trails.
+  The smoke parts around the list of work NyxBot finished overnight; the cursor stirs it into a slow vortex.
+  Keeps the paper-slip sorting scene (landing-2 v2) and the apps hub (landing-1 v3) from kit.js.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Mona+Sans:wdth,wght@75..125,200..900&display=swap" rel="stylesheet">
+<link rel="icon" href="assets/brand/nyxid-coloured-icon.svg">
+<link rel="stylesheet" href="kit.css">
+<style>
+:root{
+  --ground:#0F0D17; --ink:#F1EEF8; --slate:#B8B1CB; --faint:#9D96B3;
+  --line:rgba(241,238,248,.1); --line-2:rgba(241,238,248,.24);
+  --card:rgba(30,27,42,.9); --accent:#A88BFF; --accent-soft:rgba(151,117,250,.16);
+  --tray-bg:rgba(27,24,38,.92); --tray-ink:#F1EEF8; --tray-wait-bg:rgba(56,44,22,.78); --tray-wait-line:#A8873C;
+  --btn-bg:#F1EEF8; --btn-ink:#0F0D17; --done:#3DBE8E;
+}
+.nav.is-stuck{background:rgba(15,13,23,.82);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-color:var(--line)}
+.b-no,.b-undo{color:var(--ink)}
+
+/* hero */
+.hero{position:relative;min-height:100svh;display:grid;align-items:end;padding:120px 0 clamp(56px,9vh,104px);overflow:hidden}
+.smoke{position:absolute;inset:0;width:100%;height:100%}
+.hero-grid{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:clamp(24px,4vw,72px);align-items:end}
+.hero h1{font-size:clamp(54px,8.6vw,140px);line-height:.9}
+.hero h1 .says{color:#8F88A8;font-weight:250}
+.hero .lede{margin-top:28px;max-width:44ch}
+.hero-acts{display:flex;gap:26px;align-items:center;flex-wrap:wrap;margin-top:32px}
+
+.night{padding:22px 24px 14px;border-radius:22px;background:rgba(20,18,30,.62);border:1px solid var(--line);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.night-h{display:flex;justify-content:space-between;align-items:baseline;font-size:15px;font-weight:600;padding-bottom:10px}
+.night-h span{font-weight:400;color:var(--faint);font-size:14px}
+.night li{display:grid;grid-template-columns:64px 20px 1fr;gap:12px;align-items:center;padding:11px 0;border-top:1px solid var(--line);font-size:15px;color:var(--slate)}
+.night li b{color:var(--ink);font-weight:600}
+.night li time{font-size:13.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.night li img{width:18px;height:18px}
+.night li.wait{color:#E8CF92}
+.night li.wait b{color:#F6E2AE}
+.night .tick{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--done);margin-left:8px;vertical-align:1px}
+
+/* counter and hub on the night ground */
+.pile-sec{background:radial-gradient(ellipse 60% 50% at 20% 60%,rgba(151,117,250,.08),transparent 70%)}
+.hub-core{background:#08070D;box-shadow:0 0 0 1px rgba(168,139,255,.35),0 0 60px -10px rgba(151,117,250,.45)}
+.apps-sec .hub-lines path.base{stroke:rgba(241,238,248,.16)}
+.apps-sec .tile img[src*="github"],.apps-sec .tile img[src*="notion"],.apps-sec .tile img[src*="/x."],.slot>img[src*="/x."],.night img[src*="/x."]{filter:invert(1)}
+
+/* closing */
+.close-sec{overflow:hidden}
+.close-sec h2 .says{color:#8F88A8;font-weight:250}
+.foot{position:relative;z-index:1}
+
+@media (max-width:959px){
+  .hero{min-height:0;padding-top:110px}
+  .hero-grid{grid-template-columns:minmax(0,1fr)}
+  .night{margin-top:12px}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav">
+  <div class="wrap nav-bar">
+    <a class="nav-logo" href="#main" aria-label="NyxID home"><img src="assets/brand/nyxid-coloured-logo.svg" alt="NyxID"></a>
+    <nav class="nav-links" aria-label="Main"><a href="#pile">How it works</a><a href="#apps">Apps</a><a href="https://nyx.chrono-ai.fun/docs">Docs</a></nav>
+    <a class="btn" href="https://nyx.chrono-ai.fun/register">Get started</a>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" data-hero>
+  <canvas class="smoke" data-smoke aria-hidden="true"></canvas>
+  <div class="wrap hero-grid">
+    <div>
+      <h1><span class="says">You sleep.</span><span class="does">NyxBot works.</span></h1>
+      <p class="lede">Leave the night's messages to NyxBot. It answers, books and files in the apps you already use, and keeps the decisions you reserved for the morning.</p>
+      <div class="hero-acts"><a class="btn" href="https://nyx.chrono-ai.fun/register">Start with NyxBot</a><a class="link" href="#pile">See the whole night</a></div>
+    </div>
+    <div class="night" data-night aria-live="polite">
+      <p class="night-h">Done while you slept <span data-night-count>Luna Bistro</span></p>
+      <ol>
+        <li><time>11:42 PM</time><img src="assets/icons/google-calendar.svg" alt=""><span><b>Booked Sarah's table</b> for Sunday, vegan noted<i class="tick" aria-label="done"></i></span></li>
+        <li><time>12:10 AM</time><img src="assets/icons/x.svg" alt=""><span><b>Answered @maya_eats</b> from your menu notes<i class="tick" aria-label="done"></i></span></li>
+        <li><time>6:05 AM</time><img src="assets/icons/twilio.svg" alt=""><span><b>Called Mr Tan back</b>, Friday delivery confirmed<i class="tick" aria-label="done"></i></span></li>
+        <li><time>7:15 AM</time><img src="assets/icons/google-calendar.svg" alt=""><span><b>Lunch covered</b>, Sam takes Jo's shift<i class="tick" aria-label="done"></i></span></li>
+        <li class="wait"><time>7:40 AM</time><img src="assets/icons/gmail.svg" alt=""><span><b>Harbour Fish Co.</b> wants 8% more. Waiting for your yes</span></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section class="pile-sec" id="pile" data-pile-sec></section>
+
+<section class="apps-sec" id="apps">
+  <div class="wrap">
+    <div class="apps-head">
+      <h2>Ask in a chat and the work lands in your apps.</h2>
+      <p class="lede">NyxBot listens where you and your customers already write. It works in the apps your business already runs on. Each one connects through a sign-in link.</p>
+    </div>
+    <div data-hub-mount></div>
+    <div class="apps-note">
+      <p><b>Your app is missing?</b> Any REST API with an OpenAPI file becomes a tool NyxBot can use.</p>
+      <a class="link" href="https://nyx.chrono-ai.fun/docs">Read the docs</a>
+    </div>
+  </div>
+</section>
+
+<section class="close-sec" data-close>
+  <canvas class="smoke" data-smoke-close aria-hidden="true"></canvas>
+  <div class="wrap">
+    <h2><span class="says">Hand NyxBot</span><span class="does">the night shift.</span></h2>
+    <p class="lede">Connect a chat and the apps you work in. NyxBot starts with the jobs you allow.</p>
+    <div class="close-acts"><a class="btn" href="https://nyx.chrono-ai.fun/register">Start with NyxBot</a><a class="link" href="https://github.com/ChronoAIProject/NyxID">View on GitHub</a></div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap"><span>Luna Bistro is an illustrative example.</span><nav aria-label="Footer"><a href="https://nyx.chrono-ai.fun/docs">Docs</a><a href="https://github.com/ChronoAIProject/NyxID">GitHub</a><a href="https://nyx.chrono-ai.fun/login">Log in</a></nav></div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/Flip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/Draggable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/InertiaPlugin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/DrawSVGPlugin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/MotionPathPlugin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lenis@1.1.14/dist/lenis.min.js"></script>
+<script src="kit.js"></script>
+<script>
+(() => {
+  const K = window.NyxKit;
+  if (!K) return;
+  const { G, has, $, $$ } = K;
+  const motion = !K.reduced();
+  K.smooth();
+
+  /* ---------- ink smoke ---------- */
+  function smoke(canvas, opts) {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const host = canvas.parentElement;
+    let w = 0, h = 0, dpr = 1, raf = 0, run = false, last = 0;
+    const P = [];
+    const mouse = { x: -9999, y: -9999, vx: 0, vy: 0 };
+    function size() {
+      dpr = Math.min(devicePixelRatio || 1, 1.5);
+      w = canvas.clientWidth; h = canvas.clientHeight;
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = '#0F0D17'; ctx.fillRect(0, 0, w, h);
+      P.length = 0;
+      const n = Math.round(Math.min(2200, (w * h) / 420) * opts.density);
+      for (let i = 0; i < n; i++) P.push(spawn({}, true));
+    }
+    function spawn(p, anywhere) {
+      p.x = Math.random() * w;
+      p.y = anywhere ? Math.random() * h : h * (0.2 + Math.random() * 0.9);
+      p.px = p.x; p.py = p.y;
+      p.life = 0; p.max = 3 + Math.random() * 7;
+      p.sp = 14 + Math.random() * 30;
+      p.tint = Math.random() < 0.06 ? 2 : Math.random() < 0.22 ? 1 : 0;
+      return p;
+    }
+    // the clearing: smoke is pushed out of these boxes so the content stays readable
+    // soft oval clearings: smoke thins out towards the middle of each box instead of stopping at an edge
+    const clearings = () => (opts.clear ? opts.clear() : []).map((r) => ({ cx: r.left + r.width / 2, cy: r.top + r.height / 2, rx: r.width * 0.62 + 40, ry: r.height * 0.62 + 40 }));
+    function frame(tms) {
+      const t = tms / 1000;
+      const dt = Math.min(0.025, t - last || 0.016); last = t;
+      // fade the previous frame towards the ground: that leaves the ink trails
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = `rgba(15,13,23,${Math.min(0.5, 0.06 * dt * 60)})`;
+      ctx.fillRect(0, 0, w, h);
+      const cr = canvas.getBoundingClientRect();
+      const boxes = clearings().map((b) => ({ cx: b.cx - cr.left, cy: b.cy - cr.top, rx: b.rx, ry: b.ry }));
+      const mx = mouse.x - cr.left, my = mouse.y - cr.top;
+      const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D()];
+      for (const p of P) {
+        const a = Math.sin(p.x * 0.0038 + t * 0.13) * 2.1 + Math.cos(p.y * 0.0047 - t * 0.11) * 2.1 + Math.sin((p.x + p.y) * 0.0016 + t * 0.07) * 1.4 - 1.2;
+        let vx = Math.cos(a) * p.sp, vy = Math.sin(a) * p.sp - 8;
+        // the cursor stirs a slow vortex
+        const dx = p.x - mx, dy = p.y - my, d = Math.hypot(dx, dy);
+        if (d < 240) { const f = (1 - d / 240); vx += (-dy / (d || 1)) * 120 * f + mouse.vx * 0.25 * f; vy += (dx / (d || 1)) * 120 * f + mouse.vy * 0.25 * f; }
+        let thin = false;
+        for (const b of boxes) {
+          const ex = (p.x - b.cx) / b.rx, ey = (p.y - b.cy) / b.ry, q = ex * ex + ey * ey;
+          if (q < 1) {
+            const el = Math.sqrt(q) || 1;
+            vx += (ex / el) * 70 * (1 - q); vy += (ey / el) * 70 * (1 - q);
+            if (q < 0.7) thin = true;
+          }
+        }
+        p.px = p.x; p.py = p.y;
+        p.x += vx * dt; p.y += vy * dt;
+        p.life += dt;
+        if (p.life > p.max || p.x < -20 || p.x > w + 20 || p.y < -20 || p.y > h + 20) { spawn(p, false); continue; }
+        const path = paths[thin ? 3 : p.tint];
+        path.moveTo(p.px, p.py); path.lineTo(p.x, p.y);
+      }
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 1.1;
+      ctx.strokeStyle = 'rgba(206,198,232,.16)'; ctx.stroke(paths[0]);
+      ctx.strokeStyle = 'rgba(168,139,255,.28)'; ctx.stroke(paths[1]);
+      ctx.strokeStyle = 'rgba(224,127,191,.32)'; ctx.stroke(paths[2]);
+      ctx.strokeStyle = 'rgba(206,198,232,.04)'; ctx.stroke(paths[3]);
+      mouse.vx *= 0.9; mouse.vy *= 0.9;
+      if (run) raf = requestAnimationFrame(frame);
+    }
+    host.addEventListener('pointermove', (e) => { mouse.vx = e.clientX - mouse.x; mouse.vy = e.clientY - mouse.y; mouse.x = e.clientX; mouse.y = e.clientY; });
+    host.addEventListener('pointerleave', () => { mouse.x = mouse.y = -9999; });
+    const api = {
+      start() { if (run || !motion) return; run = true; last = performance.now(); raf = requestAnimationFrame(frame); },
+      stop() { run = false; cancelAnimationFrame(raf); },
+      resize() {
+        size();
+        // reduced motion: let the smoke settle into one still frame
+        if (!motion) { for (let i = 0; i < 90; i++) frame(i * 33); }
+      },
+    };
+    api.resize();
+    let rt;
+    addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(api.resize, 150); });
+    return api;
+  }
+
+  const hero = $('[data-hero]'), night = $('[data-night]');
+  const s1 = smoke($('[data-smoke]'), {
+    density: 1,
+    clear: () => [night.getBoundingClientRect(), $('.hero h1').getBoundingClientRect()],
+  });
+  if (s1) K.whileVisible(hero, s1.start, s1.stop);
+  const closeEl = $('[data-close]');
+  const s2 = smoke($('[data-smoke-close]'), { density: 0.7, clear: () => [$('.close-sec .wrap').getBoundingClientRect()] });
+  if (s2) K.whileVisible(closeEl, s2.start, s2.stop);
+
+  /* the one orchestrated moment: the night's work surfaces line by line out of the ink */
+  if (has && motion) {
+    G.from($$('li', night), { opacity: 0, y: 10, filter: 'blur(6px)', duration: 0.7, ease: 'power3.out', stagger: 0.32, delay: 0.6 });
+    G.from(night, { opacity: 0, duration: 0.9, ease: 'power2.out', delay: 0.2 });
+  }
+
+  /* ---------- the counter and the apps hub ---------- */
+  K.initSort($('[data-pile-sec]'));
+  K.initHub($('#apps'));
+})();
+</script>
+</body>
+</html>
