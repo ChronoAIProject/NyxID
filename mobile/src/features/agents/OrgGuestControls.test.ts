@@ -274,3 +274,16 @@ test("organization channel slugs bypass translation", () => {
     assert.ok(!e.translations.includes(platform));
   }
 });
+
+test("an admin outside the maintainer list can read guest settings but cannot toggle them", () => {
+  const e = setup();
+  e.harness.mount(() => e.module.OrgGuestChannel({
+    agent: { ...agent, can_use: true, can_maintain: false },
+    channel: { id: "bot", bot_label: "Finance", platform: "lark", status: "active" },
+  }));
+  elements(e.harness.flush()).find((r) => r.props.label === "Finance")!.props.onPress();
+  const toggle = elements(e.harness.flush()).find((r) => r.props.label === "Allow guests")!.props.accessory;
+  assert.equal(toggle.props.disabled, true);
+  toggle.props.onValueChange(true);
+  assert.deepEqual(e.writes, []);
+});

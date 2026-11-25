@@ -1,0 +1,24 @@
+NyxID 1.0.5 (11) - App Review Notes
+
+NyxID lets people chat with an AI agent, talk through ideas by voice, connect tools such as GitHub or Notion, and work with several agents in a Crew. This version supports iPhone, iPad, iPhone Duo, and a basic Apple Watch companion.
+
+SIGN IN
+Use the email and password in App Store Connect's Sign-in Information fields. On the opening screen, enter the email and password and tap Sign In. Internet access is required.
+
+SUGGESTED TESTING
+1. Open the navigation menu > Plugins > Connectors.
+2. Choose GitHub or Notion and tap Connect.
+3. Sign in to that service and approve access. For Notion, select a test page to share with NyxID.
+4. Return to NyxBot and ask "List my GitHub repositories" or "Find the pages I shared with NyxID in Notion."
+
+Only one service is needed for this test. A GitHub or Notion account is required.
+
+APPLE WATCH
+On a paired Apple Watch running watchOS 10 or later, open NyxID. On iPhone, open Settings > Apple Watch, check that the six-digit code matches, and tap Connect Apple Watch. Keep both apps open during setup. On Watch, open Agents, choose an agent, and dictate a question. Read the reply and use the microphone to continue. Unread shows activity and eligible approvals when available. The Watch interface is English; it supports text conversations and dictation. Live voice calls are available in the iPhone app.
+
+OPTIONAL QR SIGN-IN
+Display a fresh NyxID sign-in QR code on another device. In the mobile app, choose Scan QR code, check the code and request details, then approve or reject. QR scanning is not required for mobile sign-in.
+
+REPORTING AND ACCOUNT DELETION
+Tap the flag below an AI reply to report it. Contact support is under Settings > Contact support (contact@chrono-ai.fun).
+Account deletion is under Settings > Delete Account. Complete other review steps before testing deletion. After confirmation is accepted, the app signs out; cleanup may continue as explained in the app.

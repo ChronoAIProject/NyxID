@@ -1102,6 +1102,8 @@ test("Device Login pending foreground refresh preserves the expanded raw user ag
   env.mount();
   env.field("ABCDEFGH");
   await env.press("Continue");
+  (env.nodes().find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress as () => void)();
+  env.harness.flush();
   (
     env
       .nodes()
@@ -1112,6 +1114,7 @@ test("Device Login pending foreground refresh preserves the expanded raw user ag
   env.advance(750);
   await env.app("background");
   await env.app("active");
+  assert.ok(env.nodes().some((node) => node.props.accessibilityLabel === "Hide more details"));
   assert.ok(
     env
       .nodes()

@@ -45,9 +45,8 @@ export function ChatComposerInput({
 
 /**
  * Private and crew chats share the same control order and dictation affordance.
- * The tree is identical in both layouts, so a held dictation button and every
- * control stay mounted when an idle composer collapses to one row; only the
- * mode chip is left out of that row.
+ * The input, attachment, dictation and trailing controls stay mounted when the
+ * composer collapses. Mentions and the mode trigger appear only when expanded.
  */
 export function ChatComposerToolbar({
   attach,
@@ -92,9 +91,9 @@ export function ChatComposerToolbar({
         }
       >
         <ComposerAttachButton {...attach} />
-        {mention}
+        {compact ? null : mention}
       </View>
-      {compact ? null : settings}
+      {settings}
       <View style={styles.spacer} pointerEvents="none" />
       <View
         testID="chat-composer-trailing"

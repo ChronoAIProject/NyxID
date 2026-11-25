@@ -441,6 +441,7 @@ pub fn base_prompt(
         prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot. Keep unanswered onboarding questions pending across setup links and resumes. Creating or linking a bot is not customer readiness or consent to open access. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Model readiness alone and field presence do not prove this. An explicit owner choice can open access now; disclose audience_readiness facts and unresolved questions without another confirmation.");
     }
     prompt.push_str(WEB_RESEARCH_PROMPT);
+    prompt.push_str("When citing a source in a reply or in content written through a tool, use its verified URL and omit internal citation markers.");
     prompt.push_str(CLI_PROMPT);
     if let Some(agent) = agent {
         if !row.guest_turn {
@@ -3267,11 +3268,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             seq: row.message_count,
             turn_id: lost.turn_id.clone(),
             role: "assistant".into(),
-            text: lost
-                .reply
-                .as_ref()
-                .map(|reply| reply.text.clone())
-                .unwrap_or_default(),
+            text: checkpoint_reply_text(&lost),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
@@ -5156,6 +5153,12 @@ pub async fn stop_requested(
         .is_none_or(|turn| turn.turn_id != turn_id || turn.stop_requested))
 }
 
+fn checkpoint_reply_text(turn: &ActiveTurn) -> String {
+    turn.reply.as_ref().map_or_else(String::new, |reply| {
+        super::assistant_citation_markers::sanitize(&reply.text).into_owned()
+    })
+}
+
 #[derive(Clone)]
 pub struct TurnResult {
     pub text: String,
@@ -5547,7 +5550,7 @@ artifact_recovery_target: None,
                     turn_id: turn_id.clone(),
                     role: "assistant".into(),
                     text: if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
-                        settled_turn.as_ref().and_then(|turn| turn.reply.as_ref()).map(|reply| reply.text.clone()).unwrap_or_default()
+                        settled_turn.as_ref().map(checkpoint_reply_text).unwrap_or_default()
                     } else {
                         result.text.clone()
                     },

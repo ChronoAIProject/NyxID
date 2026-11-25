@@ -140,16 +140,26 @@ pub(crate) fn stored_bytes(value: &bson::Bson) -> AppResult<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use zeroize::Zeroizing;
 
     #[derive(Debug)]
-    struct HoldFirstWrap {
+    pub(crate) struct HoldFirstWrap {
         inner: crate::crypto::local_key_provider::LocalKeyProvider,
         held: std::sync::atomic::AtomicBool,
-        entered: tokio::sync::Notify,
-        release: tokio::sync::Notify,
+        pub(crate) entered: tokio::sync::Notify,
+        pub(crate) release: tokio::sync::Notify,
+    }
+
+    pub(crate) fn pause_first_wrap() -> (EncryptionKeys, std::sync::Arc<HoldFirstWrap>) {
+        let held = std::sync::Arc::new(HoldFirstWrap {
+            inner: crate::crypto::local_key_provider::LocalKeyProvider::new([0x11; 32], None),
+            held: Default::default(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        (EncryptionKeys::with_provider(held.clone()), held)
     }
 
     #[async_trait::async_trait]
@@ -197,13 +207,7 @@ mod tests {
                 source.insert("secret_context_versions", doc! {});
             }
             rows.insert_one(&source).await.unwrap();
-            let held = std::sync::Arc::new(HoldFirstWrap {
-                inner: crate::crypto::local_key_provider::LocalKeyProvider::new([0x11; 32], None),
-                held: Default::default(),
-                entered: Default::default(),
-                release: Default::default(),
-            });
-            let held_keys = EncryptionKeys::with_provider(held.clone());
+            let (held_keys, held) = pause_first_wrap();
             let migrate = migrate_snapshot(
                 &db,
                 &held_keys,

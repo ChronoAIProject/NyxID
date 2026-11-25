@@ -56,6 +56,8 @@ enum Adapter {
     NyxbotChannelKey,
     EventBinding,
     GatewayTransport,
+    CmaRequest,
+    LearningProposal,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -183,7 +185,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_agent_learning_proposals",
-        adapter: Adapter::Pending,
+        adapter: Adapter::LearningProposal,
         fields: &[
             "scope_encrypted",
             "body_encrypted",
@@ -324,12 +326,12 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_cma_sandboxes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::CmaRequest,
         fields: &["request_ciphertext"],
     },
     Entry {
         collection: "assistant_cma_creations",
-        adapter: Adapter::Pending,
+        adapter: Adapter::CmaRequest,
         fields: &["request_ciphertext"],
     },
     Entry {
@@ -577,7 +579,9 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
             ))),
         )?,
         Some(
-            previous_labels::GATEWAY_TRANSPORT_DIGEST
+            previous_labels::CMA_REQUEST_DIGEST
+            | previous_labels::GATEWAY_SETUP_DIGEST
+            | previous_labels::LEARNING_PROPOSAL_DIGEST
             | previous_labels::EVENT_BINDING_DIGEST
             | previous_labels::CHANNEL_KEY_DIGEST
             | previous_labels::WHATSAPP_DIGEST
@@ -785,6 +789,12 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::LearningProposal => {
+            Box::pin(super::assistant_learning_record::storage::verify(keys, row)).await
+        }
+        Adapter::CmaRequest => {
+            super::assistant_cma_request_record::verify(keys, entry.collection, row).await
+        }
         Adapter::EventBinding => {
             super::nyxbot_event_binding_service::storage::verify(db, keys, row).await
         }
@@ -919,6 +929,15 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::LearningProposal => {
+            Box::pin(super::assistant_learning_record::storage::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
+        Adapter::CmaRequest => {
+            super::assistant_cma_request_record::migrate(db, keys, entry.collection, row).await
+        }
         Adapter::EventBinding => {
             super::nyxbot_event_binding_service::storage::migrate(db, keys, row).await
         }
@@ -1336,6 +1355,13 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         // error, never an exemption based solely on its byte length.
         let exempt = no_material
             && match entry.adapter {
+                Adapter::Pending
+                    if entry.collection == crate::models::approval_request::COLLECTION_NAME =>
+                {
+                    super::execution_permission_dispatch::proposals::record::no_retained_material(
+                        row,
+                    )
+                }
                 Adapter::Pending => true,
                 Adapter::Capability => {
                     row.get("capability_encrypted")
@@ -1472,8 +1498,10 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 mod tests {
     mod channel_bots;
     mod channel_keys;
+    mod cma_requests;
     mod event_bindings;
     mod gateway_transport;
+    mod learning_proposals;
     mod registry;
     mod swaps;
     mod webhooks;

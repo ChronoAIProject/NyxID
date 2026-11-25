@@ -20,14 +20,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"ciphertext": &bytes},
         ),
         (
-            assistant_cma_sandbox::COLLECTION_NAME,
-            doc! {"request_ciphertext": &bytes},
-        ),
-        (
-            assistant_cma_creation::COLLECTION_NAME,
-            doc! {"request_ciphertext": &bytes},
-        ),
-        (
             auth_device_code::V2_COLLECTION_NAME,
             doc! {"agent_key_grant": bson::to_document(&grant).unwrap()},
         ),
@@ -187,7 +179,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a"
+        "bf6341a74abf17a8a1fe0f2b0425c6275553ed7d47824d9b869ae7008c6d0abe"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -198,7 +190,10 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed",
         "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241",
         "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96",
+        "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a",
     ];
+    let dev_learning_checkpoint =
+        "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
     let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
     for digest in [
         Some(live.as_str()),
@@ -208,6 +203,8 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
         Some(dev_gateway_checkpoint),
+        Some(previous_labels::CMA_REQUEST_DIGEST),
+        Some(dev_learning_checkpoint),
         Some(previous_labels::CHANNEL_KEY_DIGEST),
         Some(previous_labels::EVENT_BINDING_DIGEST),
         Some("unknown"),
@@ -262,9 +259,11 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             Some(value)
                 if includes_meta
                     || value == dev_gateway_checkpoint
+                    || value == dev_learning_checkpoint
                     || matches!(
                         value,
-                        previous_labels::CHANNEL_KEY_DIGEST
+                        previous_labels::CMA_REQUEST_DIGEST
+                            | previous_labels::CHANNEL_KEY_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST
                             | previous_labels::WHATSAPP_DIGEST
                             | previous_labels::CHANNEL_BOT_DIGEST

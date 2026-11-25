@@ -210,12 +210,16 @@ pub struct AssistantAgentLearningProposal {
     pub failure_rules: Vec<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub scope_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_context_version: Option<u8>,
     #[serde(default)]
     pub scope_digest: Option<String>,
     #[serde(default)]
     pub evidence: Vec<LearningEvidence>,
     #[serde(default, with = "crate::models::bson_bytes::required")]
     pub body_encrypted: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_context_version: Option<u8>,
     pub body_bytes: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -300,6 +304,8 @@ pub struct LearningPublication {
     pub target_skill_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub interface_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_context_version: Option<u8>,
     /// 2: prepared by snapshot-aware NyxID (an update carries the base
     /// interface snapshot). Absent (0) on packages prepared before it existed;
     /// such updates are never dispatched.

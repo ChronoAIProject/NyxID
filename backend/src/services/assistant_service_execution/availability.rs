@@ -123,7 +123,15 @@ impl Admission {
         error: &'a crate::services::proxy_service::ForwardRequestError,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
         Box::pin(async move {
-            if let crate::services::proxy_service::ForwardRequestError::Transport(error) = error {
+            use crate::services::proxy_service::ForwardRequestError;
+            if matches!(
+                error,
+                ForwardRequestError::PreDispatchRejected(AppError::PoolAttemptTransport(
+                    crate::errors::PoolAttemptTransportKind::ResolutionUnavailable
+                ))
+            ) {
+                self.record_unavailable(db, chat, "pre_dispatch").await?;
+            } else if let ForwardRequestError::Transport(error) = error {
                 if error.is_connect() {
                     self.record_unavailable(db, chat, "pre_dispatch").await?;
                 } else if self.read && error.is_timeout() {

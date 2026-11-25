@@ -638,7 +638,9 @@ function AgentRow({
           <button
             type="button"
             onClick={() => {
-              if (model.onBackToWorkspace) {
+              if (agent.can_use === false) {
+                model.onAgentDetails?.(agent.id);
+              } else if (model.onBackToWorkspace) {
                 model.onSelectAgent(agent.id);
               } else if (threadsColumn) {
                 if (!separateThreads) model.onSelectAgent(agent.id);
@@ -752,7 +754,7 @@ function AgentRow({
           </DropdownMenu>
         ) : null}
       </div>
-      {expanded ? (
+      {expanded && agent.can_use !== false ? (
         // The guide line runs down from the avatar's centre.
         <div
           role="group"
@@ -1643,6 +1645,10 @@ function RailAgent({
   useUiTranslation();
   const [open, setOpen] = useState(false);
   const selected = agent.id === model.selectedAgentId;
+  if (agent.can_use === false) return (
+    <button type="button" className={RAIL_BUTTON} aria-label={agentAccessibleName(agent)}
+      onClick={() => model.onAgentDetails?.(agent.id)}><AgentAvatar agent={agent} /></button>
+  );
   return (
     // Its chats open on click, never on a passing pointer; "All chats"
     // inside opens the agent itself.

@@ -342,6 +342,21 @@ async fn tracked_commands_and_wire_match_main() {
             "tracked-key"
         );
         let commands = recorded.lock().unwrap().clone();
+        let live_updates: Vec<_> = commands
+            .iter()
+            .filter(|cmd| {
+                cmd.get_str("findAndModify")
+                    == Ok(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
+            })
+            .filter_map(|cmd| cmd.get_document("update").ok()?.get_document("$set").ok())
+            .filter(|set| set.get_str("observation_state") == Ok("ready"))
+            .collect();
+        let [set] = live_updates.as_slice() else {
+            panic!("{verb} {route} must persist exactly one live sandbox observation");
+        };
+        for field in ["request_ciphertext", "request_context_version"] {
+            assert!(!set.contains_key(field), "{verb} {route} wrote {field}");
+        }
         let mut normalized = normalized_commands(&commands, &f);
         if let Some(creation) = &permit.creation {
             normalized = normalized.replace(&creation.id, "<creation>");
@@ -361,6 +376,7 @@ async fn tracked_commands_and_wire_match_main() {
     // Driver 3.7 places top-level writeConcern after command metadata. Moving
     // that field back reproduced the original fingerprint for all 17 traces.
     // Normalize only session/time/fixture identities, ciphertext and signed JWTs.
+    // These pins deliberately differ from main because a live observation no longer writes the request pair (#1956 PR 9).
     let expected: std::collections::BTreeMap<String, String> =
         serde_json::from_str(include_str!("assistant_cma_legacy_tracked_commands.json")).unwrap();
     assert_eq!(traces.len(), expected.len());

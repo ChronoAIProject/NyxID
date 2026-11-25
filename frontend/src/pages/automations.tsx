@@ -146,6 +146,8 @@ function AutomationsContent() {
           : translateUi("Webhook");
   };
   function actions(row: TriggerResponse) {
+    const agentId = row.delivery.type === "assistant" ? row.delivery.agent_id : undefined;
+    const restricted = agents.data?.agents.some((a) => a.id === agentId && a.can_use === false);
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -160,6 +162,7 @@ function AutomationsContent() {
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => setEditing(row)}>{translateUi("Edit")}</DropdownMenuItem>
           <DropdownMenuItem
+            disabled={restricted && row.status !== "active"}
             onClick={() => {
               void update
                 .mutateAsync({
@@ -174,7 +177,7 @@ function AutomationsContent() {
             {row.status === "active" ? translateUi("Pause") : translateUi("Resume")}
           </DropdownMenuItem>
           <DropdownMenuItem
-            disabled={row.status !== "active" || run.isPending}
+            disabled={row.status !== "active" || run.isPending || restricted}
             onClick={() => {
               void run
                 .mutateAsync(row.id)
@@ -402,6 +405,7 @@ export function AutomationEditor({
     }
   }, [form, ownerTimezone, hasCalendarTimezone]);
   const values = form.watch();
+  const restrictedTarget = values.delivery_type === "assistant" && agents.data?.agents.some((a) => a.id === values.agent_id && a.can_use === false);
   const chats = useAutomationChats(values.deliver_type === "chat");
   const [spec, setSpec] = useState<ScheduleSpec>();
   const serialized = JSON.stringify(values);
@@ -544,6 +548,7 @@ export function AutomationEditor({
     );
   }
   async function save(v: AutomationForm) {
+    if (restrictedTarget) return;
     try {
       setError(undefined);
       if (!settings.data?.timezone)
@@ -830,7 +835,7 @@ export function AutomationEditor({
                   {select("agent_id", translateUi("Target agent"), [
                     ["", "Choose an agent…"],
                     ...(agents.data?.agents
-                      .filter((a) => a.status !== "destroyed")
+                      .filter((a) => a.status !== "destroyed" && a.can_use !== false)
                       .map((a) => [a.id, a.display_name ?? a.name] as const) ??
                       []),
                   ])}
@@ -903,7 +908,7 @@ export function AutomationEditor({
             <GroupedDialogActions
               changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "label", label: "Label" }, { key: "instruction", label: "Instruction" }, { key: "source", label: "Source", format: labelValue({ schedule: "Schedule", webhook: "Webhook" }) }, { key: "kind", label: "Schedule type", format: labelValue({ cron: "Calendar", every: "Every", at: "Once" }) }, { key: "expression", label: "Cron expression" }, { key: "timezone", label: "Timezone" }, { key: "amount", label: "Interval" }, { key: "unit", label: "Interval unit", format: labelValue({ minutes: "Minutes", hours: "Hours", days: "Days" }) }, { key: "anchor", label: "Anchor" }, { key: "at", label: "Run at" }, { key: "start", label: "Start" }, { key: "end", label: "End" }, { key: "max_runs", label: "Maximum runs" }, { key: "grace_seconds", label: "Grace period (seconds)" }, { key: "delivery_type", label: "Delivery type", format: labelValue({ assistant: "Assistant", notification: "Notification", webhook: "Webhook", agent: "Device agent" }) }, { key: "agent_id", label: "Target agent", format: (value) => { const agent = agents.data?.agents.find((agent) => agent.id === value); return agent?.display_name || agent?.name || String(value || "None"); } }, { key: "thread_policy", label: "Thread", format: labelValue({ default: values.source === "webhook" ? "Default (dedicated thread)" : "Default (NyxBot home, specialist dedicated)", home: "Home thread", dedicated: "One thread for this automation", new: "New thread each run" }) }, { key: "confirmation_policy", label: "Confirmation policy", format: labelValue({ changes: "Every changing action (recommended)", destructive: "Only destructive actions" }) }, { key: "deliver_type", label: "Send result to", format: labelValue({ thread: "Web thread", chat: "Channel chat", notification: "Mobile push" }) }, { key: "chat_id", label: "Chat", format: (value) => { const chat = chats.data?.find((chat) => chat.id === value); return chat ? `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}` : value ? "Saved chat" : "None"; } }, { key: "overlap", label: "If still running", format: labelValue({ skip: "Skip", queue: "Queue one" }) }, { key: "webhook_url", label: "Webhook URL", format: (value) => value === form.formState.defaultValues?.webhook_url ? "Saved destination (hidden)" : "New destination (hidden)" }, { key: "conversation_id", label: "Device conversation" }, { key: "verification_mode", label: "Verification method", format: labelValue({ bearer: "Bearer token", query: "Query token", hmac: "HMAC signature" }) }, { key: "signature_header", label: "Signature header" }])}
               intent={row ? "edit" : "create"}
-              disabled={!form.formState.isValid}
+              disabled={!form.formState.isValid || restrictedTarget}
               label={translateUi("automation")}
               dirty={form.formState.isDirty || prefillDirty}
               pending={busy}

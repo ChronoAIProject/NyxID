@@ -155,13 +155,9 @@ pub(crate) async fn decrypt_result(
     if p.delivery_abandoned || row.created_at < Utc::now() - Duration::days(1) {
         return Ok(None);
     }
-    let Some(value) = &p.result else {
+    let Some(raw) = Field::Result.open(&state.encryption_keys, row).await? else {
         return Ok(None);
     };
-    let raw = state
-        .encryption_keys
-        .decrypt_with_aad(&value.bytes, format!("{}:result", aad(&row.id)).as_bytes())
-        .await?;
     if raw.len() > MAX_PAYLOAD {
         return Err(conflict());
     }

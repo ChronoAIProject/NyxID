@@ -61,6 +61,8 @@ pub struct Proposal {
     pub review: Review,
     /// Envelope encryption with request-ID AAD. Never returned or logged.
     pub payload: Option<bson::Binary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_context_version: Option<u8>,
     pub state: String,
     pub grant_id: Option<String>,
     pub selected_choice: Option<String>,
@@ -69,6 +71,8 @@ pub struct Proposal {
     #[serde(default, with = "super::bson_datetime::optional")]
     pub claimed_at: Option<DateTime<Utc>>,
     pub result: Option<bson::Binary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_context_version: Option<u8>,
     pub failure_code: Option<String>,
 }
 
@@ -166,6 +170,8 @@ pub struct ProposalV2 {
     pub review: Review,
     /// Envelope encryption with request-ID AAD. Never returned or logged.
     pub payload: Option<bson::Binary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_context_version: Option<u8>,
     pub state: String,
     pub grant_id: Option<String>,
     pub selected_choice: Option<String>,
@@ -174,6 +180,8 @@ pub struct ProposalV2 {
     #[serde(default, with = "super::bson_datetime::optional")]
     pub claimed_at: Option<DateTime<Utc>>,
     pub result: Option<bson::Binary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_context_version: Option<u8>,
     pub failure_code: Option<String>,
 }
 

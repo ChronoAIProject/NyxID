@@ -208,7 +208,7 @@ export function workspaceSearchSections(
 ): WorkspaceSearchSection[] {
   const typing = !!query.trim();
   const availableAgents = agents.filter(
-    (agent) => agent.status !== "destroyed",
+    (agent) => agent.status !== "destroyed" && agent.can_use !== false,
   );
   const names = new Map(
     availableAgents.map((agent) => [
@@ -217,7 +217,8 @@ export function workspaceSearchSections(
     ]),
   );
   const seen = new Set<string>();
-  const chats = [...conversations]
+  const denied = new Set(agents.filter((agent) => agent.can_use === false).map((agent) => agent.id));
+  const chats = conversations.filter((chat) => !chat.agent || !denied.has(chat.agent.id))
     .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at))
     .filter((chat) => {
       if (seen.has(chat.id)) return false;
@@ -243,7 +244,7 @@ export function workspaceSearchSections(
           },
         },
       }))
-    : workspaceRecents(conversations, crews)
+    : workspaceRecents(chats, crews)
         .slice(0, 8)
         .map((row) => ({
           key: row.key,

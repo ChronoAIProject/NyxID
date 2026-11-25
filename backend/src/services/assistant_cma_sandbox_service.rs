@@ -438,36 +438,20 @@ pub(super) async fn recover_creation_request(
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
-    let version = match row.request_context_version {
-        None => None,
-        Some(3) => Some(3),
-        // The persisted marker is i32: never truncate unknown versions to u8.
-        Some(_) => {
-            return Err(AppError::Conflict(
-                "cma_creation_recovery_unavailable".into(),
-            ));
-        }
-    };
-    let field = ["request_ciphertext"];
-    let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &field)?;
-    let bytes = record_field::decrypt_context(
+    let context = RecordContext::new(
+        COLLECTION_NAME,
+        &row.id,
+        &row.user_id,
+        &["request_ciphertext"],
+    )?;
+    super::assistant_cma_request_record::open(
         keys,
         &context,
-        version,
-        row.request_ciphertext
-            .as_deref()
-            .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?,
+        row.request_context_version,
+        row.request_ciphertext.as_deref(),
+        row.request_hash.as_deref(),
     )
-    .await?;
-    if bytes.len() > MAX_RECOVERY_BYTES {
-        return Err(invalid_request());
-    }
-    if prepare_creation_request(&bytes)?.hash != row.request_hash.as_deref().unwrap_or("") {
-        return Err(AppError::Conflict(
-            "cma_creation_recovery_unavailable".into(),
-        ));
-    }
-    Ok(bytes)
+    .await
 }
 
 pub async fn get_owned(db: &Database, owner_id: &str, id: &str) -> AppResult<AssistantCmaSandbox> {
@@ -607,11 +591,15 @@ async fn persist_observation(
     // Network I/O is not repeated. Reconcile only local observation/registration
     // contention; a changed immutable binding still fails closed.
     for _ in 0..3 {
+        let mut set = observation_set(&changed)?;
+        // A live observation can outlast a storage rewrap. Only a terminal
+        // observation clears retained bytes under this generation's fence.
+        if changed.admission_state != SandboxAdmissionState::Retired {
+            set.remove("request_ciphertext");
+            set.remove("request_context_version");
+        }
         if let Some(saved) = collection
-            .find_one_and_update(
-                observation_filter(&expected),
-                doc! {"$set": observation_set(&changed)?},
-            )
+            .find_one_and_update(observation_filter(&expected), doc! {"$set": set})
             .return_document(ReturnDocument::After)
             .await?
         {
@@ -637,8 +625,6 @@ async fn persist_observation(
                 changed.admission_state = SandboxAdmissionState::Retiring;
             }
             changed.submission_state = current.submission_state.clone();
-            changed.request_ciphertext = current.request_ciphertext.clone();
-            changed.request_context_version = current.request_context_version;
         }
         expected = current;
     }
@@ -2313,6 +2299,114 @@ mod tests {
         other.id = "different-sandbox".into();
         assert!(apply_observation(&mut row, &other, 1, Utc::now()).is_err());
         assert!(row.occupies_account_slot);
+    }
+
+    #[tokio::test]
+    async fn observation_after_crypto_rewrap_preserves_the_installed_request() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("cma_observation_rewrap").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut before = fixture_row();
+        let body = br#"{"name":"unchanged observation"}"#;
+        before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
+        before.request_ciphertext = Some(keys.encrypt(body).await.unwrap());
+        before.request_context_version = None;
+        let mut after = before.clone();
+        apply_observation(
+            &mut after,
+            &remote_sandbox(SandboxObservationState::Ready),
+            before.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        let source = bson::to_document(&before).unwrap();
+        rows.insert_one(&source).await.unwrap();
+        assert!(
+            crate::services::assistant_cma_request_record::migrate(
+                &db,
+                &keys,
+                COLLECTION_NAME,
+                &source
+            )
+            .await
+            .unwrap()
+        );
+        let installed = rows
+            .find_one(doc! {"_id":&before.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = persist_observation(&db, &before, &after).await.unwrap();
+        assert_eq!(observed.request_context_version, Some(3));
+        assert_eq!(
+            observed.request_ciphertext.as_ref(),
+            installed.get_binary_generic("request_ciphertext").ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_observation_from_empty_snapshot_preserves_request_until_retirement() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("cma_observation_install").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut before = fixture_row();
+        before.request_ciphertext = None;
+        before.request_context_version = None;
+        let body = br#"{"name":"concurrent install"}"#;
+        before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        rows.insert_one(bson::to_document(&before).unwrap())
+            .await
+            .unwrap();
+
+        let mut live = before.clone();
+        apply_observation(
+            &mut live,
+            &remote_sandbox(SandboxObservationState::Ready),
+            before.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let context = RecordContext::new(
+            COLLECTION_NAME,
+            &before.id,
+            &before.user_id,
+            &["request_ciphertext"],
+        )
+        .unwrap();
+        let bytes = keys.encrypt_record(body, &context).await.unwrap();
+        let installed = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes,
+        };
+        rows.update_one(
+            doc! {"_id": &before.id},
+            doc! {"$set": {
+                "request_ciphertext": installed.clone(),
+                "request_context_version": 3_i32,
+            }},
+        )
+        .await
+        .unwrap();
+        let observed = persist_observation(&db, &before, &live).await.unwrap();
+        assert_eq!(
+            observed.request_ciphertext.as_deref(),
+            Some(installed.bytes.as_slice())
+        );
+        assert_eq!(observed.request_context_version, Some(3));
+
+        let mut retired = observed.clone();
+        apply_observation(
+            &mut retired,
+            &remote_sandbox(SandboxObservationState::Retired),
+            observed.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let saved = persist_observation(&db, &observed, &retired).await.unwrap();
+        assert!(saved.request_ciphertext.is_none());
+        assert!(saved.request_context_version.is_none());
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 //! Owner-requested drafts, sharing L1 review, encryption and publication.
+use super::assistant_learning_record::Field;
 use super::{
     assistant_acknowledgement_service::{self as acks, ChatAuthority},
     assistant_agent_learning::{self as learning, GeneratedFile, GeneratedProposal},
@@ -390,10 +391,29 @@ pub async fn create(
     let fingerprint = hex::encode(mac.finalize().into_bytes());
     let scope_digest = hex::encode(Sha256::digest(&scope_bytes));
     let now = Utc::now();
+    let id = Uuid::new_v4().to_string();
+    let (body_encrypted, body_context_version) = Field::Body
+        .seal(
+            &state.encryption_keys,
+            &id,
+            &agent.user_id,
+            &agent.id,
+            &encoded,
+        )
+        .await?;
+    let (scope_encrypted, scope_context_version) = Field::Scope
+        .seal(
+            &state.encryption_keys,
+            &id,
+            &agent.user_id,
+            &agent.id,
+            &scope_bytes,
+        )
+        .await?;
     let candidate = AssistantAgentLearningProposal {
         authoring_origin: None,
         source: ProposalSource::Authored,
-        id: Uuid::new_v4().to_string(),
+        id,
         agent_id: agent.id.clone(),
         owner_id: agent.user_id.clone(),
         run_id: String::new(),
@@ -407,10 +427,12 @@ pub async fn create(
         publication: None,
         failure_code: None,
         failure_rules: Vec::new(),
-        scope_encrypted: Some(state.encryption_keys.encrypt(&scope_bytes).await?),
+        scope_encrypted: Some(scope_encrypted),
+        scope_context_version,
         scope_digest: Some(scope_digest),
         evidence: Vec::new(),
-        body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+        body_encrypted,
+        body_context_version,
         body_bytes: encoded.len() as i64,
         created_at: now,
         updated_at: now,
@@ -684,6 +706,15 @@ async fn submit_owner_draft(
             ));
         }
         let now = Utc::now();
+        let (body_encrypted, body_context_version) = Field::Body
+            .seal(
+                &state.encryption_keys,
+                &id,
+                &agent.user_id,
+                &agent.id,
+                &encoded,
+            )
+            .await?;
         let row = AssistantAgentLearningProposal {
             authoring_origin: None,
             source: ProposalSource::Authored,
@@ -702,9 +733,11 @@ async fn submit_owner_draft(
             failure_code: None,
             failure_rules: Vec::new(),
             scope_encrypted: None,
+            scope_context_version: None,
             scope_digest: None,
             evidence: Vec::new(),
-            body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+            body_encrypted,
+            body_context_version,
             body_bytes: encoded.len() as i64,
             created_at: now,
             updated_at: now,
@@ -925,10 +958,11 @@ async fn publish_automatically_from_origin(
     );
     // Full access bypasses every request to proceed, including reduced-scope
     // consent. Persist only its count; the linked preview decrypts the declaration.
-    if let Some(encrypted) = &proposal.scope_encrypted {
-        let scope: DraftScope =
-            serde_json::from_slice(&state.encryption_keys.decrypt(encrypted).await?)
-                .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
+    if let Some(bytes) =
+        super::assistant_learning_record::scope(&state.encryption_keys, &proposal).await?
+    {
+        let scope: DraftScope = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
         if scope.status == "reduced" {
             summary.push_str(&format!(
                 "; Reduced scope: {} declared omission(s); separate consent bypassed by Full access",
@@ -1048,7 +1082,7 @@ pub async fn raise_review_card(
 
 #[cfg(test)]
 #[path = "assistant_skill_authoring_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) fn credential_shaped(value: &str) -> bool {
     validation::credential_position(value).is_some()

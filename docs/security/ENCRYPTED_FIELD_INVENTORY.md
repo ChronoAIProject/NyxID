@@ -43,7 +43,7 @@ A collection may use separate adapters for different fields.
 | `user_services` | `default_request_headers` | [default_header_service.rs](../../backend/src/services/default_header_service.rs) | Implemented |
 | `personal_erasure_effects` | `capability_encrypted` | [personal_erasure_service/provider.rs](../../backend/src/services/personal_erasure_service/provider.rs) | Implemented |
 | `agent_key_login_requests` | `delivery_credential_encrypted` | [agent_login_record_service.rs](../../backend/src/services/agent_login_record_service.rs) | Implemented |
-| `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | — | Pending |
+| `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | [assistant_learning_record_storage.rs](../../backend/src/services/assistant_learning_record_storage.rs) | Implemented |
 | `assistant_async_operations` | `result_encrypted` | [async_service_operation.rs](../../backend/src/services/async_service_operation.rs) | Implemented |
 | `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
 | `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
@@ -67,8 +67,8 @@ A collection may use separate adapters for different fields.
 | `trigger_deliveries` | `envelope_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
 | `user_service_connections` | `credential_encrypted` | [connection_record_service.rs](../../backend/src/services/connection_record_service.rs) | Implemented |
 | `async_service_operation_artifacts` | `data_encrypted` | [generated_artifacts/storage.rs](../../backend/src/services/generated_artifacts/storage.rs) | Implemented |
-| `assistant_cma_sandboxes` | `request_ciphertext` | — | Pending |
-| `assistant_cma_creations` | `request_ciphertext` | — | Pending |
+| `assistant_cma_sandboxes` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
+| `assistant_cma_creations` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
@@ -101,12 +101,22 @@ shared signer fence. Storage rewrap preserves the retained logical pins;
 transfer authenticates and rebinds the current transaction's source row.
 [Bot record adapter](../../backend/src/services/channel_bot_record.rs) · [Fingerprint selection](../../backend/src/services/channel_credential_continuity.rs)
 
+Each CMA request copy uses its own stored collection, row ID, user ID and field.
+The adapter checks the hash of the exact HTTP body and compares the full source
+document before updating the envelope and its marker. An uncertain creation
+retains its request and idempotency key through rewrap and recovery.
+[CMA request storage](../../backend/src/services/assistant_cma_request_record.rs)
+
+Learning proposal writers use the record-write switch for the body, scope and
+publication interface. Each field binds the proposal, owner and agent. The
+interface also binds its publication operation. Migration compares the exact
+source document and preserves terminal body sentinels and publication leases.
+[Proposal storage](../../backend/src/services/assistant_learning_record_storage.rs)
+
 ### Production storage for Pending fields
 
-- Mobile social sign-in stores and redeems its encrypted PKCE-bound response. CMA
-  sandbox recovery opens the sandbox request and checks the creation’s request
-  hash. The creation also retains its own encrypted copy until cleanup.
-  [Mobile delivery](../../backend/src/services/mobile_social_service.rs) · [Sandbox recovery](../../backend/src/services/assistant_cma_sandbox_service.rs) · [Creation admission](../../backend/src/services/assistant_cma_admission.rs)
+- Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
+  [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
@@ -116,7 +126,9 @@ transfer authenticates and rebinds the current transaction's source row.
   [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
 - Assistant recovery retains the encrypted input on the
   active turn’s restart window. Approval requests retain encrypted payloads
-  and results under the selected proposal version.
+  and results under the selected proposal version. Approval readers bind marked fields
+  to the request, user, version arm and field. Writers use the historical AAD in
+  both positions of the record-write switch.
   [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
@@ -190,7 +202,8 @@ version-map validation and exact-source migration stay in services.
   replies authenticate the binding digest bytes as AES AAD.
   [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
 - Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
-  Execution proposals use request-specific AAD and a distinct result suffix.
+  Execution proposals v1, v3 and v4 use `execution-proposal:v1:{id}`. V2 uses
+  `execution-proposal:v2:{id}`. Each result appends `:result`.
   The assistant reattach window authenticates the serialized tuple of domain,
   user, conversation, credential ID and window key. These services own the
   encoding of their historical AAD.

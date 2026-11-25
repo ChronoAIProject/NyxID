@@ -543,6 +543,7 @@ export const assistantAgentSchema = z.object({
   org_role: z.enum(["admin", "member", "viewer"]).nullable().optional(),
   can_maintain: z.boolean().optional(),
   can_use: z.boolean().optional(),
+  can_govern: z.boolean().optional(),
   id: z.string(),
   kind: assistantAgentKindSchema,
   /** The @handle (fixed "NyxBot" for NyxBot). */

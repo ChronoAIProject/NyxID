@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   sheet: [] as { agentId?: string; tab?: string; open: boolean }[],
   threads: [] as { id: string }[],
   threadsLoaded: false,
+  threadAgent: undefined as { id: string } | undefined,
 }));
 const specialist = { id: "agent-researcher", kind: "specialist", name: "researcher", status: "idle", can_use: true };
 const nyxbot = { id: "agent-nyxbot", kind: "nyxbot", name: "NyxBot", status: "idle", can_use: true };
@@ -50,7 +51,8 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
-  getConversation: () => undefined,
+  getConversation: () => state.threadAgent ? { agent: state.threadAgent } : undefined,
+  forgetAgent: vi.fn(),
   capabilities: () => Promise.resolve({ steer: null }),
 } }));
 vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
@@ -85,6 +87,7 @@ vi.mock("./assistant-link-modals", () => ({ AssistantLinkModalHost: ({ children 
 vi.mock("./nyxagent-composer", () => ({ NyxAgentComposer: () => <form aria-label="Composer" /> }));
 
 beforeEach(() => {
+  specialist.can_use = true; state.threadAgent = undefined;
   state.search = {}; state.navigations = []; state.sheet = []; state.threads = []; state.threadsLoaded = false;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
@@ -141,4 +144,18 @@ it("tells the owner a direct specialist chat is handled by that specialist, neve
     "Talk to researcher directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.",
   );
   expect(empty).not.toHaveTextContent(/NyxBot/);
+});
+
+it("closes a cached thread on use revocation and keeps the live specialist profile reachable", async () => {
+  state.search = { c: "private-thread" };
+  state.threadAgent = specialist;
+  const client = new QueryClient();
+  const page = () => <QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>;
+  const view = render(page());
+  expect(screen.getByRole("form", { name: "Composer" })).toBeVisible();
+  specialist.can_use = false;
+  view.rerender(page());
+  expect(screen.queryByRole("form", { name: "Composer" })).not.toBeInTheDocument();
+  expect(screen.getByText("Chat access is restricted.")).toBeVisible();
+  expect(state.navigations.at(-1)).toMatchObject({ replace: true, search: { agent: specialist.id, details: "overview" } });
 });

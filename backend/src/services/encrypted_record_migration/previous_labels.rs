@@ -220,14 +220,21 @@ pub(super) const EVENT_BINDING_DIGEST: &str =
     "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
 
 // These Meta draft registries share the reconciled field order with consent assets appended.
-pub(super) const META_DIGESTS: [&str; 6] = [
+pub(super) const META_DIGESTS: [&str; 7] = [
     "4c651a86c5f4450b911a8052544564ca6659040d1cc429064a5fea1d2f0cb016", // 73318f7de
     "9a784b1659734c401dbb632bfda793658c1bd612819bef626a622bc87fb92189", // e97018750
     "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de", // f344f1f8e
     "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed",
     "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241", // e42c02795
     "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96", // a40f49119
+    "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a", // 5014e6111
 ];
 
-pub(super) const GATEWAY_TRANSPORT_DIGEST: &str =
+pub(super) const GATEWAY_SETUP_DIGEST: &str =
     "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
+
+pub(super) const CMA_REQUEST_DIGEST: &str =
+    "2586a1add34bc8bf42b81e020c60c6d2d14d4b3567cb29c2c8bf976d5100a99e";
+
+pub(super) const LEARNING_PROPOSAL_DIGEST: &str =
+    "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";

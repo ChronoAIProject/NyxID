@@ -70,6 +70,9 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::RateLimited => (429, 1005),
         AppError::ServiceConcurrencyLimited => (429, 12600),
         AppError::Internal(_) => (500, 1006),
+        AppError::PoolAttemptTransport(
+            crate::errors::PoolAttemptTransportKind::ResolutionUnavailable,
+        ) => (err.status_code().as_u16(), err.error_code()),
         AppError::DatabaseError(_) => (500, 1007),
         AppError::ValidationError(_) => (400, 1008),
         AppError::NodeNotFound(_) => (404, 8000),
@@ -1523,7 +1526,8 @@ fn pool_attempt_evidence(
         crate::errors::PoolAttemptTransportKind::NodeAfterDispatch => {
             crate::services::pool_failover::AttemptEvidence::NodeTransportAfterDispatch
         }
-        crate::errors::PoolAttemptTransportKind::AfterDispatch => {
+        crate::errors::PoolAttemptTransportKind::AfterDispatch
+        | crate::errors::PoolAttemptTransportKind::ResolutionUnavailable => {
             crate::services::pool_failover::AttemptEvidence::TransportAfterDispatch
         }
     })
@@ -7790,6 +7794,18 @@ async fn execute_resolved_proxy_inner<'a>(
                             had_dispatched_failure,
                         )
                         .await?;
+                    if matches!(
+                        error,
+                        AppError::PoolAttemptTransport(
+                            crate::errors::PoolAttemptTransportKind::ResolutionUnavailable
+                        )
+                    ) && !had_dispatched_failure
+                        && (is_pool_attempt || nyxagent_admission)
+                    {
+                        return Err(AppError::PoolAttemptTransport(
+                            crate::errors::PoolAttemptTransportKind::Connect,
+                        ));
+                    }
                     return Err(error);
                 }
                 Ok(Err(error)) => {
@@ -8577,8 +8593,10 @@ pub(crate) fn build_downstream_ws_request(
 
 /// Connect to a downstream WebSocket, injecting credentials and identity
 /// headers into the upgrade request.
+#[allow(clippy::too_many_arguments)]
 async fn connect_downstream_ws(
     url: &str,
+    path: &str,
     target: &proxy_service::ProxyTarget,
     delegated: &[delegation_service::DelegatedCredential],
     identity_headers: &[(String, String)],
@@ -8598,19 +8616,18 @@ async fn connect_downstream_ws(
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
-    let (ws_stream, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS),
-        async {
-            let destination = target.direct_destination(url).await?;
-            let stream = destination
-                .connect()
-                .await
-                .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
-            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
-                .await
-                .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
-        },
-    )
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS);
+    let destination = target.direct_destination(url, path).await?;
+    let (ws_stream, response) = tokio::time::timeout_at(deadline, async {
+        let stream = destination
+            .connect()
+            .await
+            .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
+        tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
+            .await
+            .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
+    })
     .await
     .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))??;
 
@@ -9177,6 +9194,7 @@ async fn handle_ws_passthrough(
     }
     let downstream = connect_downstream_ws(
         &downstream_url,
+        path,
         target,
         delegated,
         identity_headers,
@@ -11417,7 +11435,8 @@ mod tests {
             BillingIngress::Proxy,
         )
         .unwrap();
-        let result = super::connect_downstream_ws(url, &target, &[], &[], &[], None, permit).await;
+        let result =
+            super::connect_downstream_ws(url, "/", &target, &[], &[], &[], None, permit).await;
         assert!(matches!(
             result,
             Err(crate::errors::AppError::ValidationError(_))
@@ -11472,6 +11491,7 @@ mod tests {
 
         let connection = super::connect_downstream_ws(
             &format!("ws://{addr}/v1/convai/conversation"),
+            "v1/convai/conversation",
             &target,
             &[],
             &[],

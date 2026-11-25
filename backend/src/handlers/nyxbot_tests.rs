@@ -6745,6 +6745,10 @@ async fn authenticated_telegram_directed_start_registers_group_without_a_welcome
 #[path = "nyxbot_media_tests.rs"]
 mod media_tests;
 
+fn unregistered_nyxbot_problem() -> Value {
+    json!({"title":"invalid request","status":400,"detail":"nyxbot","code":"invalid_request"})
+}
+
 #[test]
 fn gateway_problem_status_distinguishes_authentication_from_permission() {
     for (status, expected) in [
@@ -6761,6 +6765,21 @@ fn gateway_problem_status_distinguishes_authentication_from_permission() {
         assert_eq!(gateway_error_code(&response), expected);
     }
     for (status, body, expected) in [
+        (
+            400,
+            unregistered_nyxbot_problem(),
+            "gateway_provider_not_registered",
+        ),
+        (
+            400,
+            json!({"code":"invalid_request", "detail":" nyxbot\n"}),
+            "gateway_provider_not_registered",
+        ),
+        (
+            400,
+            json!({"code":"invalid_request", "detail":"invalid nyxbot channel"}),
+            "gateway_rejected_request",
+        ),
         (
             400,
             json!({"code":"invalid_request", "detail":"provider is not registered"}),
@@ -6816,6 +6835,80 @@ async fn active_for_bot_picks_newest_live_with_id_tie_break() {
     state.db.drop().await.unwrap();
 }
 
+async fn register_mock_gateway(state: &AppState, server: &wiremock::MockServer) {
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = Uuid::new_v4().to_string();
+    service.slug = GATEWAY_SLUG.into();
+    service.base_url = server.uri();
+    service.requires_user_credential = false;
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_connect_reports_unregistered_nyxbot_to_owner_and_audit() {
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let (mut state, _, upstream) = setup("gateway_unregistered").await;
+    let _upstream = tokio_util::task::AbortOnDropHandle::new(upstream);
+    state.config.jwt_issuer = "http://localhost:3001".into();
+    let server = MockServer::start().await;
+    register_mock_gateway(&state, &server).await;
+    Mock::given(method("POST"))
+        .and(path("/channels"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(unregistered_nyxbot_problem()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let bot = bot_doc("telegram", "Telegram bot");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+
+    let error = Box::pin(connect_channel(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Json(ConnectRequest {
+            bot_id,
+            agent_id: None,
+        }),
+    ))
+    .await
+    .unwrap_err();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let envelope: Value = serde_json::from_str(&body_text(response).await).unwrap();
+    let data = state
+        .db
+        .collection::<AuditLog>(AUDIT)
+        .find_one(doc! {"user_id": OWNER, "event_type": "nyxbot_channel_connect_failed"})
+        .await
+        .unwrap()
+        .unwrap()
+        .event_data
+        .unwrap();
+    assert_eq!(data["error_code"], "gateway_provider_not_registered");
+    assert!(!data.to_string().contains("nyxbot"));
+    assert!(
+        envelope["message"]
+            .as_str()
+            .unwrap()
+            .contains("has not registered NyxBot as a provider yet (operator step)")
+    );
+}
+
 #[tokio::test]
 async fn gateway_connect_refuses_missing_identity_and_attach_version() {
     use wiremock::{
@@ -6825,17 +6918,7 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
     let (mut state, _, upstream) = setup("gateway_invalid_json").await;
     state.config.jwt_issuer = "http://localhost:3001".into();
     let server = MockServer::start().await;
-    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-    service.id = Uuid::new_v4().to_string();
-    service.slug = "cmaeg".into();
-    service.base_url = server.uri();
-    service.requires_user_credential = false;
-    state
-        .db
-        .collection::<DownstreamService>(SERVICES)
-        .insert_one(service)
-        .await
-        .unwrap();
+    register_mock_gateway(&state, &server).await;
     for response in [
         json!({}),
         json!({"channel_id":"","version":1}),
@@ -7081,17 +7164,7 @@ async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
         assert_eq!(watch.platform.as_deref(), Some("telegram"));
         let gateway = wiremock::MockServer::start().await;
         if let Some(status) = status {
-            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-            service.id = Uuid::new_v4().to_string();
-            service.slug = "cmaeg".into();
-            service.base_url = gateway.uri();
-            service.requires_user_credential = false;
-            state
-                .db
-                .collection::<DownstreamService>(SERVICES)
-                .insert_one(service)
-                .await
-                .unwrap();
+            register_mock_gateway(&state, &gateway).await;
             wiremock::Mock::given(wiremock::matchers::method("POST"))
                 .respond_with(
                     wiremock::ResponseTemplate::new(status)
