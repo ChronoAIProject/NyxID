@@ -761,6 +761,8 @@
   "Routing not confirmed": "Routing not confirmed",
   "Same API": "Same API",
   "Save Redirect URIs": "Save Redirect URIs",
+  "Save Rotated Trigger Secret": "Save Rotated Trigger Secret",
+  "Save Trigger Credentials": "Save Trigger Credentials",
   "Save as a new view": "Save as a new view",
   "Save login": "Save login",
   "Save named filter combinations. The default opens when you return to AI Services.": "Save named filter combinations. The default opens when you return to AI Services.",

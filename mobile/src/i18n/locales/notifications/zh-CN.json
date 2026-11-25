@@ -33,6 +33,7 @@
   "on {{platform}}": "在 {{platform}} 上",
   "replied in": "已回复，位于",
   "reported back in": "已汇报，位于",
+  "unread": "未读",
   "was paused": "已暂停",
   "was skipped": "已跳过",
   "{{count}} new": "{{count}} 条新消息"

@@ -24,13 +24,13 @@ export function describeChanges<T extends object>(before: object | undefined, af
       const oldList = field.list(previous), newList = field.list(current);
       const added = newList.filter((value) => !oldList.includes(value));
       const removed = oldList.filter((value) => !newList.includes(value));
-      if (added.length || removed.length) return [{ label: field.label, added, removed }];
-      if (oldList.join("\n") !== newList.join("\n")) return [{ label: field.label, before: oldList.join(", ") || "Empty", after: newList.join(", ") || "Empty" }];
+      if (added.length || removed.length) return [{ get label() { return field.label; }, added, removed }];
+      if (oldList.join("\n") !== newList.join("\n")) return [{ get label() { return field.label; }, before: oldList.join(", ") || "Empty", after: newList.join(", ") || "Empty" }];
       return [];
     }
     const format = field.format ?? changeValue;
     const oldText = format(previous), newText = format(current);
-    return oldText === newText ? [] : [{ label: field.label, before: oldText, after: newText }];
+    return oldText === newText ? [] : [{ get label() { return field.label; }, before: oldText, after: newText }];
   });
 }
 export const changeList = (value: unknown): string[] => Array.isArray(value) ? value.map(String) : [];

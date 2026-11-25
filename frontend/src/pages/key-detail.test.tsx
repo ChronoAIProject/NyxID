@@ -8,6 +8,7 @@ import type { KeyInfo } from "@/types/keys";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import type { OwnershipResource } from "@/types/ownership-transfers";
+import { appI18n } from "@/i18n";
 
 const {
   hooks,
@@ -773,6 +774,24 @@ describe("KeyDetailPage — edit flows", () => {
 });
 
 describe("KeyDetailPage — delete flow", () => {
+  it("uses the current language for the completed removal's history action", async () => {
+    const user = userEvent.setup();
+    const view = render(<KeyDetailPage />);
+    try {
+      await user.click(screen.getByRole("button", { name: /^Delete$/i }));
+      await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+      await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+      act(() => hooks.deleteKey.mock.calls[0]![1].onSuccess({ deleted: true, upstream_revocation_scheduled: true }));
+      const action = mockToastSuccess.mock.calls.at(-1)![1].action;
+      expect(action.label).toBe("查看历史记录");
+      act(() => action.onClick());
+      expect(mockNavigate).toHaveBeenLastCalledWith({ to: "/keys/$keyId", params: { keyId: "key-1" } });
+    } finally {
+      view.unmount();
+      await appI18n.changeLanguage("en");
+    }
+  });
+
   it("opens the confirm dialog and deletes via useDeleteKey then navigates to /keys", async () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);

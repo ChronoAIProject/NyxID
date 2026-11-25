@@ -17,6 +17,7 @@ import {
   unreadForSource,
 } from "./notificationPresentation";
 import { notificationSchema } from "./notificationContracts";
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 
 const C = `nyxa-${"a".repeat(32)}`;
 const G = `nyxg-${"b".repeat(32)}`;
@@ -30,6 +31,22 @@ const row = (overrides: Record<string, unknown>) =>
     updated_at: "2026-11-10T08:05:00Z",
     ...overrides,
   });
+
+test("unread accessibility copy follows the app language and preserves notification content", () => {
+  const notification = row({ title: "My English report", preview: "Alice's original text", read: false });
+  const now = Date.parse("2026-11-10T08:10:00Z");
+  try {
+    for (const [language, suffix] of [["zh-CN", "未读"], ["zh-TW", "未讀"], ["en", "unread"]] as const) {
+      setAppTranslationLanguage(language);
+      const label = notificationAccessibilityLabel(notification, now);
+      assert.ok(label.startsWith("My English report, Alice's original text, "));
+      assert.ok(label.endsWith(", " + suffix));
+    }
+    assert.ok(!notificationAccessibilityLabel({ ...notification, read: true }, now).endsWith(", unread"));
+  } finally {
+    setAppTranslationLanguage("en");
+  }
+});
 
 test("badge caps at 99+, count chips start at two and labels read naturally", () => {
   assert.equal(notificationBadge(0), "");

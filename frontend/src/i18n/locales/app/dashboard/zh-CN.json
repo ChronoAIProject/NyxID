@@ -761,6 +761,8 @@
   "Routing not confirmed": "路由未确认",
   "Same API": "相同 API",
   "Save Redirect URIs": "保存重定向 URI",
+  "Save Rotated Trigger Secret": "保存轮换后的触发器密钥",
+  "Save Trigger Credentials": "保存触发器凭据",
   "Save as a new view": "另存为新视图",
   "Save login": "保存登录信息",
   "Save named filter combinations. The default opens when you return to AI Services.": "保存命名的筛选条件组合。返回 AI 服务时会打开默认视图。",

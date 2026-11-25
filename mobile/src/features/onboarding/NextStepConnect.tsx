@@ -1,6 +1,7 @@
+import { onboardingText } from "../../../../shared/onboardingCopy";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { translateApp } from "../../i18n/appTranslation";
+import { appLocale, translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Linking, View } from "react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
@@ -41,7 +42,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
       if (!currentRequest()) return;
       if (current.connected || current.choices.length === 0) {
         started.current = true;
-        start.current({ ...step, prompt: current.connected ? current.prompt : step.prompt, connect: false });
+        start.current({ ...step, prompt: onboardingText(appLocale(), current.connected ? current.prompt : step.prompt), connect: false });
         onClose();
         return;
       }
