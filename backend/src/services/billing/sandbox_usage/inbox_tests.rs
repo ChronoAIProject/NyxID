@@ -500,6 +500,23 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         before_cpu["result"],
         serde_json::json!({"status":"candidate","numerator_pico":"120000000000000000","divisor":"3600000"})
     );
+    super::completeness_inbox::prepare(&fx.db).await.unwrap();
+    let mut completeness: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../../tests/fixtures/cma_minute_completeness_v1/full-minute.canonical.json"
+    ))
+    .unwrap();
+    completeness["owner"]["subject"] = serde_json::json!(owner);
+    completeness["positions"][0]["digest"] = serde_json::json!(usage_hash);
+    completeness["facts"][0]["event_digest"] = serde_json::json!(usage_hash);
+    let statement_bytes = serde_json_canonicalizer::to_vec(&completeness).unwrap();
+    let (_, accepted_statement) =
+        super::completeness_inbox::accept(&fx.db, &writer, &statement_bytes)
+            .await
+            .unwrap();
+    assert_eq!(
+        accepted_statement.validation,
+        super::completeness_validation::Decision::Validated
+    );
     let first_bucket = shadow_buckets::observe(&fx.db, ISSUER, bucket())
         .await
         .unwrap()
@@ -522,6 +539,10 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
             .contains(&"minute_completeness_unproven".into())
     );
     assert_eq!(first_bucket.input.facts[0].evidence_revision, 1);
+    assert_eq!(
+        first_bucket.input.completeness[0].validation_status,
+        "validated"
+    );
     let replay = shadow_buckets::observe(&fx.db, ISSUER, bucket())
         .await
         .unwrap()
@@ -544,7 +565,7 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         .delete_one(doc! {"_id":&owner})
         .await
         .unwrap();
-    let (correction, _) = with_owner(CORRECTION, &owner, Some(&usage_hash), true);
+    let (correction, correction_hash) = with_owner(CORRECTION, &owner, Some(&usage_hash), true);
     inbox::accept(&fx.db, &writer, &correction).await.unwrap();
     let after = inbox_shadow::inspect(&fx.db, ISSUER, NAMESPACE, stream, fact)
         .await
@@ -574,6 +595,45 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         first_bucket.input.price_pin
     );
     assert_eq!(corrected_bucket.input.facts[0].evidence_revision, 2);
+    assert_eq!(
+        corrected_bucket.input.completeness[0].validation_status,
+        "superseded"
+    );
+    use sha2::{Digest, Sha256};
+    let decoded_correction = super::contract::decode_event(&correction, inbox::clock()).unwrap();
+    completeness["statement_id"] = serde_json::json!(Uuid::new_v4().to_string());
+    completeness["revision"] = serde_json::json!("2");
+    completeness["previous_statement_digest"] =
+        serde_json::json!(hex::encode(Sha256::digest(&statement_bytes)));
+    completeness["positions"][0]["sequence"] =
+        serde_json::json!(decoded_correction.header().sequence.get().to_string());
+    completeness["positions"][0]["digest"] = serde_json::json!(correction_hash);
+    completeness["facts"][0]["event_id"] =
+        serde_json::json!(decoded_correction.header().event_id.as_str());
+    completeness["facts"][0]["event_digest"] = serde_json::json!(correction_hash);
+    completeness["facts"][0]["evidence_revision"] = serde_json::json!("2");
+    let successor_bytes = serde_json_canonicalizer::to_vec(&completeness).unwrap();
+    let (_, accepted) = super::completeness_inbox::accept(&fx.db, &writer, &successor_bytes)
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.validation,
+        super::completeness_validation::Decision::Validated
+    );
+    let resolved = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved.input.completeness[0].validation_status,
+        "validated"
+    );
+    assert_eq!(resolved.input.facts, corrected_bucket.input.facts);
+    assert_eq!(
+        resolved.provisional_total,
+        corrected_bucket.provisional_total
+    );
+
     assert_eq!(corrected_bucket.provisional_delta.pico(), -16_666_666_666);
     let measured_open = include_bytes!(
         "../../../../tests/fixtures/cma_usage_v1/measured-stream-open.canonical.json"
@@ -750,6 +810,17 @@ async fn minute_completeness_arrives_before_facts_and_reopens_after_a_correction
     successor["facts"][0]["event_digest"] = json!(correction.digest().as_str());
     successor["facts"][0]["evidence_revision"] = json!("2");
     let successor = serde_json_canonicalizer::to_vec(&successor).unwrap();
+    let mut held: Value = serde_json::from_slice(&successor).unwrap();
+    held["statement_id"] = json!(Uuid::new_v4().to_string());
+    held["revision"] = json!("3");
+    held["previous_statement_digest"] = json!(hex::encode(Sha256::digest(&successor)));
+    held["producer_hold"] = json!("physical_attribution_conflict");
+    let held = serde_json_canonicalizer::to_vec(&held).unwrap();
+    assert!(matches!(
+        completeness_inbox::accept(&fx.db, &writer, &held).await,
+        Err(InboxError::Prerequisite("statement_predecessor_missing"))
+    ));
+
     let (created, fresh) = completeness_inbox::accept(&fx.db, &writer, &successor)
         .await
         .unwrap();
@@ -764,16 +835,20 @@ async fn minute_completeness_arrives_before_facts_and_reopens_after_a_correction
         serde_json::to_value(&prior).unwrap()["receipt"],
         first_json["receipt"]
     );
-    let mut held: Value = serde_json::from_slice(&successor).unwrap();
-    held["statement_id"] = json!(Uuid::new_v4().to_string());
-    held["revision"] = json!("3");
-    held["previous_statement_digest"] = json!(hex::encode(Sha256::digest(&successor)));
-    held["producer_hold"] = json!("physical_attribution_conflict");
-    let held = serde_json_canonicalizer::to_vec(&held).unwrap();
     let (created, held) = completeness_inbox::accept(&fx.db, &writer, &held)
         .await
         .unwrap();
     assert!(created);
     assert_eq!(held.validation, Decision::Pending("producer_hold"));
+    let held_json = serde_json::to_value(&held).unwrap();
+    let held_id = held_json["receipt"]["statement_id"].as_str().unwrap();
+    let recovered = completeness_inbox::read(&fx.db, &reader, held_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&recovered).unwrap()["receipt"],
+        held_json["receipt"]
+    );
     fx.db.drop().await.unwrap();
 }

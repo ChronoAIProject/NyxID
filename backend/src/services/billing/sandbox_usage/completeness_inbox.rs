@@ -248,8 +248,12 @@ async fn append(
         }
         Some(previous) => {
             let prior = decode_row(previous)?;
+            let expected = prior.revision.0.checked_add(1).ok_or(InboxError::Corrupt)?;
+            if prior.owner == statement.owner && statement.revision.0 > expected {
+                return Err(InboxError::Prerequisite("statement_predecessor_missing"));
+            }
             if prior.owner != statement.owner
-                || prior.revision.0.checked_add(1) != Some(statement.revision.0)
+                || expected != statement.revision.0
                 || statement.previous_statement_digest.as_deref() != Some(previous.digest.as_str())
             {
                 return Err(InboxError::Conflict("statement_predecessor_changed"));
