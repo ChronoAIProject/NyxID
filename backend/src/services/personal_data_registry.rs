@@ -3494,11 +3494,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         OwnerIndexBoundedReason::ShortTtl,
     ),
     (
-        "assistant_voice_announcements",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
         "assistant_voice_windows",
         "user_id",
         OwnerIndexBoundedReason::SmallOrResourceBounded,

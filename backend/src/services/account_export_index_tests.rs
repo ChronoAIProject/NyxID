@@ -333,16 +333,6 @@ mod export_index_coverage {
             ]
         ),
         resource!(
-            "assistant_voice_announcements",
-            "user_id",
-            "voice::announcements stores one announcement per call/request id and expires it 24 hours after the call deadline.",
-            "voice/announcements.rs",
-            [
-                "id: format!(\"{}:{request}\", call.id)",
-                "expires_at: bson::DateTime::from_chrono(call.deadline + Duration::hours(24))"
-            ]
-        ),
-        resource!(
             "assistant_voice_windows",
             "user_id",
             "assistant_voice::ensure_indexes uniquely fences billing_request_id; billing::voice reserves deterministic call/window funding records, not audio frames.",
