@@ -138,6 +138,8 @@ pub struct LearningEvidence {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantAgentLearningRun {
+    #[serde(default)]
+    pub org_maintain_revision: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub agent_id: String,
@@ -283,6 +285,8 @@ pub struct LearningPublication {
     pub started: bool,
     pub approved_by: Option<String>,
     pub approval_digest: Option<String>,
+    #[serde(default)]
+    pub org_maintain_revision: i64,
     pub acknowledgement_id: Option<String>,
     pub skills_revision: i64,
     pub lease_id: Option<String>,

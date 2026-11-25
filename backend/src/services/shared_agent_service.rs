@@ -1681,6 +1681,7 @@ pub async fn summaries(
             owner_slug: None,
             owner_kind: "person",
             org_role: None,
+            can_govern: false,
             can_maintain: false,
             can_use: true,
             machines: Vec::new(),
@@ -1729,7 +1730,7 @@ pub async fn summaries(
             super::assistant_platform_model::public_selection(db, actor, &thread.model).await?;
         result.push(super::assistant_team_service::AgentSummary {
             id: id.into(), share_role: Some(ShareRole::User), owner_id: thread.agent_owner_id.clone().unwrap_or_default(),
-            owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_maintain: false,
+            owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_govern: false, can_maintain: false,
             machines: Vec::new(), logins: Vec::new(), services: Vec::new(), account_read: false,
             guest_access: BTreeMap::new(), pending_requests: Vec::new(), last_reply: None, status: "idle",
             kind: crate::models::assistant_agent::AgentKind::Specialist, name: "Shared agent".into(),

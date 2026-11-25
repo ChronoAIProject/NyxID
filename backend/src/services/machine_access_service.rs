@@ -995,7 +995,7 @@ pub async fn configure(
         let result=Box::pin(async {
             let mut agent=db.collection::<AssistantAgent>(AGENTS).find_one(doc!{"_id":&agent_id,"destroyed_at":bson::Bson::Null})
                 .session(&mut *session).await?.ok_or_else(refused)?;
-            Box::pin(super::org_agent_service::require_maintain(&db, &actor, &agent)).await?;
+            Box::pin(super::org_agent_service::fence_maintenance(&db,session,&actor,&agent)).await?;
             if !super::org_service::resolve_owner_access(&db,&actor,&node.user_id).await?.can_write() {return Err(refused());}
             if actor != agent.user_id {
                 let fenced = db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id": &agent.user_id, "is_active": true},doc! {"$inc": {"agent_team_fence":1}}).session(&mut *session).await?;

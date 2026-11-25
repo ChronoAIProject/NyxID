@@ -233,6 +233,53 @@ async fn cutover_adoption_is_admin_only_and_review_binds_grants_and_bot_set() {
             .await
             .is_err()
     );
+    let agents = db.collection::<Document>("assistant_agents");
+    agents
+        .update_one(
+            doc! {"_id":&f.agent.id},
+            doc! {"$set":{"org_maintainer_user_ids":[&f.org.member]}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        adoption::preview(&db, &f.org.admin, &f.agent.id).await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        adoption::adopt(&db, &f.org.admin, &f.agent.id, input.clone()).await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        crate::handlers::nyxbot::gateway_retry::retry(&f.org.state, &f.org.admin, &f.channel.id)
+            .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        crate::handlers::nyxbot::disconnect(&f.org.state, &f.org.admin, &f.channel.id).await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        crate::services::nyxbot_chat_settings_service::update_as(
+            &db,
+            &f.channel,
+            &f.org.admin,
+            &crate::services::nyxbot_chat_settings_service::AccessSettings {
+                private_chats: Some("owner".into()),
+                private_chat_posts: None,
+                apply_to_existing: false
+            },
+            None,
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    agents
+        .update_one(
+            doc! {"_id":&f.agent.id},
+            doc! {"$unset":{"org_maintainer_user_ids":""}},
+        )
+        .await
+        .unwrap();
     grant(&f, "Late addition").await;
     assert!(matches!(
         adoption::adopt(&db, &f.org.admin, &f.agent.id, input).await,

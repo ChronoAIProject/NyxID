@@ -33,6 +33,7 @@ async fn agent(
         return Err(super::denied());
     }
     super::require_admin(db, actor, &agent.user_id).await?;
+    org_agent_service::require_maintain(db, actor, &agent).await?;
     Ok(agent)
 }
 
@@ -67,7 +68,7 @@ fn review(
         })
         .collect();
     let material = json!({"actor":actor,"agent":agent.id,"owner":agent.user_id,
-        "grants":agent.grants,"guests":agent.guest_access,"scopes":agent.operation_scopes,
+        "maintain_revision":agent.org_maintain_revision,"grants":agent.grants,"guests":agent.guest_access,"scopes":agent.operation_scopes,
         "guest_scopes":agent.guest_operation_scopes,"bindings":bindings,"services":services});
     audit_service::keyed_fingerprint(
         audit_service::audit_chain_hmac_key(),
@@ -113,16 +114,7 @@ pub(crate) async fn adopt(db: &Database, actor: &str, id: &str, input: Adoption)
             }
             let agent = agent(db, actor, id, tx).await?;
             org_agent_service::authorize_guest_change(db, actor, &agent, tx).await?;
-            // All grant writers and new channel bindings write this row, fencing
-            // both policy edits and a concurrent change to the reviewed binding set.
-            super::live_doc(
-                db,
-                tx,
-                "assistant_agents",
-                doc! {"_id":id,"user_id":&agent.user_id,"destroyed_at":null},
-                true,
-            )
-            .await?;
+            org_agent_service::fence_maintenance(db, tx, actor, &agent).await?;
             let channels = channels(db, &agent, tx).await?;
             if !channels.is_empty()
                 && channels.iter().all(|row| {

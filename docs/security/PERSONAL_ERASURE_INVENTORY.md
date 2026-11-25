@@ -7,6 +7,8 @@ establish completion, and a scan for `user_id` alone cannot establish ownership.
 The registry and inventory drift tests described below keep the cleanup map
 reviewable as collections change.
 
+Personal erasure prunes the erased person from each organization specialist’s user and maintainer lists. Each affected capability revision advances once. Organization specialists remain with the organization.
+
 ## Owner-index rollout
 
 These startup additions never drop, rename, or rebuild an existing index. They
@@ -14,9 +16,9 @@ reuse any existing index whose first key is the erasure owner predicate and
 add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions. The manifest adds 15 indexes, comprising
-14 stream indexes and the group-message author index used for attribution
-redaction. The reply delivery index on `{user_id:1, inbound_message_id:1}` already covers owner erasure.
+not change retention or ownership decisions. The manifest adds 17 indexes, comprising
+14 stream indexes, the group-message author index used for attribution
+redaction, and the two specialist access-list indexes. The reply delivery index on `{user_id:1, inbound_message_id:1}` already covers owner erasure.
 
 Each row below is a real missing prefix on a collection that grows with
 events, messages, requests, or deliveries. Without it, the owner query would
@@ -56,6 +58,8 @@ that collection has no such field. An already deployed extra index is left
 untouched.
 
 ```javascript
+db.assistant_agents.createIndex({"org_maintainer_user_ids": 1}, {name: "personal_erasure_owner_assistant_agents_org_maintainer_user_ids"});
+db.assistant_agents.createIndex({"org_user_ids": 1}, {name: "personal_erasure_owner_assistant_agents_org_user_ids"});
 db.assistant_group_mention_notifications.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_mention_notifications_user_id"});
 db.assistant_group_messages.createIndex({"author_user_id": 1}, {name: "personal_erasure_owner_assistant_group_messages_author_user_id"});
 db.assistant_group_messages.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_messages_user_id"});
@@ -448,7 +452,7 @@ backend/src/models/approval_grant.rs: COLLECTION_NAME=approval_grants | user_id
 backend/src/models/approval_request.rs: COLLECTION_NAME=approval_requests | actor_user_id, user_id
 backend/src/models/assistant_acknowledgement.rs: COLLECTION_NAME=assistant_acknowledgements | user_id
 backend/src/models/assistant_action_receipt.rs: COLLECTION_NAME=assistant_action_receipts | user_id
-backend/src/models/assistant_agent.rs: COLLECTION_NAME=assistant_agents | created_by, user_id
+backend/src/models/assistant_agent.rs: COLLECTION_NAME=assistant_agents | created_by, org_maintainer_user_ids, org_user_ids, user_id
 backend/src/models/assistant_agent_credential.rs: COLLECTION_NAME=assistant_agent_credentials | user_id
 backend/src/models/assistant_agent_learning.rs: CONFIG_COLLECTION_NAME=assistant_agent_learning, MEMBERS_COLLECTION_NAME=assistant_agent_learning_members, RUNS_COLLECTION_NAME=assistant_agent_learning_runs, PROPOSALS_COLLECTION_NAME=assistant_agent_learning_proposals, REJECTIONS_COLLECTION_NAME=assistant_agent_learning_rejections, ROOTS_COLLECTION_NAME=assistant_agent_learning_skill_roots, PUBLICATION_TARGETS_COLLECTION_NAME=assistant_learning_publication_targets, MIGRATIONS_COLLECTION_NAME=assistant_learning_migrations, AUTHORED_CLAIMS_COLLECTION_NAME=assistant_authored_draft_claims | actor_id, member_user_id, owner_id
 backend/src/models/assistant_attachment.rs: COLLECTION_NAME=assistant_attachments | user_id
@@ -741,7 +745,7 @@ startup awaits a large-collection build and may be delayed. Pre-build with:
 db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"assistant_messages_account_export"});
 ```
 
-The message index joins the 15 erasure indexes above. Upgrade tests allow
+The message index joins the 17 erasure indexes above. Upgrade tests allow
 precisely the declared additions and preserve the previous
 index set, including on an older-replica startup.
 
@@ -765,7 +769,7 @@ db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_expor
 db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
 ```
 
-The additive rollout comprises 15 erasure indexes and six export indexes. Existing definitions remain untouched; the upgrade tests compare
+The additive rollout comprises 17 erasure indexes and six export indexes. Existing definitions remain untouched; the upgrade tests compare
 all definitions before/after and replay the old startup fixture afterward.
 
 

@@ -538,10 +538,17 @@ pub(crate) fn inventory_owner_fields(
     }
 
     let mut fields = std::collections::BTreeMap::new();
-    for (collection, filter) in inventory(owner) {
+    let acl_filter = super::super::org_agent_service::member_list_filter(owner);
+    for (collection, filter) in inventory(owner)
+        .into_iter()
+        .chain([(crate::models::assistant_agent::COLLECTION_NAME, acl_filter)])
+    {
         let mut row = std::collections::BTreeSet::new();
         collect(&bson::Bson::Document(filter), None, owner, &mut row);
-        fields.insert(collection, row);
+        fields
+            .entry(collection)
+            .or_insert_with(std::collections::BTreeSet::new)
+            .extend(row);
     }
     fields
 }
@@ -1198,7 +1205,16 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
     if !clear {
         return Ok(false);
     }
-    if redact_shared(&db, &job.user_id).await? {
+    if redact_page(
+        &db,
+        &job.user_id,
+        crate::models::assistant_agent::COLLECTION_NAME,
+        super::super::org_agent_service::member_list_filter(&job.user_id),
+        super::super::org_agent_service::prune_member_update(&job.user_id),
+    )
+    .await?
+        || redact_shared(&db, &job.user_id).await?
+    {
         return Ok(false);
     }
     if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
@@ -1441,7 +1457,8 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
     let result:AppResult<bool>=async {
         if !remote_cleanup_clear(db,&job.user_id,&mut tx).await? {return Ok(false);}
         if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]}).session(&mut tx).await?.is_some() {return Ok(false);}
-        for (collection,filter) in inventory(&job.user_id) {
+        let acl_filter = super::super::org_agent_service::member_list_filter(&job.user_id);
+        for (collection,filter) in inventory(&job.user_id).into_iter().chain([(crate::models::assistant_agent::COLLECTION_NAME, acl_filter)]) {
             if db.collection::<Document>(collection).find_one(filter).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
         }
         for spec in super::super::personal_data_registry::ATTRIBUTIONS {

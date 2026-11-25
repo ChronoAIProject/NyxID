@@ -208,11 +208,23 @@ pub async fn update_settings_as(
 
         let work:AppResult<_>=Box::pin(async {
             let binding = fence(db,channel,owner,session).await?;
-            if binding.org_specialist.is_some() {
-                super::super::org_channel_service::fence_management(db,session,&binding,&manager).await?;
+            let chat_filter = doc! {"_id":chat,"user_id":owner,"channel_id":channel,"record_scope":{"$ne":SCOPE}};
+            if let Some(org_binding) = &binding.org_specialist {
+                use super::super::org_channel_service;
+                org_channel_service::fence_management(db,session,&binding,&manager).await?;
+                let previous = db.collection::<bson::Document>(THREADS)
+                    .find_one(chat_filter.clone()).projection(doc! {"agent_id":1})
+                    .session(&mut *session).await?.ok_or_else(not_found)?;
+                let old = previous.get_str("agent_id").ok();
+                let new = update.get_document("$set").ok().and_then(|set| set.get_str("agent_id").ok());
+                let overrides = [old, new].into_iter().flatten().collect::<std::collections::BTreeSet<_>>();
+                for id in overrides {
+                    if Some(id) != binding.agent_id.as_deref() {
+                        org_channel_service::fence_binding_agent(db,session,&org_binding.org_id,id,Some(&manager)).await?;
+                    }
+                }
             }
-            let row=db.collection::<NyxbotThread>(THREADS).find_one_and_update(
-                doc! {"_id":chat,"user_id":owner,"channel_id":channel,"record_scope":{"$ne":SCOPE}},update.clone())
+            let row=db.collection::<NyxbotThread>(THREADS).find_one_and_update(chat_filter,update.clone())
                 .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(not_found)?;
             if stop_children || reassign {
                 db.collection::<NyxbotThread>(THREADS).update_many(
@@ -309,14 +321,12 @@ pub(crate) async fn relink_in_session(
             super::super::org_channel_service::fence_management(db, session, current, manager)
                 .await?;
         }
-        // A combined transaction already fenced this old binding. Its access
-        // write separately checks the new binding after this relink.
-        super::super::org_channel_service::live_doc(
+        super::super::org_channel_service::fence_binding_agent(
             db,
             session,
-            "assistant_agents",
-            doc! {"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},
-            true,
+            &binding.org_id,
+            agent,
+            Some(manager),
         )
         .await?;
         binding.revision = uuid::Uuid::new_v4().to_string();

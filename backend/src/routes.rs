@@ -2918,6 +2918,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::assistant_team::delete_agent),
         )
         .route(
+            "/nyxagent/agents/{id}/org-access",
+            get(handlers::assistant_team::get_org_access),
+        )
+        .route(
             "/nyxagent/skills/catalog",
             get(handlers::agent_skills::catalog),
         )

@@ -48,6 +48,13 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Producer's authority for a delegated result. A personal producer records the actor as owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_owner_id: Option<String>,
+    #[serde(default)]
+    pub source_org_use_revision: i64,
+    #[serde(default)]
+    pub org_use_revision: i64,
     /// Extended, JSON-quoted channel notice. Older readers receive an explicitly
     /// marked excerpt in `text` within their existing event-rendering budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -930,6 +937,9 @@ pub struct AssistantConversation {
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
+    /// Specialist use revision at which the current thread credential was admitted.
+    #[serde(default)]
+    pub org_use_revision: i64,
     /// Actor-owned private history survives withdrawal of personal-agent sharing.
     #[serde(default)]
     pub shared_agent_thread: bool,
@@ -1003,6 +1013,16 @@ impl AssistantConversation {
             .as_ref()
             .filter(|fence| fence.api_key_id == self.credential_api_key_id)
             .map_or(0, |fence| fence.min_state_version)
+    }
+
+    pub(crate) fn owns_agent(&self, agent_id: &str) -> bool {
+        self.agent_id.as_deref() == Some(agent_id)
+            && self
+                .agent_owner_id
+                .as_ref()
+                .is_none_or(|owner| owner == &self.user_id)
+            && !self.shared_agent_thread
+            && self.collaboration.is_none()
     }
 
     pub fn is_subagent(&self) -> bool {

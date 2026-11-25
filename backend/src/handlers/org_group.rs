@@ -69,6 +69,7 @@ pub(crate) async fn post(
         )
         .await?;
     let request = GroupRequest {
+        org_use_revisions: Default::default(),
         execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
             channel_source: None,
             version: 1,
@@ -188,6 +189,20 @@ async fn run_member(
     let agent = groups::resolve_agents(&state.db, &access.group.user_id, &[agent_id.into()])
         .await?
         .remove(0);
+    if !access
+        .org
+        .as_ref()
+        .is_some_and(|s| s.permits_agent(&access.actor, &agent))
+        || request
+            .org_use_revisions
+            .get(agent_id)
+            .copied()
+            .unwrap_or(0)
+            != agent.org_use_revision
+    {
+        groups::remove_pending_agent(&state.db, &request.id, agent_id).await?;
+        return Ok(true);
+    }
     let thread = Box::pin(groups::member_thread(
         &state.db,
         &state.encryption_keys,
@@ -317,6 +332,17 @@ pub(crate) async fn member_settled(
                 &access.group.member_agent_ids,
             )
             .await?;
+            let agents: Vec<_> = agents
+                .into_iter()
+                .filter(|a| {
+                    access
+                        .org
+                        .as_ref()
+                        .is_some_and(|s| s.permits_agent(&access.actor, a))
+                        && request.org_use_revisions.get(&a.id).copied().unwrap_or(0)
+                            == a.org_use_revision
+                })
+                .collect();
             let per_hour =
                 crate::services::assistant_settings_service::get(&state.db, &access.actor)
                     .await?

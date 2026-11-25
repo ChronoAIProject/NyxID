@@ -80,7 +80,10 @@ pub async fn status(
     let actor = auth.user_id.to_string();
     engine::require_enabled(&state.db, &actor).await?;
     let agent = team::agent(&state.db, &actor, &agent_id).await?;
-    crate::services::org_agent_service::require_use(&state.db, &actor, &agent).await?;
+    let acl = crate::services::org_agent_service::access(&state.db, &actor, &agent.user_id).await?;
+    if !crate::services::org_agent_service::specialist_rights(&actor, &agent, &acl).can_maintain {
+        crate::services::org_agent_service::require_use(&state.db, &actor, &agent).await?;
+    }
     Ok(Json(json!(
         review::status(&state.db, &actor, &agent_id).await?
     )))

@@ -1227,21 +1227,27 @@ pub async fn resolve_owner_access(
     };
     let effective_scope =
         crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
-    let membership_id = m.id.clone();
+    Ok(access_for_membership(m, effective_scope))
+}
 
-    Ok(match m.role {
+pub(crate) fn access_for_membership(
+    m: OrgMembership,
+    effective_scope: Option<Vec<String>>,
+) -> OwnerAccess {
+    let membership_id = m.id;
+    match m.role {
         OrgRole::Admin => OwnerAccess::AsOrgAdmin {
-            org_user_id: owner.id,
+            org_user_id: m.org_user_id,
             membership_id,
             allowed_service_ids: effective_scope,
         },
         OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
-            org_user_id: owner.id,
+            org_user_id: m.org_user_id,
             membership_id,
             role: m.role,
             allowed_service_ids: effective_scope,
         },
-    })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

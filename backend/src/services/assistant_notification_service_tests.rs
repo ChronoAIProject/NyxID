@@ -703,6 +703,7 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
     first.guest = true;
     let row = begin(&f, &f.owner, &first).await;
     let execution = crate::models::org_channel::Execution {
+        org_use_revision: 0,
         version: 1,
         org_id: org.clone(),
         revision: "rev-1".into(),
@@ -1974,6 +1975,7 @@ async fn concurrent_producers_on_one_source_yield_one_unread_row_with_the_full_c
         last_recipient_ids_by_actor: Default::default(),
         created_by: "user".into(),
         message_count: 0,
+        pending_org_use_revisions: Default::default(),
         pending_agent_ids: Vec::new(),
         hops_remaining: 0,
         followers: Vec::new(),

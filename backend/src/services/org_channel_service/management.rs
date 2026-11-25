@@ -105,6 +105,51 @@ pub(crate) async fn load(
     Ok(row)
 }
 
+/// Use one owner snapshot and one agent query for the channel page.
+pub(crate) async fn manageable_agents(
+    db: &Database,
+    actor: &str,
+    channels: &[NyxbotChannel],
+) -> AppResult<std::collections::HashSet<String>> {
+    use crate::services::org_agent_service::{owners_for_page, specialist_rights};
+    use futures::TryStreamExt;
+    let owners = channels
+        .iter()
+        .filter_map(|row| row.org_specialist.as_ref().map(|b| b.org_id.as_str()))
+        .collect();
+    let owners = owners_for_page(db, actor, owners).await?;
+    if owners.is_empty() {
+        return Ok(Default::default());
+    }
+    let pairs: std::collections::HashSet<_> = channels
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.agent_id.as_deref()?,
+                row.org_specialist.as_ref()?.org_id.as_str(),
+            ))
+        })
+        .collect();
+    let ids: Vec<_> = pairs.iter().map(|(id, _)| *id).collect();
+    let agents: Vec<AssistantAgent> = db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":ids},"kind":"specialist","destroyed_at":null})
+        .await?
+        .try_collect()
+        .await?;
+    Ok(agents
+        .into_iter()
+        .filter(|agent| {
+            pairs.contains(&(agent.id.as_str(), agent.user_id.as_str()))
+                && owners.get(&agent.user_id).is_some_and(|(acl, _)| {
+                    let rights = specialist_rights(actor, agent, acl);
+                    rights.can_govern && rights.can_maintain
+                })
+        })
+        .map(|agent| agent.id)
+        .collect())
+}
+
 pub(crate) struct GuestViewInputs {
     pub(crate) ready: bool,
     admin: bool,
@@ -131,14 +176,14 @@ pub(crate) async fn view_inputs(
             .projection(doc! { "_id": 1 })
             .await?
             .is_some();
-    let admin = matches!(
-        access,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
-    );
     let agent = db
         .collection::<AssistantAgent>("assistant_agents")
         .find_one(doc! {"_id":&row.agent_id,"user_id":&b.org_id,"destroyed_at":null})
         .await?;
+    let admin = agent.as_ref().is_some_and(|a| {
+        let rights = crate::services::org_agent_service::specialist_rights(actor, a, &access);
+        rights.can_govern && rights.can_maintain
+    });
     let services = match agent.as_ref() {
         Some(agent) => guest_services(db, agent).await?,
         None => Vec::new(),

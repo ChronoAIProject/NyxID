@@ -138,7 +138,7 @@ pub(crate) async fn activate(
             let row=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&id,"user_id":&owner_id,"status":"pending"})
                 .session(&mut *session).await?.ok_or_else(conflict)?;
             super::platform_bot_authority::fence_personal_routes(&db,&row.channel_bot_id,owner(&row),session).await?;
-            if row.org_specialist.is_some() {super::org_channel_service::fence_management(&db,session,&row,&row.user_id).await?;}
+            if row.org_specialist.is_some() {super::org_channel_service::fence_binding_authority(&db,session,&row,&row.user_id,false).await?;}
             if db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"channel_bot_id":&row.channel_bot_id,"status":"active","_id":{"$ne":&row.id}})
                 .session(&mut *session).await?.is_some() {return Err(conflict());}
             // Serialize with route retirement and key invalidation.
@@ -215,8 +215,14 @@ pub(crate) async fn restore_existing(
                     .await?;
                 }
                 if row.org_specialist.is_some() {
-                    super::org_channel_service::fence_management(&db, session, &row, &row.user_id)
-                        .await?;
+                    super::org_channel_service::fence_binding_authority(
+                        &db,
+                        session,
+                        &row,
+                        &row.user_id,
+                        false,
+                    )
+                    .await?;
                 }
                 let row = super::nyxbot_channel_query_service::fence_meta_default(
                     &db,

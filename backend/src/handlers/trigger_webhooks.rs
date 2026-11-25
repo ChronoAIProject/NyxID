@@ -248,6 +248,7 @@ mod tests {
                 None
             };
         let trigger = Trigger {
+            assistant_target_owner: None,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,

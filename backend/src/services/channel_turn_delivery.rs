@@ -430,6 +430,14 @@ pub(crate) async fn enqueue_in_session(
     // Transaction retries must revalidate the original unaccepted
     // origin. Never leak queued=true from an aborted attempt.
     let mut event = incoming.clone();
+    if let Some(member) = event
+        .reply_to
+        .first()
+        .and_then(|o| o.org_execution.as_deref())
+        .filter(|e| !e.guest)
+    {
+        event.org_use_revision = member.org_use_revision;
+    }
     let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
     let mut row = rows
         .find_one(doc! {"_id": &conversation, "user_id": &owner})

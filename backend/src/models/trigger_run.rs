@@ -32,6 +32,10 @@ impl RunOutcome {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_specialist_owner_id: Option<String>,
+    #[serde(default)]
+    pub org_use_revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<super::assistant_message::WorkEvidence>,
