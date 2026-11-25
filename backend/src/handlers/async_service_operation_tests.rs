@@ -617,6 +617,15 @@ async fn nyxbot_native_and_mcp_cma_calls_share_the_turn_authentication_refusal()
     use crate::services::{
         assistant_service_execution::cma::AuthenticationRefusal, feature_flag_service as flags,
     };
+    async fn refusal(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+        let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text.strip_prefix("Error (401): ").unwrap_or(text)).unwrap()
+    }
 
     let a = cma_existing_agent_fixture().await;
     let db = &a.f.state.db;
@@ -652,7 +661,7 @@ async fn nyxbot_native_and_mcp_cma_calls_share_the_turn_authentication_refusal()
             .unwrap();
     assert!(!independent_refusal.already_refused(db).await.unwrap());
     let response = call(&a.f, &auth, "sandbox__list_cma_agents", json!({})).await;
-    assert_eq!(result(response, true).await, expected);
+    assert_eq!(refusal(response).await, expected);
     assert_eq!(*a.calls.lock().unwrap(), ["/api/v1/sandboxes/sbx_coffee"]);
 
     db.collection::<bson::Document>(CONVERSATIONS)
@@ -664,17 +673,9 @@ async fn nyxbot_native_and_mcp_cma_calls_share_the_turn_authentication_refusal()
         .unwrap();
     let next = authenticate(&a.f).await;
     let response = direct_call(&a.f, &next, "sandbox__list_cma_agents", json!({})).await;
-    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
-        .await
-        .unwrap();
-    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
-    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(text.strip_prefix("Error (401): ").unwrap_or(text)).unwrap(),
-        expected
-    );
+    assert_eq!(refusal(response).await, expected);
     let native = direct_call(&a.f, &next, "nyxid__list_cma_resources", json!({})).await;
-    assert_eq!(result(native, true).await, expected);
+    assert_eq!(refusal(native).await, expected);
     assert_eq!(
         *a.calls.lock().unwrap(),
         ["/api/v1/sandboxes/sbx_coffee", "/api/v1/agents"]
