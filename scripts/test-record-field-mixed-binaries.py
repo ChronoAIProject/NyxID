@@ -34,6 +34,8 @@ def main():
                         help="replay a retained setup at its loopback gateway on both server revisions")
     parser.add_argument("--cma-requests", action="store_true",
                         help="exchange both request copies across two dual-reader revisions")
+    parser.add_argument("--learning-writers", action="store_true",
+                        help="exchange learning proposals with the reader-preparation binary")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -108,6 +110,30 @@ def main():
             run(reader, "read", fixture)
         # Keep a populated legacy row for strict-mode and transition checks.
         run("base", "write", "old")
+        if args.learning_writers:
+            run("base", "write", "base-on", writes=True)
+            run("candidate", "read", "base-on", writes=True)
+            run("candidate", "reject", "old", writes=True, legacy=False)
+            run("candidate", "migrate", "old", writes=True)
+            run("base", "read", "old", legacy=False)
+            run("candidate", "read", "old", legacy=False)
+            run("candidate", "write", "current", writes=True)
+            for side in ["base", "candidate"]:
+                run(side, "read", "current", writes=True, legacy=False)
+                run(side, "read", "current", legacy=False)
+            run("candidate", "replace", "current", writes=True)
+            run("base", "read", "current", legacy=False)
+            run("base", "replace", "current")
+            run("candidate", "read", "current")
+            run("candidate", "replace", "current", writes=True)
+            run("candidate", "clear", "current")
+            run("base", "read", "current", legacy=False)
+            registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+            for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                run(writer, "registry-write", "generation", writes=True, test=registry)
+                run(writer, "registry-live", "generation", writes=True, test=registry)
+                run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
         if args.cma_requests:
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                 run(writer, "write", "active", writes=True)

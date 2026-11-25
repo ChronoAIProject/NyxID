@@ -5,7 +5,7 @@ use crate::{
     },
     services::{
         assistant_authority_tests::{Fixture, orchestrator_fixture},
-        assistant_learning_publication as publication,
+        assistant_learning_publication as publication, assistant_learning_record as record,
         feature_flag_service::FlagTarget,
     },
 };
@@ -77,16 +77,6 @@ pub(crate) async fn contextualize(
         );
         parent.insert(marker, 3_i32);
     }
-}
-
-async fn install_contextual(f: &Fixture, id: &str) {
-    let rows = f
-        .state
-        .db
-        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
-    let mut raw = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
-    contextualize(&f.state.encryption_keys, &mut raw).await;
-    rows.replace_one(doc! {"_id":id}, raw).await.unwrap();
 }
 
 fn input(agent: &str) -> Value {
@@ -170,8 +160,17 @@ async fn make_with_access(
     value: Value,
     owner_reader: bool,
 ) -> (AssistantAgentLearningProposal, AssistantAcknowledgement) {
+    make_in_state(f, &f.state, value, owner_reader).await
+}
+
+async fn make_in_state(
+    f: &Fixture,
+    state: &crate::AppState,
+    value: Value,
+    owner_reader: bool,
+) -> (AssistantAgentLearningProposal, AssistantAcknowledgement) {
     let reader = crate::handlers::agent_skills::Reader {
-        state: &f.state,
+        state,
         person: &f.owner,
         thread_key: if owner_reader {
             None
@@ -182,7 +181,7 @@ async fn make_with_access(
         chat: (!owner_reader).then(|| std::sync::Arc::new(f.chat.clone())),
     };
     let result = create(
-        &f.state,
+        state,
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
@@ -674,14 +673,9 @@ async fn active_publication_refuses_reject_and_edit() {
         })
         .await
         .unwrap();
-    let edited: Value = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let edited: Value =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     for (status, started, uncertain, verified, expiry) in [
         (
             "pending",
@@ -1415,20 +1409,13 @@ async fn mount_publication(
     verb: &str,
 ) {
     let p = row.publication.as_ref().unwrap();
-    let bytes = f
-        .state
-        .encryption_keys
-        .decrypt(&row.body_encrypted)
-        .await
-        .unwrap();
+    let bytes = record::body(&f.state.encryption_keys, row).await.unwrap();
     let draft: GeneratedProposal = serde_json::from_slice(&bytes).unwrap();
-    let snapshot: Option<publication::InterfaceSnapshot> = match &p.interface_encrypted {
-        Some(encrypted) => Some(
-            serde_json::from_slice(&f.state.encryption_keys.decrypt(encrypted).await.unwrap())
-                .unwrap(),
-        ),
-        None => None,
-    };
+    let snapshot: Option<publication::InterfaceSnapshot> =
+        record::interface(&f.state.encryption_keys, row, p)
+            .await
+            .unwrap()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap());
     let archive = publication::package_with_snapshot(
         &draft,
         &p.operation_id,
@@ -1486,14 +1473,9 @@ async fn crash_revision(
     let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
     let skill_id = Uuid::new_v4().to_string();
     let base_p = base.publication.as_ref().unwrap();
-    let base_draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&base.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let base_draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &base).await.unwrap())
+            .unwrap();
     let base_bytes = publication::package_with_snapshot(
         &base_draft,
         &base_p.operation_id,
@@ -1630,19 +1612,13 @@ async fn allowed_card(f: &Fixture, card: &AssistantAcknowledgement) -> Assistant
 
 async fn publication_bytes(f: &Fixture, row: &AssistantAgentLearningProposal) -> Vec<u8> {
     let p = row.publication.as_ref().unwrap();
-    let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, row).await.unwrap())
+            .unwrap();
     let snapshot: publication::InterfaceSnapshot = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(p.interface_encrypted.as_ref().unwrap())
+        &record::interface(&f.state.encryption_keys, row, p)
             .await
+            .unwrap()
             .unwrap(),
     )
     .unwrap();
@@ -1917,14 +1893,9 @@ async fn base_verify_integrity_failures_keep_source_review_code() {
         } else {
             owner.to_owned()
         };
-        let draft: GeneratedProposal = serde_json::from_slice(
-            &f.state
-                .encryption_keys
-                .decrypt(&row.body_encrypted)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let draft: GeneratedProposal =
+            serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+                .unwrap();
         let base_hash = draft.base_skill.as_ref().unwrap().sha256.clone();
         Mock::given(method("POST"))
             .and(path("/api/v1/skill-format/validate"))
@@ -2441,14 +2412,9 @@ async fn new_skill_check_finds_the_exact_version_after_a_lost_create_response() 
             "guid":id,"name":p.name,"version":p.version,"skillHash":p.sha256,
             "isPrivate":true,"createdBy":f.owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]
         }}))).expect(1).mount(&server).await;
-    let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     let archive =
         publication::package_with_snapshot(&body, &p.operation_id, &p.name, &p.version, None)
             .unwrap();
@@ -2781,19 +2747,13 @@ async fn two_authored_drafts_cannot_publish_the_same_update_target_after_uncerta
         .unwrap();
     assert!(finish(&f, allowed.clone(), true).await.is_err());
     let p = held.publication.as_ref().unwrap();
-    let draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&held.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &held).await.unwrap())
+            .unwrap();
     let snapshot: publication::InterfaceSnapshot = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(p.interface_encrypted.as_ref().unwrap())
+        &record::interface(&f.state.encryption_keys, &held, p)
             .await
+            .unwrap()
             .unwrap(),
     )
     .unwrap();
@@ -2828,14 +2788,9 @@ async fn interface_refusal_releases_barrier_and_requires_a_revised_draft() {
     let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
     let base_p = base.publication.as_ref().unwrap();
-    let base_draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&base.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let base_draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &base).await.unwrap())
+            .unwrap();
     let base_bytes = publication::package_with_snapshot(
         &base_draft,
         &base_p.operation_id,
@@ -2949,14 +2904,9 @@ async fn released_target_is_claimed_by_second_draft_and_old_retry_reports_target
     let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
     let base_p = base.publication.as_ref().unwrap();
-    let base_draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&base.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let base_draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &base).await.unwrap())
+            .unwrap();
     let base_bytes = publication::package_with_snapshot(
         &base_draft,
         &base_p.operation_id,
@@ -5291,10 +5241,7 @@ async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
     assert_eq!(proposal.status, "pending");
     assert!(proposal.scope_encrypted.is_none());
     assert!(proposal.scope_digest.is_none());
-    let encoded = f
-        .state
-        .encryption_keys
-        .decrypt(&proposal.body_encrypted)
+    let encoded = record::body(&f.state.encryption_keys, &proposal)
         .await
         .unwrap();
     let mut mac =
@@ -5307,9 +5254,7 @@ async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
         hex::encode(mac.finalize().into_bytes())
     );
     let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&proposal.body_encrypted)
+        &record::body(&f.state.encryption_keys, &proposal)
             .await
             .unwrap(),
     )
@@ -5355,10 +5300,7 @@ async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
         .await
         .unwrap()
         .unwrap();
-    let encoded = f
-        .state
-        .encryption_keys
-        .decrypt(&saved.body_encrypted)
+    let encoded = record::body(&f.state.encryption_keys, &saved)
         .await
         .unwrap();
     let expected =
@@ -5537,14 +5479,9 @@ async fn top_level_files_are_reviewed_and_packaged_under_references() {
         {"path":"assets/notes.txt","content":"Plain notes."}
     ]);
     let (row, _card) = make(&f, value).await;
-    let draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     let paths: Vec<_> = draft.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(paths, ["references/faq.md", "assets/notes.txt"]);
     let archive =
@@ -5872,6 +5809,7 @@ async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
     let mut old_row = row.clone();
     old_row.scope_digest = None;
     old_row.scope_encrypted = None;
+    old_row.scope_context_version = None;
     let old_binding = publication::binding(&old_row, p, p.skills_revision);
     assert!(old_binding.get("scope_digest").is_none());
     assert_ne!(
@@ -6007,14 +5945,9 @@ async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
     .await
     .unwrap();
     assert_ne!(complete["proposal_id"], result["proposal_id"]);
-    let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     review::edit(
         &f.state,
         &f.owner,
@@ -6086,7 +6019,7 @@ async fn reduced_scope_publication_requires_consent_and_pins_with_metadata_audit
     let (row, card) = make(&f, value).await;
     let skill_id = Uuid::new_v4().to_string();
     mount_publication(&f, &server, &row, &skill_id, "POST").await;
-    install_contextual(&f, &row.id).await;
+    assert_eq!(row.body_context_version, Some(3));
     assert!(finish(&f, card.clone(), true).await.is_err());
     assert!(
         server
@@ -6619,7 +6552,7 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
             .unwrap(),
     ] {
         f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"scope_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes}}}).await.unwrap();
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"scope_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes}}, "$unset":{"scope_context_version":""}}).await.unwrap();
         let preview =
             review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &card.id)
                 .await
@@ -6632,7 +6565,7 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
         .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
         .update_one(
             doc! {"_id":&row.id},
-            doc! {"$unset":{"scope_encrypted":"","scope_digest":""}},
+            doc! {"$unset":{"scope_encrypted":"","scope_context_version":"","scope_digest":""}},
         )
         .await
         .unwrap();
@@ -6648,14 +6581,9 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
 async fn relocated_authored_package_records_postapproval_failure_and_clears_rules_after_edit() {
     let f = fixture("authoring_legacy_root_preclaim").await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
-    let mut body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let mut body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     let server = setup_ornn(&f).await;
     // The root path is relocated before review, preserving main's released contract.
     assert_eq!(
@@ -7307,4 +7235,95 @@ async fn specialist_draft_recovery_preserves_assigned_routing_across_a_direct_tu
         1
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn learning_rewrap_loses_to_edit_publication_pin_and_erasure() {
+    for action in ["edit", "publish_and_pin", "erase"] {
+        let mut f = fixture("learning_storage_race").await;
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        f.state.encryption_keys = std::sync::Arc::new(legacy);
+        let server = setup_ornn(&f).await;
+        let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+        let rows = f
+            .state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+        let selector = doc! {"_id": &row.id, "owner_id": &row.owner_id};
+        let original = rows.find_one(selector.clone()).await.unwrap().unwrap();
+        f.state.encryption_keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
+        let (keys, pause) = crate::services::record_field_service::tests::pause_first_wrap();
+        let rewrap = record::storage::migrate(&f.state.db, &keys, &original);
+        let writer = async {
+            pause.entered.notified().await;
+            assert!(record::storage::verify(&keys, &original).await.is_err());
+            match action {
+                "edit" => {
+                    let plain = record::body(&keys, &row).await.unwrap();
+                    let mut draft: Value = serde_json::from_slice(&plain).unwrap();
+                    draft["description"] = json!("Revised by the owner");
+                    review::edit(
+                        &f.state,
+                        &f.owner,
+                        &row.agent_id,
+                        &row.id,
+                        row.revision,
+                        &draft,
+                    )
+                    .await
+                    .unwrap();
+                }
+                "publish_and_pin" => {
+                    mount_publication(&f, &server, &row, &Uuid::new_v4().to_string(), "POST").await;
+                    Box::pin(finish(&f, card, true)).await.unwrap();
+                    let pinned = stored(&f, &row.id).await;
+                    assert_eq!(pinned.status, "pinned");
+                    assert!(
+                        pinned.body_encrypted.is_empty() && pinned.body_context_version.is_none()
+                    );
+                }
+                "erase" => {
+                    assert_eq!(
+                        rows.delete_one(selector.clone())
+                            .await
+                            .unwrap()
+                            .deleted_count,
+                        1
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let winner = rows.find_one(selector.clone()).await.unwrap();
+            pause.release.notify_one();
+            winner
+        };
+        let (changed, winner) = tokio::join!(Box::pin(rewrap), Box::pin(writer));
+        assert!(!changed.unwrap());
+        assert!(rows.find_one(selector.clone()).await.unwrap() == winner);
+        if let Some(winner) = winner {
+            assert!(
+                record::storage::migrate(&f.state.db, &keys, &winner)
+                    .await
+                    .unwrap()
+            );
+            let current = rows.find_one(selector).await.unwrap().unwrap();
+            record::storage::verify(&keys, &current).await.unwrap();
+            if action == "publish_and_pin" {
+                assert!(
+                    !current.contains_key("body_encrypted")
+                        && !current.contains_key("body_context_version")
+                );
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/v1/skills")
+                        .count(),
+                    1
+                );
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    }
 }
