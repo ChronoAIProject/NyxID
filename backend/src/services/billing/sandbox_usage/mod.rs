@@ -7,6 +7,8 @@ mod types;
 mod validation;
 
 #[cfg(test)]
+mod chain_tests;
+#[cfg(test)]
 mod contract_tests;
 #[cfg(test)]
 mod correction_tests;
