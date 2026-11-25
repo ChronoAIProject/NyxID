@@ -1,9 +1,11 @@
 # NyxID spec index: which spec governs which code.
 #
 # Agents: this file is short. Read it and pick every area with a `governs`
-# pattern that matches the path you are editing, then read that area's specs.
-# A path can match more than one area. Patterns use git's default pathspec
-# matching, where `*` matches any characters including `/`; to test one:
+# pattern that matches the path you are editing, then use each spec's `covers`
+# line to choose what to read. If several areas match, start with the most
+# specific pattern (for example `assistant_cma_*` before `assistant_*`).
+# Patterns use git's default pathspec matching, where `*` matches any
+# characters including `/`; to test one:
 #   git ls-files -- '<pattern>' | grep -Fx '<your path>'
 #
 # Human-readable version: docs/README.md. How to keep specs current:
@@ -14,25 +16,26 @@
 #   area         short area label (also the owner label)
 #   specs        governing documents; `role` is reference (current behaviour,
 #                edited in place), design (why; frozen), runbook (operations)
-#                or guide (tasks)
+#                or guide (tasks); `covers` says what to read it for
 #   governs      git pathspec patterns (`*` matches any characters, including `/`);
-#                the nightly check runs `git log -- <pattern>` with them
+#                the nightly check runs `git log -- '<pattern>'` with them
 #   verified_at  last commit at which the specs were checked against the code
 #   input_of     docs that code, tests or the frontend build read directly
 #                (edit with care; run the named consumer)
 
 version: 1
+registries_verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
 areas:
   - area: nyxbot
     title: NyxBot (NyxAgent engine, agents, groups, shared agents)
     status: current
     specs:
-      - { doc: docs/chat/08-nyxagent-engine.md, role: reference }
-      - { doc: docs/chat/09-nyxbot-orchestrator.md, role: design }
-      - { doc: docs/chat/12-shared-agents-and-groups.md, role: reference }
-      - { doc: docs/NYXBOT_SERVICE_EXECUTION.md, role: reference }
-      - { doc: docs/NYXBOT_FIRST_RUN.md, role: reference }
+      - { doc: docs/chat/08-nyxagent-engine.md, role: reference, covers: "engine contract: turns, credentials, access modes, acknowledgements, account tools, route table, turn survival, tool images, model selection, feedback" }
+      - { doc: docs/chat/09-nyxbot-orchestrator.md, role: design, covers: "NyxBot team and channel design: specialists, groups, channel links, guests, org-specialist bindings, gateway provider" }
+      - { doc: docs/chat/12-shared-agents-and-groups.md, role: reference, covers: "shared agents and collaboration groups: sharing, consent, billing lanes, rollout" }
+      - { doc: docs/NYXBOT_SERVICE_EXECUTION.md, role: reference, covers: "how NyxBot selects and executes connected services, including fallback" }
+      - { doc: docs/NYXBOT_FIRST_RUN.md, role: reference, covers: "first-run onboarding: interests, suggestions, routes" }
     governs:
       - backend/src/services/assistant_*
       - backend/src/handlers/assistant_*
@@ -40,19 +43,21 @@ areas:
       - backend/src/services/nyxbot_*
       - backend/src/handlers/nyxbot*
       - frontend/src/components/assistant/*
-    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+    verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
   - area: channels
     title: Channel bots (relay, Agent Event Gateway, platform adapters)
     status: current
     specs:
-      - { doc: docs/CHANNEL_BOT_RELAY.md, role: reference }
-      - { doc: docs/CHANNEL_EVENT_GATEWAY.md, role: reference }
-      - { doc: docs/CHANNEL_THREAD_FOLLOW.md, role: reference }
-      - { doc: docs/CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md, role: reference }
-      - { doc: docs/TELEGRAM_NEW.md, role: reference }
-      - { doc: docs/PLATFORM_BOTFATHER.md, role: reference }
-      - { doc: docs/AURINKO_INTEGRATION.md, role: reference }
+      - { doc: docs/CHANNEL_BOT_RELAY.md, role: reference, covers: "relay architecture, routes, adapters and capabilities, callbacks and reply tokens, health, bot connection links, WhatsApp/X/Discord specifics" }
+      - { doc: docs/CHANNEL_EVENT_GATEWAY.md, role: reference, covers: "device-event ingress (/channel-events) and NyxBot as the Agent Event Gateway provider" }
+      - { doc: docs/CHANNEL_COMPLETE_REPLIES.md, role: reference, covers: "agent relay reply bounds and splitting (/channel-relay/reply)" }
+      - { doc: docs/CHANNEL_ACTIVITY.md, role: reference, covers: "channel activity and inbound admission" }
+      - { doc: docs/CHANNEL_THREAD_FOLLOW.md, role: reference, covers: "thread follow per platform" }
+      - { doc: docs/CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md, role: reference, covers: "thread-follow contract with the gateway" }
+      - { doc: docs/TELEGRAM_NEW.md, role: reference, covers: "managed Telegram, manager bots, full saved reply delivery (64-part rule for NyxBot posts)" }
+      - { doc: docs/PLATFORM_BOTFATHER.md, role: reference, covers: "shared BotFather help publications" }
+      - { doc: docs/AURINKO_INTEGRATION.md, role: reference, covers: "Aurinko email channel and service" }
     governs:
       - backend/src/services/channel_*
       - backend/src/services/channel_adapters/*
@@ -64,52 +69,68 @@ areas:
       - backend/src/handlers/telegram_*
       - backend/src/services/whatsapp_native*
       - backend/src/services/org_channel_service*
-    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+    verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
   - area: automations
     title: Automations (triggers, webhook and schedule sources)
     status: current
     specs:
-      - { doc: docs/NYXBOT_SCHEDULES.md, role: reference }
-      - { doc: docs/API.md, role: reference }  # section "Inbound Triggers"
+      - { doc: docs/NYXBOT_SCHEDULES.md, role: reference, covers: "automations: sources, deliveries, budgets, schedules, coordinator completion, run history, limits" }
+      - { doc: docs/API.md, role: reference, covers: "section Inbound Triggers: routes, credentials, ingress, per-target dedup" }
     governs:
       - backend/src/services/trigger_*
       - backend/src/handlers/trigger*
       - backend/src/models/trigger*
       - backend/src/handlers/assistant_schedules.rs
-    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+    verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
   - area: notifications
-    title: Notifications (NyxBot feed, push, approvals delivery)
+    title: Notifications (NyxBot feed and push)
     status: current
     specs:
-      - { doc: docs/chat/12-notifications.md, role: reference }
-      - { doc: docs/MOBILE_APP_INTEGRATION.md, role: reference }
-      - { doc: docs/API.md, role: reference }  # notification settings, device tokens, approvals
+      - { doc: docs/chat/12-notifications.md, role: reference, covers: "NyxBot notification feed, bell, push preferences and push delivery" }
+      - { doc: docs/MOBILE_APP_INTEGRATION.md, role: reference, covers: "device tokens, push payloads and the push type table, notification settings" }
+      - { doc: docs/API.md, role: reference, covers: "notification settings and device-token routes" }
     governs:
       - backend/src/services/assistant_notification_service*
       - backend/src/services/notification_service*
       - backend/src/handlers/assistant_notifications.rs
       - backend/src/handlers/notifications.rs
       - backend/src/handlers/device_tokens.rs
-      - backend/src/handlers/approvals.rs
-      - backend/src/services/approval_service.rs
       - backend/src/models/assistant_notification.rs
       - backend/src/models/notification_channel.rs
       - mobile/src/lib/notifications/*
       - mobile/src/features/notifications/*
-    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+    verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
+
+  - area: approvals
+    title: Approvals (proxy approvals, execution permissions, approval delivery)
+    status: current
+    specs:
+      - { doc: docs/EXECUTION_PERMISSIONS.md, role: reference, covers: "execution permissions: proposals, enrollment, async approval, resume" }
+      - { doc: docs/GRANULAR_APPROVALS_DESIGN.md, role: design, covers: "exact-service approval digests and grants" }
+      - { doc: docs/API.md, role: reference, covers: "Transaction Approval on the proxy, approval routes, error codes 7000 and 7001" }
+      - { doc: docs/MOBILE_APP_INTEGRATION.md, role: reference, covers: "approval pushes and the mobile approval sequence" }
+      - { doc: docs/site/shared/concepts/approvals.md, role: guide, covers: "approval concepts for users" }
+      - { doc: docs/site/ai/guides/approvals-for-agents.md, role: guide, covers: "how agents handle 7000/7001 and status polling" }
+    governs:
+      - backend/src/services/approval_*
+      - backend/src/handlers/approval*
+      - backend/src/models/approval_*
+      - backend/src/services/execution_permission_*
+      - backend/src/handlers/execution_permission*
+    verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
   - area: sandboxes
     title: Sandboxes (CMA sandboxes, remote machines, sandbox billing, generated files)
     status: current
     specs:
-      - { doc: docs/chat/12-cma-sessions.md, role: reference }
-      - { doc: docs/superpowers/specs/2026-11-04-cma-worker-v1-design.md, role: design }
-      - { doc: docs/CMA_BILLING.md, role: reference }
-      - { doc: docs/REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md, role: reference }
-      - { doc: docs/REMOTE_MACHINE_DELETE_RECOVERY.md, role: runbook }
-      - { doc: docs/chat/10-uploads.md, role: reference }  # section "Generated Sandbox files"
+      - { doc: docs/chat/12-cma-sessions.md, role: reference, covers: "CMA sandboxes and sessions: slots, reservations, management routes, refusal reference" }
+      - { doc: docs/superpowers/specs/2026-11-04-cma-worker-v1-design.md, role: design, covers: "CMA worker v1 design" }
+      - { doc: docs/CMA_BILLING.md, role: reference, covers: "sandbox billing: rate cards, quotes, funded windows, exclusions" }
+      - { doc: docs/REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md, role: reference, covers: "hosted remote machines: owner reads, deletion policy, recovery contracts" }
+      - { doc: docs/REMOTE_MACHINE_DELETE_RECOVERY.md, role: runbook, covers: "remote-machine deletion and recovery" }
+      - { doc: docs/chat/10-uploads.md, role: reference, covers: "section Generated Sandbox files: retention and encryption" }
     governs:
       - backend/src/services/assistant_cma_*
       - backend/src/handlers/assistant_cma_*
@@ -119,7 +140,7 @@ areas:
       - backend/src/services/billing/sandbox_*
       - backend/src/services/generated_artifacts/*
       - deploy/remote-machine/*
-    verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
+    verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
 registries:
   - { code: backend/src/routes.rs, spec: docs/API.md, holds: routes }
@@ -143,9 +164,9 @@ input_of:
 not_yet_indexed:
   - { area: auth-and-login, start_with: [docs/ADR-015-auth-device-login.md, docs/DEVICE_LOGIN_PROTOCOL.md] }
   - { area: billing, start_with: [docs/BILLING_EXACT_ACCOUNTING.md, docs/BILLING_OPERATIONS.md, docs/PLATFORM_KEYS_AND_INFERENCE.md] }
-  - { area: catalog-and-services, start_with: [docs/API_DISCOVERY.md, docs/AI_SERVICES_ARCHITECTURE.md, docs/CATALOG_MANAGER.md, docs/TOOLS.md] }
+  - { area: catalog-services-and-proxy, start_with: [docs/API_DISCOVERY.md, docs/AI_SERVICES_ARCHITECTURE.md, docs/CATALOG_MANAGER.md, docs/TOOLS.md, docs/PROXY_STREAMING_ARCHITECTURE.md] }
   - { area: agent-keys-and-isolation, start_with: [docs/AGENT_ISOLATION.md, docs/AGENT_OPERATION_SCOPES.md, docs/SERVICE_ACCOUNTS.md] }
   - { area: nodes-and-machines, start_with: [docs/NODE_PROXY_ARCHITECTURE.md, docs/MACHINE_NODES.md, docs/NYXID_NODE.md, docs/SSH_NODE_KEY_AUTH.md] }
-  - { area: oauth-and-security, start_with: [docs/OIDC.md, docs/security/OAUTH_AUTHORITY_ROLLOUT.md, docs/SECURITY_ROLLOUT_READINESS.md, docs/EXECUTION_PERMISSIONS.md] }
+  - { area: oauth-and-security, start_with: [docs/OIDC.md, docs/security/OAUTH_AUTHORITY_ROLLOUT.md, docs/SECURITY_ROLLOUT_READINESS.md] }
   - { area: plugins, start_with: [docs/PLUGINS.md] }
   - { area: deployment, start_with: [docs/DEPLOYMENT.md, docs/ENV.md] }

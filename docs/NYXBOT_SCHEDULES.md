@@ -309,8 +309,8 @@ assume, that schedules and triggers do not slow NyxID or NyxBot down:
   resume, and each run's outcome. No instruction text or payloads in audit or
   logs.
 - **Errors.** Reuse the trigger error block (11600–11606). Add codes there, or
-  in a new reserved block, and update CLAUDE.md's table.
-- **Docs.** Update CLAUDE.md (Triggers rule, NyxAgent paragraph, key routes),
+  in a new reserved block, and update the error-code table in `AGENTS.md` (Critical Rule 3).
+- **Docs.** Update `AGENTS.md` (Triggers rule, NyxAgent paragraph, key routes),
   `docs/chat/09-nyxbot-orchestrator.md`, and this document.
 
 ## Acceptance

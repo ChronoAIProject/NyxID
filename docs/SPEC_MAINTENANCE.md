@@ -23,7 +23,7 @@ reviews and merges the result.
 2. **Always check the shared registries**, where most spec drift starts:
 
    ```bash
-   git log -p <last check>..origin/dev -- backend/src/routes.rs backend/src/config.rs \
+   git log -p <registries_verified_at>..origin/dev -- backend/src/routes.rs backend/src/config.rs \
      backend/src/errors/mod.rs backend/src/db.rs
    ```
 
@@ -42,7 +42,7 @@ reviews and merges the result.
    | D | Code contradicts the spec and no PR shows intent to change it | Leave the spec; list it as a candidate NyxID issue |
 
 4. **Record the check.** Set `verified_at` to the checked commit for each area
-   you reviewed, and open one docs PR: `docs: nightly spec sync YYYY-MM-DD`,
+   you reviewed and `registries_verified_at` after step 2, and open one docs PR: `docs: nightly spec sync YYYY-MM-DD`,
    listing class B fixes and class D candidates.
 
 ## Weekly: index coverage

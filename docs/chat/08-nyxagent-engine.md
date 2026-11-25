@@ -1663,7 +1663,8 @@ selected profile uses the thread's own credential (`inference_credential: thread
 not a platform key), and its lane is eligible: the owner's first-party and
 automation turns, standalone specialist assignments, member turns in personal web
 groups, owner-private chat turns and NyxBot event wakes. Guest, voice,
-shared-agent, organization and collaboration turns are never enrolled. An enrolled
+shared-agent and collaboration turns, and organization turns using shared or
+channel access, are never enrolled. An enrolled
 turn records `active_turn.restart_admission` and sends its request with
 `"background": true` under the turn's idempotency window key. If NyxAgent refuses
 background execution, or metadata discovery is unavailable, the turn runs in the
@@ -1684,8 +1685,8 @@ handoff emits a `turn.notice` with code `continued_after_restart`.
 Turn survival keeps the no-replay guarantee. The survivor sends the request again
 only when NyxAgent's answer proves the original was never admitted or never
 started (no tool dispatched). An ambiguous or unreadable outcome settles as
-`outcome_unknown`; an execution NyxAgent reports as lost settles as
-`executor_lost`. A claim after the turn deadline settles as `turn_timeout` or
+`outcome_unknown`; an execution NyxAgent reports as lost (upstream code
+`executor_lost`) also settles as `outcome_unknown`. A claim after the turn deadline settles as `turn_timeout` or
 `queue_timeout` (or `outcome_unknown` while upstream work may still run) and
 requests upstream cancellation; a revoked credential settles as
 `credential_invalid`. Turns that are not enrolled keep the stale-heartbeat,

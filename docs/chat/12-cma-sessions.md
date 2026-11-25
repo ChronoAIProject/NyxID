@@ -606,6 +606,11 @@ exact current text; `{login_url}` is the only variable part.
 | Not found | `Sandbox not found`, `Sandbox was not created through NyxID` | No NyxID-created Sandbox matches. |
 | Not found | `CMA Agent not found`, `CMA Agent parent not found` | No owned Agent or parent reference matches. |
 | Validation | `One Idempotency-Key is required` | A `pause` or `revive` command, or a retirement, has no, or more than one, `Idempotency-Key` (`recover_creation` takes none). |
+| Validation | `Sandbox label must contain 1–120 bytes without control characters` | A rename sets a label that is empty after trimming, longer than 120 bytes, or contains control characters. |
+| Conflict | `cma_retirement_idempotency_conflict` | A retirement uses a different `Idempotency-Key` from the one recorded for this Sandbox's pending retirement. |
+| Conflict | `cma_retirement_recovery_unavailable` | A retirement is already pending without a recorded `Idempotency-Key`, so a new request cannot replace or retry it. |
+| Conflict | `cma_sandbox_retired` | A command targets a Sandbox that no longer occupies the account slot. |
+| Conflict | `cma_sandbox_retiring` | `pause` or `revive` is sent while the Sandbox's retirement is pending. |
 | Validation | `Invalid CMA event cursor` | Stream cursor and `Last-Event-ID` differ, repeat, or are invalid. |
 | Conflict | `cma_sandbox_generation_changed` | The request's generation is stale. |
 | Conflict | `cma_deployment_changed` | The CMA catalog service changed since the reference was created. |

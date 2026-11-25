@@ -592,7 +592,7 @@ Every push carries a `type` in its data (FCM `data`; top-level keys in the APNs 
 | `mfa_disabled` | Alert. MFA was disabled on the account. | none |
 | `machine_lifecycle` | Alert. A remote machine lifecycle event is recorded. | `machine_id`, `operation_id`, `url` |
 | `machine_control` | Alert. NyxBot asks the owner to take control of a machine. | `url` |
-| `trigger_event` | Alert. A trigger with notification delivery receives an event. | `trigger_label`, `event_id`, `preview` (at most 512 characters) |
+| `trigger_event` | Alert. A trigger with notification delivery receives an event; the same type also carries machine-update notices and automation notices. | `trigger_label`, `event_id`, `preview` (at most 512 characters) |
 | `device_bind_success`, `device_repeated_fail`, `device_lock_alert` | Alert. A headless device-code binding is approved, reaches repeated failed signed polls, or is locked. | `template` (same value), `hw_id`, `device_label`; `node_id`, `failed_poll_count`, `locked_until` when known |
 | `automation_result` (push-only automation delivery) | Alert. An automation whose destination is a notification finishes a run. | `conversation_id`, `deeplink` |
 | `automation_result`, `automation_problem`, `needs_decision`, `agent_update`, `chat_update` (NyxBot Notifications) | Alert. A NyxBot Notifications row the person opted into for push (see [NyxBot Notifications](chat/12-notifications.md#optional-push)). | `kind` (same value), `notification_id`, `deeplink`; `conversation_id` when the row's source records one |

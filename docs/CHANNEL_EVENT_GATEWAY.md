@@ -118,7 +118,7 @@ flowchart LR
     end
 
     subgraph State["Shared MongoDB Coordination"]
-        DSTORE[(coordination_event_dedup<br/>claim + commit + TTL)]
+        DSTORE[(event_dedup_records<br/>claim + commit + TTL)]
         PCL[(coordination_token_buckets<br/>conversation token bucket)]
     end
 
@@ -203,7 +203,7 @@ Execution order matters — each step is ordered to minimize wasted work on the 
 
 ### event_dedup_cache (`backend/src/services/event_dedup_cache.rs`)
 
-Thin namespace wrapper around `coordination_service::EventDedupStore`. Records are keyed by a hash of `(namespace, scope, event_id)` in `coordination_event_dedup`. `claim()` is an atomic first-writer-wins upsert, `commit()` requires the exact unexpired claim fence, and `release()` deletes only the caller's claim. A TTL index removes expired claims and committed dedup records. Channel events and trigger events use separate namespaces.
+Thin namespace wrapper around `coordination_service::EventDedupStore`. Records are keyed by a hash of `(namespace, scope, event_id)` in `event_dedup_records`. `claim()` is an atomic first-writer-wins upsert, `commit()` requires the exact unexpired claim fence, and `release()` deletes only the caller's claim. A TTL index removes expired claims and committed dedup records. Channel events and trigger events use separate namespaces.
 
 ### channel_relay_service (`backend/src/services/channel_relay_service.rs`)
 
@@ -416,7 +416,8 @@ Device events never use these tokens. They target only device conversations, the
 
 `lookup_recent_inbound_thread_id()` only returns an interaction token if the source webhook inbound is fresher than 2 minutes. Stale tokens are not inherited. A copied value is stored on the device-event row only; it is never sent in the callback or used for a reply.
 
-### Reply-time window (12 minutes for device events)
+<a id="reply-time-window-12-minutes-for-device-events"></a>
+### Reply-time window (bot conversations; none for device events)
 
 Device events have no reply-time window because replies to them are refused. For bot conversations, a reply attaches the interaction token only while the original message is younger than 14 minutes (one minute under Discord's 15-minute limit); an older token falls back to the regular channel message API.
 
