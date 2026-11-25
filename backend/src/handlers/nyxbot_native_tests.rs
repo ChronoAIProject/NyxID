@@ -506,14 +506,14 @@ async fn native_unadmitted_crash_becomes_durable_failure_and_purge_wins() {
     assert!(body_text(response).await.contains("response.completed"));
     let mut saved = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
     saved.terminal = false;
-    saved.payload_ciphertext = recovery::Payload::new(
+    let queued = recovery::Payload::new(
         &id,
         "nyxbot_stable",
         recovery::metadata(&request["metadata"]).unwrap(),
-    )
-    .seal(&state.encryption_keys)
-    .await
-    .unwrap();
+    );
+    recovery::storage::install(&state.encryption_keys, &mut saved, &queued)
+        .await
+        .unwrap();
     state
         .db
         .collection::<Stored>(RESPONSES)

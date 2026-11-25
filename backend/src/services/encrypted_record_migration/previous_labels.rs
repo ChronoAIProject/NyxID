@@ -275,3 +275,6 @@ pub(super) const EVENT_REPLY_DIGEST: &str =
     "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
 pub(super) const META_ASSETS: super::FieldLabels =
     ("channel_meta_oauth_sessions", &["assets_encrypted"]);
+
+pub(super) const EVENT_WRITERS_DIGEST: &str =
+    "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";

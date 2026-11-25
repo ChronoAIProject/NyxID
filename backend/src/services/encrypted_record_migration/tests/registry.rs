@@ -27,10 +27,6 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             auth_device_code::V2_COLLECTION_NAME,
             doc! {"delivery_access_token_encrypted": &bytes, "delivery_refresh_token_encrypted": &bytes},
         ),
-        (
-            nyxbot_gateway_response::COLLECTION_NAME,
-            doc! {"payload_ciphertext": &bytes},
-        ),
     ]
 }
 
@@ -172,7 +168,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada"
+        "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -193,7 +189,10 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
     let reply_draft = "1c55ec996722c504e1e0fad8cc55a31a178a515945c322484f8e1115ad59c649";
     let event_reply_checkpoint = "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
+    let event_writers_checkpoint =
+        "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";
     for digest in [
+        Some(event_writers_checkpoint),
         Some(event_reply_checkpoint),
         Some(reply_draft),
         Some(live.as_str()),
@@ -246,7 +245,10 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             digest != Some(live.as_str())
         );
         let includes_meta = digest.is_some_and(|v| {
-            v == live || v == event_reply_checkpoint || historical_meta.contains(&v)
+            v == live
+                || v == event_writers_checkpoint
+                || v == event_reply_checkpoint
+                || historical_meta.contains(&v)
         });
         assert_eq!(
             report
@@ -264,6 +266,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                     && field.field == "response_reply.ciphertext"
                     && field.authenticated_current == 11),
             digest == Some(live.as_str())
+                || digest == Some(event_writers_checkpoint)
                 || digest == Some(event_reply_checkpoint)
                 || digest == Some(reply_draft)
         );

@@ -8022,3 +8022,6 @@ async fn contextual_event_field(
         bytes: keys.encrypt_record(&plaintext, &context).await.unwrap(),
     }
 }
+
+#[path = "nyxbot_gateway_record_tests.rs"]
+mod gateway_record_tests;
