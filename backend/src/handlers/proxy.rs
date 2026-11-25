@@ -412,6 +412,33 @@ fn forwarded_response_header_value(
     axum::http::HeaderValue::from_bytes(value).ok()
 }
 
+fn project_direct_response_headers(
+    mut response: axum::http::response::Builder,
+    status: StatusCode,
+    headers: &HeaderMap,
+    is_sse: bool,
+    location_context: Option<&AsyncLocationContext>,
+    github_metadata: bool,
+) -> axum::http::response::Builder {
+    for (name, value) in headers {
+        let forwarded = if github_metadata && github_scope::forward_header(name.as_str()) {
+            Some(value.clone())
+        } else {
+            forwarded_response_header_value(
+                status,
+                name.as_str(),
+                value.as_bytes(),
+                is_sse,
+                location_context,
+            )
+        };
+        if let Some(value) = forwarded {
+            response = response.header(name.clone(), value);
+        }
+    }
+    response
+}
+
 fn node_is_sse_headers(headers: &[(String, String)]) -> bool {
     headers.iter().any(|(name, value)| {
         name.eq_ignore_ascii_case("content-type")
@@ -7990,38 +8017,32 @@ async fn execute_resolved_proxy_inner<'a>(
                 return observe_model_response(model_request, path, response).await;
             }
 
-            let mut response_builder = Response::builder().status(status);
-            let github_snapshot = (state.config.github_oauth_scope_response_enabled
+            let destination = downstream_response.url();
+            let upstream_headers = downstream_response.headers();
+            let github_metadata = state.config.github_oauth_scope_response_enabled
                 && github_scope::verified_route(
                     target.catalog_slug.as_deref(),
                     target.auth_method == "bearer",
-                    downstream_response.url(),
-                ))
-            .then(|| downstream_response.url().clone());
-
-            // Forward only allowlisted response headers.
-            // Skip content-length for SSE (length unknown). Keep it for other
-            // streaming responses — clients need it for download progress / seeking.
-            for (name, value) in downstream_response.headers().iter() {
-                let name_lower = name.as_str().to_lowercase();
-                if let Ok(header_name) =
-                    axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                    && let Some(header_value) =
-                        if github_snapshot.is_some() && github_scope::forward_header(&name_lower) {
-                            Some(value.clone())
-                        } else {
-                            forwarded_response_header_value(
-                                status,
-                                &name_lower,
-                                value.as_bytes(),
-                                is_sse,
-                                location_context.as_ref(),
-                            )
-                        }
-                {
-                    response_builder = response_builder.header(header_name, header_value);
-                }
-            }
+                    destination,
+                );
+            let github_scope_refusal = github_metadata
+                && !should_stream
+                && target.connection_id.is_some()
+                && destination.path().trim_start_matches('/') == path.trim_start_matches('/')
+                && github_scope::missing_public_write_scope(
+                    &method,
+                    destination.path(),
+                    status,
+                    upstream_headers,
+                );
+            let response_builder = project_direct_response_headers(
+                Response::builder().status(status),
+                status,
+                upstream_headers,
+                is_sse,
+                location_context.as_ref(),
+                github_metadata,
+            );
 
             let mut response = crate::services::proxy_http_response::relay_response(
                 state,
@@ -8045,16 +8066,9 @@ async fn execute_resolved_proxy_inner<'a>(
             )
             .await?;
 
-            if !should_stream
-                && target.connection_id.is_some()
-                && let Some(ref destination) = github_snapshot
-                && destination.path().trim_start_matches('/') == path.trim_start_matches('/')
-                && let Some(service_id) = resolved_user_service_id.as_deref()
-            {
+            if github_scope_refusal && let Some(service_id) = resolved_user_service_id.as_deref() {
                 response = github_scope::write_scope_refusal(
                     response,
-                    &method,
-                    destination,
                     &state.config.frontend_url,
                     service_id,
                 )

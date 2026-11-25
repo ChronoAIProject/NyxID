@@ -32,15 +32,10 @@ pub(super) fn forward_header(name: &str) -> bool {
 
 pub(super) async fn write_scope_refusal(
     response: Response,
-    method: &Method,
-    destination: &Url,
     frontend: &str,
     service_id: &str,
 ) -> Response {
     let status = response.status();
-    if !missing_public_write_scope(method, destination.path(), status, response.headers()) {
-        return response;
-    }
     let Some(remediation_url) = manage_url(frontend, service_id) else {
         return response;
     };
@@ -93,7 +88,7 @@ pub(super) async fn write_scope_refusal(
     Response::from_parts(parts, body)
 }
 
-fn missing_public_write_scope(
+pub(super) fn missing_public_write_scope(
     method: &Method,
     path: &str,
     status: StatusCode,
@@ -103,6 +98,7 @@ fn missing_public_write_scope(
         || !matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
         || one_header(headers, "x-github-request-id").is_none_or(str::is_empty)
         || headers.contains_key(header::RETRY_AFTER)
+        || headers.contains_key("x-github-sso")
         || headers.contains_key("x-accepted-github-permissions")
         || (status == StatusCode::FORBIDDEN
             && one_header(headers, "x-ratelimit-remaining")
@@ -286,22 +282,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sso_refusal_survives_projection_without_disclosing_the_sso_url() {
+        let body = r#"{"message":"Forbidden"}"#;
+        let status = StatusCode::FORBIDDEN;
+        let mut headers = evidence();
+        headers.insert(
+            "x-github-sso",
+            "required; url=https://github.com/orgs/fixture/sso"
+                .parse()
+                .unwrap(),
+        );
+        let classify = missing_public_write_scope(&Method::POST, PATH, status, &headers);
+        let mut response = super::super::project_direct_response_headers(
+            Response::builder().status(status),
+            status,
+            &headers,
+            false,
+            None,
+            true,
+        )
+        .body(Body::from(body))
+        .unwrap();
+        if classify {
+            response = write_scope_refusal(response, "https://console.example.test", SERVICE).await;
+        }
+        assert!(response.headers().contains_key("x-oauth-scopes"));
+        assert!(!response.headers().contains_key("x-github-sso"));
+        assert_eq!(response.status(), status);
+        assert_eq!(to_bytes(response.into_body(), 8192).await.unwrap(), body);
+    }
+
+    #[tokio::test]
     async fn typed_scope_refusal_keeps_evidence_and_selects_exact_management_route() {
-        let destination = Url::parse(&format!("https://api.github.com{PATH}")).unwrap();
         let mut response = Response::new(Body::from(r#"{"message":"Not Found"}"#));
         *response.status_mut() = StatusCode::NOT_FOUND;
         *response.headers_mut() = evidence();
         response
             .headers_mut()
             .insert(header::CONTENT_LENGTH, "23".parse().unwrap());
-        let response = write_scope_refusal(
-            response,
-            &Method::POST,
-            &destination,
-            "https://console.example.test/",
-            SERVICE,
-        )
-        .await;
+        let response =
+            write_scope_refusal(response, "https://console.example.test/", SERVICE).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(response.headers().contains_key("x-oauth-scopes"));
         assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
@@ -319,7 +339,6 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_independent_provider_refusals() {
-        let destination = Url::parse(&format!("https://api.github.com{PATH}")).unwrap();
         for body in [
             r#"{"message":"You have exceeded a secondary rate limit"}"#,
             r#"{"message":"Forbidden","errors":[{"code":"branch_protection"}]}"#,
@@ -327,14 +346,8 @@ mod tests {
             let mut response = Response::new(Body::from(body));
             *response.status_mut() = StatusCode::FORBIDDEN;
             *response.headers_mut() = evidence();
-            let response = write_scope_refusal(
-                response,
-                &Method::POST,
-                &destination,
-                "https://console.example.test",
-                SERVICE,
-            )
-            .await;
+            let response =
+                write_scope_refusal(response, "https://console.example.test", SERVICE).await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert_eq!(
                 to_bytes(response.into_body(), 8192).await.unwrap(),
