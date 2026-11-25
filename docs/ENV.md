@@ -787,7 +787,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 |----------|---------|-------------|
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
-| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/send`, `/reply` and `/thread-reply` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64; `/reply` and `/thread-reply` accept at least 2 MiB. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |

@@ -168,8 +168,10 @@ verified actor in `ChannelOrigin.org_execution`. A group/topic has one org-owned
 public transcript and separate hidden execution lanes per member or guest.
 Only a verified admin records owner presence; ordinary members cannot open the
 guest audience. Follow expiry, stop, exact source targeting and delivery fences
-remain mandatory. Guest exposure, exact daily budget and per-sender limits apply
-to followed turns too. Gateway sender IDs never establish NyxID membership.
+remain mandatory. The binding's guest exposure, guest service and billing
+limits, and per-sender limits apply to followed turns too; see
+[guest settings](chat/09-nyxbot-orchestrator.md#guest-settings-and-binding-recovery).
+Gateway sender IDs never establish NyxID membership.
 
 Discord addressing and diagnostics (#2185): an exact bot-user mention and a
 mention of that bot's own authenticated managed integration role both normalize

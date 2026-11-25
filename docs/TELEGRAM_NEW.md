@@ -327,8 +327,9 @@ per-message entities, so emphasis, links and code do not depend on parsing an
 unfinished Markdown fragment. Native manager and proactive posts use the same
 platform-specific limits (including Slack scalar and Lark JSON-byte accounting).
 
-Authored post requests retain their 4,000-character input limit; Unicode can
-still require multiple provider messages. Saved manager replies and automation
+Authored post requests accept at most 32,768 characters of input. This input
+limit is separate from the platform's single-message limit, so a post can still
+require multiple provider messages. Saved manager replies and automation
 results use the larger delivery bound below, with their saved thread as the
 source for any overflow link.
 
