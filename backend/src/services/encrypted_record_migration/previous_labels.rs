@@ -222,3 +222,6 @@ pub(super) const GATEWAY_SETUP_DIGEST: &str =
 
 pub(super) const CMA_REQUEST_DIGEST: &str =
     "2586a1add34bc8bf42b81e020c60c6d2d14d4b3567cb29c2c8bf976d5100a99e";
+
+pub(super) const LEARNING_PROPOSAL_DIGEST: &str =
+    "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";

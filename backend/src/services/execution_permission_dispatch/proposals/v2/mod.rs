@@ -207,7 +207,9 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         return Err(refused());
     }
     let id = Uuid::new_v4().to_string();
-    let encrypted = Slot::V2.seal(keys, &id, Field::Payload, &encoded).await?;
+    let (encrypted, payload_context_version) = Slot::V2
+        .seal(keys, &id, &context.actor, Field::Payload, &encoded)
+        .await?;
     if encrypted.len() > MAX_PAYLOAD {
         tracing::info!(
             reason = "encrypted_payload_too_large",
@@ -345,7 +347,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         choices,
         review: review_v2(db, context, chat, effect, reusable, &task, gaps).await?,
         payload: Some(binary(encrypted)),
-        payload_context_version: None,
+        payload_context_version,
         state: "pending".into(),
         grant_id: None,
         selected_choice: None,

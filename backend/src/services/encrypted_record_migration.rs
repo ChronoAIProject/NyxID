@@ -58,6 +58,7 @@ enum Adapter {
     GatewayTransport,
     CmaRequest,
     LearningProposal,
+    ApprovalProposal,
     Setup,
     AgentLogin,
     // These are implementation blockers until their service-owned decoders and
@@ -356,7 +357,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "approval_requests",
-        adapter: Adapter::Pending,
+        adapter: Adapter::ApprovalProposal,
         fields: &[
             "execution_proposal.v1.payload",
             "execution_proposal.v1.result",
@@ -567,7 +568,8 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
         Some(
-            previous_labels::CMA_REQUEST_DIGEST
+            previous_labels::LEARNING_PROPOSAL_DIGEST
+            | previous_labels::CMA_REQUEST_DIGEST
             | previous_labels::GATEWAY_SETUP_DIGEST
             | previous_labels::EVENT_BINDING_DIGEST
             | previous_labels::CHANNEL_KEY_DIGEST
@@ -776,6 +778,10 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::ApprovalProposal => {
+            Box::pin(super::execution_permission_dispatch::proposals::record::verify(keys, row))
+                .await
+        }
         Adapter::LearningProposal => {
             Box::pin(super::assistant_learning_record::storage::verify(keys, row)).await
         }
@@ -916,6 +922,12 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::ApprovalProposal => {
+            Box::pin(
+                super::execution_permission_dispatch::proposals::record::migrate(db, keys, row),
+            )
+            .await
+        }
         Adapter::LearningProposal => {
             Box::pin(super::assistant_learning_record::storage::migrate(
                 db, keys, row,
@@ -1342,13 +1354,6 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         // error, never an exemption based solely on its byte length.
         let exempt = no_material
             && match entry.adapter {
-                Adapter::Pending
-                    if entry.collection == crate::models::approval_request::COLLECTION_NAME =>
-                {
-                    super::execution_permission_dispatch::proposals::record::no_retained_material(
-                        row,
-                    )
-                }
                 Adapter::Pending => true,
                 Adapter::Capability => {
                     row.get("capability_encrypted")

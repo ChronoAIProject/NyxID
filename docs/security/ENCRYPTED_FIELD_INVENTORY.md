@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 49 entries for 47 collections, with 36 implemented adapters
-and 13 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 49 entries for 47 collections, with 37 implemented adapters
+and 12 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -74,7 +74,7 @@ A collection may use separate adapters for different fields.
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
-| `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | — | Pending |
+| `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
 and a separate field path for each webhook. System, dynamic and ownerless
@@ -104,6 +104,10 @@ interface also binds its publication operation. Migration compares the exact
 source document and preserves terminal body sentinels and publication leases.
 [Proposal storage](../../backend/src/services/assistant_learning_record_storage.rs)
 
+Approval payloads and results bind the approval ID, user and selected versioned
+field path. Migration compares the complete source approval before replacing
+retained fields. Dispatch claims and per-effect send receipts keep their own fences.
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
@@ -116,11 +120,8 @@ source document and preserves terminal body sentinels and publication leases.
   Gateway responses store an encrypted replay payload.
   [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
 - Assistant recovery retains the encrypted input on the
-  active turn’s restart window. Approval requests retain encrypted payloads
-  and results under the selected proposal version. Approval readers bind marked fields
-  to the request, user, version arm and field. Writers use the historical AAD in
-  both positions of the record-write switch.
-  [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+  active turn’s restart window.
+  [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and
