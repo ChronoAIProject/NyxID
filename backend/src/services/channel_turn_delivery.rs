@@ -657,35 +657,6 @@ fn compatible_grants<'a>(
         && incoming.iter().all(|context| scope(context) == expected)
 }
 
-#[cfg(test)]
-mod grant_compatibility_tests {
-    use super::compatible_grants;
-    use crate::models::{assistant_conversation::ChannelTurnContext, channel_meta::GrantRef};
-
-    #[test]
-    fn identical_questions_from_independently_erasable_inboxes_stay_separate() {
-        fn context(bot: &str, grant: Option<&str>) -> ChannelTurnContext {
-            bson::from_document(bson::doc! {
-                "meta_grant": grant.map(|grant| bson::to_bson(&GrantRef {
-                    bot_id:bot.to_owned(), grant_id: grant.to_owned(), generation:1
-                }).unwrap()),
-                "source_event_id":"event","channel_id":"home","channel_bot_id":bot,
-                "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true,
-            }).unwrap()
-        }
-        let first = [context("first", Some("a"))];
-        let second = [context("second", Some("b"))];
-        let successor = [context("first", Some("b"))];
-        let ordinary = [context("other", None)];
-        assert!(compatible_grants(first.iter(), &first));
-        assert!(compatible_grants(ordinary.iter(), &ordinary));
-        assert!(!compatible_grants(first.iter(), &second));
-        assert!(!compatible_grants(first.iter(), &successor));
-        assert!(!compatible_grants(first.iter(), &ordinary));
-        assert!(!compatible_grants([].iter(), &first));
-    }
-}
-
 fn compatible_sources(
     a: Option<&crate::models::assistant_conversation::ChannelOrigin>,
     b: Option<&crate::models::assistant_conversation::ChannelOrigin>,
@@ -1138,4 +1109,33 @@ async fn target_in_session(
         && row.group_id.is_none()
         && row.platform_thread.is_none();
     Ok((own_chat || private_home).then_some((channel, thread)))
+}
+
+#[cfg(test)]
+mod grant_compatibility_tests {
+    use super::compatible_grants;
+    use crate::models::{assistant_conversation::ChannelTurnContext, channel_meta::GrantRef};
+
+    #[test]
+    fn identical_questions_from_independently_erasable_inboxes_stay_separate() {
+        fn context(bot: &str, grant: Option<&str>) -> ChannelTurnContext {
+            bson::from_document(bson::doc! {
+                "meta_grant": grant.map(|grant| bson::to_bson(&GrantRef {
+                    bot_id:bot.to_owned(), grant_id: grant.to_owned(), generation:1
+                }).unwrap()),
+                "source_event_id":"event","channel_id":"home","channel_bot_id":bot,
+                "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true,
+            }).unwrap()
+        }
+        let first = [context("first", Some("a"))];
+        let second = [context("second", Some("b"))];
+        let successor = [context("first", Some("b"))];
+        let ordinary = [context("other", None)];
+        assert!(compatible_grants(first.iter(), &first));
+        assert!(compatible_grants(ordinary.iter(), &ordinary));
+        assert!(!compatible_grants(first.iter(), &second));
+        assert!(!compatible_grants(first.iter(), &successor));
+        assert!(!compatible_grants(first.iter(), &ordinary));
+        assert!(!compatible_grants([].iter(), &first));
+    }
 }
