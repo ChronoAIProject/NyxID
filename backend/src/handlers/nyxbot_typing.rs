@@ -86,7 +86,12 @@ async fn resolve(
     let destination = if channel.transport == "gateway" {
         let context = match event.event_context_ciphertext.as_ref() {
             Some(bytes) => {
-                let plaintext = state.encryption_keys.decrypt(bytes).await?;
+                let plaintext = crate::services::nyxbot_event_record::event_context(
+                    &state.encryption_keys,
+                    &event,
+                    bytes,
+                )
+                .await?;
                 serde_json::from_slice::<Value>(&plaintext)
                     .map_err(|_| AppError::OAuthAuthorityUnavailable)?
             }

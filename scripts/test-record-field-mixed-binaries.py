@@ -40,6 +40,8 @@ def main():
                         help="exercise the retained conversation window and the legacy subscriber boundary")
     parser.add_argument("--learning-writers", action="store_true",
                         help="exchange learning proposals with the reader-preparation binary")
+    parser.add_argument("--event-replay-readers", action="store_true",
+                        help="exchange event replies and gateway replay, including stored generation labels")
     parser.add_argument("--approval-readers", action="store_true",
                         help="exchange four versions of pending, completed and cleared approvals")
     parser.add_argument("--approval-writers", action="store_true",
@@ -130,7 +132,7 @@ def main():
                 run(reader, "registry-" + previous, "generation", test=registry, writes=True)
             return
 
-        if args.approval_readers:
+        if args.approval_readers or args.event_replay_readers:
             for writes in (False, True):
                 for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                     run(writer, "write", "legacy", writes=writes)
@@ -140,6 +142,12 @@ def main():
             run("candidate", "read", "current", writes=True, legacy=False)
             run("candidate", "read", "current", legacy=False)
             run("base", "reject", "current")
+            if args.event_replay_readers:
+                registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+                for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                    run(writer, "registry-write", "generation", writes=True, test=registry)
+                    run(writer, "registry-live", "generation", writes=True, test=registry)
+                    run(reader, "registry-" + previous, "generation", writes=True, test=registry)
             return
 
         run("base", "write", "old")

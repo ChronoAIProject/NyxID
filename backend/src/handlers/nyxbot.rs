@@ -4878,7 +4878,13 @@ async fn get_event_context_inner(
             let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
                 return problem(StatusCode::NOT_FOUND, "event_not_found");
             };
-            return match state.encryption_keys.decrypt(ciphertext).await {
+            return match crate::services::nyxbot_event_record::event_context(
+                &state.encryption_keys,
+                &event,
+                ciphertext,
+            )
+            .await
+            {
                 Ok(bytes) => {
                     let valid = serde_json::from_slice::<Value>(&bytes).is_ok_and(|context| {
                         context["channel_id"].as_str() == row.gateway_channel_id.as_deref()
@@ -4923,7 +4929,13 @@ async fn get_event_context_inner(
     let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
     };
-    match state.encryption_keys.decrypt(ciphertext).await {
+    match crate::services::nyxbot_event_record::event_context(
+        &state.encryption_keys,
+        &event,
+        ciphertext,
+    )
+    .await
+    {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
@@ -5250,6 +5262,7 @@ async fn custom_responses(
         event_id: event_id.to_owned(),
         relay_message_id: None,
         custom_binding_id: Some(binding.id.clone()),
+        event_context_version: None,
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: request["conversation"].as_str().map(str::to_owned),
@@ -5691,6 +5704,7 @@ async fn responses_with_producers_impl(
         relay_message_id: (activity["source"]["type"] == json!("nyxid_relay"))
             .then(|| event_id.clone()),
         custom_binding_id: None,
+        event_context_version: None,
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: None,
@@ -7151,6 +7165,7 @@ pub async fn relay_callback(
         event_id: claims.message_id.clone(),
         relay_message_id: Some(claims.message_id.clone()),
         custom_binding_id: None,
+        event_context_version: None,
         event_context_ciphertext: None,
         status: "running".into(),
         conversation_id: None,

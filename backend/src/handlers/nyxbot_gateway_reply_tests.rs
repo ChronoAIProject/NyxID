@@ -887,7 +887,7 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
         recovery::metadata(&request["metadata"]).unwrap(),
     );
     payload.finish(Some("Useful answer"), true);
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: id.clone(),
         user_id: OWNER.into(),
@@ -900,10 +900,37 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
         terminal: true,
         answer_delivery: None,
         revision: 1,
+        payload_context_version: None,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    let field = [
+        "payload_ciphertext",
+        &stored.channel_id,
+        &stored.binding_id,
+        &stored.response_id,
+    ];
+    let context = crate::crypto::record_field::RecordContext::new(
+        RESPONSES,
+        &stored.id,
+        &stored.user_id,
+        &field,
+    )
+    .unwrap();
+    let bytes = f
+        .state
+        .encryption_keys
+        .decrypt(&stored.payload_ciphertext)
+        .await
+        .unwrap();
+    stored.payload_ciphertext = f
+        .state
+        .encryption_keys
+        .encrypt_record(&bytes, &context)
+        .await
+        .unwrap();
+    stored.payload_context_version = Some(3);
     f.state
         .db
         .collection::<GatewayResponse>(RESPONSES)

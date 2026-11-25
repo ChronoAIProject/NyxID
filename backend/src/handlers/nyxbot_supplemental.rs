@@ -396,9 +396,15 @@ pub async fn followed(
             decision.skip(Reason::ReferenceUnavailable);
             return Ok(());
         };
-        let context: Value =
-            serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
-                .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
+        let context: Value = serde_json::from_slice(
+            &crate::services::nyxbot_event_record::event_context(
+                &state.encryption_keys,
+                &event,
+                ciphertext,
+            )
+            .await?,
+        )
+        .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
         if context["event_ref"].as_str().is_none() {
             decision.skip(Reason::ReferenceUnavailable);
             return Ok(());

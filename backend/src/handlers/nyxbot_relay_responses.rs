@@ -96,6 +96,7 @@ pub(super) async fn prepare(
         terminal: false,
         answer_delivery: None,
         revision: 0,
+        payload_context_version: None,
         payload_ciphertext: payload.seal(&state.encryption_keys).await?,
         created_at: event.created_at,
         expires_at: event.created_at + ChronoDuration::hours(recovery::RETENTION_HOURS),
