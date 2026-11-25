@@ -292,8 +292,9 @@ actions remain separate capabilities.
   only the account-scoped observer resets. Observations publish before paint.
 - `frontend/src/components/assistant/cma-session-card.tsx`: responsive cards,
   pin/minimise controls, source and external navigation, global floating stack.
-- `frontend/src/hooks/use-cma-session.ts`, `cma-session-api.ts`, and
-  `cma-session-events.ts`: scoped polling, proxy requests, recovery, SSE projection.
+- `frontend/src/hooks/use-cma-session.ts`, `frontend/src/lib/assistant/cma-session-api.ts`,
+  and `frontend/src/lib/assistant/cma-session-events.ts`: scoped polling, proxy
+  requests, recovery, SSE projection.
 - `frontend/src/stores/cma-session-store.ts`: bounded account preferences/reset.
 - Regression tests cover server receipt ownership and original source retention,
   absent attribution, guest/group exclusion, connection changes, scoped/pinned
@@ -526,3 +527,114 @@ The inspector reports these distinctions and guidance. Checked against CMA
 `resume_connection`) and `agent_lifecycle_operations.rs` (`view`). The missing
 creation identity/absence contract is tracked in ChronoAIProject/cma#2354;
 NyxID cannot safely force-release these rows.
+
+## Refusal reference
+
+NyxID's own CMA refusals use the standard error envelope
+`{"error":"...","error_code":...,"message":"..."}`. Most reasons have no
+dedicated numeric code: over HTTP the reason is carried only in `message`, after
+a prefix fixed by the error kind. Responses that CMA itself returns and NyxID
+forwards (for example `409 trust_confirmation_required`) reach the caller
+unchanged and are not listed here.
+
+| Kind | HTTP | `error_code` | `error` | HTTP `message` |
+| --- | --- | --- | --- | --- |
+| Bad request | 400 | 1000 | `bad_request` | `Bad request: <reason>` |
+| Validation | 400 | 1008 | `validation_error` | `Validation error: <reason>` |
+| Forbidden | 403 | 1002 | `forbidden` | `Forbidden: <reason>` |
+| Not found | 404 | 1003 | `not_found` | `Not found: <reason>` |
+| Conflict | 409 | 1004 | `conflict` | `Conflict: <reason>` |
+
+Native `nyxid__` CMA tools return error tool results with the same `error` and
+`error_code`. Their `message` is the reason without a prefix (at most 300
+characters) for Validation and Forbidden, `Resource not found.` for Not found,
+`The resource changed. Inspect it and request a new acknowledgement.` for
+Conflict, and `The account operation could not be completed. Review it in the
+NyxID UI.` for Bad request.
+
+The HTTP message `Conflict: cma_sandbox_account_slot_occupied` is byte-pinned:
+slot diagnostics never change its status, code or message. The reasons below are
+exact current text; `{login_url}` is the only variable part.
+
+**CMA gateway outcomes** (any CMA read or command):
+
+| Kind | Reason | When |
+| --- | --- | --- |
+| Conflict | `cma_observation_unavailable` | CMA timed out, was unavailable, answered 401/403, or returned an invalid or oversized (over 2 MiB) response. |
+| Conflict | `cma_configuration_required` | The owner's resolved CMA catalog service, base URL or execution fingerprint no longer matches, or the identity assertion cannot be attached. |
+| Conflict | `cma_inventory_incomplete` | CMA's resource inventory is incomplete. |
+| Conflict | `CMA resource state changed; refresh before retrying` | CMA answered 409 with any other code. |
+| Conflict | `sandbox_credential_setup_required: Sign in once at {login_url}; keep the original creation request for recovery` | CMA answered `409 sandbox_credential_setup_required`; `{login_url}` is the CMA deployment's `/auth/login` URL. |
+| Conflict | `desktop_unavailable`, `desktop_busy`, `desktop_runtime_unavailable` | CMA refused the desktop outside the descriptor read; the descriptor read instead returns `available: false` with the same `reason`. |
+| Not found | `CMA resource not found` | CMA answered 404. |
+| Forbidden | `CMA resource access denied` | CMA reported a different owner, or the native route is not permitted. |
+| Validation | `Invalid CMA request` | Invalid identifier, cursor or `Idempotency-Key` (1–200 printable ASCII bytes, without `"` or `\`). |
+| Validation | `Direct proxy destination is not permitted` | The CMA destination fails the proxy destination policy. |
+
+**Proxy admission and creation** (catalog CMA requests from MCP or chat keys):
+
+| Kind | Reason | When |
+| --- | --- | --- |
+| Bad request | `Invalid CMA execution request` | Malformed managed request, for example both a Sandbox and a Workspace parent, a query on a change, or a creation reply over 2 MiB. |
+| Bad request | `Omit machine_included when selecting an existing parent` | Agent creation names a parent and `machine_included`. |
+| Bad request | `CMA tasks require stream=true` | Task submission without `stream: true`. |
+| Bad request | `CMA changes require a stable Idempotency-Key` | A change other than a file write has no `Idempotency-Key`. |
+| Validation | `Invalid CMA creation request` | The creation body is not a bounded JSON object or contains credential-shaped keys. |
+| Forbidden | `cma_operation_not_supported: use the published personal Agent and Sandbox operations` | The operation is not a published personal Agent or Sandbox operation. |
+| Conflict | `cma_sandbox_account_slot_occupied` | The account's one NyxID-created Sandbox allocation is held (byte-pinned). |
+| Conflict | `cma_sandbox_account_slot_occupied: the earlier creation is not confirmed absent; retry later to recheck its original request; do not delete or reconnect` | Automatic recovery of the held allocation could not prove the earlier creation absent; the new request is not dispatched. |
+| Conflict | `cma_nyxid_sandbox_required` | The selected parent is not this account's NyxID-created Sandbox. |
+| Conflict | `cma_sandbox_retiring: new Agents and tasks are closed` | The parent Sandbox is retiring or retired. |
+| Conflict | `cma_creation_authority_changed` | A retried creation's owner, catalog deployment, request or parent changed. |
+| Conflict | `cma_creation_authority_changed: the original request was confirmed not created; submit the corrected request with a new Idempotency-Key (CMA binds the original key to its original body)` | A changed body reuses the key of a Sandbox creation confirmed not created. |
+| Conflict | `cma_creation_already_completed: query the original resource` | The original creation is confirmed. |
+| Conflict | `cma_creation_observation_pending: query the original resource` | The original creation already has a resource identity. |
+| Conflict | `cma_creation_replay_expired: retain the original request and confirm its result without resubmitting` | Replay is outside the 23-hour window from first dispatch. |
+| Conflict | `cma_creation_result_unknown` | A dispatched creation's result cannot be confirmed (30-second read limit, undecodable success body, or no saved remote ID). |
+| Conflict | `cma_creation_idempotency_conflict` | The same key was used with a different service or request. |
+| Conflict | `cma_creation_recovery_unavailable` | No retained creation record or request material exists for recovery. |
+| Conflict | `cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made` | A release lacks durable `confirmed_not_created` evidence. |
+
+**Management routes and Agent reads**:
+
+| Kind | Reason | When |
+| --- | --- | --- |
+| Not found | `CMA Sandbox access is not enabled` | `assistant:cma-sandboxes` is off for the owner. |
+| Forbidden | `A personal account is required` | The owner is not an active person. |
+| Not found | `Sandbox not found`, `Sandbox was not created through NyxID` | No NyxID-created Sandbox matches. |
+| Not found | `CMA Agent not found`, `CMA Agent parent not found` | No owned Agent or parent reference matches. |
+| Validation | `One Idempotency-Key is required` | A Sandbox command or retirement has no, or more than one, `Idempotency-Key`. |
+| Validation | `Invalid CMA event cursor` | Stream cursor and `Last-Event-ID` differ, repeat, or are invalid. |
+| Conflict | `cma_sandbox_generation_changed` | The request's generation is stale. |
+| Conflict | `cma_deployment_changed` | The CMA catalog service changed since the reference was created. |
+| Conflict | `cma_agent_parent_unavailable`, `cma_agent_registration_changed` | The Agent's parent or registration cannot be bound. |
+| Conflict | `cma_agent_observation_stale` | CMA reports an older Agent revision than NyxID last observed. |
+| Forbidden | `CMA Agent identity changed`, `CMA Agent owner mismatch`, `CMA Agent authority changed`, `CMA Response identity changed` | Live CMA identity no longer matches the stored reference. |
+| Forbidden | `CMA desktop is unavailable` | A desktop stream was requested for an Agent without an available desktop. |
+| Forbidden | `A current human session is required`, `Human session ended`, `Human session verification changed`, `CMA observation authority unavailable` | Stream revalidation of the human session or Agent authority failed. |
+| Forbidden | `Desktop authentication or origin refused` | The desktop WebSocket lacks a verified session or allowed origin. |
+
+**Native tools**:
+
+| Kind | Reason | When |
+| --- | --- | --- |
+| Forbidden | `CMA requires this owner's enabled feature and current CMA grant` | The chat is not eligible for CMA tools. |
+| Validation | `Invalid CMA tool arguments` | Arguments are missing or malformed. |
+| Validation | `Use an attachment of at most 32 MiB from this conversation` | `nyxid__cma_save_attachment` names another conversation's or an oversized upload. |
+| Conflict | `CMA action access mode changed; confirm again` | The access mode changed after a non-read action was confirmed. |
+| Conflict | `cma_resource_page_too_large` | A `nyxid__list_cma_resources` page exceeds 64 KiB. |
+
+**Admin reservation routes and operator migration**:
+
+| Kind | Reason | When |
+| --- | --- | --- |
+| Not found | `CMA reservation not found` | No reservation matches. |
+| Validation | `Invalid reservation cursor or owner`, `Invalid reservation states`, `remote_sandbox_id is required` | Invalid list filters, or `associate` without `remote_sandbox_id`. |
+| Conflict | `CMA reservation changed; inspect it again before resolving` | Generation, revision or creation revision fences changed. |
+| Conflict | `Account erasure is in progress for this owner; inspection is unavailable` | The owner's account erasure has been accepted. |
+| Conflict | `cma_sandbox_live: this account already has its NyxID sandbox; create agents in its workspace or ask the owner to retire it` | The row is bound to a live Sandbox. |
+| Conflict | `cma_sandbox_retirement_proof_required: CMA has not confirmed retirement of this exact sandbox` | `confirm_retirement` without CMA `retired` for that identity. |
+| Conflict | `cma_creation_record_missing: no exact creation evidence is available; the reservation cannot be resolved` | No creation record exists. |
+| Conflict | `cma_creation_provenance_required: no saved receipt or CMA lineage ties a sandbox to this creation; ownership alone cannot establish NyxID creation provenance` | `associate` without receipt or lineage. |
+| Conflict | `cma_sandbox_retired: a retired resource cannot resolve an uncertain creation` | `associate` names a retired Sandbox. |
+| Conflict | `Contextual writer cutover is required before migration` | The operator rewrap walk reached CMA request rows before contextual writes were enabled. |

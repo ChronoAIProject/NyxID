@@ -9366,6 +9366,55 @@ native `nyxid__list_notifications` tool uses the same authorized previews and
 never marks read. It is available to owner NyxBot threads and NyxBot automation
 turns with the flag enabled. Upgrade all replicas before enabling the flag.
 
+## Remote Machines
+
+Owner routes require a first-party human session; API-key, service-account,
+delegated and relay credentials are rejected. Quote, create, resume and rekey
+also require the `experimental:remote-machines` flag and a ready platform
+configuration (see [ENV.md](ENV.md#remote-machine-runtime-funding-and-bootstrap-verification));
+pause and delete do not.
+Request and response fields, profile/rate rules, bounded reads and deletion are
+specified in
+[Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/remote-machine-entitlement` | Entitlement and advisory billing preflight for a profile. |
+| POST | `/api/v1/remote-machine-quotes` | Quote a new Machine or the resume of an existing one. |
+| GET | `/api/v1/remote-machines` | Owner Machines, cursor-paged; `include_deleted=true` adds retained records. |
+| POST | `/api/v1/remote-machines` | Create a Machine from an accepted quote (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}` | Machine detail. |
+| DELETE | `/api/v1/remote-machines/{machine_id}` | Delete the Machine and its workspace (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines/{machine_id}/actions` | Owner lifecycle action: `pause`, `resume`, `rekey` or `delete` (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines/{machine_id}/rekey` | Fenced owner-authorized credential recovery (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}/events` | Lifecycle events, `(created_at, _id)` seek cursor. |
+| GET | `/api/v1/remote-machines/{machine_id}/operations` | Lifecycle operations for the Machine. |
+| GET | `/api/v1/remote-machine-operations/{operation_id}` | One lifecycle operation. |
+| POST | `/api/v1/remote-machine-operations/{operation_id}/retry-delete` | Retry a failed deletion (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}/billing` | Runtime billing detail (optional `run_id`, `offset`). |
+| GET | `/api/v1/remote-machines/{machine_id}/billing/runs` | Funded runtime runs. |
+| GET | `/api/v1/remote-machines/{machine_id}/usage` | Storage usage observations. |
+| GET | `/api/v1/remote-machines/{machine_id}/jobs` | External execution jobs on this Machine. |
+| GET | `/api/v1/remote-machines/{machine_id}/jobs/{job_id}/output` | Job output. |
+| POST | `/api/v1/remote-machines/{machine_id}/jobs/{job_id}/cancel` | Cancel a job. |
+| GET | `/api/v1/remote-machines/{machine_id}/grants` | External execution grants for this Machine. |
+| POST | `/api/v1/remote-machines/{machine_id}/confirmations/{id}/decision` | Decide a pending execution confirmation bound to this Machine. |
+
+Admin routes require a first-party human admin or operator for reads and an
+admin for writes; runtime rate writes also require the flag for the acting admin.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/admin/remote-machines/platform` | Platform configuration, controller health and investigations. |
+| GET | `/api/v1/admin/billing/runtime` | Runtime rates and their synchronization state. |
+| POST | `/api/v1/admin/billing/runtime/rates` | Stage a runtime rate. |
+| POST | `/api/v1/admin/billing/runtime/rates/{id}/resync` | Retry rate synchronization. |
+| POST | `/api/v1/admin/billing/runtime/rates/{id}/retire` | Retire a rate. |
+
+The managed workload calls `POST /api/v1/machines/managed/prepare` and
+`POST /api/v1/machines/managed/bootstrap` without a user credential; they accept
+only workload authentication (72 KiB body limit).
+
 ## NyxBot CMA Sandbox management scope
 
 `GET /api/v1/assistant/nyxagent/sandboxes` lists only Sandboxes with a
@@ -9376,6 +9425,32 @@ human owner and the CMA feature flag. The response includes `sandboxes`,
 and connection aliases; `limit` is `1`. Creating or logging into a Sandbox
 directly in CMA does not make it a NyxID-created resource.
 
+All management paths below use the prefix `/api/v1/assistant/nyxagent`; `{id}`
+is NyxID's local reference ID. Handlers require a first-party human, an active
+personal owner and `assistant:cma-sandboxes`. Delegated `account:read` is denied
+for every read, stream and upgrade path. Accepted lifecycle commands return
+`202` while pending; acknowledgement alone is not completion.
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| GET | `/sandboxes` | NyxID-created resources and account allocation status |
+| GET | `/sandboxes/{id}` | Live detail with durable unknown/pending facts |
+| PATCH | `/sandboxes/{id}` | Local label change bound to generation |
+| POST | `/sandboxes/{id}/commands` | `pause` or `revive`, bound to generation and one stable `Idempotency-Key`; `recover_creation`, bound to generation |
+| DELETE | `/sandboxes/{id}` | Retirement intent bound to generation and one stable `Idempotency-Key`; release only after exact retirement observation |
+| GET | `/sandboxes/{id}/events` | Bounded Sandbox lifecycle events |
+| GET | `/cma-agents/{id}` | Exact Agent detail and safe profile |
+| GET | `/cma-agents/{id}/transcript` | Authoritative conversation turns and compatible flat messages |
+| GET | `/cma-agents/{id}/events/snapshot` | Agent event snapshot; the `cursor` query maps to CMA's `page_cursor` |
+| GET | `/cma-agents/{id}/events` | Agent SSE; resume with `after_cursor` or `Last-Event-ID` |
+| GET | `/cma-agents/{id}/responses/{response_id}` | Exact response bound to that Agent |
+| GET | `/cma-agents/{id}/responses/{response_id}/events` | Response SSE; resume with a numeric `after_cursor` or `Last-Event-ID` (CMA's `starting_after`) |
+| GET | `/cma-agents/{id}/desktop` | Availability/descriptor for the exact Agent |
+| GET | `/cma-agents/{id}/desktop/ws` | Authorized RFB WebSocket relay |
+
+`GET /api/v1/assistant/nyxagent/cma-sessions` is the read-only session-card
+projection described in [CMA session status cards](chat/12-cma-sessions.md).
+
 The same scope applies to Sandbox detail, label, lifecycle and event routes,
 Agent parent bindings, `nyxid__list_cma_resources`, and cached assistant context.
 External `discovered`, `claimed`, or `conflict` references are hidden and cannot
@@ -9383,8 +9458,8 @@ be used to manage an external Sandbox. There are no Sandbox `claim` or
 `unregistered` management endpoints. Raw CMA catalog proxy reads retain CMA's
 own response and may list other resources in the upstream account.
 
-The Agent summaries in `nyxid__list_cma_resources` and the cached CMA context
-include nullable `last_known_response_id`, taken from an existing observed
+The Agent summaries in `nyxid__list_cma_resources` include nullable
+`last_known_response_id`, taken from an existing observed
 submission. This lets another NyxBot chat locate that work without copying the
 source chat's transcript. It is a historical lookup hint, not the current task
 or permission to control it. Read the live Response and verify its conversation,
@@ -10004,7 +10079,7 @@ units, retry semantics and rollout requirements are in [CMA billing](CMA_BILLING
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/v1/billing/sandboxes/quotes` | Quote the existing catalog service prices for an owner and full Sandbox allocation. |
+| POST | `/api/v1/billing/sandboxes/quotes` | Quote the effective CMA rate card, synchronized for the configured plan, for an owner and full Sandbox allocation. |
 | POST | `/api/v1/billing/sandboxes/windows` | Atomically reserve at most 300 seconds across all applicable resource metrics. |
 | GET | `/api/v1/billing/sandboxes/cursors/{sandbox_id}` | Recover the durable ordered allocation-evidence checkpoint. |
 | GET | `/api/v1/billing/sandboxes/receipts/{request_id}` | Recover an already committed producer request, including during an admission/provider outage. |
