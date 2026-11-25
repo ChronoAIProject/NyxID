@@ -115,15 +115,9 @@ class Peer extends Events implements NativeAudioPeer {
   }
 }
 
-for (const [platform, engine, linked, native] of [
-  ["ios", "webview", true, true],
-  ["android", "native", true, true],
-  ["android", "native", false, false],
-  ["android", "webview", true, false],
-  ["android", undefined, true, false],
-  ["web", "native", true, false],
-] as const) {
-  test(`OpenAI factory on ${platform}, engine=${engine}, linked=${linked}`, async () => {
+for (const platform of ["ios", "android", "web"] as const) {
+  test(`OpenAI factory on ${platform} selects the platform transport`, async () => {
+    const modules: { WebRTCModule?: object } = { WebRTCModule: {} };
     const stream = new Stream();
     let imports = 0;
     const factory = loadTestModule<typeof import("./createNativeOpenAIMedia")>(
@@ -131,17 +125,10 @@ for (const [platform, engine, linked, native] of [
       {
         require(name: string) {
           switch (name) {
-            case "expo-constants":
-              return {
-                default: {
-                  expoConfig: { extra: { androidOpenAIVoiceEngine: engine } },
-                },
-              };
+            case "../../../i18n/localizedError":
+              return { localizedError: (message: string) => new Error(message) };
             case "react-native":
-              return {
-                Platform: { OS: platform },
-                NativeModules: { WebRTCModule: linked ? {} : null },
-              };
+              return { Platform: { OS: platform }, NativeModules: modules };
             case "./NativeOpenAIMedia":
               return { NativeOpenAIMedia };
             case "react-native-webrtc":
@@ -158,8 +145,12 @@ for (const [platform, engine, linked, native] of [
     );
     assert.equal(imports, 0);
     const media = factory.createNativeOpenAIMedia();
-    assert.equal(imports, native ? 1 : 0);
-    if (!native) return assert.equal(media, undefined);
+    if (platform === "web") {
+      assert.equal(media, undefined);
+      assert.equal(imports, 0);
+      return;
+    }
+    assert.equal(imports, 1);
     assert.ok(media instanceof NativeOpenAIMedia);
     try {
       assert.equal(
@@ -170,6 +161,9 @@ for (const [platform, engine, linked, native] of [
       media.close();
     }
     assert.equal(stream.track.readyState, "ended");
+    delete modules.WebRTCModule;
+    assert.throws(() => factory.createNativeOpenAIMedia(), /not supported/);
+    assert.equal(imports, 1);
   });
 }
 

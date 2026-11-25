@@ -389,7 +389,6 @@ test("api+frontend associates both frontend hosts and shares the path manifest",
 function expoConfig(env: Record<string, string>) {
   return loadTestModule<{ default: (context: { config: object }) => {
     ios: { associatedDomains: string[] };
-    extra: { androidOpenAIVoiceEngine: string };
     android: { intentFilters: { data: { host?: string; port?: string; path?: string }[] }[] };
   } }>("../../../app.config.ts", {
     process: { env },
@@ -403,34 +402,6 @@ function expoConfig(env: Record<string, string>) {
     },
   }).default({ config: {} });
 }
-
-test("Android OpenAI voice defaults to native in dev and can be compared per profile", () => {
-  const dev = profileEnv({
-    APP_ENV: "dev",
-    PROD_ANDROID_OPENAI_VOICE_ENGINE: "webview",
-  });
-  const prod = productionEnv({
-    APP_ENV: "prod",
-    DEV_ANDROID_OPENAI_VOICE_ENGINE: "native",
-  });
-  assert.equal(expoConfig(dev).extra.androidOpenAIVoiceEngine, "native");
-  assert.equal(expoConfig(prod).extra.androidOpenAIVoiceEngine, "webview");
-  assert.equal(
-    expoConfig({ ...dev, DEV_ANDROID_OPENAI_VOICE_ENGINE: "webview" }).extra
-      .androidOpenAIVoiceEngine,
-    "webview",
-  );
-  assert.equal(
-    expoConfig({ ...prod, PROD_ANDROID_OPENAI_VOICE_ENGINE: "native" }).extra
-      .androidOpenAIVoiceEngine,
-    "native",
-  );
-  assert.throws(
-    () => expoConfig({ ...dev, DEV_ANDROID_OPENAI_VOICE_ENGINE: "typo" }),
-    /DEV_ANDROID_OPENAI_VOICE_ENGINE/,
-  );
-});
-
 test("Expo consumes the selected host list for iOS entitlements and Android Activity links", () => {
   const config = expoConfig(productionEnv({
     APP_ENV: "prod",

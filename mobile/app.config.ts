@@ -16,12 +16,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     warnOnFrontendUrlFallback: true,
   });
   const ident = appIdentity(env);
-  const engineVariable = `${appEnv.toUpperCase()}_ANDROID_OPENAI_VOICE_ENGINE`;
-  const androidOpenAIVoiceEngine =
-    env[engineVariable] || (appEnv === "dev" ? "native" : "webview");
-  if (!["native", "webview"].includes(androidOpenAIVoiceEngine)) {
-    throw new Error(`${engineVariable} must be native or webview`);
-  }
 
   // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
@@ -178,7 +172,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
     ],
     extra: {
-      androidOpenAIVoiceEngine,
       crashArtifactId: process.env.NYXID_CRASH_ARTIFACT_ID,
       APP_ENV: appEnv,
       TELEMETRY_DSN: r.telemetryDsn,

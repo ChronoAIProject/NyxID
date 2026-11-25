@@ -9,7 +9,7 @@ import {
   type VoiceMediaAdapter,
   type VoiceMediaEvent,
 } from "./AssistantVoiceClient";
-import type { VoicePreferences, VoiceSession } from "./voiceContracts";
+import type { VoicePreferences, VoiceProtocol, VoiceSession } from "./voiceContracts";
 import * as documentModule from "./voiceMediaDocument";
 import { systemStatusActivityActive } from "../../../lib/systemStatusActivity";
 
@@ -19,7 +19,7 @@ type Media = VoiceMediaAdapter & {
   receive(raw: string): void;
 };
 
-function fixture() {
+function fixture(platform: "android" | "ios" = "android") {
   const listeners = new Set<(event: VoiceMediaEvent) => void>();
   const state = {
     closed: 0,
@@ -60,7 +60,7 @@ function fixture() {
     },
   };
   const harness = hookHarness<unknown>({
-    "react-native": { StyleSheet: { create: (value: unknown) => value } },
+    "react-native": { Platform: { OS: platform }, StyleSheet: { create: (value: unknown) => value } },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
     "./createNativeOpenAIMedia": { createNativeOpenAIMedia: () => native },
@@ -69,7 +69,7 @@ function fixture() {
     fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
   ) as {
     NativeVoiceMedia: new (factory?: (() => VoiceMediaAdapter) | null) => Media;
-    VoiceMediaBridge(props: { media: Media; origin: string }): unknown;
+    VoiceMediaBridge(props: { media: Media; protocol: VoiceProtocol; origin: string }): unknown;
   };
   const media = new module.NativeVoiceMedia();
   return { state, native, listeners, harness, module, media };
@@ -113,6 +113,7 @@ for (const settlement of ["terminal", "deadline"] as const) {
     f.harness.mount(() =>
       f.module.VoiceMediaBridge({
         media: f.media,
+        protocol: "openai_live",
         origin: "https://nyx.example",
       }),
     );
@@ -239,21 +240,25 @@ for (const settlement of ["terminal", "deadline"] as const) {
   });
 }
 
-test("ordinary native Bridge unmount still releases capture immediately", async () => {
-  const f = fixture();
-  f.harness.mount(() =>
-    f.module.VoiceMediaBridge({
-      media: f.media,
-      origin: "https://nyx.example",
-    }),
-  );
-  await f.media.prepare("openai_live", new AbortController().signal);
-  f.media.setInput(true);
-  f.harness.unmount();
-  assert.equal(f.state.closed, 1);
-  assert.equal(f.state.input, false);
-  assert.equal(f.media.usesNativeMedia, false);
-});
+for (const platform of ["android", "ios"] as const) {
+  test(`${platform} OpenAI calls mount no WebView and release native capture on unmount`, async () => {
+    const f = fixture(platform);
+    const view = f.harness.mount(() =>
+      f.module.VoiceMediaBridge({
+        media: f.media,
+        protocol: "openai_live",
+        origin: "https://nyx.example",
+      }),
+    );
+    assert.equal(view, null);
+    await f.media.prepare("openai_live", new AbortController().signal);
+    f.media.setInput(true);
+    f.harness.unmount();
+    assert.equal(f.state.closed, 1);
+    assert.equal(f.state.input, false);
+    assert.equal(f.media.usesNativeMedia, false);
+  });
+}
 
 test("beginEndDrain never exempts a WebView engine from disconnect cleanup", async () => {
   const f = fixture();
