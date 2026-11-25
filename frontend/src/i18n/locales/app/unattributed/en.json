@@ -972,7 +972,6 @@
   "{{count}} requests_one": "{{count}} request",
   "{{count}} requests_other": "{{count}} requests",
   "{{count}} selected + all platform services": "{{count}} selected + all platform services",
-  "{{count}} service": "{{count}} service",
   "{{count}} services": "{{count}} services",
   "{{displayName}} {{roleLabel}} message": "{{displayName}} {{roleLabel}} message",
   "{{display_name}} setup": "{{display_name}} setup",

@@ -41,6 +41,7 @@
   "on {{platform}}": "在 {{platform}} 上",
   "replied in": "已回覆，位於",
   "reported back in": "已回報，位於",
+  "unread": "未讀",
   "was paused": "已暫停",
   "was skipped": "已略過",
   "{{count}} new": "{{count}} 條新訊息"

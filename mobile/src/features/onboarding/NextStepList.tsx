@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { onboardingText } from "../../../../shared/onboardingCopy";
 import { useState } from "react";
 import { NextStepConnect } from "./NextStepConnect";
 import { Feather } from "@expo/vector-icons";
@@ -17,6 +19,8 @@ export function NextStepList({
   onStart: (step: NextStep) => void;
   disabled?: boolean;
 }) {
+  const { language } = useAppLanguage();
+  const text = (source: string) => onboardingText(language, source);
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
   const [connecting, setConnecting] = useState<NextStep>();
@@ -36,11 +40,14 @@ export function NextStepList({
         >
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={step.title}
-            accessibilityHint={step.description}
+            accessibilityLabel={text(step.title)}
+            accessibilityHint={text(step.description)}
             disabled={disabled}
             accessibilityState={{ disabled: !!disabled }}
-            onPress={() => step.connect ? setConnecting(step) : onStart(step)}
+            onPress={() => {
+              if (step.connect) setConnecting(step);
+              else onStart({ ...step, prompt: text(step.prompt) });
+            }}
             style={({ pressed }) => [
               styles.main,
               { opacity: disabled ? 0.6 : pressed ? 0.7 : 1 },
@@ -62,9 +69,9 @@ export function NextStepList({
               />
             </View>
             <View style={styles.text}>
-              <Label style={styles.title}>{step.title}</Label>
+              <Label style={styles.title}>{text(step.title)}</Label>
               <Label muted style={styles.description}>
-                {step.description}
+                {text(step.description)}
               </Label>
             </View>
             <Label muted style={styles.arrow}>

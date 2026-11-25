@@ -75,6 +75,7 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
+  ActivityPage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -223,6 +224,12 @@ const loginRoute = createRoute({
       : {}),
   }),
   component: LoginPage,
+});
+
+const activityRoute = createRoute({
+  path: "/activity",
+  getParentRoute: () => rootRoute,
+  component: ActivityPage,
 });
 
 const nyxbotOnboardingRoute = createRoute({
@@ -1307,6 +1314,7 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  activityRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,

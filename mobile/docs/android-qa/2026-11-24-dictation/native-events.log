@@ -1,0 +1,93 @@
+--------- beginning of main
+11-24 16:38:55.468 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"permission","error":null,"draft":"","at":1795509535468}'
+11-24 16:38:55.473 30187 30225 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:38:55.473 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"connecting","error":null,"draft":"","at":1795509535473}'
+11-24 16:38:55.474 28545 28545 I NyxSpeechFixture: discovery mode=empty
+11-24 16:38:55.474 30187 30386 D ExpoSpeechService: onSupportResult() called with recognitionSupport: RecognitionSupport { installedOnDeviceLanguages = [], pendingOnDeviceLanguages = [], supportedOnDeviceLanguages = [], onlineLanguages = [] }
+11-24 16:38:55.492 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:38:55.493 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:38:55.493 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:38:55.493 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:38:55.493 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:38:55.494 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:38:55.494 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:38:55.505 28545 28545 I NyxSpeechFixture: start attempt=1 lang=ja-JP t=84954326
+11-24 16:38:55.510 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"listening","error":null,"draft":"","at":1795509535510}'
+11-24 16:38:59.809 28545 28545 I NyxSpeechFixture: no-speech attempt=1 t=84958629
+11-24 16:38:59.810 30187 30187 D ExpoSpeechService: onError() - no-speech: No speech was detected. - code: 7
+11-24 16:39:00.497 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:39:00.499 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:39:00.499 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:39:00.499 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:00.499 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:39:00.499 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:00.500 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:00.516 28545 28545 I NyxSpeechFixture: start attempt=2 lang=ja-JP t=84959337
+11-24 16:39:04.822 28545 28545 I NyxSpeechFixture: no-speech attempt=2 t=84963642
+11-24 16:39:04.824 30187 30187 D ExpoSpeechService: onError() - no-speech: No speech was detected. - code: 7
+11-24 16:39:05.510 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:39:05.510 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:39:05.510 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:39:05.510 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:05.510 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:39:05.510 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:05.511 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:05.522 28545 28545 I NyxSpeechFixture: start attempt=3 lang=ja-JP t=84964343
+11-24 16:39:09.826 28545 28545 I NyxSpeechFixture: no-speech attempt=3 t=84968646
+11-24 16:39:09.828 30187 30187 D ExpoSpeechService: onError() - no-speech: No speech was detected. - code: 7
+11-24 16:39:10.553 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"idle","error":"No speech was detected. Try again.","draft":"","at":1795509550553}'
+11-24 16:39:17.370 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"permission","error":null,"draft":"","at":1795509557370}'
+11-24 16:39:17.374 30187 30225 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:17.374 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"connecting","error":null,"draft":"","at":1795509557374}'
+11-24 16:39:17.375 28545 28545 I NyxSpeechFixture: discovery mode=result
+11-24 16:39:17.376 30187 30480 D ExpoSpeechService: onSupportResult() called with recognitionSupport: RecognitionSupport { installedOnDeviceLanguages = [], pendingOnDeviceLanguages = [], supportedOnDeviceLanguages = [], onlineLanguages = [] }
+11-24 16:39:17.377 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:39:17.378 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:39:17.378 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:39:17.378 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:17.378 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:39:17.378 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:17.378 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:17.391 28545 28545 I NyxSpeechFixture: start attempt=1 lang=ja-JP t=84976211
+11-24 16:39:17.396 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"listening","error":null,"draft":"","at":1795509557396}'
+11-24 16:39:21.696 28545 28545 I NyxSpeechFixture: no-speech attempt=1 t=84980516
+11-24 16:39:21.697 30187 30187 D ExpoSpeechService: onError() - no-speech: No speech was detected. - code: 7
+11-24 16:39:22.393 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:39:22.394 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:39:22.394 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:39:22.394 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:22.394 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:39:22.394 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:22.394 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:22.404 28545 28545 I NyxSpeechFixture: start attempt=2 lang=ja-JP t=84981225
+11-24 16:39:26.711 28545 28545 I NyxSpeechFixture: synthetic result
+11-24 16:39:26.714 30187 30187 D ExpoSpeechService: onResults(), results: [{transcript=QA recognized after pause, confidence=0.0, segments=[]}]
+11-24 16:39:26.761 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"idle","error":null,"draft":"|QA recognized after pause","at":1795509566761}'
+11-24 16:39:33.302 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"permission","error":null,"draft":"|QA recognized after pause","at":1795509573302}'
+11-24 16:39:33.308 30187 30225 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:33.309 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"connecting","error":null,"draft":"|QA recognized after pause","at":1795509573309}'
+11-24 16:39:33.311 28545 28545 I NyxSpeechFixture: discovery mode=empty
+11-24 16:39:33.312 30187 30548 D ExpoSpeechService: onSupportResult() called with recognitionSupport: RecognitionSupport { installedOnDeviceLanguages = [], pendingOnDeviceLanguages = [], supportedOnDeviceLanguages = [], onlineLanguages = [] }
+11-24 16:39:33.313 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:39:33.313 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:39:33.313 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:39:33.313 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:33.313 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:39:33.313 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:33.314 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:33.334 28545 28545 I NyxSpeechFixture: start attempt=1 lang=ja-JP t=84992155
+11-24 16:39:33.341 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"listening","error":null,"draft":"|QA recognized after pause","at":1795509573341}'
+11-24 16:39:37.640 28545 28545 I NyxSpeechFixture: no-speech attempt=1 t=84996460
+11-24 16:39:37.640 30187 30187 D ExpoSpeechService: onError() - no-speech: No speech was detected. - code: 7
+11-24 16:39:38.330 30187 30187 D ExpoSpeechService: Start recognition.
+11-24 16:39:38.331 30187 30187 D ExpoSpeechService: androidIntentOptions: {EXTRA_PREFER_OFFLINE=false, EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0, EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS=15000.0, EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000.0}
+11-24 16:39:38.331 30187 30187 D ExpoSpeechService: Resolved key EXTRA_PREFER_OFFLINE -> android.speech.extra.PREFER_OFFLINE with value: false (java.lang.Boolean)
+11-24 16:39:38.331 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:38.331 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS with value: 15000.0 (java.lang.Double)
+11-24 16:39:38.331 30187 30187 D ExpoSpeechService: Resolved key EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS -> android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS with value: 3000.0 (java.lang.Double)
+11-24 16:39:38.333 30187 30187 D ExpoSpeechService: Found service for package dev.nyxid.voicetest: dev.nyxid.voicetest.Provider
+11-24 16:39:38.345 28545 28545 I NyxSpeechFixture: start attempt=2 lang=ja-JP t=84997166
+11-24 16:39:40.512 30187 30187 D ExpoSpeechService: onError() - no-speech: No speech was detected. - code: 7
+11-24 16:39:40.519 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"stopping","error":null,"draft":"|QA recognized after pause","at":1795509580518}'
+11-24 16:39:40.531 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"stopping","error":"No speech was detected. Try again.","draft":"|QA recognized after pause","at":1795509580530}'
+11-24 16:39:40.538 30187 30220 I ReactNativeJS: 'NyxHookQA', '{"phase":"idle","error":"No speech was detected. Try again.","draft":"|QA recognized after pause","at":1795509580538}'

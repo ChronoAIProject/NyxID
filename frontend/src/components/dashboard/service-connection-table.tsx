@@ -1,3 +1,4 @@
+import { serviceOrderAccessibility } from "./service-order-accessibility";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -1000,21 +1001,7 @@ export function ServiceConnectionTable({
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
-        accessibility={{
-          announcements: {
-            onDragStart: ({ active }) =>
-              `Picked up ${connections.find((key) => key.id === active.id)?.label}, position ${ids.indexOf(String(active.id)) + 1} of ${ids.length}`,
-            onDragOver: ({ active, over }) =>
-              over && active.id !== over.id
-                ? `Moved to position ${ids.indexOf(String(over.id)) + 1}`
-                : undefined,
-            onDragEnd: ({ over }) =>
-              over
-                ? `Dropped at position ${ids.indexOf(String(over.id)) + 1}`
-                : "Cancelled",
-            onDragCancel: () => "Cancelled",
-          },
-        }}
+        accessibility={serviceOrderAccessibility(connections, ids)}
         onDragEnd={({ active, over }) => {
           if (over && active.id !== over.id)
             ordering.update(

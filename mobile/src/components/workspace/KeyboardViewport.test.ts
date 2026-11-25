@@ -24,6 +24,8 @@ function setup(
     initialKeyboard ? initialKeyboard.screenY + initialKeyboard.height : 0,
   ),
   inSheet = false,
+  androidContentBottom: number | null = null,
+  safeAreaBottom = 24,
 ) {
   const keyboardListeners = new Map<
     string,
@@ -40,6 +42,7 @@ function setup(
   let animations = 0;
   const viewports: (KeyboardViewportFrame | undefined)[] = [];
   const harness = hookHarness<Element>({
+    expo: { requireOptionalNativeModule: () => ({ contentBottom: () => androidContentBottom }) },
     "react-native": {
       View: "View",
       Platform: { OS: platform },
@@ -84,7 +87,7 @@ function setup(
       useSafeAreaFrame: () => safeAreaFrame,
       useSafeAreaInsets: () => ({
         top: safeAreaTop,
-        bottom: 24,
+        bottom: safeAreaBottom,
         left: 0,
         right: 0,
       }),
@@ -200,6 +203,30 @@ for (const [viewHeight, expectedOverlap] of [[482, 35], [447, 0]] as const) {
     assert.equal(env.bottom(), expectedOverlap, "resize events cannot erase the IME frame");
     env.hide();
     assert.equal(env.bottom(), 0);
+    env.harness.unmount();
+  });
+}
+
+for (const reportedTop of [895.99, 896, 920, 920.01]) {
+  test(`Android keeps the IME inset when the visible display frame ends at ${reportedTop}`, () => {
+    const env = setup(undefined, 24, "android", { y: 0, height: 920 }, 920, false, 896, 0);
+    const frame = { screenY: reportedTop, height: 336 };
+    env.metrics(frame);
+    env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+    assert.equal(env.measurements.length, 1);
+    env.measurements.shift()!(0, 0, 411, 872);
+    assert.equal(env.bottom(), 336);
+    assert.deepEqual(env.viewport(), { y: 0, height: 536 });
+
+    // The native resize can arrive after the show event with the same metrics.
+    env.windowHeight(560);
+    env.resize();
+    env.measurements.shift()!(0, 0, 411, 536);
+    assert.equal(env.bottom(), 0);
+    assert.deepEqual(env.viewport(), { y: 0, height: 536 });
+
+    env.hide();
+    assert.equal(env.viewport(), undefined);
     env.harness.unmount();
   });
 }

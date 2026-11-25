@@ -10,6 +10,8 @@
 export function isPublicPath(path: string): boolean {
   return (
     path === "/" ||
+    path === "/activity" ||
+    path === "/activity/" ||
     path === "/login" ||
     path === "/register" ||
     path === "/nyxbot/onboarding" ||
