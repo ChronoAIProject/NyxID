@@ -22,7 +22,7 @@ export async function recognitionLocales(
     }
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const empty = { locales: [], installedLocales: [] };
+  const empty: LocaleResult = { locales: [], installedLocales: [] };
   try {
     const result = await Promise.race([
       Promise.resolve()

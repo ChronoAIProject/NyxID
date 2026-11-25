@@ -963,7 +963,6 @@ test("recognizer errors explain themselves; text heard before a failure still jo
     x.emit("end", null);
     await x.h.settle();
     if (code === "service-not-allowed") {
-      if (code === "speech-timeout") x.emit("speechstart");
       x.emit("error", { error: code });
       x.emit("end");
       await x.h.settle();
