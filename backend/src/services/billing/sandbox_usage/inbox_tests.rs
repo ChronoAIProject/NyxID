@@ -395,7 +395,7 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         billing_wallet::COLLECTION_NAME as WALLETS,
         credits::Credits,
         sandbox_usage_rates::{
-            COLLECTION_NAME as RATES, POLICIES, Selection, UsagePolicy, UsageTariff,
+            COLLECTION_NAME as RATES, POLICIES, SCHEMA, Selection, UsagePolicy, UsageTariff,
         },
         usage_meter::COLLECTION_NAME as USAGE_METER,
         user::{COLLECTION_NAME as USERS, User, UserType},
@@ -415,6 +415,7 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
     pin.scope.owner_id = owner.clone();
     pin.scope_key = super::policy::scope_key(&pin.scope).unwrap();
     pin.dimensions.cpu = Selection::Allocated;
+    pin.dimensions.disk = Selection::Measured;
     fx.db
         .collection::<UsagePolicy>(POLICIES)
         .insert_one(UsagePolicy {
@@ -443,6 +444,20 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
         source_epoch: "00000000-0000-4000-8000-000000000002",
         minute: pricing_tests::time(),
     };
+    fx.db
+        .collection::<Document>(SCHEMA)
+        .update_one(
+            doc! {"schema_version":1},
+            doc! {"$unset":{"shadow_buckets_ready":""}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        shadow_buckets::observe(&fx.db, ISSUER, bucket())
+            .await
+            .is_err()
+    );
+    pricing_schema::prepare(&fx.db).await.unwrap();
     let unpriced = shadow_buckets::observe(&fx.db, ISSUER, bucket())
         .await
         .unwrap()
@@ -568,6 +583,32 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
     let (opening, opening_digest) = with_owner(measured_open, &owner, None, false);
     let (evidence, _) = with_owner(measured, &owner, Some(&opening_digest), false);
     inbox::accept(&fx.db, &writer, &opening).await.unwrap();
+    let opened = shadow_buckets::observe(&fx.db, ISSUER, bucket())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(opened.bucket_id, corrected_bucket.bucket_id);
+    assert_eq!(opened.positions.len(), 2);
+    assert_eq!(opened.input.facts.len(), 1);
+    assert_eq!(opened.provisional_total, corrected_bucket.provisional_total);
+    for metric in [
+        "sandbox_memory_working_set_byte_milliseconds_v1",
+        "sandbox_disk_used_byte_milliseconds_v1",
+    ] {
+        assert!(
+            opened
+                .input
+                .unresolved
+                .contains(&format!("{metric}:minute_evidence_missing"))
+        );
+        assert!(
+            !opened
+                .input
+                .provisional_metrics
+                .iter()
+                .any(|row| row.metric_code == metric)
+        );
+    }
     inbox::accept(&fx.db, &writer, &evidence).await.unwrap();
     let both = shadow_buckets::observe(&fx.db, ISSUER, bucket())
         .await
@@ -588,6 +629,25 @@ async fn correction_keeps_its_historical_owner_and_usage_time_tariff_after_erasu
             .contains(&"minute_completeness_unproven".into())
     );
     assert_eq!(both.input.price_pin, first_bucket.input.price_pin);
+    for metric in [
+        "sandbox_memory_working_set_byte_milliseconds_v1",
+        "sandbox_disk_used_byte_milliseconds_v1",
+    ] {
+        assert!(
+            !both
+                .input
+                .unresolved
+                .contains(&format!("{metric}:minute_evidence_missing"))
+        );
+    }
+    let disk = both
+        .input
+        .provisional_metrics
+        .iter()
+        .find(|row| row.metric_code == "sandbox_disk_used_byte_milliseconds_v1")
+        .unwrap();
+    assert_eq!(disk.numerator_pico, "0");
+    assert_eq!(disk.rounded_candidate, Credits::ZERO);
     for collection in [LEDGER, WALLETS, USAGE_METER] {
         assert_eq!(
             fx.db

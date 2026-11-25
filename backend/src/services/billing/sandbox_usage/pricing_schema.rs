@@ -50,8 +50,25 @@ pub async fn prepare(db: &Database) -> AppResult<()> {
             .await?;
     }
     db.collection::<Document>(SCHEMA).update_one(doc! {"schema_version":1},
-        doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"schema_version":1,"revision":0_i64},"$set":{"ready":true}})
+        doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"schema_version":1,"revision":0_i64},"$set":{"ready":true,"shadow_buckets_ready":true}})
         .upsert(true).await?;
+    Ok(())
+}
+
+pub(super) async fn require_bucket_schema(
+    db: &Database,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let ready = db
+        .collection::<Document>(SCHEMA)
+        .find_one(doc! {"schema_version":1,"ready":true,"shadow_buckets_ready":true})
+        .session(session)
+        .await?;
+    if ready.is_none() {
+        return Err(unavailable(
+            "Prepare Sandbox usage shadow bucket indexes explicitly",
+        ));
+    }
     Ok(())
 }
 

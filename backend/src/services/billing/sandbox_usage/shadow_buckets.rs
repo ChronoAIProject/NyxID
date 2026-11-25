@@ -130,6 +130,7 @@ async fn observe_in_session(
     bucket: &Bucket<'_>,
     source: &OwnerRef,
 ) -> AppResult<ShadowBucketRevision> {
+    pricing_schema::require_bucket_schema(db, session).await?;
     let owner_subject = source.subject.as_str();
     let mut streams = db
         .collection::<Stream>(STREAMS)
@@ -214,6 +215,7 @@ async fn observe_in_session(
         .sort(doc! {"stream_id":1,"fact_id":1}).limit(FACT_LIMIT+1).session(&mut *session).await?;
     let mut refs = Vec::new();
     let mut fractions = BTreeMap::<Metric, (u128, u128)>::new();
+    let mut observed_metrics = BTreeSet::new();
     // Contiguous custody and observed resource facts alone do not certify completeness.
     let mut unresolved = BTreeSet::from([
         "minute_completeness_unproven".to_string(),
@@ -239,6 +241,7 @@ async fn observe_in_session(
             return Err(corrupt());
         }
         let fact = effective_fact(&event, &stored.fact_id).ok_or_else(corrupt)?;
+        observed_metrics.extend(fact.quantities.keys().copied());
         refs.push(ShadowFactRef {
             stream_id: stored.stream_id,
             fact_id: stored.fact_id.clone(),
@@ -286,6 +289,35 @@ async fn observe_in_session(
         }
         if pin.tariff_id.is_none() {
             unresolved.insert("tariff_unresolved".into());
+        }
+        for (selection, allocated, measured) in [
+            (
+                pin.dimensions.cpu,
+                Metric::AllocatedCpu,
+                Metric::MeasuredCpu,
+            ),
+            (
+                pin.dimensions.memory,
+                Metric::AllocatedMemory,
+                Metric::MeasuredMemory,
+            ),
+            (
+                pin.dimensions.disk,
+                Metric::AllocatedDisk,
+                Metric::MeasuredDisk,
+            ),
+        ] {
+            let selected = match selection {
+                Selection::Allocated => allocated,
+                Selection::Measured => measured,
+                _ => continue,
+            };
+            if !observed_metrics.contains(&selected) {
+                unresolved.insert(format!(
+                    "{}:minute_evidence_missing",
+                    pricing::code(selected)
+                ));
+            }
         }
     }
     if refs.is_empty() {
