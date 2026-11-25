@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 #[path = "assistant_nyxagent_subscriber.rs"]
 mod subscriber;
-pub(crate) use subscriber::cancel_background;
+pub(crate) use subscriber::{cancel_background, record as window_record};
 
 /// HTTP composition supplies existing reporting and queue wake-up behavior.
 /// Called only with a confirmed durable reply, never a candidate stream result.

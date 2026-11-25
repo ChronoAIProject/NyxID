@@ -26,6 +26,8 @@ def main():
                         help="exercise active and rolled-back channel writers against the dual-reader base")
     parser.add_argument("--whatsapp", action="store_true",
                         help="exercise retained enrollment migration and token replacement after writer rollback")
+    parser.add_argument("--thread-reference", action="store_true",
+                        help="exchange retained thread references and verify relay bindings across rewrap")
     parser.add_argument("--gateway-key", action="store_true",
                         help="exercise managed channel-key replacement, removal and retained migration")
     parser.add_argument("--event-bindings", action="store_true",
@@ -34,6 +36,8 @@ def main():
                         help="replay a retained setup at its loopback gateway on both server revisions")
     parser.add_argument("--cma-requests", action="store_true",
                         help="exchange both request copies across two dual-reader revisions")
+    parser.add_argument("--reattach-window", action="store_true",
+                        help="exercise the retained conversation window and the legacy subscriber boundary")
     parser.add_argument("--learning-writers", action="store_true",
                         help="exchange learning proposals with the reader-preparation binary")
     parser.add_argument("--approval-readers", action="store_true",
@@ -237,7 +241,7 @@ def main():
         run("candidate", "read", "current")
         if args.reader_preparation:
             return
-        if args.whatsapp or args.gateway_key or args.event_bindings:
+        if args.whatsapp or args.gateway_key or args.event_bindings or args.reattach_window or args.thread_reference:
             run("candidate", "migrate", "old", writes=True)
             run("candidate", "read", "old", legacy=False)
             run("base", "metadata" if args.event_bindings else "reject", "old")
@@ -247,7 +251,7 @@ def main():
             run("candidate", "clear", "current")
             run("base", "read", "current")
         registry_test = args.test
-        if args.whatsapp or args.gateway_key or args.event_bindings:
+        if args.whatsapp or args.gateway_key or args.event_bindings or args.reattach_window or args.thread_reference:
             registry_test = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
         if args.channel_writers:
             run("candidate", "replace", "current", writes=True)

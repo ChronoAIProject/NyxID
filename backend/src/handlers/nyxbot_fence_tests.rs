@@ -906,3 +906,106 @@ async fn personal_adoption_no_source_or_classified_destination_opens_no_transact
     assert_history(&f, SECOND).await;
     finish(f).await;
 }
+
+#[tokio::test]
+async fn thread_reference_storage_races_personal_and_org_adoption_and_new_activity() {
+    use crate::services::{
+        channel_supplemental_delivery::reference_anchor, nyxbot_thread_reference as reference,
+        record_field_service::tests::pause_first_wrap,
+    };
+    for org in [false, true] {
+        for migrate_first in [false, true] {
+            let f = Box::pin(fixture(org, "direct")).await;
+            let db = &f.state.db;
+            let rows = db.collection::<bson::Document>(THREADS);
+            let filter = doc! {"_id":&f.source.id};
+            let mut legacy = crate::test_utils::test_encryption_keys();
+            legacy.set_contextual_record_writes(false);
+            reference::record_activity(db, &legacy, &f.source, doc! {}, Some("first"), Some("one"))
+                .await
+                .unwrap();
+            let source = rows.find_one(filter.clone()).await.unwrap().unwrap();
+            if migrate_first {
+                assert!(
+                    reference::migrate(db, &f.state.encryption_keys, &source)
+                        .await
+                        .unwrap()
+                );
+                adopt(&f, SECOND).await.unwrap();
+            } else {
+                let (keys, pause) = pause_first_wrap();
+                let migrate = reference::migrate(db, &keys, &source);
+                let move_chat = async {
+                    pause.entered.notified().await;
+                    adopt(&f, SECOND).await.unwrap();
+                    pause.release.notify_one();
+                };
+                let (won, ()) = tokio::join!(migrate, move_chat);
+                assert!(!won.unwrap());
+                let winner = rows.find_one(filter.clone()).await.unwrap().unwrap();
+                assert!(winner.get("event_ref_ciphertext") == source.get("event_ref_ciphertext"));
+                assert!(!winner.contains_key("event_ref_context_version"));
+                assert!(
+                    reference::migrate(db, &f.state.encryption_keys, &winner)
+                        .await
+                        .unwrap()
+                );
+            }
+            assert_history(&f, SECOND).await;
+            let adopted = rows.find_one(filter.clone()).await.unwrap().unwrap();
+            let row: NyxbotThread = bson::from_document(adopted.clone()).unwrap();
+            assert!(
+                reference::open(&f.state.encryption_keys, &row)
+                    .await
+                    .unwrap()
+                    .as_str()
+                    == "first"
+            );
+            assert_eq!(reference_anchor(&row).ok(), Some("one"));
+            // A delayed activity for the former partition cannot update the adopted row.
+            reference::record_activity(db, &legacy, &f.source, doc! {}, Some("late"), None)
+                .await
+                .unwrap();
+            assert!(rows.find_one(filter.clone()).await.unwrap().unwrap() == adopted);
+
+            reference::record_activity(db, &legacy, &row, doc! {}, Some("two"), Some("second"))
+                .await
+                .unwrap();
+            let before = rows.find_one(filter.clone()).await.unwrap().unwrap();
+            let (keys, pause) = pause_first_wrap();
+            let migrate = reference::migrate(db, &keys, &before);
+            let new_activity = async {
+                pause.entered.notified().await;
+                reference::record_activity(
+                    db,
+                    &f.state.encryption_keys,
+                    &row,
+                    doc! {},
+                    Some("three"),
+                    Some("newest"),
+                )
+                .await
+                .unwrap();
+                let winner = rows.find_one(filter.clone()).await.unwrap().unwrap();
+                pause.release.notify_one();
+                winner
+            };
+            let (won, winner) = tokio::join!(migrate, new_activity);
+            assert!(!won.unwrap());
+            assert!(rows.find_one(filter).await.unwrap().unwrap() == winner);
+            reference::verify(&f.state.encryption_keys, &winner)
+                .await
+                .unwrap();
+            let row = bson::from_document(winner).unwrap();
+            assert_eq!(reference_anchor(&row).ok(), Some("newest"));
+            assert!(
+                reference::open(&f.state.encryption_keys, &row)
+                    .await
+                    .unwrap()
+                    .as_str()
+                    == "three"
+            );
+            finish(f).await;
+        }
+    }
+}
