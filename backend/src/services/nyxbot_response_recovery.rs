@@ -1,11 +1,15 @@
 //! Durable provider responses. Reads never recreate or resubmit model/tool work.
 use crate::{
-    crypto::aes::EncryptionKeys,
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
         assistant_message::AssistantMessage,
         nyxbot_channel::{EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel, NyxbotEvent},
         nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
+        nyxbot_response_read::ReplyPayload,
     },
 };
 use bson::{Document, doc};
@@ -115,11 +119,41 @@ impl Payload {
     }
 }
 pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<Payload> {
-    open_payload(keys, &row.payload_ciphertext).await
+    let field = [
+        "payload_ciphertext",
+        &row.channel_id,
+        &row.binding_id,
+        &row.response_id,
+    ];
+    let context = RecordContext::new(RESPONSES, &row.id, &row.user_id, &field)?;
+    open_payload(
+        keys,
+        &context,
+        row.payload_context_version,
+        &row.payload_ciphertext,
+    )
+    .await
 }
 
-pub async fn open_payload(keys: &EncryptionKeys, ciphertext: &[u8]) -> AppResult<Payload> {
-    let bytes = keys.decrypt(ciphertext).await?;
+pub(crate) async fn event_reply(
+    keys: &EncryptionKeys,
+    event_id: &str,
+    channel: &NyxbotChannel,
+    response_id: &str,
+    reply: &ReplyPayload,
+) -> AppResult<Payload> {
+    let field = ["response_reply.ciphertext", &channel.id, response_id];
+    let context = RecordContext::new(EVENTS, event_id, &channel.user_id, &field)?;
+    open_payload(keys, &context, reply.context_version, &reply.ciphertext).await
+}
+
+async fn open_payload(
+    keys: &EncryptionKeys,
+    context: &RecordContext<'_>,
+    version: Option<u8>,
+    ciphertext: &[u8],
+) -> AppResult<Payload> {
+    let bytes = record_field::decrypt_context(keys, context, version, ciphertext).await?;
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(unavailable());
     }
@@ -206,6 +240,14 @@ pub async fn load(
     }
     Ok(response)
 }
+fn replace_payload(fields: Document) -> Document {
+    doc! {
+        "$set": fields,
+        "$unset": {"payload_context_version": ""},
+        "$inc": {"revision": 1_i64},
+    }
+}
+
 pub async fn finish(
     db: &Database,
     keys: &EncryptionKeys,
@@ -267,7 +309,7 @@ pub async fn finish(
         .update_one(
             doc! {"_id":&row.id,"terminal":false,"revision":row.revision,
             "expires_at":{"$gt":bson::DateTime::now()}},
-            doc! {"$set":terminal,"$inc":{"revision":1_i64}},
+            replace_payload(terminal),
         )
         .await?;
     if changed.modified_count == 1 {
@@ -422,7 +464,7 @@ where
             if body.progress() {
                 let sealed=body.seal(keys).await?;
                 db.collection::<GatewayResponse>(RESPONSES).update_one(doc! {"_id":&row.id,"revision":row.revision,"terminal":false},
-                    doc! {"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}},"$inc":{"revision":1_i64}}).await?;
+                    replace_payload(doc! {"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}})).await?;
             }
         }
     } else if event.status != "queued"

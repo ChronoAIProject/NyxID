@@ -13,10 +13,13 @@ pub(super) async fn load(
     if !view.admitted {
         return Ok(None);
     }
-    if let Some(ciphertext) = view.reply_ciphertext.take() {
-        let payload = crate::services::nyxbot_response_recovery::open_payload(
+    if let Some((event_id, reply)) = view.reply.take() {
+        let payload = crate::services::nyxbot_response_recovery::event_reply(
             &state.encryption_keys,
-            &ciphertext,
+            &event_id,
+            row,
+            id,
+            &reply,
         )
         .await?;
         if payload.snapshot["id"] != view.payload.snapshot["id"]
@@ -193,6 +196,7 @@ pub(super) async fn reply(
     let reply = ReplyPayload {
         version: 1,
         response_id: id.clone(),
+        context_version: None,
         ciphertext: payload.seal(&state.encryption_keys).await?,
     };
     let reply = bson::to_bson(&reply)

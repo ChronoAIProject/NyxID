@@ -91,6 +91,7 @@ pub(super) async fn prepare(
         stream_deadline: row.created_at + ChronoDuration::seconds(STREAM_SECS),
         checked_at: row.created_at,
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     };
@@ -966,7 +967,12 @@ async fn event_reference(state: &AppState, event: &NyxbotEvent) -> AppResult<Zer
         .event_context_ciphertext
         .as_ref()
         .ok_or_else(|| AppError::NotFound("Channel event unavailable".into()))?;
-    let bytes = state.encryption_keys.decrypt(ciphertext).await?;
+    let bytes = crate::services::nyxbot_event_record::event_context(
+        &state.encryption_keys,
+        event,
+        ciphertext,
+    )
+    .await?;
     let context: Value = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Internal("Channel event unavailable".into()))?;
     context["event_ref"]
@@ -985,7 +991,13 @@ async fn mint_target(
     fetch_target(state, event, channel, d).await?;
     if let (Some(sealed), Some(expires)) = (&d.target_ciphertext, d.target_expires_at) {
         state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {"_id": &event.id, "delivery.state":{"$in":["pending","preparing_text"]}, "delivery.target_ciphertext": bson::Bson::Null},
-            doc! {"$set": {"delivery.target_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone()}, "delivery.target_expires_at": bson::DateTime::from_chrono(expires)}}).await?;
+            doc! {
+                "$set": {
+                    "delivery.target_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone()},
+                    "delivery.target_expires_at": bson::DateTime::from_chrono(expires),
+                },
+                "$unset": {"delivery.target_context_version": ""},
+            }).await?;
     }
     let canonical = state
         .db
@@ -997,6 +1009,7 @@ async fn mint_target(
         .and_then(|e| e.delivery)
         .ok_or_else(preparation::lost)?;
     d.target_ciphertext = canonical.target_ciphertext;
+    d.target_context_version = canonical.target_context_version;
     d.target_expires_at = canonical.target_expires_at;
     Ok(())
 }
@@ -1041,6 +1054,7 @@ async fn fetch_target(
     }
     let sealed = state.encryption_keys.encrypt(target.as_bytes()).await?;
     d.target_ciphertext = Some(sealed);
+    d.target_context_version = None;
     d.target_expires_at = Some(expires);
     Ok(())
 }
@@ -1093,9 +1107,16 @@ pub(super) async fn dispatch_occurrence(
                 if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
                     return Ok(classified(Outcome::Rejected));
                 }
-                let reference =
-                    crate::crypto::guarded_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                        .map_err(|_| AppError::Internal("Channel target unavailable".into()))?;
+                let reference = crate::crypto::guarded_utf8(
+                    crate::services::nyxbot_event_record::delivery_target(
+                        &state.encryption_keys,
+                        event,
+                        d,
+                        ciphertext,
+                    )
+                    .await?,
+                )
+                .map_err(|_| AppError::Internal("Channel target unavailable".into()))?;
                 (
                     Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
                     Some(event.id.as_str()),

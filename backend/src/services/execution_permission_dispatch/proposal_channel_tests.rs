@@ -94,6 +94,7 @@ async fn channel_turn_transport(
         stream_deadline: Utc::now() + chrono::Duration::seconds(570),
         checked_at: Utc::now(),
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     };

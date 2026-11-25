@@ -219,8 +219,9 @@ pub(super) const CHANNEL_KEY_DIGEST: &str =
 pub(super) const EVENT_BINDING_DIGEST: &str =
     "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
 
-// These Meta draft registries share the reconciled field order with consent assets appended.
-pub(super) const META_DIGESTS: [&str; 8] = [
+// These Meta registries share the reconciled field order with consent assets appended.
+pub(super) const META_DIGESTS: [&str; 9] = [
+    "8d3f9c267aa1346a94a79c061d35cbf8c0e844fba6a1d9144869116dcab42369", // #2902 on dev
     "4c651a86c5f4450b911a8052544564ca6659040d1cc429064a5fea1d2f0cb016", // 73318f7de
     "9a784b1659734c401dbb632bfda793658c1bd612819bef626a622bc87fb92189", // e97018750
     "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de", // f344f1f8e
@@ -248,3 +249,24 @@ pub(super) const REATTACH_WINDOW_DIGEST: &str =
 
 pub(super) const THREAD_EVENT_DIGEST: &str =
     "5dfa37490ffad3c3a6cc3eb3fbe19ca6adf2c2291d78cc5d1c998a815055fb42";
+
+pub(super) const EVENT_REPLY_DRAFT_DIGEST: &str =
+    "1c55ec996722c504e1e0fad8cc55a31a178a515945c322484f8e1115ad59c649";
+
+pub(super) fn event_reply_draft() -> impl Iterator<Item = super::FieldLabels> {
+    reconciled().map(|entry| -> super::FieldLabels {
+        if entry.0 == "nyxbot_events" {
+            (
+                entry.0,
+                &[
+                    "delivery.target_ciphertext",
+                    "event_context_ciphertext",
+                    "guest_setup_payload",
+                    "response_reply.ciphertext",
+                ],
+            )
+        } else {
+            entry
+        }
+    })
+}

@@ -29,7 +29,7 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
         ),
         (
             nyxbot_channel::EVENTS_COLLECTION_NAME,
-            doc! {"delivery": {"target_ciphertext": &bytes}, "event_context_ciphertext": &bytes, "guest_setup_payload": &bytes},
+            doc! {"delivery": {"target_ciphertext": &bytes}, "event_context_ciphertext": &bytes, "guest_setup_payload": &bytes, "response_reply": {"ciphertext": &bytes}},
         ),
         (
             nyxbot_gateway_response::COLLECTION_NAME,
@@ -176,11 +176,12 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "8d3f9c267aa1346a94a79c061d35cbf8c0e844fba6a1d9144869116dcab42369"
+        "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
     let historical_meta = [
+        "8d3f9c267aa1346a94a79c061d35cbf8c0e844fba6a1d9144869116dcab42369",
         "4c651a86c5f4450b911a8052544564ca6659040d1cc429064a5fea1d2f0cb016",
         "9a784b1659734c401dbb632bfda793658c1bd612819bef626a622bc87fb92189",
         "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de",
@@ -194,7 +195,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let dev_learning_checkpoint =
         "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
     let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
+    let reply_draft = "1c55ec996722c504e1e0fad8cc55a31a178a515945c322484f8e1115ad59c649";
     for digest in [
+        Some(reply_draft),
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
         Some(previous_labels::RECONCILED_DIGEST),
@@ -223,6 +226,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             "unresolved": 1_i64,
             "field_outcomes": {
                 "21": {"0": {"verification_blocked": 7_i64}},
+                "29": {"3": {"authenticated_current": 11_i64}},
                 "30": {"0": {"authenticated_current": 2_i64}},
             },
         });
@@ -252,6 +256,15 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                     && field.field == "assets_encrypted"),
             includes_meta
         );
+        assert_eq!(
+            report
+                .field_outcomes
+                .iter()
+                .any(|field| field.collection == "nyxbot_events"
+                    && field.field == "response_reply.ciphertext"
+                    && field.authenticated_current == 11),
+            digest == Some(live.as_str()) || digest == Some(reply_draft)
+        );
         let expected = match digest {
             Some(previous_labels::DIGEST) => Some((
                 "nyxbot_watches",
@@ -260,6 +273,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             )),
             Some(value)
                 if includes_meta
+                    || value == reply_draft
                     || value == dev_thread_checkpoint
                     || value == dev_gateway_checkpoint
                     || value == dev_learning_checkpoint

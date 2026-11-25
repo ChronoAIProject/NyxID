@@ -132,8 +132,15 @@ pub(super) async fn wait(
         let events=db.collection::<bson::Document>(EVENTS);
         if events.count_documents(doc!{"user_id":owner,"status":"queued","guest_setup_payload":{"$exists":true}}).session(&mut *tx).await?>=32 {return Ok(false);}
         Ok(events.update_one(doc!{"_id":event,"user_id":owner,"turn_id":bson::Bson::Null,"status":{"$in":["running","resuming"]}},
-            doc!{"$set":{"status":"queued","guest_setup_conversation_id":conversation,"guest_setup_deadline":bson::DateTime::from_chrono(*deadline),
-                "guest_setup_payload":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext.clone()}}}).session(tx).await?.matched_count==1)
+            doc! {
+                "$set": {
+                    "status": "queued",
+                    "guest_setup_conversation_id": conversation,
+                    "guest_setup_deadline": bson::DateTime::from_chrono(*deadline),
+                    "guest_setup_payload": bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:ciphertext.clone() },
+                },
+                "$unset": {"guest_setup_context_version": ""},
+            }).session(tx).await?.matched_count==1)
     })).await?;
     if !accepted {
         return Ok(Some(Inbound::Busy));
@@ -198,14 +205,8 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     let invalid = || AppError::Internal("Guest queue unavailable".into());
     let id = event.get_str("_id").map_err(|_| invalid())?;
     let owner = event.get_str("user_id").map_err(|_| invalid())?;
-    let bytes = state
-        .encryption_keys
-        .decrypt(
-            event
-                .get_binary_generic("guest_setup_payload")
-                .map_err(|_| invalid())?,
-        )
-        .await?;
+    let bytes =
+        crate::services::nyxbot_event_record::guest_setup(&state.encryption_keys, event).await?;
     let payload: WaitingGuest = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let channel = load_channel(
         state,
