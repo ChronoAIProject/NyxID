@@ -3355,7 +3355,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("channel_email_batches", "user_id"),
     ("channel_email_receipts", "user_id"),
     ("channel_email_sends", "user_id"),
-    ("channel_reply_deliveries", "user_id"),
     ("nyxbot_events", "user_id"),
     ("refresh_tokens", "user_id"),
     ("service_change_events", "actor.person_id"),
