@@ -388,8 +388,8 @@ pub(super) async fn create(
         })
         .collect::<AppResult<Vec<_>>>()?;
     let version = v3::choose_version(db, &contract, reusable).await?;
-    let encrypted = Slot::Assistant(version)
-        .seal(keys, &id, Field::Payload, &encoded)
+    let (encrypted, payload_context_version) = Slot::Assistant(version)
+        .seal(keys, &id, &chat.user_id, Field::Payload, &encoded)
         .await?;
     if encrypted.len() > MAX_PAYLOAD {
         tracing::info!(
@@ -435,7 +435,7 @@ pub(super) async fn create(
         )
         .await?,
         payload: Some(binary(encrypted)),
-        payload_context_version: None,
+        payload_context_version,
         state: "pending".into(),
         grant_id: None,
         selected_choice: None,

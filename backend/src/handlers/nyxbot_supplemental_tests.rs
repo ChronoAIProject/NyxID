@@ -1994,3 +1994,6 @@ async fn supplemental_result_preparation_failure_does_not_claim() {
         f.state.db.drop().await.unwrap();
     }).await;
 }
+
+#[path = "nyxbot_thread_reference_tests.rs"]
+mod thread_reference_tests;

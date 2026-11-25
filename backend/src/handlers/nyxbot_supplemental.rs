@@ -171,13 +171,7 @@ pub async fn relay(
             return Ok(());
         }
         // Progress retains the original gateway-reference window.
-        let ciphertext = thread
-            .event_ref_ciphertext
-            .as_deref()
-            .ok_or_else(|| AppError::Internal("Event reference unavailable".into()))?;
-        let reference = state.encryption_keys.decrypt(ciphertext).await?;
-        std::str::from_utf8(&reference)
-            .map_err(|_| AppError::Internal("Event reference unavailable".into()))?;
+        crate::services::nyxbot_thread_reference::open(&state.encryption_keys, thread).await?;
     }
     if decrypt_agent_key(state, channel).await?.is_none() {
         decision.skip(Reason::AuthorityRefused);

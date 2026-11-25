@@ -20,7 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-Each row lists the exact BSON paths and migration status for one adapter.
+The registry has 50 entries for 48 collections, with 42 implemented adapters
+and 8 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -53,7 +54,7 @@ A collection may use separate adapters for different fields.
 | `downstream_services` | `credential_encrypted` | [catalog_credential_record_service.rs](../../backend/src/services/catalog_credential_record_service.rs) | Implemented |
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
 | `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
-| `nyxbot_threads` | `event_ref_ciphertext` | — | Pending |
+| `nyxbot_threads` | `event_ref_ciphertext` | [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs) | Implemented |
 | `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload` | — | Pending |
 | `mobile_social_deliveries` | `ciphertext` | — | Pending |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
@@ -72,8 +73,8 @@ A collection may use separate adapters for different fields.
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
 | `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
-| `assistant_conversations` | `active_turn.restart_admission.window.input` | — | Pending |
-| `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | — | Pending |
+| `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
+| `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
 | `channel_meta_oauth_sessions` | `assets_encrypted` | — | Pending |
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
@@ -113,6 +114,21 @@ interface also binds its publication operation. Migration compares the exact
 source document and preserves terminal body sentinels and publication leases.
 [Proposal storage](../../backend/src/services/assistant_learning_record_storage.rs)
 
+Approval payloads and results bind the approval ID, user and selected versioned
+field path. Migration compares the complete source approval before replacing
+retained fields. Dispatch claims and per-effect send receipts keep their own fences.
+
+Reattach input binds the conversation, user, admitted credential and window key.
+Recovery and continuation writers store the marker with the input. Rewrap
+compares the full source conversation so worker takeover, window replacement,
+credential rotation, stop and settlement retain their own fences.
+[Window storage](../../backend/src/services/assistant_reattach_window_record.rs)
+
+Gateway thread references bind the thread ID, user and channel. Rewrap preserves
+the reference deadline and relay message. A matching relay binding is recomputed
+with the new ciphertext in the same exact-source update.
+[Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
@@ -120,16 +136,9 @@ source document and preserves terminal body sentinels and publication leases.
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
-- NyxBot keeps the latest event reference on the thread. The event holds its
-  context, the late-delivery target and the queued guest setup payload.
+- The NyxBot event holds its context, the late-delivery target and the queued guest setup payload.
   Gateway responses store an encrypted replay payload.
-  [Thread reference](../../backend/src/services/channel_supplemental_delivery.rs) · [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
-- Assistant recovery retains the encrypted input on the
-  active turn’s restart window. Approval requests retain encrypted payloads
-  and results under the selected proposal version. Approval readers bind marked fields
-  to the request, user, version arm and field. Writers use the historical AAD in
-  both positions of the record-write switch.
-  [Restart window](../../backend/src/services/assistant_nyxagent_subscriber.rs) · [Proposal versions](../../backend/src/models/execution_proposal.rs) · [Approval delivery](../../backend/src/services/execution_permission_dispatch/proposals/resume.rs)
+  [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and

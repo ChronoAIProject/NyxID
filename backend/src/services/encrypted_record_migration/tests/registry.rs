@@ -13,7 +13,7 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
         key_was_created: true,
         delivery_credential_encrypted: Some(vec![0xa5]),
     };
-    let mut sources = vec![
+    vec![
         (channel_meta::SESSIONS, doc! {"assets_encrypted": &bytes}),
         (
             mobile_social::MobileSocialDelivery::COLLECTION_NAME,
@@ -32,25 +32,10 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
             doc! {"delivery": {"target_ciphertext": &bytes}, "event_context_ciphertext": &bytes, "guest_setup_payload": &bytes},
         ),
         (
-            nyxbot_channel::THREADS_COLLECTION_NAME,
-            doc! {"event_ref_ciphertext": &bytes},
-        ),
-        (
             nyxbot_gateway_response::COLLECTION_NAME,
             doc! {"payload_ciphertext": &bytes},
         ),
-        (
-            assistant_conversation::COLLECTION_NAME,
-            doc! {"active_turn": {"restart_admission": {"window": {"input": &bytes}}}},
-        ),
-    ];
-    for version in ["v1", "v2", "v3", "v4"] {
-        sources.push((
-            approval_request::COLLECTION_NAME,
-            doc! {"execution_proposal": {version: {"payload": &bytes, "result": &bytes}}},
-        ));
-    }
-    sources
+    ]
 }
 
 #[test]
@@ -85,6 +70,18 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
         .filter(|line| line.starts_with("| `"))
         .collect();
     assert_eq!(rows.len(), REGISTRY.len());
+    let pending = REGISTRY
+        .iter()
+        .filter(|e| matches!(e.adapter, Adapter::Pending))
+        .count();
+    let collections: HashSet<_> = REGISTRY.iter().map(|e| e.collection).collect();
+    assert!(inventory.contains(&format!(
+        "{} entries for {} collections, with {} implemented adapters\nand {} Pending entries.",
+        REGISTRY.len(),
+        collections.len(),
+        REGISTRY.len() - pending,
+        pending
+    )));
     let mut unique = HashSet::new();
     for (entry, line) in REGISTRY.iter().zip(rows) {
         let cells: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
@@ -179,7 +176,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "bf6341a74abf17a8a1fe0f2b0425c6275553ed7d47824d9b869ae7008c6d0abe"
+        "8d3f9c267aa1346a94a79c061d35cbf8c0e844fba6a1d9144869116dcab42369"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -191,7 +188,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241",
         "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96",
         "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a",
+        "bf6341a74abf17a8a1fe0f2b0425c6275553ed7d47824d9b869ae7008c6d0abe",
     ];
+    let dev_thread_checkpoint = "5dfa37490ffad3c3a6cc3eb3fbe19ca6adf2c2291d78cc5d1c998a815055fb42";
     let dev_learning_checkpoint =
         "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
     let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
@@ -202,6 +201,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
         Some(previous_labels::CHANNEL_BOT_DIGEST),
         Some(previous_labels::WHATSAPP_DIGEST),
+        Some(dev_thread_checkpoint),
+        Some(previous_labels::APPROVAL_PROPOSAL_DIGEST),
+        Some(previous_labels::REATTACH_WINDOW_DIGEST),
         Some(dev_gateway_checkpoint),
         Some(previous_labels::CMA_REQUEST_DIGEST),
         Some(dev_learning_checkpoint),
@@ -258,11 +260,14 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             )),
             Some(value)
                 if includes_meta
+                    || value == dev_thread_checkpoint
                     || value == dev_gateway_checkpoint
                     || value == dev_learning_checkpoint
                     || matches!(
                         value,
-                        previous_labels::CMA_REQUEST_DIGEST
+                        previous_labels::APPROVAL_PROPOSAL_DIGEST
+                            | previous_labels::REATTACH_WINDOW_DIGEST
+                            | previous_labels::CMA_REQUEST_DIGEST
                             | previous_labels::CHANNEL_KEY_DIGEST
                             | previous_labels::EVENT_BINDING_DIGEST
                             | previous_labels::WHATSAPP_DIGEST

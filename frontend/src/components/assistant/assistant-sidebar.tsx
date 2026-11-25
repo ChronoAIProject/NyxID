@@ -8,8 +8,9 @@ import { useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } 
 import { useShallow } from "zustand/react/shallow";
 import { createPortal } from "react-dom";
 import { AssistantThreadsContext } from "./assistant-threads-context";
-import { AssistantThreadList } from "./assistant-thread-list";
-import { channelSourceTitle, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
+import { AssistantThreadList, ThreadChannelSummary } from "./assistant-thread-list";
+import { conversationChannelName, conversationChannelPlatform, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
+import { ChannelPlatformGlyph } from "@/components/shared/channel-platform-glyph";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useQuery } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -161,8 +162,8 @@ function ComingSoonItem({
 
 /**
  * One sidebar chat row: a full-width select button with the 3-dot menu laid
- * over its right edge, so the title always gets the whole column and the
- * trigger only takes space visually once the row is hovered.
+ * over its right edge, so the content uses the whole row. When the trigger
+ * appears, the content fades beneath it without changing the layout.
  *
  * The always-on state is keyed on `(hover: none)`, not on a breakpoint: a
  * pointer-less device can be any width (an iPad is `md`), and app.css already
@@ -213,6 +214,23 @@ function ConversationRow({
   const shownTitle = conversationDisplayTitle(conversation);
   const showDraft = !active && draftPreview.length > 0;
   const draftPreviewId = `assistant-draft-${conversation.id}`;
+  const channelDescriptionId = useId();
+  const platform = conversationChannelPlatform(conversation);
+  const channelName = conversationChannelName(conversation);
+  const channel = platform ? (
+    <span id={channelDescriptionId} title={channelName ?? undefined}
+      className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-text-tertiary">
+      <ChannelPlatformGlyph platform={platform} className="size-3.5 shrink-0" />
+      <span className={showDetails ? undefined : "sr-only"}>{channelName}</span>
+    </span>
+  ) : null;
+  const draftLine = showDraft ? (
+    <span id={draftPreviewId} className="flex min-w-0 items-center gap-1 type-secondary text-text-tertiary">
+      <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
+      <span className="sr-only">{translateUi("Draft: ")}</span>
+      <span className="min-w-0 flex-1 truncate">{draftPreview}</span>
+    </span>
+  ) : null;
 
   return (
     <div
@@ -226,7 +244,7 @@ function ConversationRow({
         onClick={onSelect}
         aria-label={unread ? translateUi("{{title}}, unread", { title: shownTitle }) : shownTitle}
         aria-current={active ? "page" : undefined}
-        aria-describedby={showDraft ? draftPreviewId : undefined}
+        aria-describedby={[platform ? channelDescriptionId : null, showDraft ? draftPreviewId : null].filter(Boolean).join(" ") || undefined}
         title={conversation.title}
         className={cn(
           "w-full overflow-hidden px-2 py-1 text-left transition-colors",
@@ -245,37 +263,32 @@ function ConversationRow({
             kind={conversation.channel?.chat_kind}
             className="h-3 w-3 shrink-0 text-text-tertiary"
           /> : null}
-          <span className={cn("min-w-0 truncate", showDetails && "flex-1")}>{shownTitle}</span>
+          <span className="min-w-0 flex-1 truncate">{shownTitle}</span>
           {showDetails && pinned ? <PinnedChatMarker /> : null}
           {showDetails && !conversation.channel?.thread_id ? <ChatKindIcon kind={conversation.channel?.chat_kind} className="h-3 w-3 shrink-0 text-text-tertiary" /> : null}
-          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-12 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
+          {!showDetails ? channel : null}
           {unread ? (
             <span aria-hidden="true" data-unread-marker="" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
           ) : null}
         </span>
-        {showDetails && !showDraft ? (
-          <span className="mt-1 flex items-center gap-1.5 text-12 text-text-tertiary">
-            {conversation.active_turn ? translateUi("Working") : (
-              <time dateTime={conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at}>
-                {Number.isNaN(Date.parse(conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at)) ? "" : new Date(conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at)
-                  .toLocaleDateString(getFormattingLocale(), { month: "short", day: "numeric" })}
-              </time>
-            )}
-            {conversation.message_count !== undefined ? (
-              <><span aria-hidden="true">·</span><span>{translateUi("{{count}} messages", { count: conversation.message_count })}</span></>
-            ) : null}
+        {showDetails ? (
+          <span className="mt-1 flex items-center justify-between gap-2 type-secondary text-text-tertiary">
+            <span className="min-w-0 flex-1">
+              {showDraft ? draftLine : <span className="flex flex-wrap items-center gap-x-1.5">
+                {conversation.active_turn ? translateUi("Working") : (
+                  <time dateTime={conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at}>
+                    {Number.isNaN(Date.parse(conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at)) ? "" : new Date(conversation.channel?.thread_id ? conversation.created_at : conversation.last_message_at)
+                      .toLocaleDateString(getFormattingLocale(), { month: "short", day: "numeric" })}
+                  </time>
+                )}
+                {conversation.message_count !== undefined ? (
+                  <><span aria-hidden="true">·</span><span>{translateUi("{{count}} messages", { count: conversation.message_count })}</span></>
+                ) : null}
+              </span>}
+            </span>
+            {channel}
           </span>
-        ) : null}
-        {showDraft && (
-          <span
-            id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-13 text-text-tertiary"
-          >
-            <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
-            <span className="sr-only">{translateUi("Draft: ")}</span>
-            <span className="min-w-0 flex-1 truncate">{draftPreview}</span>
-          </span>
-        )}
+        ) : showDraft ? <span className="mt-0.5 block">{draftLine}</span> : null}
       </button>
       <DropdownMenu open={menuOpen} onOpenChange={(open) => {
         if (open) {
@@ -1717,6 +1730,7 @@ function RailAgentChats({
   const pinnedIds = usePinnedConversationIds();
   const userId = useAuthStore((state) => state.user?.id);
   const selected = agent.id === model.selectedAgentId;
+  const channelDescriptionPrefix = useId();
   // The open agent's threads are already loaded; others load (and cache) on hover.
   const threads = useQuery({
     queryKey: nyxBotQueryKeys.threads(userId, agent.id),
@@ -1756,6 +1770,7 @@ function RailAgentChats({
         >
           <Plus aria-hidden="true" className="h-3 w-3" />{translateUi("New chat")}</button>
       </div>
+      {chats.length ? <div className="px-2 pb-1"><ThreadChannelSummary threads={chats} /></div> : null}
       {loading && !chats.length ? (
         <p className="px-2 py-1.5 text-13 text-text-tertiary">{translateUi("Loading chats...")}</p>
       ) : !chats.length ? (
@@ -1768,6 +1783,7 @@ function RailAgentChats({
                 type="button"
                 onClick={() => onPick(chat.id)}
                 aria-label={conversationDisplayTitle(chat) || translateUi("New conversation")}
+                aria-describedby={conversationChannelPlatform(chat) ? `${channelDescriptionPrefix}-${chat.id}` : undefined}
                 aria-current={chat.id === activeConversationId ? "page" : undefined}
                 className={cn(
                   "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-overlay hover:text-foreground",
@@ -1776,15 +1792,14 @@ function RailAgentChats({
               >
                 {pinnedIds.has(chat.id) ? <PinnedChatMarker /> : null}
                 {chat.channel?.thread_id ? <MessagesSquare aria-hidden="true" className="h-3 w-3 shrink-0 text-text-tertiary" /> : null}
-                <span className="min-w-0">
-                  <span className="block truncate">{conversationDisplayTitle(chat) || translateUi("New conversation")}</span>
-                  {chat.channel ? <span className="mt-0.5 block truncate type-secondary text-text-tertiary">
-                    {chat.channel.parent_title?.trim()
-                      ? `${channelPlatformName(chat.channel.platform)} · ${chat.channel.parent_title}`
-                      : translateUi("{{platform}} · Bot: {{bot}}", { platform: channelPlatformName(chat.channel.platform),
-                        bot: chat.channel.bot_label?.trim() || channelSourceTitle(chat.channel) })}
-                  </span> : null}
-                </span>
+                <span className="min-w-0 flex-1 truncate">{conversationDisplayTitle(chat) || translateUi("New conversation")}</span>
+                {conversationChannelPlatform(chat) ? (
+                  <span id={`${channelDescriptionPrefix}-${chat.id}`} title={conversationChannelName(chat) ?? undefined}
+                    className="inline-flex shrink-0 items-center whitespace-nowrap text-text-tertiary">
+                    <ChannelPlatformGlyph platform={conversationChannelPlatform(chat)!} className="size-3.5 shrink-0" />
+                    <span className="sr-only">{conversationChannelName(chat)}</span>
+                  </span>
+                ) : null}
               </button>
             </li>
           ))}

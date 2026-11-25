@@ -220,7 +220,7 @@ pub(super) const EVENT_BINDING_DIGEST: &str =
     "98ef7eabeac5b92e4bc6f7c24b087b3b68d54fad47ac7ddf64c6eecdbe665108";
 
 // These Meta draft registries share the reconciled field order with consent assets appended.
-pub(super) const META_DIGESTS: [&str; 7] = [
+pub(super) const META_DIGESTS: [&str; 8] = [
     "4c651a86c5f4450b911a8052544564ca6659040d1cc429064a5fea1d2f0cb016", // 73318f7de
     "9a784b1659734c401dbb632bfda793658c1bd612819bef626a622bc87fb92189", // e97018750
     "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de", // f344f1f8e
@@ -228,6 +228,7 @@ pub(super) const META_DIGESTS: [&str; 7] = [
     "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241", // e42c02795
     "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96", // a40f49119
     "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a", // 5014e6111
+    "bf6341a74abf17a8a1fe0f2b0425c6275553ed7d47824d9b869ae7008c6d0abe", // 96386ba2b
 ];
 
 pub(super) const GATEWAY_SETUP_DIGEST: &str =
@@ -238,3 +239,12 @@ pub(super) const CMA_REQUEST_DIGEST: &str =
 
 pub(super) const LEARNING_PROPOSAL_DIGEST: &str =
     "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
+
+pub(super) const APPROVAL_PROPOSAL_DIGEST: &str =
+    "89dd069d90525725f8d136619f99428d2f040d5176f66c9ef009d640e858c67c";
+
+pub(super) const REATTACH_WINDOW_DIGEST: &str =
+    "68bf534769f813c488cb4a87da6cf374632bede78e8d57b924cef52aecb2c78f";
+
+pub(super) const THREAD_EVENT_DIGEST: &str =
+    "5dfa37490ffad3c3a6cc3eb3fbe19ca6adf2c2291d78cc5d1c998a815055fb42";
