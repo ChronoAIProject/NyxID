@@ -13,11 +13,11 @@ export function ActivityPage() {
     <main className="flex min-h-dvh items-center justify-center bg-background px-6">
       <section className="flex w-full max-w-sm flex-col items-center gap-4 rounded-lg border border-border bg-card p-6 text-center">
         <NyxidIcon className="h-8 w-8" />
-        <h1 className="text-18 font-semibold">{title}</h1>
+        <h1 className="type-section-heading">{title}</h1>
         <Button asChild variant="primary" size="lg" className="w-full">
           <a href="nyxid://activity">{t("Open NyxID app")}</a>
         </Button>
-        <Link to="/assistant/approvals" className="text-13 text-muted-foreground underline">
+        <Link to="/assistant/approvals" className="type-secondary text-muted-foreground underline">
           {t("Review approvals on the web")}
         </Link>
       </section>
