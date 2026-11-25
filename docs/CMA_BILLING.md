@@ -405,3 +405,125 @@ Paid launch additionally requires controlled subscription/invoice verification,
 end-to-end crash/race tests across both systems, and exactly one enabled Lago
 emission path. CMA's existing direct exporter must remain disabled when using
 NyxID. The user enables billing after deployment; seeding prices never activates charging.
+
+## Usage evidence v1 contract (inactive)
+
+The pure decoder in `backend/src/services/billing/sandbox_usage/contract.rs`
+freezes a separate usage evidence format for CMA. This foundation adds no route,
+collection, worker, startup operation or charging path. Existing funded Sandbox
+APIs retain their current behavior. A later, separately reviewed inbox must
+establish producer authority, durable custody and stream consistency before any
+consumer can act on these records.
+
+The versioned interchange bundle is
+`backend/tests/fixtures/cma_usage_v1/`: `schema.json`, synthetic events and a
+receipt, their RFC 8785 canonical bytes, and `manifest.json`. Copy the whole
+bundle verbatim into CMA. Its release manifest SHA-256 is
+`5aa9606080eef4123e5314f0eac412f2c1bc018eb83aff172e01bfbbc14ac033`.
+Backend tests pin that hash, every listed file and canonical event digest, and
+validate the fixtures against the schema. The schema describes wire shape;
+raw duplicate detection and contextual arithmetic, ordering, coverage, clock
+and predecessor validation remain decoder requirements.
+
+`decode_event(bytes, Clock)` is the validation boundary. It returns an immutable
+`Event` with read-only header, payload, canonical bytes and computed digest.
+Decode raw bytes first: deserializing into a JSON map before this boundary would
+lose duplicate keys. The decoder rejects duplicate keys at every depth,
+including equivalent escaped names, before calling the pinned
+`serde_json_canonicalizer` RFC 8785 implementation. SHA-256 covers the complete
+canonical event, including identifiers and `previous_event_digest`; a supplied
+digest field is forbidden. Object key order, whitespace and equivalent JSON
+escapes do not change the digest. Strings are not Unicode-normalized.
+
+The four strict `kind` variants are `stream_open` (`opening`), `usage` (`facts`),
+`correction` (`correction`) and `stream_seal` (`seal`). They share the header
+shown in the fixtures. Unknown fields and variants are rejected. Schema version
+is the JSON integer `1`; supported basis/definition/algorithm combinations are:
+
+| Basis | Metric definition | Algorithm version |
+| --- | --- | --- |
+| `allocated` | `allocated-v1` | `lifecycle-minute-split-v1` |
+| `measured` | `measured-v1` | `binding-integral-half-even-v1` |
+
+Other versions require explicit reader support. Algorithm names identify the
+producer's frozen computation; decoding does not re-integrate source samples.
+`owner_ref` contains issuer, subject and kind. Its kind is bounded text so
+unresolved owner categories can retain evidence. The contract contains no price,
+wallet amount, funding prerequisite or claim of authenticated ownership.
+
+Wire bounds and ordering are fixed as follows:
+
+- Bodies are at most 512 KiB, with at most 64 facts and 1–64 source references.
+  The JSON parser's recursion limit also applies. Empty usage facts can advance
+  a zero-duration source transition without inventing a billable interval.
+- Quantities are canonical nonnegative decimal strings, at most 38 digits.
+  Sequence, evidence revision and runtime generation are positive decimal
+  strings up to `i64::MAX`; source part starts at zero. Times are nonnegative
+  epoch-millisecond strings up to `i64::MAX`. Signs, leading zeroes, decimal
+  points, exponent notation and JSON numeric quantities are rejected.
+- Event, stream, source-epoch, fact and receipt IDs are canonical lowercase
+  UUIDv4 strings. Digests are 64 lowercase hexadecimal characters. Other text
+  is nonempty, at most 256 UTF-8 bytes, without control characters or leading
+  or trailing whitespace.
+- Resource fields are required. Each runtime or home binding contains both its
+  ID and generation, or two explicit nulls; partial pairs are rejected even when
+  inactive. Home generation is opaque bounded text, preserved
+  exactly rather than parsed as a counter. Compute without a home and retained
+  home storage without a runtime are valid. Positive audit duration or expected
+  coverage requires both ID and generation for the corresponding resource,
+  including measured residual or missing evidence at zero logical uptime.
+- Facts are strictly ascending by `fact_id`. Source references are strictly
+  ascending by `(kind, id, revision, part)`, comparing text by Unicode scalar
+  order and revision/part numerically. Historical missing ranges ascend by
+  time and cannot overlap. Wrong ordering and duplicates are rejected; the
+  receiver does not reorder arrays. Metric quantities are an object containing
+  exactly the three keys for the selected basis; canonical JSON orders its keys.
+- A fact is a nonempty half-open interval inside one aligned UTC minute.
+  Allocated endpoints, audit time and covered binding time are whole seconds.
+  Checked capacity × covered seconds must equal each present allocated amount.
+  Overlapping compute or home evidence with the same physical identity and
+  generation is rejected within an event. Cross-event overlap remains an inbox
+  responsibility.
+- `source_cutoff_ms <= observed_at_ms <= produced_at_ms`. Production time may
+  use the caller's explicit bounded clock skew; fact endpoints and capture/seal
+  boundaries cannot exceed the validation clock. Audit duration cannot exceed
+  the interval. A first event is `stream_open`, sequence `"1"`, with a required
+  null previous digest. Later events require a digest. Only the inbox can prove
+  an unbroken stored chain or that a seal follows final home release.
+
+Each quantity uses these exact divisors, without floating point or prices:
+
+| Metric | Divide by to obtain core-hours or GiB-hours |
+| --- | ---: |
+| `sandbox_cpu_millis_seconds` | 3,600,000 |
+| `sandbox_memory_mib_seconds` | 3,686,400 |
+| `sandbox_disk_gib_seconds` | 3,600 |
+| `sandbox_cpu_core_nanoseconds_v1` | 3,600,000,000,000 |
+| `sandbox_memory_working_set_byte_milliseconds_v1` | 3,865,470,566,400,000 |
+| `sandbox_disk_used_byte_milliseconds_v1` | 3,865,470,566,400,000 |
+
+Coverage counts physical binding milliseconds and can exceed a wall-clock
+minute for concurrent bindings. `observed` requires complete coverage, a present
+quantity and null missing reason. `partial` requires positive incomplete
+coverage, a present subtotal and a reason. `missing` requires zero covered time,
+positive expected time, null quantity and a reason. `estimated` requires a
+present quantity and a reason. Covered time cannot exceed expected time.
+Observed `"0"` is distinct from missing `null`; null-valued fields must still be
+present. Measured allocation is required null. Logical compute uptime can be
+zero while retained disk capacity or measured physical residual remains present.
+
+Corrections contain a full replacement and controlled reason, never a signed
+delta. `Event::validate_correction_of` additionally compares an exact decoded
+predecessor: namespace, owner, Sandbox, stream, source epoch, basis, metric
+definition, fact ID, resource identity and period stay fixed; predecessor event
+ID/digest/revision must match, sequence must advance, and evidence revision must
+increase by one. Allocation, quantities, quality and source evidence can change.
+The future inbox must enforce that this predecessor is the effective stored head
+and atomically serialize competing replacements.
+
+`decode_receipt` accepts only the immutable custody fields in `receipt.json`.
+`Receipt::matches(event)` checks event/stream/sequence/digest and acceptance time
+before CMA records an ACK. `custody` can only be `persisted`; it never means
+priced, funded or charged. Mutable processing status belongs in a separate
+response. Neither decoding nor matching a receipt establishes server authority
+or proves persistence; that requires the future authenticated inbox protocol.
