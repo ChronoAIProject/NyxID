@@ -54,7 +54,9 @@ pub(crate) enum Evidence {
     Absent {
         operation: Option<String>,
     },
-    Progress,
+    Progress {
+        operation: Option<String>,
+    },
     Unknown,
 }
 #[derive(Deserialize)]
@@ -236,7 +238,9 @@ fn parse(row: &AssistantCmaCreation, id: &Identity<'_>, value: Value) -> CmaResu
             Ok(Evidence::Absent { operation: None })
         }
         Outcome::InProgress { operation_id } if operation_matches(row, operation_id.as_deref()) => {
-            Ok(Evidence::Progress)
+            Ok(Evidence::Progress {
+                operation: operation_id,
+            })
         }
         Outcome::Unknown { reason } if !reason.is_empty() => Ok(Evidence::Unknown),
         _ => Err(invalid_reply()),

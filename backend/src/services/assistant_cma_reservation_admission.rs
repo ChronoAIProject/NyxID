@@ -28,6 +28,7 @@ pub(crate) enum Change {
     Release,
     ReleaseEmptyInventory(Vec<String>),
     CoveredAbsent(Option<String>),
+    CoveredProgress(String),
     CoveredCreated(CmaSandbox, Option<String>),
     ConfirmRetirement(CmaSandbox),
 }
@@ -123,6 +124,18 @@ async fn commit_with_actor(
                     apply_creation_change(row, &mut next, &CreationChange::NoResource)?;
                     row.released_by_inventory = true;
                 }
+                Change::CoveredProgress(operation) => {
+                    let row = creation.as_mut().ok_or_else(drift)?;
+                    if row.covered_key.is_none() || !row.creates_sandbox || !current.occupies_account_slot
+                        || current.cma_sandbox_id.is_some() || row.cma_sandbox_id.is_some() || row.cma_agent_id.is_some()
+                        || current.idempotency_key.as_deref()!=Some(row.idempotency_key.as_str())
+                        || current.request_hash.as_deref()!=Some(row.request_hash.as_str())
+                        || current.operation_id.as_deref().is_some_and(|id| id!=operation)
+                        || row.operation_id.as_deref().is_some_and(|id| id!=operation)
+                        || matches!(row.submission_state.as_str(),"confirmed"|"confirmed_not_created")
+                    { return Err(drift()); }
+                    apply_creation_change(row,&mut next,&CreationChange::Receipt(CreationReceipt::Lifecycle(operation.clone())))?;
+                },
                 Change::CoveredAbsent(operation) => {
                     let row = creation.as_mut().ok_or_else(drift)?;
                     if row.covered_key.is_none() || !current.occupies_account_slot
@@ -287,7 +300,12 @@ pub(crate) async fn recover_covered(
                 "creation_confirmed",
             )
         }
-        Evidence::Progress => return Ok("creation_in_progress"),
+        Evidence::Progress {
+            operation: Some(operation),
+        } if creation.operation_id.is_none() => {
+            (Change::CoveredProgress(operation), "creation_in_progress")
+        }
+        Evidence::Progress { .. } => return Ok("creation_in_progress"),
         Evidence::Unknown => return Ok("creation_outcome_unknown"),
     };
     let expected_sandbox = match &change {
@@ -298,6 +316,7 @@ pub(crate) async fn recover_covered(
         Change::CoveredCreated(_, operation) | Change::CoveredAbsent(operation) => {
             operation.clone()
         }
+        Change::CoveredProgress(operation) => Some(operation.clone()),
         _ => None,
     };
     let result = commit_recovery(db,parent,Some(creation),change,serde_json::json!({
@@ -318,9 +337,12 @@ pub(crate) async fn recover_covered(
                 && saved.as_ref().is_some_and(|row| {
                     row.revision > creation.revision
                         && row.operation_id == expected_operation
-                        && ((reason == "creation_confirmed_not_created"
-                            && row.submission_state == "confirmed_not_created"
-                            && !observed.occupies_account_slot)
+                        && ((reason == "creation_in_progress"
+                            && observed.occupies_account_slot
+                            && observed.operation_id == expected_operation)
+                            || (reason == "creation_confirmed_not_created"
+                                && row.submission_state == "confirmed_not_created"
+                                && !observed.occupies_account_slot)
                             || (reason == "creation_confirmed"
                                 && row.cma_sandbox_id.is_some()
                                 && row.cma_sandbox_id == expected_sandbox
@@ -344,12 +366,22 @@ pub(crate) async fn cancel_covered(
     generation: i64,
 ) -> AppResult<sandboxes::SandboxCommandDto> {
     let db = &super::super::transaction_service::durable_database(db);
-    let parent = sandboxes::get_owned(db, owner, id).await?;
+    let mut parent = sandboxes::get_owned(db, owner, id).await?;
     sandboxes::require_generation(&parent, generation)?;
-    let creation = creation_for_sandbox(db, &parent).await?.ok_or_else(drift)?;
+    let mut creation = creation_for_sandbox(db, &parent).await?.ok_or_else(drift)?;
     require_parent(&creation, &parent)?;
     if creation.covered_key.is_none() {
         return Err(AppError::Conflict("This creation predates durable evidence; recover the original request or exact Sandbox retirement".into()));
+    }
+    if parent.occupies_account_slot
+        && creation.operation_id.is_none()
+        && creation.path == "/api/v1/agents"
+    {
+        recover_covered(db, gateway, &parent, &creation).await?;
+        parent = sandboxes::get_owned(db, owner, id).await?;
+        sandboxes::require_generation(&parent, generation)?;
+        creation = creation_for_sandbox(db, &parent).await?.ok_or_else(drift)?;
+        require_parent(&creation, &parent)?;
     }
     if !parent.occupies_account_slot && creation.submission_state == "confirmed_not_created" {
         return Ok(sandboxes::SandboxCommandDto {

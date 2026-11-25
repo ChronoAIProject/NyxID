@@ -679,11 +679,19 @@ async fn covered_creation_without_response_id_settles_and_allows_a_new_key() {
 #[tokio::test]
 async fn covered_cancellation_waits_for_terminal_evidence_and_replays_idempotently() {
     let op="1".repeat(32);
-    let (f,c)=covered_setup("/api/v1/agents",Some(&op)).await;
+    let (f,c)=covered_setup("/api/v1/agents",None).await;
     let before=parent(&f,&c).await;
+    assert!(c.operation_id.is_none());
+    covered_reply(&f,&c,json!({"kind":"in_progress"})).await;
+    assert_eq!(recovery::recover_one(&f.db,&f.gateway(),&before).await.unwrap(),"creation_in_progress");
+    assert!(parent(&f,&c).await.occupies_account_slot);
+    assert!(f.saved(&c.id).await.operation_id.is_none());
+    f.server.reset().await;
     covered_reply(&f,&c,json!({"kind":"in_progress","operation_id":op})).await;
     assert_eq!(recovery::recover_one(&f.db,&f.gateway(),&before).await.unwrap(),"creation_in_progress");
     assert!(parent(&f,&c).await.occupies_account_slot);
+    assert_eq!(f.saved(&c.id).await.operation_id.as_deref(),Some(op.as_str()));
+    assert_eq!(parent(&f,&c).await.operation_id.as_deref(),Some(op.as_str()));
     f.server.reset().await;
     Mock::given(method("POST")).and(path(format!("/api/v1/agent-lifecycle/{op}/cancel")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":op,"status":"failed"}))).mount(&f.server).await;
@@ -696,6 +704,7 @@ async fn covered_cancellation_waits_for_terminal_evidence_and_replays_idempotent
     let count=f.server.received_requests().await.unwrap().len();
     assert!(!reservation_admin::cancel_covered(&f.db,&gateway,&f.owner,&before.id,before.generation).await.unwrap().pending);
     assert_eq!(f.server.received_requests().await.unwrap().len(),count);
+    assert!(f.admit(&f.target,"/api/v1/agents","fresh-after-cancel",br#"{"name":"Fresh fixture"}"#).await.is_ok());
     f.db.drop().await.unwrap();
 }
 

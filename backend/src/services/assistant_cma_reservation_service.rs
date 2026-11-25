@@ -326,7 +326,7 @@ async fn observe(
                     Err(error) => (unknown_reason(error), None),
                 };
             }
-            Ok(Evidence::Progress) if creation.operation_id.is_none() => {
+            Ok(Evidence::Progress { operation: None }) if creation.operation_id.is_none() => {
                 return (unknown("covered_creation_in_progress"), None);
             }
             Ok(Evidence::Unknown) => return (unknown("covered_creation_outcome_unknown"), None),
