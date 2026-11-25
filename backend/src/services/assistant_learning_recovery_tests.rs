@@ -78,6 +78,37 @@ async fn tool_base(f: &Fixture, server: &MockServer) -> Base {
     base
 }
 
+pub(crate) async fn mixed_authored_row(
+    keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+) -> bson::Document {
+    let mut f = fixture("mixed_learning_authored").await;
+    f.state.encryption_keys = keys;
+    let server = setup_ornn(&f).await;
+    let base = tool_base(&f, &server).await;
+    let mut value = input(&f.chat.agent_id);
+    value["scope"] = json!({"status":"reduced","omissions":["An appendix was omitted."]});
+    value["base_skill"] = json!({"skill_id":base.skill_id,"version":"1.0"});
+    let (row, _) = make_with_access(&f, value, true).await;
+    let agent = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let raw = f
+        .state
+        .db
+        .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state.db.drop().await.unwrap();
+    doc! {"authored":raw, "agent":agent}
+}
+
 async fn mount_base(f: &Fixture, server: &MockServer, base: &Base) {
     mount_base_after(f, server, base, std::time::Duration::ZERO).await;
 }
@@ -1847,5 +1878,91 @@ async fn recovery_stale_release_frees_only_the_reservation_of_a_draft_invalidate
     assert_eq!(freed["actions"], json!(["deny", "publish"]));
     assert_eq!(writes(&server).await, 0);
     assert_owner_identity(&f, &server).await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_rebuilds_from_a_contextual_body_and_writes_a_legacy_snapshot() {
+    let f = fixture("learning_contextual_recovery").await;
+    let server = setup_ornn(&f).await;
+    let base = tool_base(&f, &server).await;
+    let (row, card) = legacy_draft(&f, &base, "Check the tracker.").await;
+    let card = expire(&f, &card).await;
+    install_contextual(&f, &row.id).await;
+    assert_eq!(
+        reprepare(&f, &row, Some(&card)).await.unwrap()["status"],
+        "reprepared"
+    );
+    let rebuilt = stored(&f, &row.id).await;
+    let p = rebuilt.publication.as_ref().unwrap();
+    let bytes = decode(&f, p.interface_encrypted.as_ref().unwrap()).await;
+    let snapshot: publication::InterfaceSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert!(snapshot.tools.iter().any(|tool| tool == BASE_TOOL));
+    let preview = review::authored_preview(&f.state, &f.owner, &row.agent_id, &row.id)
+        .await
+        .unwrap();
+    assert!(
+        preview["files"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(BASE_TOOL)
+    );
+    assert_eq!(writes(&server).await, 0);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_access_uses_contextual_body_scope_and_interface_for_publication_and_receipt() {
+    let f = fixture("learning_contextual_receipt").await;
+    let server = setup_ornn(&f).await;
+    let base = tool_base(&f, &server).await;
+    let mut value = input(&f.chat.agent_id);
+    value["scope"] = json!({"status":"reduced","omissions":["Test appendix."]});
+    value["base_skill"] = json!({"skill_id":base.skill_id,"version":"1.0"});
+    let (row, _) = make_with_access(&f, value, true).await;
+    mount_publication(&f, &server, &row, &base.skill_id, "PUT").await;
+    install_contextual(&f, &row.id).await;
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent =
+        crate::services::assistant_team_service::agent(&f.state.db, &f.owner, &row.agent_id)
+            .await
+            .unwrap();
+    let binding = publication::binding(
+        &row,
+        row.publication.as_ref().unwrap(),
+        agent.skills_revision,
+    );
+    let reader = crate::handlers::agent_skills::Reader {
+        state: &f.state,
+        person: &f.owner,
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    let result = Box::pin(publish_automatically(
+        &f.state, &f.chat, &agent, &row.id, &binding, &reader,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "pinned");
+    let history = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let receipt = history
+        .iter()
+        .find(|r| r.decided_by.as_deref() == Some("access_mode"))
+        .unwrap();
+    assert!(receipt.summary.contains("1 declared omission(s)"));
+    assert!(!receipt.summary.contains("Test appendix"));
+    server.verify().await;
     f.state.db.drop().await.unwrap();
 }

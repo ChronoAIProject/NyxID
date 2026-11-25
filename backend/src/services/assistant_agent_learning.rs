@@ -1348,10 +1348,12 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         failure_code: None,
         failure_rules: Vec::new(),
         scope_encrypted: None,
+        scope_context_version: None,
         scope_digest: None,
         evidence: run.evidence.clone(),
         body_bytes: body.len() as i64,
         body_encrypted: state.encryption_keys.encrypt(&body).await?,
+        body_context_version: None,
         created_at: now,
         updated_at: now,
     };
@@ -1480,7 +1482,7 @@ pub fn spawn(state: AppState) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::models::assistant_agent_learning::DEFAULT_THRESHOLD;
 
@@ -1665,6 +1667,42 @@ mod tests {
             before
         );
         f.state.db.drop().await.unwrap();
+    }
+
+    pub(crate) async fn mixed_learned_row(
+        keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    ) -> bson::Document {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let (mut state, mock, agent, config) = destruction_fixture().await;
+        state.encryption_keys = keys;
+        let content = serde_json::json!({"schema_version":1,"kind":"new","name":"checklist","description":"Reusable checklist","skill_md":"Validate each step.","files":[],"rationale":"Repeatable work","safety_notes":"Review first"});
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"choices":[{"message":{"content":content.to_string()}}]}),
+            ))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        let id = run.id.clone();
+        Box::pin(process_with_state(&state, run)).await.unwrap();
+        let row = state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .find_one(doc! {"run_id": id})
+            .await
+            .unwrap()
+            .unwrap();
+        state.db.drop().await.unwrap();
+        row
     }
 
     async fn destruction_fixture() -> (

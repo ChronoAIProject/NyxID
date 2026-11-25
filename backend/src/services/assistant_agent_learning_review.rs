@@ -5,8 +5,8 @@ use super::{
     api_key_mutation_service as transactions,
     assistant_acknowledgement_service::{self as acks, ChatAuthority},
     assistant_agent_learning::{self as learning, GeneratedProposal},
-    assistant_learning_publication as publication, assistant_team_service as team,
-    feature_flag_service, org_agent_service,
+    assistant_learning_publication as publication, assistant_learning_record as record,
+    assistant_team_service as team, feature_flag_service, org_agent_service,
 };
 use crate::{
     AppState,
@@ -91,6 +91,7 @@ const PACKAGE_FORMAT_SNAPSHOT: i64 = 2;
 fn legacy_package(p: &LearningPublication, draft_is_update: Option<bool>) -> bool {
     p.package_format < PACKAGE_FORMAT_SNAPSHOT
         && p.interface_encrypted.is_none()
+        && p.interface_context_version.is_none()
         && match p.target_kind.as_deref() {
             Some(kind) => kind == "update",
             None => draft_is_update.unwrap_or(false),
@@ -100,8 +101,11 @@ fn legacy_package(p: &LearningPublication, draft_is_update: Option<bool>) -> boo
 /// Mongo form of the snapshot-less package fields. Pre-#1828 rows have no
 /// `package_format` or `interface_encrypted` at all, and absent must match.
 fn legacy_package_filter() -> bson::Document {
-    doc! {"publication.package_format":{"$not":{"$gte":PACKAGE_FORMAT_SNAPSHOT}},
-    "publication.interface_encrypted":bson::Bson::Null}
+    doc! {
+        "publication.package_format": {"$not": {"$gte": PACKAGE_FORMAT_SNAPSHOT}},
+        "publication.interface_encrypted": bson::Bson::Null,
+        "publication.interface_context_version": bson::Bson::Null,
+    }
 }
 
 pub(super) fn non_effective(p: &LearningPublication, now: chrono::DateTime<Utc>) -> bool {
@@ -176,21 +180,26 @@ fn package_refusal_codes() -> Vec<&'static str> {
     codes
 }
 
+async fn proposal_scope(
+    state: &AppState,
+    row: &AssistantAgentLearningProposal,
+) -> AppResult<Option<DraftScope>> {
+    record::scope(&state.encryption_keys, row)
+        .await?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| conflict()))
+        .transpose()
+}
+
 async fn interface_snapshot(
     state: &AppState,
+    row: &AssistantAgentLearningProposal,
     p: &LearningPublication,
 ) -> AppResult<Option<publication::InterfaceSnapshot>> {
-    let Some(encrypted) = &p.interface_encrypted else {
-        return Ok(None);
-    };
-    let bytes = state
-        .encryption_keys
-        .decrypt(encrypted)
+    record::interface(&state.encryption_keys, row, p)
         .await
-        .map_err(|_| conflict())?;
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| conflict())
+        .map_err(|_| conflict())?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| conflict()))
+        .transpose()
 }
 
 /// The target recorded in an operation's own encrypted draft: `Ok(Some(None))`
@@ -201,12 +210,10 @@ async fn original_target_from_body(
     state: &AppState,
     row: &AssistantAgentLearningProposal,
 ) -> Result<Option<Option<String>>, ()> {
-    if row.body_encrypted.is_empty() {
+    if row.body_encrypted.is_empty() && row.body_context_version.is_none() {
         return Ok(None);
     }
-    let bytes = state
-        .encryption_keys
-        .decrypt(&row.body_encrypted)
+    let bytes = record::body(&state.encryption_keys, row)
         .await
         .map_err(|_| ())?;
     let decoded = || {
@@ -771,7 +778,18 @@ async fn invalidate_stale(db: &Database, row: &AssistantAgentLearningProposal) -
             filter.insert("status", doc! {"$nin":["pinned","rejected"]});
             let changed = transaction_db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
                 filter,
-                doc! {"$set":{"status":"invalidated","failure_code":"evidence_unavailable","body_bytes":0,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
+                doc! {
+                    "$set": {
+                        "status": "invalidated",
+                        "failure_code": "evidence_unavailable",
+                        "body_bytes": 0,
+                        "updated_at": bson::DateTime::now(),
+                    },
+                    "$unset": {
+                        "body_encrypted": "",
+                        "body_context_version": "",
+                    },
+                },
             ).session(&mut *session).await?;
             if changed.modified_count != 1 { return Err(conflict()); }
             Ok(())
@@ -809,9 +827,7 @@ async fn draft(
     state: &AppState,
     row: &AssistantAgentLearningProposal,
 ) -> AppResult<GeneratedProposal> {
-    let bytes = state
-        .encryption_keys
-        .decrypt(&row.body_encrypted)
+    let bytes = record::body(&state.encryption_keys, row)
         .await
         .map_err(|_| not_found())?;
     let text = std::str::from_utf8(&bytes).map_err(|_| not_found())?;
@@ -1543,7 +1559,23 @@ pub async fn edit(
             filter.insert("status", doc! {"$in":["pending","publication_failed"]});
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
                 filter,
-                doc! {"$set":{"status":"pending","body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted.clone()},"body_bytes":body_len,"fingerprint":&fingerprint,"revision":expected_revision+1,"agent_skills_revision":skills_revision,"updated_at":bson::DateTime::now()},"$unset":{"publication":"","failure_code":"","failure_rules":""}},
+                doc! {
+                    "$set": {
+                        "status": "pending",
+                        "body_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone() },
+                        "body_bytes": body_len,
+                        "fingerprint": &fingerprint,
+                        "revision": expected_revision+1,
+                        "agent_skills_revision": skills_revision,
+                        "updated_at": bson::DateTime::now(),
+                    },
+                    "$unset": {
+                        "body_context_version": "",
+                        "publication": "",
+                        "failure_code": "",
+                        "failure_rules": "",
+                    },
+                },
             ).session(&mut *session).await?;
             if changed.modified_count != 1 { return Err(conflict()); }
             Ok(())
@@ -1603,7 +1635,18 @@ pub async fn reject(
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         { let mut filter = operation_filter(&fresh); filter.insert("status", doc! {"$in":UNDISPATCHED_STATUSES.to_vec()}); filter },
-                        doc! {"$set":{"status":"rejected","body_bytes":0,"failure_code":&reason,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
+                        doc! {
+                            "$set": {
+                                "status": "rejected",
+                                "body_bytes": 0,
+                                "failure_code": &reason,
+                                "updated_at": bson::DateTime::now(),
+                            },
+                            "$unset": {
+                                "body_encrypted": "",
+                                "body_context_version": "",
+                            },
+                        },
                     )
                     .session(&mut *session)
                     .await?;
@@ -1686,7 +1729,18 @@ async fn discard_automatic(
         let result: AppResult<()> = async {
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
                 doc! {"_id":&row.id,"owner_id":&actor_owned,"revision":revision_filter(revision),"source":"authored","status":"pinned","publication.acknowledgement_id":bson::Bson::Null,"publication.approved_by":&actor_owned},
-                doc! {"$set":{"status":"rejected","body_bytes":0,"failure_code":"rejected","updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":""}},
+                doc! {
+                    "$set": {
+                        "status": "rejected",
+                        "body_bytes": 0,
+                        "failure_code": "rejected",
+                        "updated_at": bson::DateTime::now(),
+                    },
+                    "$unset": {
+                        "body_encrypted": "",
+                        "body_context_version": "",
+                    },
+                },
             ).session(&mut *session).await?;
             if changed.modified_count != 1 { return Err(conflict()); }
             skills::apply_verified_in_session(&db, &agent, &selection, &metadata, &mut *session).await?;
@@ -2134,12 +2188,9 @@ pub async fn accept_scope(
     accepted: bool,
 ) -> AppResult<()> {
     let (agent, row) = load(&state.db, actor, agent_id, id).await?;
-    let Some(encrypted) = row.scope_encrypted.as_ref() else {
+    let Some(scope) = proposal_scope(state, &row).await? else {
         return Ok(());
     };
-    let scope: crate::models::assistant_agent_learning::DraftScope =
-        serde_json::from_slice(&state.encryption_keys.decrypt(encrypted).await?)
-            .map_err(|_| conflict())?;
     if scope.status != "reduced" {
         return Ok(());
     }
@@ -2243,21 +2294,17 @@ async fn approve_core(
     if publication::binding(&row, &p, agent.skills_revision) != *binding {
         return Err(conflict());
     }
-    if let Some(encrypted) = row.scope_encrypted.as_ref() {
-        let scope: crate::models::assistant_agent_learning::DraftScope =
-            serde_json::from_slice(&state.encryption_keys.decrypt(encrypted).await?)
-                .map_err(|_| conflict())?;
-        if card.is_some()
-            && scope.status == "reduced"
-            && !p.reduced_scope_acceptance.as_ref().is_some_and(|consent| {
-                consent.revision == row.revision
-                    && consent.approval_digest == acks::arguments_digest(binding)
-            })
-        {
-            return Err(AppError::Conflict(
-                "reduced_scope_acceptance_required".into(),
-            ));
-        }
+    if let Some(scope) = proposal_scope(state, &row).await?
+        && card.is_some()
+        && scope.status == "reduced"
+        && !p.reduced_scope_acceptance.as_ref().is_some_and(|consent| {
+            consent.revision == row.revision
+                && consent.approval_digest == acks::arguments_digest(binding)
+        })
+    {
+        return Err(AppError::Conflict(
+            "reduced_scope_acceptance_required".into(),
+        ));
     }
     let digest = acks::arguments_digest(binding);
     let lease = Uuid::new_v4().to_string();
@@ -2635,7 +2682,7 @@ async fn execute(
             }
         }
     } else {
-        let snapshot = interface_snapshot(state, p).await?;
+        let snapshot = interface_snapshot(state, row, p).await?;
         let bytes = publication::package_with_snapshot(
             &body,
             &p.operation_id,
@@ -2882,7 +2929,22 @@ async fn execute(
                         if row_for_pin.source == ProposalSource::Authored && publication_for_pin.acknowledgement_id.is_none() {
                             doc! {"$set":{"status":"pinned","failure_code":bson::Bson::Null,"publication.lease_expires_at":bson::Bson::Null,"updated_at":bson::DateTime::now()},"$unset":{"failure_rules":"","publication.last_stage":"","publication.last_registry_status":""}}
                         } else {
-                            doc! {"$set":{"status":"pinned","failure_code":bson::Bson::Null,"publication.lease_expires_at":bson::Bson::Null,"body_bytes":0,"updated_at":bson::DateTime::now()},"$unset":{"body_encrypted":"","failure_rules":"","publication.last_stage":"","publication.last_registry_status":""}}
+                            doc! {
+                                "$set": {
+                                    "status": "pinned",
+                                    "failure_code": bson::Bson::Null,
+                                    "publication.lease_expires_at": bson::Bson::Null,
+                                    "body_bytes": 0,
+                                    "updated_at": bson::DateTime::now(),
+                                },
+                                "$unset": {
+                                    "body_encrypted": "",
+                                    "body_context_version": "",
+                                    "failure_rules": "",
+                                    "publication.last_stage": "",
+                                    "publication.last_registry_status": "",
+                                },
+                            }
                         },
                     )
                     .session(&mut *session)
@@ -2984,15 +3046,17 @@ async fn preview_value(
     if !matches!(row.status.as_str(), "pinned" | "rejected" | "invalidated") {
         match draft(state, row).await {
             Ok(body) => {
-                match interface_snapshot(state, p).await.and_then(|snapshot| {
-                    publication::skill_markdown_with_snapshot(
-                        &body,
-                        &p.operation_id,
-                        &p.name,
-                        &p.version,
-                        snapshot.as_ref(),
-                    )
-                }) {
+                match interface_snapshot(state, row, p)
+                    .await
+                    .and_then(|snapshot| {
+                        publication::skill_markdown_with_snapshot(
+                            &body,
+                            &p.operation_id,
+                            &p.name,
+                            &p.version,
+                            snapshot.as_ref(),
+                        )
+                    }) {
                     Ok(markdown) => {
                         files.push(json!({"path":"SKILL.md","content":markdown}));
                         files.extend(
@@ -3019,23 +3083,12 @@ async fn preview_value(
     } else {
         None
     };
-    let scope = if let Some(encrypted) = &row.scope_encrypted {
-        state
-            .encryption_keys
-            .decrypt(encrypted)
-            .await
-            .ok()
-            .and_then(|bytes| {
-                serde_json::from_slice::<crate::models::assistant_agent_learning::DraftScope>(
-                    &bytes,
-                )
-                .ok()
-            })
-            .map(|scope| json!({"status": scope.status, "omissions": scope.omissions}))
-    } else {
-        None
-    };
-    let scope_unavailable = row.scope_encrypted.is_some() && scope.is_none();
+    let scope = proposal_scope(state, row).await;
+    let scope_unavailable = scope.is_err();
+    let scope = scope
+        .ok()
+        .flatten()
+        .map(|scope| json!({"status": scope.status, "omissions": scope.omissions}));
     let card = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
         .find_one(doc! {"user_id":&row.owner_id,"authored_skill.proposal_id":&row.id,"authored_skill.revision":row.revision}).sort(doc! {"created_at":-1}).await?;
     let conversation = if let Some(card) = card {
