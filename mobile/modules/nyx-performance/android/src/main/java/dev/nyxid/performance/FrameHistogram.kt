@@ -30,6 +30,9 @@ internal class FrameHistogram(val startedMs: Double) {
     if (count < 2 || nowMs - startedMs !in 1.0..15000.0) return null
     return mapOf(
       "duration_ms" to nowMs - startedMs, "sample_count" to count,
+      // Observed rendered-window callbacks per elapsed second. TOTAL_DURATION
+      // is work time and must never be inverted to estimate display FPS.
+      "observed_fps" to count * 1000.0 / (nowMs - startedMs),
       "interval_p50_ms" to percentile(0.50), "interval_p95_ms" to percentile(0.95),
       "interval_max_ms" to maximum, "over_budget_count" to overBudget,
       "dropped_callback_count" to dropped

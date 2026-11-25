@@ -84,7 +84,7 @@ export function PerformanceConsentSettings() {
     <SettingsGroup
       title={t("Performance metrics")}
       footer={t(
-        "Share optional app timing measurements to help improve performance. This choice applies only to this device and is independent of account usage analytics. Off by default.",
+        "Share chat response times, frame rate, JavaScript responsiveness, and peak app memory use from this device. This setting is independent of account usage analytics and is off by default.",
       )}
     >
       <SettingsRow

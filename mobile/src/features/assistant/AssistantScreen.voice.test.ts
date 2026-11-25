@@ -95,10 +95,8 @@ function setup(
   const events: unknown[][] = [];
   const perf = { enabled: false, sample: undefined as AssistantTurnPerformance | undefined, submitted: [] as ChatTurnTimings[] };
   const nativePerf = {
-    readiness: [] as { screen: string; enabled: boolean; scope: unknown }[],
     frames: [] as { focused: boolean; streaming: boolean; scope: unknown }[],
     events: [] as string[],
-    layouts: [] as unknown[],
   };
   const alerts: { text: string; style?: string; onPress?: () => void }[][] = [];
   const drafts: {
@@ -518,10 +516,6 @@ function setup(
       }),
     },
     "../../lib/performance/useNativePerformance": {
-      usePerformanceInputReady: (screen: string, enabled: boolean, scope: unknown) => {
-        nativePerf.readiness.push({ screen, enabled, scope });
-        return (event: unknown) => nativePerf.layouts.push(event);
-      },
       useChatNativeFrames: (options: { focused: boolean; streaming: boolean; scope: unknown }) => {
         nativePerf.frames.push(options);
         return {
@@ -3635,17 +3629,11 @@ test("a batched reply commits through the matching saved bubble after the live r
   x.harness.unmount();
 });
 
-test("real composer and transcript handlers forward native readiness and frame boundaries without losing scroll follow", () => {
+test("transcript handlers forward frame boundaries while retaining scroll follow", () => {
   const view = setup("thread-a");
-  assert.equal(view.nativePerf.readiness.at(-1)?.enabled, false);
   assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
   view.setTranscriptReady(true);
-  assert.equal(view.nativePerf.readiness.at(-1)?.screen, "chat");
-  assert.equal(view.nativePerf.readiness.at(-1)?.enabled, true);
   assert.equal(view.nativePerf.frames.at(-1)?.focused, true);
-  const layout = { nativeEvent: { layout: { width: 320, height: 48 } } };
-  view.input().props.onInputLayout(layout);
-  assert.deepEqual(view.nativePerf.layouts, [layout]);
   const list = view.all().find((element) => element.type === "FlatList")!;
   list.props.onScrollBeginDrag();
   list.props.onScrollEndDrag({});
@@ -3654,7 +3642,6 @@ test("real composer and transcript handlers forward native readiness and frame b
   assert.deepEqual(view.nativePerf.events, ["drag", "drag-end", "momentum", "momentum-end"]);
   assert.deepEqual(view.events.filter((event) => String(event[0]).startsWith("follow-")), [["follow-drag"], ["follow-drag-end"], ["follow-momentum"], ["follow-momentum-end"]]);
   view.setFocused(false);
-  assert.equal(view.nativePerf.readiness.at(-1)?.enabled, false);
   assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
   view.harness.unmount();
 });

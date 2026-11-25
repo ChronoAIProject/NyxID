@@ -1,6 +1,6 @@
 # NyxID React Native 性能监控与排查手册
 
-适用范围为 NyxID 的原生 Android / iOS 应用。本分支在移动端实现三类性能事件。下面的看板配置、告警阈值和教学数据分别用于配置与读图。
+适用范围为 NyxID 的原生 Android / iOS 应用。本分支采集聊天响应、观测帧率、JS 长任务或事件循环延迟、进程内存峰值，并在构建时记录产物大小。下面的看板配置、告警阈值和教学数据分别用于配置与读图。
 
 ## 1. 一个问题该去哪里看
 
@@ -23,7 +23,7 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 ### 启动
 
 - **首帧**回答“多久看到第一个应用画面”。Android 的 TTID 由系统测量。冷启动需要新建进程，暖启动会复用部分状态，例如进程还在但 Activity 要重建；热启动通常可复用内存中的 Activity。iOS 将新进程启动和从后台恢复分别统计。应用内首次执行 JS 时，原生加载已经开始。
-- **可操作**回答“多久能执行来 App 的第一件事”。NyxID 用两个终点。未登录时登录控件能交互；已登录进入聊天时启动遮罩已消失、输入框可见且已能接收输入。导航 ready、组件第一次布局、真实键盘弹出分别代表不同阶段。用一次自动输入或测试员实际输入校准终点，避免把动画中仍被遮住的控件判成可用。
+- **可操作**回答“多久能执行来 App 的第一件事”。本地专项测试可选择两个终点。未登录时登录控件能交互；已登录进入聊天时启动遮罩已消失、输入框可见且已能接收输入。导航 ready、组件第一次布局、真实键盘弹出分别代表不同阶段。用一次自动输入或测试员实际输入校准终点，避免把动画中仍被遮住的控件判成可用。
 - **计时**从平台提供的原生启动时点出发，在同一单调时钟下记录间隔。Android 可在上述条件成立时调用 `reportFullyDrawn`，由 Macrobenchmark 读取 TTFD；iOS 用启动指标加业务 signpost。只拿得到 JS 计时的版本可以报告“JS 初始化到可输入”。后台恢复用后台到前台的真实转换单列，排除权限弹窗、控制中心造成的短暂失焦。
 - **项目排查点**依次观察域配置、字体、会话恢复、导航和首屏就绪。现有字体等待有 8 秒兜底，可记录触发次数。完成启动才能发出的业务事件会漏掉中途退出、无响应或崩溃的启动，读图时并排看平台启动与稳定性数据。[Android 启动定义](https://developer.android.google.cn/topic/performance/vitals/launch-time?hl=zh-cn) · [Apple 启动耗时](https://developer.apple.com/documentation/xcode/reducing-your-app-s-launch-time) · [NyxID 字体和启动流程](https://github.com/ChronoAIProject/NyxID/blob/9e25a66955abe4a0d8d685392fb4b60d77292e55/mobile/src/app/App.tsx)
 
@@ -47,7 +47,7 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 ## 3. NyxID 的 PostHog 看板怎么搭
 
-本版设计采用 **RN 客户端 → PostHog**。App 在本机测量，使用 `posthog-react-native` 的即时发送路径向项目的 `/batch/` 接口发送三个自定义事件。客户端配置取自目标 PostHog 项目的公开 Project Token 和接收事件的 host。个人 API key 只用于有管理权限的操作，不能打进 App。现有产品分析使用 NyxID relay，这条直连线路仅用于新增的三个性能事件。[PostHog RN SDK](https://posthog.com/docs/libraries/react-native) · [现有产品分析约定](https://github.com/ChronoAIProject/NyxID/blob/9e25a66955abe4a0d8d685392fb4b60d77292e55/docs/TELEMETRY.md)
+本版设计采用 **RN 客户端 → PostHog**。App 在本机测量，使用 `posthog-react-native` 的即时发送路径向项目的 `/batch/` 接口发送三个自定义事件。客户端配置取自目标 PostHog 项目的公开 Project Token 和接收事件的 host。个人 API key 只用于有管理权限的操作，不能打进 App。构建脚本从构建机直连同一项目，另发一类产物事件。现有产品分析使用 NyxID relay。[PostHog RN SDK](https://posthog.com/docs/libraries/react-native) · [现有产品分析约定](https://github.com/ChronoAIProject/NyxID/blob/9e25a66955abe4a0d8d685392fb4b60d77292e55/docs/TELEMETRY.md)
 
 **构建配置**。在对应环境的移动端构建配置中设置 `DEV_PERFORMANCE_POSTHOG_TOKEN` 与 `DEV_PERFORMANCE_POSTHOG_HOST`，或对应的 `PROD_` 变量。Project Settings 里的公开项目 token 以 `phc_` 开头；host 使用实际 HTTPS 接收域名，例如美国区 `https://us.i.posthog.com` 或欧洲区 `https://eu.i.posthog.com`。每个环境独立配置，留空时隐藏性能开关。首次安装需要包含新原生模块的构建。
 
@@ -55,25 +55,30 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 每条事件包含 `surface=mobile`、`environment`、`platform`、原生 App 版本 `client_version` 和构建号 `build_number`。
 
-PostHog 协议还会附带本次进程内的匿名 `distinct_id`、事件 UUID、时间戳和客户端库版本。匿名身份只保存在内存，应用进程重启后更换，不绑定 NyxID 账号，也不发送持久设备标识。接收服务仍可看到网络连接的 IP；关闭 GeoIP 解析不等于隐藏连接 IP。关闭分享停止未来观测并使未发送样本失效，不删除已经接收的事件；已接收数据的保留周期由项目配置决定。
+运行时事件还会附带本次进程内的匿名 `distinct_id`、事件 UUID、时间戳和客户端库版本。匿名身份只保存在内存，应用进程重启后更换，不绑定 NyxID 账号，也不发送持久设备标识。接收服务仍可看到网络连接的 IP；关闭 GeoIP 解析不等于隐藏连接 IP。关闭分享停止未来观测并使未发送样本失效，不删除已经接收的事件；已接收数据的保留周期由项目配置决定。
 
 | 事件 | 一条代表什么 | 字段和测量边界 |
 |---|---|---|
-| `mobile.perf_startup` | 冷启动或后台恢复至首个受支持页面的就绪信号 | `startup_kind`、`startup_source`、`screen`、`readiness`、`duration_ms`。Android 冷启动从进程启动时间起算；iOS 从 didFinishLaunching 标记起算。终点为获准观测后启用的输入框或认证页面布局后的原生绘制机会，可能包含本机许可读取延迟。分别按平台和终点看图。|
 | `mobile.perf_chat_turn` | 一轮通过输入框发送的聊天 | `headers_ms`、`first_text_ms`、`first_text_commit_ms` 均从发送操作起算；`duration_ms` 在轮次终态时冻结。 `outcome` 为 completed、no_text、cancelled、error 或 timeout。能看到正文但结束后两秒仍未观察到提交时，省略提交耗时。|
 | `mobile.perf_frames` | 聊天页内一次可观测的拖动或流式输出窗口 | `scenario` 区分 chat_drag、chat_drag_during_stream 和 chat_streaming。`measurement_source`、`duration_ms`、`sample_count`、`over_budget_count` 及 `interval_p50_ms`、`interval_p95_ms`、`interval_max_ms` 描述这一窗口。Android 采 Window FrameMetrics，可用时含 `dropped_callback_count`。iOS 采 CADisplayLink 回调间隔，超预算回调是显示节奏的近似值。Apple 官方动画停顿数据在 Instruments 或 Organizer 核对。|
+| `mobile.perf_js_tasks` | 每次进入前台或在前台开启分享，抽取一次约 10 秒的连续窗口 | `rn_longtask` 表示 RN 能观测已完成的 ≥50 ms JS 任务，报告 `task_count`、最长任务 `max_task_ms` 和超过阈值的累计 `blocked_ms`。如运行时未提供该能力，每 250 ms 测一次定时器延迟，来源为 `event_loop_lag`，单列 `stall_count`、`max_lag_ms`。延迟次数与长任务次数口径不同。窗口中途进后台或撤回即丢弃。 |
+| `mobile.perf_artifact` | 构建工具读取最终产物后发送一次 | `size_bytes` 是文件字节数。按 `platform`、`build_number`、`build_configuration` 和 `artifact_kind` 分组；同构建重报时按最新值显示。APK、AAB、IPA 分别比较。iOS 模拟器的 `simulator_app_uncompressed` 是 .app 内普通文件的逻辑大小之和，跳过符号链接。 |
+
+**帧率与内存图**均读取 `mobile.perf_frames`。窗口的 `observed_fps` 为实际观测帧回调数除以经过的秒数。Android 窗口只在应用产生帧时收到回调，静止画面的低值也可能代表没有重绘需求。iOS 记录 CADisplayLink 回调频率。比较同平台、同场景和同构建类型，同时看慢帧占比。窗口结束时读取进程启动以来的常驻内存最高值 `peak_rss_bytes`，Android 取 `/proc/self/status` 的 VmHWM，iOS 取 getrusage 的 ru_maxrss。除以 1,048,576 得到 MiB。读不到的值保留为空；RSS 包含原生和 JS 等内存，排查泄漏需另看多次操作后的占用变化。
+
+**包大小图**从标准 Android AAB 和 iOS IPA 发布脚本自动取数，只传构建元数据；独立于用户的本机开关，失败不阻断出包。QA 可在 mobile/ 中运行 `APP_ENV=dev node scripts/performance-artifact.js --kind apk --configuration debug --version 1.0.4 --build 112502 --file /path/to/build.apk`。同一种产物按构建号看变化，再用分发平台提供的拆包报告估算用户下载量。
 
 **第一张图的具体操作**
 
 1. 安装配置了 QA 项目的新包后，用测试环境、已在本机开启性能分享的设备完成一次指定动作。在 PostHog 的事件列表里找到样本，核对耗时是数值、平台和构建号正确。用本地时间记录核对数量级，再做一次取消和一次无文本结束，检查结果枚举、耗时缺失情况。
 2. 打开 **Product analytics → Trends**，选择 `mobile.perf_chat_turn`，使用数值属性聚合，属性选 `first_text_commit_ms`，聚合选 **95th percentile**。过滤 `surface=mobile` 和目标环境，保留有该属性的轮次，按 `platform` 拆分，固定一个平台后再比较 `build_number`。保存为“发送到首段文字提交 · P95”。图表描述写明“在本机开启性能分享的抽样交互”。[PostHog Trends 聚合](https://posthog.com/docs/product-analytics/trends/aggregations)
 3. 同页再放 P50、含该时点的样本数，以及按 `outcome` 拆分的全部已记录轮次数。P50 表示中位体验；P95 表示约 95% 的已观测耗时在此值以内。只有两三个请求时，保留原始值更容易理解。首段文字缺失不能填 0，否则一批超时就可能让图看起来变快。
-4. 启动图用 `duration_ms`，过滤单一 `startup_kind`、平台和入口。Android 帧图用两个 Sum 序列及公式 `100 × sum(over_budget_count) / sum(sample_count)`，按场景筛选 Android 的观察样本，排除零分母。iOS 另建“显示回调超预算占比”图，选择 `ios_display_link` 数据源，使用同一计数公式。不要把每个窗口的 P95 再平均后当作所有帧的 P95。
+4. Android 帧图用两个 Sum 序列及公式 `100 × sum(over_budget_count) / sum(sample_count)`，按场景筛选 Android 的观察样本，排除零分母。iOS 另建“显示回调超预算占比”图，选择 `ios_display_link` 数据源，使用同一计数公式。不要把每个窗口的 P95 再平均后当作所有帧的 P95。
 5. 上报汇总放在测量窗口之后，防止监控自身影响启动或流式输出。每次采样仅传预定义枚举和耗时，不增加聊天原文、完整 URL、token、设备或聊天标识。记录本机许可覆盖范围、抽样策略及其变更日期。看板的“样本数”指成功入库的观测量。release 和 QA 应使用可区分的环境或发布渠道。
 
-**直连验收**。QA 包使用测试环境和已知构建号。在设备默认关闭时确认没有性能请求；开启后各执行一次启动、聊天和滚动，检查请求直接发往配置的 PostHog host，并在事件详情核对名称、数值类型和平台字段。断网时触发一次事件，先在本机关闭分享再恢复网络，验证待发事件不会补送；重启后检查关闭状态仍然生效。
+**直连验收**。QA 包使用测试环境和已知构建号。在设备默认关闭时确认没有性能请求；开启后保持前台至少 12 秒，再执行一次聊天和滚动，检查请求直接发往配置的 PostHog host，并在事件详情核对名称、数值类型和平台字段。断网时触发一次事件，先在本机关闭分享再恢复网络，验证待发事件不会补送；重启后检查关闭状态仍然生效。
 
-**本次交付的验证边界**。定向测试覆盖本机授权与读写失败、真实 PostHog SDK 的请求体和离线/超时不补发、聊天终态与首段文字提交、原生启动/帧窗口的 JS 生命周期，以及设置页三种语言。原生侧完成了 Android 模块针对真实 Android/Expo/RN 依赖的 Kotlin 编译，以及 Kotlin/Swift 直方图测试和 Swift 语法解析。测试项目另用三条明确标记为 `qa-smoke` 的合成样本验证了真实接收接口、查询结果和看板显示，接收返回 HTTP 200，三个查询值与样本一致。这只验证接收与展示路径。没有执行完整 Android/iOS 应用构建，也没有完成新包在真机上从操作到 PostHog 入库的端到端验收；上面的直连验收仍需安装包含新模块的构建后完成。完整前端测试、类型检查和构建交给 GitHub CI。
+**验收口径**。使用真实安装包，记录原生版本、构建号和各阶段的 UTC 时间，在 PostHog 按相同维度回查。对照本地文件字节数核验产物事件；查看运行时事件的来源、窗口数及单位。模拟器适合验证开关、采集和报表，真机发布包用于建立性能基线。
 
 ## 4. 新手可独立完成的第一次真机实验
 

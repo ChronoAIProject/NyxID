@@ -22,7 +22,7 @@ import {
   chatSurfaceStyles,
 } from "./ChatSurface";
 import { TranscriptViewport } from "./TranscriptViewport";
-import { useChatNativeFrames, usePerformanceInputReady } from "../../lib/performance/useNativePerformance";
+import { useChatNativeFrames } from "../../lib/performance/useNativePerformance";
 import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import {
@@ -91,6 +91,7 @@ import { AssistantTurnPerformance } from "./assistantTurnPerformance";
 import {
   beginPerformanceSample,
   submitPerformanceSample,
+  subscribePerformanceConsent,
 } from "../../lib/performance/metrics";
 import { RotateCcw, X } from "lucide-react-native";
 import type {
@@ -522,11 +523,6 @@ export function AssistantScreen({
     (!!assistant.conversationId ||
       (assistant.agent?.can_use === true &&
         assistant.agent.status !== "destroyed"));
-  const onInputLayout = usePerformanceInputReady(
-    homeVisible ? "nyxbot_home" : "chat",
-    focused && canCompose && (homeVisible || transcriptScroll.ready) && !voiceThread,
-    draftKey,
-  );
   const frameMetrics = useChatNativeFrames({
     focused: focused && !homeVisible && !voiceThread && transcriptScroll.ready,
     streaming: assistant.sending && !!assistant.live?.blocks?.length && !streamPersisted,
@@ -1079,8 +1075,10 @@ export function AssistantScreen({
     const epoch = running ? null : beginPerformanceSample();
     const sample = epoch === null
       ? undefined
-      : new AssistantTurnPerformance((timings) =>
-          submitPerformanceSample(epoch, "mobile.perf_chat_turn", timings),
+      : new AssistantTurnPerformance(
+          (timings) => submitPerformanceSample(epoch, "mobile.perf_chat_turn", timings),
+          undefined,
+          subscribePerformanceConsent,
         );
     if (!running) turnPerformance.current = sample;
     setStopProtected(true);
@@ -2066,7 +2064,6 @@ export function AssistantScreen({
             ) : null}
             <ChatComposerInput
               dictation={dictation}
-              onInputLayout={onInputLayout}
               value={draft}
               onChangeText={updateDraft}
               generation={`${draftKey}:${composerGeneration}`}

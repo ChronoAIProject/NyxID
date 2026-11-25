@@ -1,19 +1,9 @@
 import { requireOptionalNativeModule } from "expo-modules-core";
 
-export type StartupKind = "cold" | "resume";
-export type PerformanceScreen = "nyxbot_home" | "chat" | "auth";
 export type FrameScenario =
   | "chat_drag"
   | "chat_drag_during_stream"
   | "chat_streaming";
-export type StartupTiming = {
-  duration_ms: number;
-  startup_source:
-    | "android_process_uptime"
-    | "ios_did_finish_launching"
-    | "android_activity_resume"
-    | "ios_will_enter_foreground";
-};
 export type FrameTiming = {
   measurement_source: "android_frame_metrics" | "ios_display_link";
   duration_ms: number;
@@ -23,9 +13,11 @@ export type FrameTiming = {
   interval_max_ms: number;
   over_budget_count: number;
   dropped_callback_count?: number;
+  observed_fps?: number;
+  peak_rss_bytes?: number;
+  peak_rss_source?: "android_proc_status_vmhwm" | "ios_getrusage_maxrss";
 };
 export interface NativePerformance {
-  measureReady(kind: StartupKind): Promise<StartupTiming | null>;
   startFrames(token: string): Promise<boolean>;
   stopFrames(token: string): Promise<FrameTiming | null>;
   cancelFrames(): Promise<void>;

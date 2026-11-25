@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createPerformanceConsent } from "./consent";
 
-test("only a persisted grant for the current destination can authorize a cold startup", async () => {
+test("only a persisted grant for the current destination enables observations after hydration", async () => {
   for (const value of [null, "other", "project"]) {
     const consent = createPerformanceConsent(
       "project",
@@ -11,9 +11,9 @@ test("only a persisted grant for the current destination can authorize a cold st
       () => true,
     );
     assert.equal(consent.begin(), null);
-    assert.equal(await consent.launch(), value === "project" ? 1 : null);
+    await consent.hydrate();
+    assert.equal(consent.current(), value === "project" ? 1 : null);
     await consent.set(true);
-    assert.equal(await consent.launch(), null);
     assert.notEqual(consent.begin(), null);
   }
 });
@@ -32,11 +32,12 @@ test("late hydration cannot resurrect a withdrawn grant and a regrant uses a fre
     },
     () => true,
   );
-  const launch = consent.launch();
+  const hydration = consent.hydrate();
   const denied = consent.set(false);
   finish("project");
   await denied;
-  assert.equal(await launch, null);
+  await hydration;
+  assert.equal(consent.current(), null);
   await consent.set(true);
   const epoch = consent.begin();
   const off = consent.set(false);
@@ -64,7 +65,6 @@ test("failed reads can retry and failed withdrawal writes immediately stop this 
   await consent.hydrate();
   assert.notEqual(consent.current(), null);
   assert.equal(consent.begin(), null);
-  assert.equal(await consent.launch(), null);
   await assert.rejects(consent.set(false), /write/);
   assert.equal(consent.current(), null);
   await assert.rejects(consent.set(true), /write/);
@@ -81,7 +81,7 @@ test("a missing project does not access storage or sample", async () => {
     unexpected,
     unexpected,
   );
+  await consent.hydrate();
   await consent.set(true);
-  assert.equal(await consent.launch(), null);
   assert.equal(consent.begin(), null);
 });

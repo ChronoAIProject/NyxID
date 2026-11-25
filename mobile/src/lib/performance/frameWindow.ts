@@ -59,6 +59,23 @@ export function safeFrameTiming(value: FrameTiming | null): FrameTiming | null {
     value.dropped_callback_count! <= 100000000
   )
     result.dropped_callback_count = value.dropped_callback_count;
+  const fps = value.observed_fps;
+  if (typeof fps === "number" && Number.isFinite(fps) && fps > 0 && fps <= 1000)
+    result.observed_fps = fps;
+  const bytes = value.peak_rss_bytes;
+  const source =
+    value.measurement_source === "android_frame_metrics"
+      ? "android_proc_status_vmhwm"
+      : "ios_getrusage_maxrss";
+  if (
+    typeof bytes === "number" &&
+    Number.isSafeInteger(bytes) &&
+    bytes > 0 &&
+    value.peak_rss_source === source
+  ) {
+    result.peak_rss_bytes = bytes;
+    result.peak_rss_source = source;
+  }
   return result;
 }
 

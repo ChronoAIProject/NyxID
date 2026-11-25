@@ -524,3 +524,31 @@ test("a virtualized reply that never commits produces no synthetic commit time",
   lateCommit();
   assert.deepEqual(metrics, [{ outcome: "completed", first_text_ms: 0, duration_ms: 0 }]);
 });
+
+test("withdrawing the local chat grant stops clock reads and discards a pending text commit", (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let reads = 0;
+  let unsubscriptions = 0;
+  let discard!: () => void;
+  const results: ChatTurnTimings[] = [];
+  const sample = new AssistantTurnPerformance(
+    (result) => results.push(result),
+    () => ++reads,
+    (listener) => { discard = listener; return () => { unsubscriptions++; }; },
+  );
+  const live = { cursor: 2, turnId: "t", blocks: [{ id: "b", index: 0, text: "body" }] };
+  sample.observe({ event: "turn.status", turn_id: "t", cursor: 1, conversation_id: A, status: "running" }, live);
+  sample.observe({ event: "block.delta", cursor: 2, block_id: "b", text: "body" }, live);
+  const commit = sample.commitFor("t")!;
+  sample.finish("completed");
+  discard();
+  const previous = reads;
+  sample.admitted();
+  commit();
+  sample.observe({ event: "block.delta", cursor: 3, block_id: "b", text: "later" }, live);
+  sample.finish("completed");
+  context.mock.timers.tick(CHAT_COMMIT_GRACE_MS);
+  assert.equal(reads, previous);
+  assert.equal(unsubscriptions, 1);
+  assert.deepEqual(results, []);
+});

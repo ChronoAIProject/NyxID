@@ -79,12 +79,13 @@ test("three consented measurements produce only direct single-event batches with
   await metrics.setPerformanceConsent(true);
   const epoch = metrics.beginPerformanceSample();
   expect(epoch).not.toBeNull();
-  const startup = {
-    duration_ms: 510,
-    startup_source: "ios_did_finish_launching",
-    startup_kind: "cold",
-    screen: "chat",
-    readiness: "input_layout",
+  const jsTasks = {
+    observation_source: "rn_longtask",
+    duration_ms: 10000,
+    threshold_ms: 50,
+    task_count: 2,
+    blocked_ms: 100,
+    max_task_ms: 125,
   } as const;
   const frames = {
     measurement_source: "ios_display_link",
@@ -95,6 +96,9 @@ test("three consented measurements produce only direct single-event batches with
     interval_p95_ms: 33.4,
     interval_max_ms: 50.1,
     over_budget_count: 2,
+    observed_fps: 58,
+    peak_rss_bytes: 210_000_000,
+    peak_rss_source: "ios_getrusage_maxrss",
   } as const;
   const chat = {
     outcome: "completed",
@@ -103,14 +107,14 @@ test("three consented measurements produce only direct single-event batches with
     first_text_ms: 230,
     first_text_commit_ms: 248,
   } as const;
-  metrics.submitPerformanceSample(epoch, "mobile.perf_startup", startup);
+  metrics.submitPerformanceSample(epoch, "mobile.perf_js_tasks", jsTasks);
   metrics.submitPerformanceSample(epoch, "mobile.perf_frames", frames);
   metrics.submitPerformanceSample(epoch, "mobile.perf_chat_turn", chat);
   await settle();
   resume();
   await jest.advanceTimersByTimeAsync(60_000);
   const events = [
-    ["mobile.perf_startup", startup],
+    ["mobile.perf_js_tasks", jsTasks],
     ["mobile.perf_frames", frames],
     ["mobile.perf_chat_turn", chat],
   ] as const;

@@ -1,50 +1,37 @@
-import { useEffect, useRef, useState } from "react";
-import { AppState, type LayoutChangeEvent } from "react-native";
+import { useEffect, useRef } from "react";
+import { AppState } from "react-native";
 import {
   beginPerformanceSample,
   getPerformanceConsentEpoch,
-  resolvePerformanceLaunchEpoch,
+  hydratePerformanceConsent,
   submitPerformanceSample,
   subscribePerformanceConsent,
 } from "./metrics";
-import { nativePerformance, type PerformanceScreen } from "./nativePerformance";
+import { nativePerformance } from "./nativePerformance";
 import { beginFrameWindow, createChatFrameObserver } from "./frameWindow";
-import { createStartupObserver } from "./startupRuntime";
-
-const startup = createStartupObserver({
-  native: nativePerformance,
-  launchEpoch: resolvePerformanceLaunchEpoch,
-  begin: beginPerformanceSample,
-  current: getPerformanceConsentEpoch,
-  submit: (epoch, startup_kind, screen, timing) =>
-    submitPerformanceSample(epoch, "mobile.perf_startup", {
-      ...timing,
-      startup_kind,
-      screen,
-      readiness: screen === "auth" ? "screen_layout" : "input_layout",
-    }),
-});
-// Resolve the persisted-at-launch grant before any future in-session opt-in.
-void resolvePerformanceLaunchEpoch().catch(() => null);
-
+import { createJsTaskObserver } from "./jsTaskWindow";
 /** App owns foreground state; cleanup never reports a partially observed flow. */
 export function usePerformanceLifecycle() {
   useEffect(() => {
-    startup.foreground(
-      AppState.currentState === "active",
-      AppState.currentState === "background",
-    );
+    const jsTasks = createJsTaskObserver({
+      active: () => AppState.currentState === "active",
+      begin: beginPerformanceSample,
+      current: getPerformanceConsentEpoch,
+      submit: (epoch, result) =>
+        submitPerformanceSample(epoch, "mobile.perf_js_tasks", result),
+    });
+    jsTasks.update();
+    void hydratePerformanceConsent().catch(() => {});
     const subscription = AppState.addEventListener("change", (state) => {
       const active = state === "active";
-      startup.foreground(active, state === "background");
+      jsTasks.update();
       if (!active) void nativePerformance?.cancelFrames().catch(() => {});
     });
     let previousEpoch = getPerformanceConsentEpoch();
     const unsubscribe = subscribePerformanceConsent(() => {
-      // Hydration resolving an initial grant must not invalidate a cold stamp.
       const epoch = getPerformanceConsentEpoch();
+      jsTasks.update();
       if (previousEpoch !== null && epoch !== previousEpoch) {
-        startup.invalidate();
         void nativePerformance?.cancelFrames().catch(() => {});
       }
       previousEpoch = epoch;
@@ -52,55 +39,10 @@ export function usePerformanceLifecycle() {
     return () => {
       subscription.remove();
       unsubscribe();
-      startup.invalidate();
+      jsTasks.cancel();
       void nativePerformance?.cancelFrames().catch(() => {});
     };
   }, []);
-}
-
-/** A real, enabled composer has laid out; cached layout also works on resume. */
-export function usePerformanceInputReady(
-  screen: PerformanceScreen,
-  enabled: boolean,
-  scope: unknown,
-) {
-  const [layout, setLayout] = useState(false);
-  const [foreground, setForeground] = useState(
-    AppState.currentState === "active",
-  );
-  const mounted = useRef(true);
-  const current = useRef({ screen, enabled, scope });
-  current.current = { screen, enabled, scope };
-  const ready = () =>
-    startup.ready(
-      screen,
-      () =>
-        mounted.current &&
-        current.current.enabled &&
-        current.current.screen === screen &&
-        current.current.scope === scope &&
-        AppState.currentState === "active",
-    );
-  useEffect(() => {
-    mounted.current = true;
-    const sub = AppState.addEventListener("change", (state) =>
-      setForeground(state === "active"),
-    );
-    return () => {
-      mounted.current = false;
-      sub.remove();
-    };
-  }, []);
-  useEffect(() => {
-    if (layout && enabled && foreground) ready();
-  }, [layout, enabled, foreground, screen, scope]);
-  return (event: LayoutChangeEvent) => {
-    const { width, height } = event.nativeEvent.layout;
-    if (width > 0 && height > 0) {
-      setLayout(true);
-      if (current.current.enabled) ready();
-    }
-  };
 }
 
 export function useChatNativeFrames(options: {

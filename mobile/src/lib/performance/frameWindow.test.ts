@@ -38,7 +38,6 @@ function setup() {
         return stopped.promise;
       },
       cancelFrames: async () => {},
-      measureReady: async () => null,
     },
     begin: () => epoch,
     current: () => epoch,
@@ -148,6 +147,26 @@ test("iOS cadence cannot claim callback drops and malformed summaries are refuse
     { interval_max_ms: NaN },
   ])
     assert.equal(safeFrameTiming({ ...timing, ...invalid }), null);
+});
+test("forwards bounded FPS and a platform-matched process RSS peak independently", () => {
+  const sample: FrameTiming = {
+    ...timing,
+    observed_fps: 32.5,
+    peak_rss_bytes: 84_934_656,
+    peak_rss_source: "android_proc_status_vmhwm",
+  };
+  assert.deepEqual(safeFrameTiming(sample), sample);
+  const ios = { ...sample, measurement_source: "ios_display_link" } as const;
+  assert.equal(safeFrameTiming(ios)?.peak_rss_bytes, undefined);
+  assert.equal(
+    safeFrameTiming({ ...ios, peak_rss_source: "ios_getrusage_maxrss" })
+      ?.peak_rss_bytes,
+    sample.peak_rss_bytes,
+  );
+  assert.deepEqual(
+    safeFrameTiming({ ...sample, observed_fps: Infinity, peak_rss_bytes: -1 }),
+    timing,
+  );
 });
 test("regrant on the same focused chat permits the next drag without restarting a live stream midway", () => {
   const events: unknown[][] = [];

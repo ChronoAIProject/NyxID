@@ -22,14 +22,17 @@ export class AssistantTurnPerformance {
   private firstText?: number;
   private firstCommit?: number;
   private terminal?: Pick<ChatTurnTimings, "outcome" | "duration_ms">;
-  private submitted = false;
+  private closed = false;
+  private readonly unsubscribe?: () => void;
   private timer?: ReturnType<typeof setTimeout>;
 
   constructor(
     private readonly submit: (timings: ChatTurnTimings) => void,
     private readonly now = () => performance.now(),
+    onConsentChange?: (discard: () => void) => () => void,
   ) {
     this.startedAt = now();
+    this.unsubscribe = onConsentChange?.(() => this.close());
   }
 
   private elapsed() {
@@ -37,11 +40,11 @@ export class AssistantTurnPerformance {
   }
 
   admitted() {
-    if (!this.terminal) this.headers ??= this.elapsed();
+    if (!this.closed && !this.terminal) this.headers ??= this.elapsed();
   }
 
   observe(event: AssistantTurnEvent, reply: AssistantLiveReply) {
-    if (this.terminal) return;
+    if (this.closed || this.terminal) return;
     if (event.event === "turn.status") this.turnId = reply.turnId;
     if (reply.terminal) {
       this.finish(reply.terminal === "failed" ? "error" : reply.terminal);
@@ -60,7 +63,7 @@ export class AssistantTurnPerformance {
     if (
       !turnId ||
       turnId !== this.turnId ||
-      this.submitted ||
+      this.closed ||
       this.firstCommit !== undefined
     )
       return undefined;
@@ -68,13 +71,13 @@ export class AssistantTurnPerformance {
   }
 
   private commit = () => {
-    if (this.submitted || this.firstCommit !== undefined) return;
+    if (this.closed || this.firstCommit !== undefined) return;
     this.firstCommit = this.elapsed();
     if (this.terminal) this.flush();
   };
 
   finish(outcome: Outcome) {
-    if (this.terminal) return;
+    if (this.closed || this.terminal) return;
     const hasText =
       this.firstText !== undefined || this.firstCommit !== undefined;
     this.terminal = {
@@ -86,11 +89,16 @@ export class AssistantTurnPerformance {
     else this.flush();
   }
 
-  private flush() {
-    if (this.submitted || !this.terminal) return;
-    this.submitted = true;
+  private close() {
+    this.closed = true;
     clearTimeout(this.timer);
     this.turnId = undefined;
+    this.unsubscribe?.();
+  }
+
+  private flush() {
+    if (this.closed || !this.terminal) return;
+    this.close();
     this.submit({
       ...this.terminal,
       ...(this.headers !== undefined ? { headers_ms: this.headers } : {}),

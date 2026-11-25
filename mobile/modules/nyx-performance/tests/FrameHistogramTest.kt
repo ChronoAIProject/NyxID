@@ -12,6 +12,7 @@ fun main() {
   check(result["interval_p50_ms"] == 10.0)
   check(result["interval_p95_ms"] == 16.0)
   check(result["dropped_callback_count"] == 5)
+  check(result["observed_fps"] == 2 * 1000.0 / 300)
   check(histogram.result(15101.0) == null)
   val bounded = FrameHistogram(0.0)
   repeat(12000) { bounded.add(8.33, 1000.0 / 120) }
@@ -21,5 +22,16 @@ fun main() {
   overflow.add(1400.0, 16.0)
   overflow.add(1300.0, 16.0)
   check(overflow.result(2000.0)!!["interval_p95_ms"] == 1400.0)
+  // Equal frame work durations can have very different observed render rates.
+  val fast = FrameHistogram(0.0)
+  repeat(120) { fast.add(2.0, 1000.0 / 120) }
+  val slow = FrameHistogram(0.0)
+  repeat(30) { slow.add(2.0, 1000.0 / 60) }
+  check(fast.result(1000.0)!!["observed_fps"] == 120.0)
+  check(slow.result(1000.0)!!["observed_fps"] == 30.0)
+  check(parsePeakRssBytes("Name:\tqa\nVmHWM:\t 12345 kB\nVmRSS:\t 100 kB\n") == 12345L * 1024)
+  for (invalid in listOf("VmRSS: 123 kB", "VmHWM: 0 kB", "VmHWM: -1 kB", "VmHWM: 123 MB", "VmHWM: 999999999999999999999 kB")) {
+    check(parsePeakRssBytes(invalid) == null)
+  }
   println("PASS: Kotlin histogram honors dynamic budgets, invalid values, bounded counts and overflow percentiles")
 }

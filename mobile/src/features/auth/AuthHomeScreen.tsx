@@ -8,7 +8,6 @@ import { accountWebUrl } from "../account/accountWebHandoff";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as WebBrowser from "expo-web-browser";
 import { useIsFocused } from "@react-navigation/native";
-import { usePerformanceInputReady } from "../../lib/performance/useNativePerformance";
 import { useQuery } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
@@ -163,7 +162,6 @@ function SocialProviderIcon({ provider, color }: { provider: SocialProvider; col
 export function AuthHomeScreen({ navigation }: Props) {
   useAppLanguage();
   const focused = useIsFocused();
-  const onReadyLayout = usePerformanceInputReady("auth", focused, "auth");
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
   const [foreground, setForeground] = useState(
@@ -477,7 +475,6 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <BrandNebula />
       <KeyboardScrollView
-        onLayout={onReadyLayout}
         revealController={scrollController}
         style={flowStyles.content}
         contentContainerStyle={[

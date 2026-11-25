@@ -8,13 +8,7 @@ import {
   ScrollEdgeFades,
   useScrollEdges,
 } from "../../components/workspace/ScrollEdgeFades";
-import {
-  useEffect,
-  useRef,
-  useState,
-  type ComponentProps,
-  type ReactNode,
-} from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Text,
   Platform,
@@ -79,7 +73,6 @@ export function AssistantMentionInput({
   expandedContent,
   renderActions,
   compactWhenIdle = true,
-  onInputLayout,
 }: {
   value: string;
   onChangeText: (value: string) => void;
@@ -97,8 +90,6 @@ export function AssistantMentionInput({
   ) => ReactNode;
   /** An unfocused composer with only whitespace collapses to one row on every window. */
   compactWhenIdle?: boolean;
-  /** Native layout of the actual input, used for app-defined readiness timing. */
-  onInputLayout?: ComponentProps<typeof TextInput>["onLayout"];
 }) {
   const railIndicator = useRailScrollIndicator();
   useAppLanguage();
@@ -399,10 +390,7 @@ export function AssistantMentionInput({
             )
               setForcedCursor(null);
           }}
-          onLayout={(event) => {
-            overflow.layout(event.nativeEvent.layout.height);
-            onInputLayout?.(event);
-          }}
+          onLayout={(event) => overflow.layout(event.nativeEvent.layout.height)}
           onContentSizeChange={(event) => {
             if (!mounted.current || scope.current.revision !== revision) return;
             const height = Math.ceil(event.nativeEvent.contentSize.height);

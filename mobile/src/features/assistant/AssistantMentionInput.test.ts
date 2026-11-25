@@ -48,7 +48,6 @@ function setup(
 ) {
   let maxHeight = 120;
   const writes: string[] = [];
-  const measuredHeights: number[] = [];
   const props: Record<string, any> = {
     value: "",
     onChangeText: (text: string) => {
@@ -76,9 +75,7 @@ function setup(
       ScrollEdgeFades: "ScrollEdgeFades",
       useScrollEdges: () => ({
         edges: { start: false, end: false },
-        layout(height: number) {
-          measuredHeights.push(height);
-        },
+        layout() {},
         content() {},
         scroll() {},
       }),
@@ -167,7 +164,6 @@ function setup(
     },
     props,
     writes,
-    measuredHeights,
     harness,
     input,
     button,
@@ -177,18 +173,6 @@ function setup(
     choose,
   };
 }
-
-test("native input layout reaches readiness and the existing overflow measurement together", () => {
-  const layouts: unknown[] = [];
-  const view = setup({
-    onInputLayout: (event: unknown) => layouts.push(event),
-  });
-  const event = { nativeEvent: { layout: { width: 320, height: 64 } } };
-  view.input().props.onLayout(event);
-  assert.deepEqual(layouts, [event]);
-  assert.deepEqual(view.measuredHeights, [64]);
-  view.harness.unmount();
-});
 
 test("typing a mention searches options and replaces its full handle at the native caret", () => {
   const view = setup({ value: "Please @fi-le later" });

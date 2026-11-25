@@ -3,26 +3,19 @@ package dev.nyxid.performance
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
 import android.os.SystemClock
 import android.view.FrameMetrics
-import android.view.ViewTreeObserver
 import android.view.Window
-import expo.modules.kotlin.Promise
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
 /** No file/network IO. Observers exist only inside JS-authorized, bounded sessions. */
 class NyxPerformanceModule : Module() {
-  companion object { private var coldObserved = false }
   private val main = Handler(Looper.getMainLooper())
   private val sessions = LinkedHashMap<String, FrameHistogram>()
   private var attached: Window? = null
   private var foreground = true
-  private var resumeAt: Double? = null
-  private var generation = 0
-  private val pendingReady = mutableSetOf<() -> Unit>()
   private val expires = Runnable { cancelAll() }
   private fun now() = SystemClock.uptimeMillis().toDouble()
   private val listener = Window.OnFrameMetricsAvailableListener { window, metrics, dropped ->
@@ -41,58 +34,17 @@ class NyxPerformanceModule : Module() {
   }
   private fun pause() {
     foreground = false
-    generation++
-    resumeAt = null
     cancelAll()
-    cancelReadiness()
-  }
-  private fun cancelReadiness() {
-    pendingReady.toList().forEach { it() }
-    pendingReady.clear()
-  }
-  private fun ready(kind: String, promise: Promise) {
-    val activity = appContext.currentActivity
-    val start = if (kind == "cold") Process.getStartUptimeMillis().toDouble() else if (kind == "resume") resumeAt else null
-    val source = if (kind == "cold") "android_process_uptime" else "android_activity_resume"
-    if (!foreground || start == null || activity == null || (kind == "cold" && coldObserved)) { promise.resolve(null); return }
-    if (kind == "cold") coldObserved = true
-    else resumeAt = null
-    val view = activity.window.decorView
-    val observer = view.viewTreeObserver
-    val cycle = generation
-    var done = false
-    lateinit var onDraw: ViewTreeObserver.OnDrawListener
-    lateinit var timeout: Runnable
-    val finish: (Boolean) -> Unit = { drawn ->
-      if (!done) {
-        done = true
-        main.removeCallbacks(timeout)
-        view.post { if (observer.isAlive) observer.removeOnDrawListener(onDraw) }
-        val elapsed = now() - start
-        promise.resolve(if (drawn && foreground && cycle == generation && elapsed in 0.0..120000.0)
-          mapOf("duration_ms" to elapsed, "startup_source" to source) else null)
-      }
-    }
-    val cancel = { finish(false) }
-    onDraw = ViewTreeObserver.OnDrawListener { view.post { finish(true); pendingReady.remove(cancel) } }
-    timeout = Runnable { finish(false); pendingReady.remove(cancel) }
-    pendingReady.add(cancel)
-    observer.addOnDrawListener(onDraw)
-    view.invalidate()
-    main.postDelayed(timeout, 1000)
   }
   override fun definition() = ModuleDefinition {
     Name("NyxPerformance")
     OnActivityEntersForeground {
       main.post {
         foreground = true
-        generation++
-        resumeAt = now()
       }
     }
     OnActivityEntersBackground { main.post { pause() } }
     OnDestroy { main.post { pause() } }
-    AsyncFunction("measureReady") { kind: String, promise: Promise -> ready(kind, promise) }.runOnQueue(Queues.MAIN)
     AsyncFunction("startFrames") { token: String ->
       val window = appContext.currentActivity?.window
       if (!foreground || window == null || !token.matches(Regex("^[a-z0-9-]{1,64}$")) || sessions.size >= 2 || sessions.containsKey(token)) false
@@ -108,10 +60,19 @@ class NyxPerformanceModule : Module() {
       }
     }.runOnQueue(Queues.MAIN)
     AsyncFunction("stopFrames") { token: String ->
-      val value = sessions.remove(token)?.result(now())?.plus("measurement_source" to "android_frame_metrics")
+      var value = sessions.remove(token)?.result(now())?.plus("measurement_source" to "android_frame_metrics")
+      if (value != null) {
+        // Read only when an authorized frame window has a usable summary.
+        // VmHWM belongs to the process lifetime, including earlier allocations.
+        val peakRss = readPeakRssBytes()
+        if (peakRss != null) value = value + mapOf(
+          "peak_rss_bytes" to peakRss,
+          "peak_rss_source" to "android_proc_status_vmhwm"
+        )
+      }
       if (sessions.isEmpty()) cancelAll()
       value
     }.runOnQueue(Queues.MAIN)
-    AsyncFunction("cancelFrames") { cancelAll(); cancelReadiness() }.runOnQueue(Queues.MAIN)
+    AsyncFunction("cancelFrames") { cancelAll() }.runOnQueue(Queues.MAIN)
   }
 }

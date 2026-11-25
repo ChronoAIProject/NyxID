@@ -1,26 +1,14 @@
 # Native performance measurements
 
-This local Expo module supplies bounded measurements to the consent layer in
-`src/lib/performance`. It owns no storage, identity, network transport or user
-content. Merely loading the module records only lifecycle clock origins. JS must
-resolve the persisted launch grant before calling `measureReady`, and obtain a
-currently valid sampled consent epoch before calling `startFrames`.
+This local Expo module measures chat frame timing and reads the process peak
+resident memory from the OS when a sampled frame window ends. The JavaScript
+consent layer in `src/lib/performance` supplies a valid, sampled grant before
+calling `startFrames` and rechecks it before sending the result.
 
-`measureReady("cold")` starts at Android process uptime or the iOS
-`didFinishLaunching` callback. `measureReady("resume")` starts at the Android
-activity foreground callback or iOS `applicationWillEnterForeground`. The end is
-the next native drawing/display opportunity after the actual enabled input has
-laid out, or the login page has laid out. This app-defined boundary includes
-permission hydration latency when permission resolves after layout. It is not
-an OS TTID or TTFD measurement. Inactive-only iOS transitions do not produce
-resume measurements. A launch interrupted by a real background is discarded.
-
-`startFrames` admits at most two overlapping tokens. A single native observer
-serves both the drag and stream windows. JS ends each sample within ten seconds;
-the native observer has a fifteen-second cap from its first window. Background,
-explicit cancellation and module destruction remove the observer. Explicit
-`cancelFrames` also removes pending readiness observers immediately. Readiness
-times out after one second without a drawing/display callback.
+One native frame observer serves up to two overlapping drag and streaming
+windows. JS ends each window within ten seconds. The native observer expires
+fifteen seconds after its first window opens. Backgrounding the app, calling
+`cancelFrames`, or destroying the module removes the observer.
 
 Android samples `FrameMetrics.TOTAL_DURATION` against `DEADLINE` on API 31+ and
 the current display refresh period on older supported versions. Android's
@@ -30,6 +18,12 @@ callback's requested display period. This is main runloop/display cadence and
 cannot claim GPU presentation hitch, frozen-frame or dropped-callback counts.
 Budgets follow dynamic refresh rates, with a ten percent tolerance before an
 observation counts as over budget. Analyze platforms and sources separately.
+
+The `observed_fps` field counts observed frame callbacks per second of elapsed
+window time. Compare windows of the same platform, source and gesture. The
+optional `peak_rss_bytes` field is the process lifetime high-water mark, read
+from `VmHWM` on Android or `getrusage(RUSAGE_SELF).ru_maxrss` on iOS.
+It can reflect work completed before the gesture. Missing readings are omitted.
 
 Both implementations use a fixed 1,002-bin histogram, one millisecond percentile
 precision and a maximum of 10,000 observations per window. Values over one second

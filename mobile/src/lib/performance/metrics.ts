@@ -4,22 +4,14 @@ import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createPerformanceConsent } from "./consent";
 import type { PerformancePostHog } from "./posthogTransport";
-import type {
-  FrameScenario,
-  FrameTiming,
-  PerformanceScreen,
-  StartupKind,
-  StartupTiming,
-} from "./nativePerformance";
+import type { FrameScenario, FrameTiming } from "./nativePerformance";
 import type { ChatTurnTimings } from "../../features/assistant/assistantTurnPerformance";
 
+import type { JsTaskTiming } from "./jsTaskWindow";
+
 type PerformanceEvents = {
+  "mobile.perf_js_tasks": JsTaskTiming;
   "mobile.perf_chat_turn": ChatTurnTimings;
-  "mobile.perf_startup": StartupTiming & {
-    startup_kind: StartupKind;
-    screen: PerformanceScreen;
-    readiness: "screen_layout" | "input_layout";
-  };
   "mobile.perf_frames": FrameTiming & { scenario: FrameScenario };
 };
 
@@ -68,10 +60,6 @@ export const hydratePerformanceConsent = consent.hydrate;
 export const setPerformanceConsent = consent.set;
 export const subscribePerformanceConsent = consent.subscribe;
 export const beginPerformanceSample = consent.begin;
-let launch: Promise<number | null> | undefined;
-export const resolvePerformanceLaunchEpoch = () =>
-  (launch ??= consent.launch().catch(() => null));
-
 let client: PerformancePostHog | undefined;
 let pending = 0;
 export function submitPerformanceSample<K extends keyof PerformanceEvents>(

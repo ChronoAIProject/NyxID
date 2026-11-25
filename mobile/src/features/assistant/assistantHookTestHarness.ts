@@ -164,7 +164,6 @@ export function hookHarness<T>(
                 : name.endsWith("/performance/useNativePerformance")
                   ? {
                       usePerformanceLifecycle: () => {},
-                      usePerformanceInputReady: () => () => {},
                       useChatNativeFrames: () => ({ beginDrag() {}, endDrag() {}, momentumBegin() {}, momentumEnd() {} }),
                     }
                 : name.endsWith("/deviceLanguages")
