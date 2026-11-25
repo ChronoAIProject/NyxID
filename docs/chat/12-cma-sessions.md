@@ -596,6 +596,7 @@ exact current text; `{login_url}` is the only variable part.
 | Conflict | `cma_creation_idempotency_conflict` | The same key was used with a different service or request. |
 | Conflict | `cma_creation_recovery_unavailable` | No retained creation record or request material exists for recovery. |
 | Conflict | `cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made` | A release lacks durable `confirmed_not_created` evidence. |
+| Conflict | `cma_retirement_idempotency_conflict` | A retirement sent through the CMA proxy uses a different `Idempotency-Key` from the one recorded for the Sandbox's pending retirement. The management route does not refuse this case: it retries a pending retirement with the recorded key. |
 
 **Management routes and Agent reads**:
 
@@ -607,7 +608,6 @@ exact current text; `{login_url}` is the only variable part.
 | Not found | `CMA Agent not found`, `CMA Agent parent not found` | No owned Agent or parent reference matches. |
 | Validation | `One Idempotency-Key is required` | A `pause` or `revive` command, or a retirement, has no, or more than one, `Idempotency-Key` (`recover_creation` takes none). |
 | Validation | `Sandbox label must contain 1–120 bytes without control characters` | After trimming, a rename's label is empty, longer than 120 bytes, or contains a control character. |
-| Conflict | `cma_retirement_idempotency_conflict` | A retirement sent through the CMA proxy uses a different `Idempotency-Key` from the one recorded for the Sandbox's pending retirement. The management route does not refuse this case: it retries a pending retirement with the recorded key. |
 | Conflict | `cma_retirement_recovery_unavailable` | A retirement is pending without a recorded `Idempotency-Key`, so neither the management route nor the CMA proxy can retry it. |
 | Conflict | `cma_sandbox_retired` | A `pause` or `revive`, or a retirement of a Sandbox not yet marked retired, targets a Sandbox that no longer occupies the account slot. Retiring an already-retired Sandbox instead returns HTTP 200 with `pending: false`; `recover_creation` uses a separate path. |
 | Conflict | `cma_sandbox_retiring` | `pause` or `revive` is sent while the Sandbox's retirement is pending. |

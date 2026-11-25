@@ -121,6 +121,9 @@ areas:
       - backend/src/models/execution_permission*
       - backend/src/handlers/execution_permission*
       - backend/src/handlers/exact_service_approval*
+      - backend/src/services/exact_service_approval*
+      - backend/src/models/service_approval_config.rs
+      - backend/src/services/mcp_approval.rs
       - backend/src/services/execution_authority*
     verified_at: 9191e6690d6c81bb34c868bd5a8389bc90c4cbcc
 
