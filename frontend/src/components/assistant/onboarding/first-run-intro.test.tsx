@@ -1,3 +1,4 @@
+import { appI18n } from "@/i18n";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -241,4 +242,32 @@ it("next-step cards start their step and carry no per-card dismiss", async () =>
   expect(screen.queryByRole("button", { name: /Dismiss/ })).toBeNull();
   await user.click(screen.getByRole("button", { name: /Connect your inbox description/ }));
   expect(onStart).toHaveBeenCalledTimes(1);
+});
+
+it("renders Chinese replay guidance, step tooltips and API recommendations including after returning Home", async () => {
+  try {
+    await appI18n.changeLanguage("zh-CN");
+    const onStart = vi.fn();
+    const recommendation = {
+      id: "morning_brief",
+      title: "Get a daily brief",
+      description: "A short weekday summary of what needs you, every morning.",
+      prompt: "Set up a weekday morning brief at 8am covering my calendar, important email and anything I should know.",
+      icon: "sunrise",
+    };
+    renderIntro();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /让我们开始|开始吧|开始使用/ }));
+    const chief = screen.getByTitle("幕僚长");
+    expect(chief.getAttribute("aria-label")).toContain("幕僚长");
+    await user.click(chief);
+    expect(screen.getByText(/只.*NyxID|通过 NyxID/)).toBeTruthy();
+    cleanup();
+    render(<NextStepCards steps={[recommendation]} onStart={onStart} />);
+    await user.click(screen.getByRole("button", { name: /获取每日简报/ }));
+    expect(onStart).toHaveBeenCalledWith({ ...recommendation, prompt: expect.stringContaining("每个工作日") });
+  } finally {
+    cleanup();
+    await appI18n.changeLanguage("en");
+  }
 });

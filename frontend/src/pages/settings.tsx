@@ -387,7 +387,7 @@ function ProfileForm({ user }: { readonly user: User }) {
           discard={() => form.reset()}
           changes={() =>
             describeChanges(form.formState.defaultValues, form.getValues(), [
-              { key: "display_name", label: "Name" },
+              { key: "display_name", get label() { return translateUi("Name"); } },
             ])
           }
         />
@@ -737,9 +737,9 @@ function SecurityTab() {
                 passwordForm.formState.isDirty
                   ? [
                       {
-                        label: "Password",
-                        before: "Current password",
-                        after: "Changed",
+                        get label() { return translateUi("Password"); },
+                        get before() { return translateUi("Current password"); },
+                        get after() { return translateUi("Changed"); },
                       },
                     ]
                   : []

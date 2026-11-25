@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Platform } from "react-native";
+import { Linking, Platform } from "react-native";
 import { ExpoSpeechRecognitionModule as Recognizer } from "expo-speech-recognition";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { deviceLanguages } from "../../../i18n/deviceLanguages";
@@ -13,11 +13,14 @@ import {
   rememberDictationLanguage,
 } from "./dictationLanguage";
 
+import { recognitionLocales } from "./recognitionLocales";
+
 const listeners = new Set<() => void>();
 export const AUTOMATIC_DICTATION_LANGUAGE = "automatic";
 /** The saved choice wins while supported; otherwise use device preference order. */
 export function useDictationLanguage(active: boolean) {
   const { t, language } = useAppLanguage();
+  const [refresh, setRefresh] = useState(0);
   const [saved, setSaved] = useState<string>();
   const [recent, setRecent] = useState<string[]>([]);
   const [supported, setSupported] = useState<readonly string[]>();
@@ -34,8 +37,8 @@ export function useDictationLanguage(active: boolean) {
     };
     read();
     listeners.add(read);
-    void Promise.resolve()
-      .then(() => Recognizer.getSupportedLocales({}))
+    setSupported(undefined);
+    void recognitionLocales(Recognizer, Platform.OS)
       .then((result) => {
         if (live) setSupported(result?.locales ?? []);
       })
@@ -46,7 +49,7 @@ export function useDictationLanguage(active: boolean) {
       live = false;
       listeners.delete(read);
     };
-  }, [active]);
+  }, [active, refresh]);
   const loading = supported === undefined;
   const locales = supported ?? [];
   const listUnavailable = !loading && !locales.length;
@@ -77,7 +80,9 @@ export function useDictationLanguage(active: boolean) {
     listUnavailable,
     explanation: listUnavailable
       ? t(
-          "The language list is unavailable. Dictation uses your saved language or your device’s speech recognition default.",
+          Platform.OS === "android"
+            ? "Your speech service did not provide a language list. Retry, check the device’s speech service, or enter a language code to try (for example zh-CN, en-US or ja-JP). Support depends on the service."
+            : "The language list is unavailable. Dictation uses your saved language or your device’s speech recognition default.",
         )
       : undefined,
     value: savedSelected ? saved! : AUTOMATIC_DICTATION_LANGUAGE,
@@ -104,6 +109,13 @@ export function useDictationLanguage(active: boolean) {
       },
       ...languageOptions(locales, language),
     ],
+    retry: () => setRefresh((value) => value + 1),
+    manualEntry: Platform.OS === "android" && listUnavailable,
+    openSpeechSettings: () => {
+      void Linking.sendIntent("android.settings.VOICE_INPUT_SETTINGS")
+        .catch(() => Linking.openSettings())
+        .catch(() => {});
+    },
     choose: (value: string) => {
       const next = value === AUTOMATIC_DICTATION_LANGUAGE ? undefined : value;
       setSaved(next);

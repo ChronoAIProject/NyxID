@@ -9,7 +9,8 @@ use crate::{
         execution_proposal::{Proposal, ProposalV2},
     },
 };
-use bson::{Bson, Document};
+use bson::{Bson, Document, doc};
+use mongodb::Database;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy)]
@@ -39,10 +40,14 @@ impl Slot {
         }
     }
 
+    fn path(self, field: Field) -> [&'static str; 3] {
+        ["execution_proposal", self.name(), field.name()]
+    }
+
     pub(super) fn unset(self, fields: &[Field]) -> Document {
         let mut unset = Document::new();
         for field in fields {
-            let path = format!("execution_proposal.{}.{}", self.name(), field.name());
+            let path = self.path(*field).join(".");
             unset.insert(format!("{path}_context_version"), "");
             unset.insert(path, "");
         }
@@ -53,11 +58,43 @@ impl Slot {
         self,
         keys: &EncryptionKeys,
         id: &str,
+        owner: &str,
         field: Field,
         plain: &[u8],
-    ) -> AppResult<Vec<u8>> {
-        keys.encrypt_with_aad(plain, self.aad(id, field).as_bytes())
-            .await
+    ) -> AppResult<(Vec<u8>, Option<u8>)> {
+        if keys.contextual_record_writes() {
+            let path = self.path(field);
+            let ctx = RecordContext::new(REQUESTS, id, owner, &path)?;
+            Ok((keys.encrypt_record(plain, &ctx).await?, Some(3)))
+        } else {
+            Ok((
+                keys.encrypt_with_aad(plain, self.aad(id, field).as_bytes())
+                    .await?,
+                None,
+            ))
+        }
+    }
+    async fn open_value(
+        self,
+        keys: &EncryptionKeys,
+        id: &str,
+        owner: &str,
+        field: Field,
+        value: &bson::Binary,
+        marker: Option<u8>,
+    ) -> AppResult<Zeroizing<Vec<u8>>> {
+        match marker {
+            Some(3) => {
+                let path = self.path(field);
+                let context = RecordContext::new(REQUESTS, id, owner, &path)?;
+                keys.decrypt_record(&value.bytes, &context).await
+            }
+            None if keys.allow_legacy_record_reads() => {
+                keys.decrypt_with_aad(&value.bytes, self.aad(id, field).as_bytes())
+                    .await
+            }
+            _ => Err(conflict()),
+        }
     }
 }
 
@@ -129,46 +166,91 @@ impl Field {
                 Err(conflict())
             };
         };
-        match marker {
-            Some(3) => {
-                let path = ["execution_proposal", slot.name(), self.name()];
-                let context = RecordContext::new(REQUESTS, &row.id, &row.user_id, &path)?;
-                keys.decrypt_record(&value.bytes, &context).await.map(Some)
-            }
-            None if keys.allow_legacy_record_reads() => keys
-                .decrypt_with_aad(&value.bytes, slot.aad(&row.id, self).as_bytes())
-                .await
-                .map(Some),
-            _ => Err(conflict()),
-        }
+        slot.open_value(keys, &row.id, &row.user_id, self, value, marker)
+            .await
+            .map(Some)
     }
 }
 
-/// Pending rows with malformed arms must still produce a blocked finding when
-/// a dotted-field lookup alone would classify all eight paths as empty.
-pub(crate) fn no_retained_material(row: &Document) -> bool {
+/// Inspect the complete selected arm before publishing either field. A non-proposal
+/// approval and a selected arm cleared by retention have no material to rewrap.
+async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResult<Document> {
+    let mut set = Document::new();
     let envelope = match row.get("execution_proposal") {
-        None | Some(Bson::Null) => return true,
+        None | Some(Bson::Null) => return Ok(set),
         Some(Bson::Document(e)) => e,
-        _ => return false,
+        _ => return Err(conflict()),
     };
     if envelope.keys().any(|key| {
         key.strip_prefix('v')
             .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
             && !matches!(key.as_str(), "v1" | "v2" | "v3" | "v4")
     }) {
-        return false;
+        return Err(conflict());
     }
-    let Ok(parsed) = bson::from_document(envelope.clone()) else {
-        return false;
-    };
-    let Ok(arm) = Arm::select(&parsed) else {
-        return false;
-    };
-    [Field::Payload, Field::Result].into_iter().all(|f| {
-        let (_, value, marker) = arm.field(f);
-        value.is_none() && marker.is_none()
-    })
+    let parsed = bson::from_document(envelope.clone()).map_err(|_| conflict())?;
+    let arm = Arm::select(&parsed)?;
+    for field in [Field::Payload, Field::Result] {
+        let (slot, value, marker) = arm.field(field);
+        let Some(value) = value else {
+            if marker.is_some() {
+                return Err(conflict());
+            }
+            continue;
+        };
+        let id = row.get_str("_id").map_err(|_| conflict())?;
+        let owner = row.get_str("user_id").map_err(|_| conflict())?;
+        let path = slot.path(field);
+        let context = RecordContext::new(REQUESTS, id, owner, &path)?;
+        if marker == Some(3)
+            && keys
+                .authenticate_current_record(&value.bytes, &context)
+                .await
+                .is_ok()
+        {
+            continue;
+        }
+        if !rewrap {
+            return Err(conflict());
+        }
+        let plain = slot
+            .open_value(keys, id, owner, field, value, marker)
+            .await?;
+        let bytes = keys.encrypt_record(&plain, &context).await?;
+        keys.authenticate_current_record(&bytes, &context).await?;
+        let name = path.join(".");
+        set.insert(format!("{name}_context_version"), 3_i32);
+        set.insert(name, super::binary(bytes));
+    }
+    Ok(set)
+}
+
+pub(crate) async fn verify(keys: &EncryptionKeys, source: &Document) -> AppResult<()> {
+    inspect(keys, source, false).await.map(|_| ())
+}
+
+pub(crate) async fn migrate(
+    db: &Database,
+    keys: &EncryptionKeys,
+    source: &Document,
+) -> AppResult<bool> {
+    if !keys.contextual_record_writes() {
+        return Err(conflict());
+    }
+    let set = inspect(keys, source, true).await?;
+    if set.is_empty() {
+        return Ok(false);
+    }
+    let db = crate::services::transaction_service::durable_database(db);
+    Ok(db
+        .collection::<Document>(REQUESTS)
+        .update_one(
+            crate::services::record_storage::exact_document_predicate(source),
+            doc! {"$set": set},
+        )
+        .await?
+        .matched_count
+        == 1)
 }
 
 #[cfg(test)]

@@ -172,6 +172,7 @@
   "NyxID app on {{device}}": "{{device}} 上的 NyxID 應用",
   "NyxID app support": "NyxID 應用程式支持",
   "NyxID isn't on your watch yet": "手錶上尚未安裝 NyxID",
+  "NyxID on Apple Watch": "Apple Watch 上的 NyxID",
   "NyxID on your watch signs out. Your iPhone stays signed in.": "手錶上的 NyxID 將會登出，iPhone 仍保持登入。",
   "NyxID recovery codes": "NyxID 恢復程式碼",
   "NyxID recovery codes\n\n{{code}}": "NyxID 恢復程式碼\n\n{{code}}",

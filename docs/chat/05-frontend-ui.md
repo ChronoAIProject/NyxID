@@ -60,6 +60,26 @@ thread list and conversation share the existing content surface, with
 neutral selection highlights. Smaller screens keep threads
 inside the agent drawer; collapsed desktop navigation retains its chat popovers.
 
+The thread panel header shows Channels followed by compact platform-logo and
+count capsules below the agent identity and thread total. Only external channels
+appear; a list of app-only conversations has no channel summary. Logos have
+channel-name/count hover labels and accessible names. Compact conversation rows
+keep the title and external channel logo on one line, preserving the logo while
+the title truncates. Expanded rows place date/message count (or a draft) on the
+left and the external channel logo/name on the right. Ordinary app conversations
+have no source label, logo, or header badge. Linked bots and platform-managed
+personal chats use their saved platform, and search includes those channel names.
+The external channel badge remains visible in both the expanded conversation
+header and its compact pill.
+Thread rows use the same horizontal inset on both sides. The options menu
+overlays the right edge and fades the content beneath it when shown; it reserves
+no additional space. Personal conversations contain private app and platform-managed
+personal chats, grouped by date. Connected bot chats contain conversations from
+linked bots, grouped by their source chat. Both sections explain this distinction
+in a short caption. Source-group headers explicitly say Source chat above the
+external chat name and bot metadata, distinguishing the expandable container from
+the indented saved conversations inside it.
+
 In individual NyxBot and specialist threads, scrolling beyond 160px collapses
 the agent row into a compact pill at the upper right, with icon buttons for
 Working context and Details. Taller thread notices raise that threshold to
