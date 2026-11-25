@@ -1,5 +1,5 @@
-use super::contract::{Event, Fact, Payload, decode_event};
-use super::inbox::{InboxError, clock};
+use super::contract::{Event, Fact, Payload};
+use super::inbox::{InboxError, decode_stored};
 use super::validation::{has_compute, has_home};
 use crate::models::sandbox_usage_inbox::{
     EFFECTIVE_FACTS, EVENTS, EffectiveFact, Event as StoredEvent,
@@ -61,11 +61,7 @@ pub(super) async fn apply(
                 .session(&mut *session)
                 .await?
                 .ok_or(InboxError::Corrupt)?;
-            let predecessor = decode_event(&accepted.canonical.bytes, clock())
-                .map_err(|_| InboxError::Corrupt)?;
-            if accepted.digest != predecessor.digest().as_str() {
-                return Err(InboxError::Corrupt);
-            }
+            let predecessor = decode_stored(&accepted)?;
             event
                 .validate_correction_of(&predecessor)
                 .map_err(InboxError::Conflict)?;

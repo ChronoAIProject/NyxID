@@ -41,8 +41,8 @@ pub(super) fn clock() -> Clock {
     }
 }
 
-pub async fn prepare(db: &Database) -> Result<(), InboxError> {
-    for (collection, indexes) in [
+fn index_definitions() -> [(&'static str, Vec<(Document, bool)>); 4] {
+    [
         (PRODUCERS, vec![(doc! {"namespace":1}, true)]),
         (
             EVENTS,
@@ -74,7 +74,11 @@ pub async fn prepare(db: &Database) -> Result<(), InboxError> {
                 (doc! {"owner_subject":1}, false),
             ],
         ),
-    ] {
+    ]
+}
+
+pub async fn prepare(db: &Database) -> Result<(), InboxError> {
+    for (collection, indexes) in index_definitions() {
         let models = indexes.into_iter().map(|(keys, unique)| {
             IndexModel::builder()
                 .keys(keys)
@@ -89,27 +93,35 @@ pub async fn prepare(db: &Database) -> Result<(), InboxError> {
 }
 
 pub(super) async fn require_prepared(db: &Database) -> Result<(), InboxError> {
-    let collection = db.collection::<Document>(PRODUCERS);
-    let mut indexes = match collection.list_indexes().await {
-        Ok(indexes) => indexes,
-        Err(error)
-            if matches!(error.kind.as_ref(),
-            mongodb::error::ErrorKind::Command(command) if command.code == 26) =>
-        {
+    for (collection, mut expected) in index_definitions() {
+        let collection = db.collection::<Document>(collection);
+        let mut indexes = match collection.list_indexes().await {
+            Ok(indexes) => indexes,
+            Err(error)
+                if matches!(error.kind.as_ref(),
+                mongodb::error::ErrorKind::Command(command) if command.code == 26) =>
+            {
+                return Err(InboxError::Unavailable);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        while let Some(index) = indexes.try_next().await? {
+            let options = index.options.unwrap_or_default();
+            if options.expire_after.is_some() {
+                return Err(InboxError::Unavailable);
+            }
+            if options.sparse.unwrap_or_default() || options.partial_filter_expression.is_some() {
+                continue;
+            }
+            expected.retain(|(keys, unique)| {
+                *keys != index.keys || *unique != options.unique.unwrap_or_default()
+            });
+        }
+        if !expected.is_empty() {
             return Err(InboxError::Unavailable);
         }
-        Err(error) => return Err(error.into()),
-    };
-    while let Some(index) = indexes.try_next().await? {
-        if index.keys == doc! {"namespace": 1}
-            && index
-                .options
-                .is_some_and(|options| options.unique == Some(true))
-        {
-            return Ok(());
-        }
     }
-    Err(InboxError::Unavailable)
+    Ok(())
 }
 
 pub async fn accept(
@@ -238,9 +250,8 @@ async fn append(
                 .session(&mut *session)
                 .await?
                 .ok_or(InboxError::Corrupt)?;
-            let head = decode_event(&previous.canonical.bytes, clock())
-                .map_err(|_| InboxError::Corrupt)?;
-            if previous.digest != current.head_digest || previous.digest != head.digest().as_str() {
+            let head = decode_stored(&previous)?;
+            if previous.digest != current.head_digest || previous.sequence != current.sequence {
                 return Err(InboxError::Corrupt);
             }
             event
@@ -324,8 +335,17 @@ async fn append(
     Ok((true, event.custody_receipt(receipt_id, accepted_at_ms)))
 }
 
-fn stored_receipt(row: &StoredEvent) -> Result<Receipt, InboxError> {
-    let event = decode_event(&row.canonical.bytes, clock()).map_err(|_| InboxError::Corrupt)?;
+pub(super) fn decode_stored(row: &StoredEvent) -> Result<Event, InboxError> {
+    let accepted_at =
+        u64::try_from(row.accepted_at.timestamp_millis()).map_err(|_| InboxError::Corrupt)?;
+    let event = decode_event(
+        &row.canonical.bytes,
+        Clock {
+            now_ms: accepted_at,
+            allowed_clock_skew_ms: 0,
+        },
+    )
+    .map_err(|_| InboxError::Corrupt)?;
     let header = event.header();
     if row.digest != event.digest().as_str()
         || row.source_event_id != header.event_id.as_str()
@@ -333,11 +353,19 @@ fn stored_receipt(row: &StoredEvent) -> Result<Receipt, InboxError> {
         || row.stream_id != header.stream_id.as_str()
         || row.owner_subject != header.owner_ref.subject.as_str()
         || row.sequence != header.sequence.get() as i64
-        || row.accepted_at.timestamp_millis() < header.produced_at_ms.get() as i64
-        || Uuid::parse_str(&row.receipt_id)
-            .ok()
-            .is_none_or(|id| id.get_version() != Some(uuid::Version::Random))
     {
+        return Err(InboxError::Corrupt);
+    }
+    Ok(event)
+}
+
+fn stored_receipt(row: &StoredEvent) -> Result<Receipt, InboxError> {
+    let event = decode_stored(row)?;
+    if Uuid::parse_str(&row.receipt_id).ok().is_none_or(|id| {
+        id.get_version() != Some(uuid::Version::Random)
+            || id.get_variant() != uuid::Variant::RFC4122
+            || id.to_string() != row.receipt_id
+    }) {
         return Err(InboxError::Corrupt);
     }
     Ok(event.custody_receipt(
