@@ -103,7 +103,7 @@ Response:
 
 Status values: `pending`, `approved`, `rejected`, `expired`. For an async request, the response also has an `execution` field reporting whether NyxID sent the approved request and its bounded result. Poll with the same credential that made the request.
 
-Poll at a reasonable interval (5–10 seconds) until status is no longer `pending`. Do not re-send the original request when it is approved; read the outcome from `execution`.
+Poll at a reasonable interval (5–10 seconds). `status` leaves `pending` when the user decides, but an approved async request is only queued at that moment (`execution.state` is `queued`). If you need the outcome, keep polling until `execution.state` reaches a final state such as `completed`, `not_sent` or `unknown`, and check `execution.result_available` before reading `execution.result`. Do not re-send the original request; NyxID sends it.
 
 ## Set up notification channels
 

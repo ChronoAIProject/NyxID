@@ -16,7 +16,8 @@ reviews and merges the result.
    git log --oneline <verified_at>..origin/dev -- <each governs glob>
    ```
 
-   Skip areas with no commits.
+   Patterns use git's default pathspec matching (`*` also matches `/`), so
+   each pattern can be passed to `git log` as written. Skip areas with no commits.
 
 2. **Always check the shared registries**, where most spec drift starts:
 

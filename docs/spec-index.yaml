@@ -1,9 +1,10 @@
 # NyxID spec index: which spec governs which code.
 #
-# Agents: search this file for the path you are editing, e.g.
-#   grep -n "handlers/triggers.rs" docs/spec-index.yaml
-# or for its parent folder, then read every matching area's specs.
-# A path can match more than one area.
+# Agents: this file is short. Read it and pick every area with a `governs`
+# pattern that matches the path you are editing, then read that area's specs.
+# A path can match more than one area. Patterns use git's default pathspec
+# matching, where `*` matches any characters including `/`; to test one:
+#   git ls-files -- '<pattern>' | grep -Fx '<your path>'
 #
 # Human-readable version: docs/README.md. How to keep specs current:
 # AGENTS.md ("Specs: keep them current as you work") and
@@ -14,7 +15,8 @@
 #   specs        governing documents; `role` is reference (current behaviour,
 #                edited in place), design (why; frozen), runbook (operations)
 #                or guide (tasks)
-#   governs      git pathspec globs (`*` within a path segment)
+#   governs      git pathspec patterns (`*` matches any characters, including `/`);
+#                the nightly check runs `git log -- <pattern>` with them
 #   verified_at  last commit at which the specs were checked against the code
 #   input_of     docs that code, tests or the frontend build read directly
 #                (edit with care; run the named consumer)
@@ -90,9 +92,12 @@ areas:
       - backend/src/handlers/assistant_notifications.rs
       - backend/src/handlers/notifications.rs
       - backend/src/handlers/device_tokens.rs
+      - backend/src/handlers/approvals.rs
+      - backend/src/services/approval_service.rs
       - backend/src/models/assistant_notification.rs
       - backend/src/models/notification_channel.rs
       - mobile/src/lib/notifications/*
+      - mobile/src/features/notifications/*
     verified_at: 1f8bcaf10c2b6222456e71300e2f75e539d41778
 
   - area: sandboxes
@@ -124,11 +129,11 @@ registries:
   - { code: backend/src/services/personal_data_registry.rs, spec: docs/security/PERSONAL_ERASURE_INVENTORY.md, holds: collection registration }
 
 input_of:
-  - { doc: docs/assistant/CMA_WORKER_GUIDE.md, consumer: runtime and test, read_by: backend/src/services/assistant_cma_tools.rs }
+  - { doc: docs/assistant/CMA_WORKER_GUIDE.md, consumer: runtime and test, read_by: "backend/src/services/assistant_cma_tools.rs, backend/src/handlers/async_service_operation_tests.rs" }
   - { doc: docs/assistant/CHANNEL_SETUP_GUIDE.md, consumer: runtime, read_by: backend/src/handlers/assistant_team.rs }
   - { doc: docs/AI_AGENT_PLAYBOOK.md, consumer: runtime, read_by: backend/src/handlers/llms_txt.rs }
   - { doc: docs/examples/nyxbot-voice-service.template.json, consumer: runtime, read_by: backend/src/services/voice/catalog.rs }
-  - { doc: docs/security/PERSONAL_ERASURE_INVENTORY.md, consumer: test, read_by: backend/src/services/personal_data_registry.rs }
+  - { doc: docs/security/PERSONAL_ERASURE_INVENTORY.md, consumer: test, read_by: "backend/src/services/personal_data_registry.rs, backend/src/services/account_export_index_tests.rs" }
   - { doc: docs/security/ENCRYPTED_FIELD_INVENTORY.md, consumer: test, read_by: backend/src/services/encrypted_record_migration/tests/registry.rs }
   - { doc: docs/AGENT_OPERATION_SCOPES.md, consumer: test, read_by: backend/src/services/agent_operation_scope_tests.rs }
   - { doc: docs/ACCOUNT_DATA_EXPORT.md, consumer: test, read_by: backend/src/services/account_export_model_tests.rs }

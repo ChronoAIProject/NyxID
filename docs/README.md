@@ -1,8 +1,8 @@
 # NyxID specs: where to look
 
 This is the map of NyxID's specs. The same map in machine-readable form is
-[`spec-index.yaml`](spec-index.yaml); agents should search it for the code path
-they are editing. Agent rules for keeping specs current are in
+[`spec-index.yaml`](spec-index.yaml); agents match the code path they are editing
+against its `governs` patterns. Agent rules for keeping specs current are in
 [`AGENTS.md`](../AGENTS.md) ("Specs: keep them current as you work").
 
 ## Find the spec for an area

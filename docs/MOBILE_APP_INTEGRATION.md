@@ -595,8 +595,8 @@ Every push carries a `type` in its data (FCM `data`; top-level keys in the APNs 
 | `trigger_event` | Alert. A trigger with notification delivery receives an event. | `trigger_label`, `event_id`, `preview` (at most 512 characters) |
 | `device_bind_success`, `device_repeated_fail`, `device_lock_alert` | Alert. A headless device-code binding is approved, reaches repeated failed signed polls, or is locked. | `template` (same value), `hw_id`, `device_label`; `node_id`, `failed_poll_count`, `locked_until` when known |
 | `automation_result` (push-only automation delivery) | Alert. An automation whose destination is a notification finishes a run. | `conversation_id`, `deeplink` |
-| `automation_result`, `automation_problem`, `needs_decision`, `agent_update`, `chat_update`, `group_mention` (NyxBot Notifications) | Alert. A NyxBot Notifications row the person opted into for push (see [NyxBot Notifications](chat/12-notifications.md#optional-push)). | `kind` (same value), `notification_id`, `deeplink`; `conversation_id` when the row's source records one |
-| `group_mention` (collaboration group) | Alert. Someone mentions the person in a collaboration group. | `group_id`, `deeplink` |
+| `automation_result`, `automation_problem`, `needs_decision`, `agent_update`, `chat_update` (NyxBot Notifications) | Alert. A NyxBot Notifications row the person opted into for push (see [NyxBot Notifications](chat/12-notifications.md#optional-push)). | `kind` (same value), `notification_id`, `deeplink`; `conversation_id` when the row's source records one |
+| `group_mention` | Alert. Someone mentions the person in a collaboration group. | See [Collaboration group mentions](#collaboration-group-mentions) for the payload and settings. |
 | `assistant_voice_completed` | Silent. Work from an ended voice call finishes, and the person turned on voice completion notifications. | `conversation_id`, `request_id` |
 
 ### Handling Approval Request Notifications
@@ -626,7 +626,7 @@ When a push notification with `type: "approval_decision"` or `type: "approval_ex
 
 ### Polling Approval Status
 
-`GET /api/v1/approvals/requests/{request_id}/status` is the requester's status endpoint: it answers only the credential that made the request (same requester and resource owner), so the app cannot use it for requests made by an agent or service. To load a request received by push, the app calls `GET /api/v1/approvals/requests/{request_id}`, which returns the full request, including `status` and `expires_at`. Both use the statuses below.
+`GET /api/v1/approvals/requests/{request_id}/status` is the requester's status endpoint: it answers only the same requester type and requester ID (for an ordinary API key, the account it belongs to) with access to the resource owner, and for an execution-permission (v2) request only the exact original key, child credential and actor. The app cannot use it for requests made by an agent or service. To load a request received by push, the app calls `GET /api/v1/approvals/requests/{request_id}`, which returns the full request, including `status` and `expires_at`. Both use the statuses below.
 
 ```
 GET /api/v1/approvals/requests/{request_id}/status
@@ -859,7 +859,7 @@ Two other flows return HTTP 403 `approval_required` (error code 7000) with a `re
 - **Opt-in async (external callers):** only an eligible execution-permission (v2) request whose caller sent `X-NyxID-Approval-Mode: async`. The caller polls `GET /api/v1/approvals/requests/{id}/status` with the same credential; after approval NyxID sends the retained request itself and reports the outcome in the response's `execution` field. Ineligible requests (for example, to a service that forwards the caller's own bearer token) ignore the header and use the connected wait. See [execution permissions](EXECUTION_PERMISSIONS.md#external-requests-and-readback).
 - **Assistant reviews:** an assistant chat key can receive `approval_required` without the header when a call needs an execution-permission review. The review is recorded for the person, not the assistant key, so the key cannot poll it. The person reviews it in the NyxID web app, and approval queues the retained operation for NyxID to resume server-side. See [execution permissions](EXECUTION_PERMISSIONS.md#permission-updates-and-resume-2195-part-a).
 
-In every flow, never automatically re-send the request after `approval_required` or `approval_failed`. An approved request is continued or resumed by NyxID, so a re-sent write can run twice; a re-sent request after `approval_failed` asks the owner again.
+In every flow, never automatically re-send the request after `approval_required` or `approval_failed`. An approved request is continued or resumed by NyxID, so a re-sent write can run twice; a re-sent request after `approval_failed` may simply return `approval_failed` again without a new prompt.
 
 ### Logout Flow
 
@@ -910,7 +910,7 @@ Mobile App                                  NyxID Backend
 |--------|------|-------------|
 | `GET` | `/api/v1/approvals/requests` | List approval requests (filterable, paginated) |
 | `GET` | `/api/v1/approvals/requests/{id}` | Get an approval request's details |
-| `GET` | `/api/v1/approvals/requests/{id}/status` | Get approval request status (requester credential only) |
+| `GET` | `/api/v1/approvals/requests/{id}/status` | Get approval request status (requester only; exact original credential for v2) |
 | `POST` | `/api/v1/approvals/requests/{id}/decide` | Approve or reject a request |
 | `GET` | `/api/v1/approvals/grants` | List active approval grants |
 | `DELETE` | `/api/v1/approvals/grants/{grant_id}` | Revoke an approval grant |

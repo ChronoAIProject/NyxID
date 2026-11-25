@@ -18,7 +18,7 @@ This file is long (about 230 KB). Some tools load only the beginning: if yours d
 ## Specs: where to look
 
 - [`docs/README.md`](docs/README.md) is the spec map: each area's governing spec and the code it governs.
-- [`docs/spec-index.yaml`](docs/spec-index.yaml) is the same map in machine-readable form. Search it for the path you are editing, for example `grep -n "handlers/triggers.rs" docs/spec-index.yaml`, or for its parent folder. A path can belong to more than one area; read each matching spec.
+- [`docs/spec-index.yaml`](docs/spec-index.yaml) is the same map in machine-readable form. It is short: read it and pick every area whose `governs` pattern matches the path you are editing (`*` matches any characters, including `/`). A path can belong to more than one area; read each matching spec.
 
 | Area | Governing spec | Main code |
 |---|---|---|
@@ -32,7 +32,7 @@ This file is long (about 230 KB). Some tools load only the beginning: if yours d
 
 ## Specs: keep them current as you work
 
-1. Before changing code, find its spec: search `docs/spec-index.yaml` for the path you are editing, then read that spec's rules and the guidance on making changes.
+1. Before changing code, find its spec: match the path you are editing against the `governs` patterns in `docs/spec-index.yaml`, then read that spec's rules and the guidance on making changes.
 2. The spec is the contract. If your change alters behaviour, a contract, limit, flag, env var, error code or key decision, update the governing spec in the same PR. For new features, write the spec section first or alongside the code.
 3. Edit in place, in present tense, describing current behaviour only: no "previously/now/this PR" notes, history or known-issue lists.
 4. One place per fact: change it in its governing spec and link to it elsewhere instead of copying.

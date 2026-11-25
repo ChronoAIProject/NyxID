@@ -9,7 +9,7 @@ The approvals system adds a human checkpoint to the proxy. When a service is con
 
 Agents are useful precisely because they act autonomously. But autonomous action on sensitive services — a production API, a financial data provider, a credential that unlocks write access — carries risk. The approvals system is a circuit breaker: it lets users delegate proxy access to agents while retaining the ability to review and allow or deny specific calls before they happen.
 
-The key property is that approvals are **blocking and synchronous from the agent's perspective**. The agent sends a proxy request; if approval is required, the HTTP connection stays open while NyxID waits for the user's decision. If the user approves, the downstream response is returned directly — no retry, no callback. If the user rejects or the timeout expires, the agent receives `403 approval_failed` (code `7001`) and the request is not sent.
+By default, approvals are **blocking and synchronous from the agent's perspective**. The agent sends a proxy request; if approval is required, the HTTP connection stays open while NyxID waits for the user's decision. If the user approves, the downstream response is returned directly — no retry, no callback. If the user rejects or the timeout expires, the agent receives `403 approval_failed` (code `7001`) and the request is not sent. The exception is an eligible caller that opts into async approval with the `X-NyxID-Approval-Mode: async` header: it receives an immediate `403 approval_required` (code `7000`) with a request ID, and reads the decision (including a rejection) and the execution result from the status endpoint.
 
 ## What triggers approval
 

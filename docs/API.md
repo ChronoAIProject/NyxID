@@ -9372,7 +9372,15 @@ Owner routes require a first-party human session; API-key, service-account,
 delegated and relay credentials are rejected. Quote, create, resume and rekey
 also require the `experimental:remote-machines` flag and a ready platform
 configuration (see [ENV.md](ENV.md#remote-machine-runtime-funding-and-bootstrap-verification));
-pause and delete do not.
+pause and delete do not. A create, resume or rekey whose exact request was
+already accepted (same idempotency key and body) can be recovered while platform
+probes are unavailable; the flag check still applies.
+
+Create always requires an `Idempotency-Key` and the current policy
+acknowledgements (`policy_version`, `data_policy_version`,
+`acknowledge_shared_environment`). A free-slot create (`free_slot: true`) needs
+nothing more. A paid create or resume additionally requires an accepted
+`quote_id` and `accept_account_balance: true`.
 Request and response fields, profile/rate rules, bounded reads and deletion are
 specified in
 [Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
@@ -9382,7 +9390,7 @@ specified in
 | GET | `/api/v1/remote-machine-entitlement` | Entitlement and advisory billing preflight for a profile. |
 | POST | `/api/v1/remote-machine-quotes` | Quote a new Machine or the resume of an existing one. |
 | GET | `/api/v1/remote-machines` | Owner Machines, cursor-paged; `include_deleted=true` adds retained records. |
-| POST | `/api/v1/remote-machines` | Create a Machine from an accepted quote (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines` | Create a Machine: free slot, or paid from an accepted quote (`Idempotency-Key` required; see above). |
 | GET | `/api/v1/remote-machines/{machine_id}` | Machine detail. |
 | DELETE | `/api/v1/remote-machines/{machine_id}` | Delete the Machine and its workspace (`Idempotency-Key` required). |
 | POST | `/api/v1/remote-machines/{machine_id}/actions` | Owner lifecycle action: `pause`, `resume`, `rekey` or `delete` (`Idempotency-Key` required). |
