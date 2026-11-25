@@ -24,7 +24,13 @@ async fn written_rows(state: &AppState) -> Document {
         .await
         .unwrap()
         .unwrap();
-    assert!(!gateway.contains_key("payload_context_version"));
+    assert_eq!(
+        gateway.get_i32("payload_context_version").ok(),
+        state
+            .encryption_keys
+            .contextual_record_writes()
+            .then_some(3)
+    );
     let stored: GatewayResponse = bson::from_document(gateway.clone()).unwrap();
     let expected = recovery::payload(&state.encryption_keys, &stored)
         .await
@@ -103,6 +109,9 @@ async fn contextualize(keys: &EncryptionKeys, rows: &mut Document) {
                 .get_i32("context_version")
                 == Ok(3)
         {
+            continue;
+        }
+        if !event && source.get_i32("payload_context_version") == Ok(3) {
             continue;
         }
         let id = source.get_str("_id").unwrap();
@@ -291,14 +300,14 @@ async fn swapped_event_and_gateway_replay_payloads_are_rejected_in_both_collecti
 }
 
 #[tokio::test]
-async fn gateway_replay_refresh_and_finish_replace_contextual_fixtures_with_shipped_encoding() {
+async fn gateway_replay_refresh_and_finish_select_the_writer_encoding() {
     let (state, _, server) = setup("gateway_replay_replacement").await;
     let mut rows = Box::pin(written_rows(&state)).await;
     let source = rows.get_document_mut("gateway").unwrap();
     let row: GatewayResponse = bson::from_document(source.clone()).unwrap();
     let payload =
         recovery::Payload::new(&row.response_id, "fixture-conversation", Default::default());
-    let sealed = payload.seal(&state.encryption_keys).await.unwrap();
+    let sealed = payload.seal_legacy(&state.encryption_keys).await.unwrap();
     source.insert(
         "payload_ciphertext",
         bson::Binary {
@@ -306,6 +315,7 @@ async fn gateway_replay_refresh_and_finish_replace_contextual_fixtures_with_ship
             bytes: sealed,
         },
     );
+    source.remove("payload_context_version");
     source.insert("terminal", false);
     contextualize(&state.encryption_keys, &mut rows).await;
     let gateway = rows.get_document("gateway").unwrap();
@@ -319,44 +329,36 @@ async fn gateway_replay_refresh_and_finish_replace_contextual_fixtures_with_ship
         .await
         .unwrap();
     let responses = state.db.collection::<Document>(RESPONSES);
-    for finish in [false, true] {
+    for (writes, finish) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut keys = crate::test_utils::test_encryption_keys();
+        keys.set_contextual_record_writes(writes);
         responses
             .replace_one(doc! {"_id":&current.id}, gateway)
             .await
             .unwrap();
         if finish {
-            recovery::finish(
-                &state.db,
-                &state.encryption_keys,
-                &current,
-                Some("completed"),
-                false,
-            )
-            .await
-            .unwrap();
+            recovery::finish(&state.db, &keys, &current, Some("completed"), false)
+                .await
+                .unwrap();
         } else {
-            recovery::refresh(
-                &state.db,
-                &state.encryption_keys,
-                &current,
-                std::future::ready,
-            )
-            .await
-            .unwrap();
+            recovery::refresh(&state.db, &keys, &current, std::future::ready)
+                .await
+                .unwrap();
         }
         let updated = responses
             .find_one(doc! {"_id":&current.id})
             .await
             .unwrap()
             .unwrap();
-        assert!(!updated.contains_key("payload_context_version"));
+        assert_eq!(
+            updated.get_i32("payload_context_version").ok(),
+            writes.then_some(3)
+        );
         let row: GatewayResponse = bson::from_document(updated).unwrap();
         assert_eq!(row.revision, current.revision + 1);
         assert_eq!(row.expires_at, current.expires_at);
         assert_eq!(row.terminal, finish);
-        let decoded = recovery::payload(&state.encryption_keys, &row)
-            .await
-            .unwrap();
+        let decoded = recovery::payload(&keys, &row).await.unwrap();
         assert_eq!(
             decoded.snapshot["status"],
             if finish { "completed" } else { "in_progress" }

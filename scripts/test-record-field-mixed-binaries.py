@@ -40,6 +40,8 @@ def main():
                         help="exercise the retained conversation window and the legacy subscriber boundary")
     parser.add_argument("--learning-writers", action="store_true",
                         help="exchange learning proposals with the reader-preparation binary")
+    parser.add_argument("--gateway-writers", action="store_true",
+                        help="exchange native and relay gateway payloads across writer activation")
     parser.add_argument("--event-writers", action="store_true",
                         help="exchange native event contexts and stored no-turn replies")
     parser.add_argument("--event-replay-readers", action="store_true",
@@ -134,22 +136,23 @@ def main():
                 run(reader, "registry-" + previous, "generation", test=registry, writes=True)
             return
 
-        if args.event_writers:
+        if args.event_writers or args.gateway_writers:
+            family = "gateway" if args.gateway_writers else "event"
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                 run(writer, "write", writer)
-                run(reader, "event-read", writer)
+                run(reader, f"{family}-read", writer)
             run("base", "write", "retained", writes=True)
-            run("candidate", "event-read", "retained", writes=True)
-            run("candidate", "event-reject", "retained", legacy=False)
-            run("candidate", "event-migrate", "retained", writes=True)
-            run("candidate", "write", "active", writes=True)
+            run("candidate", f"{family}-read", "retained", writes=True)
+            run("candidate", f"{family}-reject", "retained", legacy=False)
+            run("candidate", f"{family}-migrate", "retained", writes=True)
+            run("candidate", "write-active" if args.gateway_writers else "write", "active", writes=True)
             for fixture in ["retained", "active"]:
                 for reader in ["base", "candidate"]:
                     for writes in [False, True]:
-                        run(reader, "event-read", fixture, writes=writes, legacy=False)
+                        run(reader, f"{family}-read", fixture, writes=writes, legacy=False)
             run("candidate", "write", "rollback")
-            run("base", "event-read", "rollback")
-            run("candidate", "event-reject", "rollback", legacy=False)
+            run("base", f"{family}-read", "rollback")
+            run("candidate", f"{family}-reject", "rollback", legacy=False)
             registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
             for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
                 run(writer, "registry-write", "generation", writes=True, test=registry)

@@ -56,6 +56,7 @@ enum Adapter {
     NyxbotChannelKey,
     ThreadReference,
     NyxbotEvent,
+    GatewayResponse,
     EventBinding,
     GatewayTransport,
     CmaRequest,
@@ -346,7 +347,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_gateway_responses",
-        adapter: Adapter::Pending,
+        adapter: Adapter::GatewayResponse,
         fields: &["payload_ciphertext"],
     },
     Entry {
@@ -576,11 +577,13 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::EVENT_REPLY_DIGEST) => project_labels(
-            &row,
-            previous_labels::event_reply_draft()
-                .chain(std::iter::once(previous_labels::META_ASSETS)),
-        )?,
+        Some(previous_labels::EVENT_REPLY_DIGEST | previous_labels::EVENT_WRITERS_DIGEST) => {
+            project_labels(
+                &row,
+                previous_labels::event_reply_draft()
+                    .chain(std::iter::once(previous_labels::META_ASSETS)),
+            )?
+        }
         Some(previous_labels::EVENT_REPLY_DRAFT_DIGEST) => {
             project_labels(&row, previous_labels::event_reply_draft())?
         }
@@ -803,6 +806,9 @@ async fn verify(
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
         Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::verify(keys, row)).await,
+        Adapter::GatewayResponse => {
+            Box::pin(super::nyxbot_response_recovery::storage::verify(keys, row)).await
+        }
         Adapter::ThreadReference => {
             Box::pin(super::nyxbot_thread_reference::verify(keys, row)).await
         }
@@ -957,6 +963,12 @@ async fn migrate(
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
         Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::migrate(db, keys, row)).await,
+        Adapter::GatewayResponse => {
+            Box::pin(super::nyxbot_response_recovery::storage::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::ThreadReference => {
             Box::pin(super::nyxbot_thread_reference::migrate(db, keys, row)).await
         }

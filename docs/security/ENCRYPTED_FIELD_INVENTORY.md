@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 43 implemented adapters
-and 7 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 44 implemented adapters
+and 6 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -71,7 +71,7 @@ A collection may use separate adapters for different fields.
 | `assistant_cma_sandboxes` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `assistant_cma_creations` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
-| `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
+| `nyxbot_gateway_responses` | `payload_ciphertext` | [Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs) | Implemented |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
@@ -135,6 +135,11 @@ event before updating ciphertext and version pairs. Delivery claims, guest
 leases, media retention and replay mappings keep their original values.
 [Event storage](../../backend/src/services/nyxbot_event_record.rs)
 
+Gateway response payloads bind the response row, owner, channel, binding and response ID.
+Migration checks the stored snapshot and frame order, fences the complete source, and
+rewraps the original bytes while preserving replay revision and expiry.
+[Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
@@ -142,9 +147,6 @@ leases, media retention and replay mappings keep their original values.
 - V2 device approval stores the credential inside the Agent Key grant. A session
   grant writes the access and refresh token fields at the top level.
   [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
-- Gateway responses retain their own replay payload, bound on contextual reads to the
-  response row, owner, channel, binding and response ID. The writer uses the historical encoding.
-  [Gateway replay](../../backend/src/services/nyxbot_response_recovery.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and
