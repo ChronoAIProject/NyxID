@@ -215,3 +215,52 @@ async fn signup_admission_shares_email_and_social_caps_and_allows_existing_sign_
         .await;
     drop_test_database(&db).await;
 }
+
+tokio::task_local! {
+    static CLOCK_AFTER_IP_DAY_CHARGE: Cell<Option<DateTime>>;
+}
+
+pub(super) fn advance_between_daily_charges() {
+    if let Ok(Some(now)) = CLOCK_AFTER_IP_DAY_CHARGE.try_with(Cell::take) {
+        TEST_RATE_WINDOW_NOW.with(|clock| clock.set(now));
+    }
+}
+
+#[tokio::test]
+async fn signup_admission_uses_the_same_day_across_midnight() {
+    let db = connect_transaction_test_database("signup_midnight").await;
+    let admission = net(SignupLimits::for_test(5, 1, 1), 1);
+    let key = admission.client_ip.to_string();
+
+    TEST_RATE_WINDOW_NOW
+        .scope(Cell::new(at(10, 23)), async {
+            CLOCK_AFTER_IP_DAY_CHARGE
+                .scope(Cell::new(Some(at(11, 0))), async {
+                    admission.insert_user(&db, &new_person()).await.unwrap();
+                })
+                .await;
+
+            assert_eq!(TEST_RATE_WINDOW_NOW.with(Cell::get), at(11, 0));
+            for (namespace, key) in [
+                ("signup_ip_day", key.as_str()),
+                ("signup_global_day", "all"),
+            ] {
+                assert!(
+                    !RateWindowStore::is_exhausted(&db, namespace, key, 1, DAY)
+                        .await
+                        .unwrap()
+                );
+                TEST_RATE_WINDOW_NOW.with(|clock| clock.set(at(10, 23)));
+                assert!(
+                    RateWindowStore::is_exhausted(&db, namespace, key, 1, DAY)
+                        .await
+                        .unwrap()
+                );
+                TEST_RATE_WINDOW_NOW.with(|clock| clock.set(at(11, 0)));
+            }
+            admission.insert_user(&db, &new_person()).await.unwrap();
+            assert_eq!(user(&db).count_documents(doc! {}).await.unwrap(), 2);
+        })
+        .await;
+    drop_test_database(&db).await;
+}

@@ -52,15 +52,14 @@ impl SignupAdmission {
         let context = (db, user, self.windows(&ip));
         transaction_service::run_db_only(db, &context, |session, (db, user, windows)| {
             Box::pin(async move {
-                for &(namespace, key, limit, window) in windows {
-                    if !RateWindowStore::admit_in_session(
-                        db, namespace, key, limit, window, session,
-                    )
-                    .await?
-                    {
-                        return Err(AppError::RateLimited);
-                    }
-                }
+                let [hour, ip_day, global_day] = *windows;
+                // UTC day boundaries coincide with UTC hour boundaries. The
+                // narrowest window supplies one MongoDB anchor for this attempt.
+                let anchor = charge(db, session, hour, None).await?;
+                charge(db, session, ip_day, Some(anchor)).await?;
+                #[cfg(test)]
+                tests::advance_between_daily_charges();
+                charge(db, session, global_day, Some(anchor)).await?;
                 db.collection::<User>(USERS)
                     .insert_one(*user)
                     .session(session)
@@ -70,6 +69,17 @@ impl SignupAdmission {
         })
         .await
     }
+}
+
+async fn charge(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    (namespace, key, limit, duration): (&str, &str, u64, Duration),
+    anchor: Option<chrono::DateTime<chrono::Utc>>,
+) -> AppResult<chrono::DateTime<chrono::Utc>> {
+    RateWindowStore::admit_window_in_session(db, namespace, key, limit, duration, anchor, session)
+        .await?
+        .ok_or(AppError::RateLimited)
 }
 
 #[cfg(test)]
