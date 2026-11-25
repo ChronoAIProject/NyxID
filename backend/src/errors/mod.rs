@@ -101,6 +101,7 @@ pub struct PoolAttemptSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolAttemptTransportKind {
     Connect,
+    ResolutionUnavailable,
     Timeout,
     AfterDispatch,
     NodeUnsent,
@@ -153,6 +154,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("Conflict: trigger_overlap_skip")]
+    TriggerOverlapSkip { blocking_run_id: String },
 
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
@@ -934,7 +938,9 @@ impl AppError {
             Self::CrashReportingUnavailable => StatusCode::NOT_FOUND,
             Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
-            Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::Conflict(_)
+            | Self::TriggerOverlapSkip { .. }
+            | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
                 StatusCode::CONFLICT
             }
@@ -1151,6 +1157,9 @@ impl AppError {
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
+            Self::PoolAttemptTransport(PoolAttemptTransportKind::ResolutionUnavailable) => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -1175,7 +1184,7 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) => 1004,
+            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1470,7 +1479,7 @@ impl AppError {
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "conflict",
+            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => "conflict",
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1782,6 +1791,15 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ApprovalFailed {
+                reason,
+                request_id,
+                approve_url,
+            } => Some(crate::services::approval_service::wait_failure_details(
+                reason,
+                request_id,
+                approve_url,
+            )),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }

@@ -11,7 +11,9 @@ use zeroize::Zeroizing;
 
 mod lifecycle;
 mod presentation;
+pub(crate) mod record;
 mod resume;
+use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
@@ -66,9 +68,6 @@ fn binary(bytes: Vec<u8>) -> bson::Binary {
         subtype: bson::spec::BinarySubtype::Generic,
         bytes,
     }
-}
-fn aad(id: &str) -> String {
-    format!("execution-proposal:v1:{id}")
 }
 
 pub(crate) fn supported_chat(chat: &acks::ChatAuthority) -> bool {
@@ -293,14 +292,6 @@ pub(super) async fn create(
     let now = Utc::now();
     let end = (now + Duration::minutes(10)).min(task.hard_deadline);
     let id = Uuid::new_v4().to_string();
-    let encrypted = keys.encrypt_with_aad(&encoded, aad(&id).as_bytes()).await?;
-    if encrypted.len() > MAX_PAYLOAD {
-        tracing::info!(
-            reason = "encrypted_payload_too_large",
-            "Execution proposal uses legacy prompts"
-        );
-        return Ok(None);
-    }
     let mut reusable = reusable_shape(
         effect.method,
         effect.body,
@@ -397,6 +388,16 @@ pub(super) async fn create(
         })
         .collect::<AppResult<Vec<_>>>()?;
     let version = v3::choose_version(db, &contract, reusable).await?;
+    let (encrypted, payload_context_version) = Slot::Assistant(version)
+        .seal(keys, &id, &chat.user_id, Field::Payload, &encoded)
+        .await?;
+    if encrypted.len() > MAX_PAYLOAD {
+        tracing::info!(
+            reason = "encrypted_payload_too_large",
+            "Execution proposal uses legacy prompts"
+        );
+        return Ok(None);
+    }
     if version == AssistantVersion::V3 {
         choices.push(v3::choice(&contract)?);
     }
@@ -434,6 +435,7 @@ pub(super) async fn create(
         )
         .await?,
         payload: Some(binary(encrypted)),
+        payload_context_version,
         state: "pending".into(),
         grant_id: None,
         selected_choice: None,
@@ -441,6 +443,7 @@ pub(super) async fn create(
         resume_turn_id: None,
         claimed_at: None,
         result: None,
+        result_context_version: None,
         failure_code: None,
     };
     let group_binding = super::super::org_group_service::approval_binding(
@@ -582,15 +585,10 @@ async fn bind_proposal_activity(
 }
 
 pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&Proposal> {
-    let version = AssistantVersion::of(row)?;
-    row.execution_proposal
-        .as_ref()
-        .and_then(|p| match version {
-            AssistantVersion::V1 => p.v1.as_ref(),
-            AssistantVersion::V3 => p.v3.as_ref(),
-            AssistantVersion::V4 => p.v4.as_ref(),
-        })
-        .ok_or_else(conflict)
+    match Arm::of(row)? {
+        Arm::Assistant(_, p) => Ok(p),
+        Arm::V2(_) => Err(conflict()),
+    }
 }
 async fn audit(
     db: &Database,
@@ -728,7 +726,11 @@ pub(crate) async fn decide(
                 let grant=ApprovalGrant{execution_use:None,execution_review:Some(p.review.clone()),execution_last_used_at:None,execution:Some(ExecutionPermission{version:VERSION,v1:Some(contract.clone())}),id:(*grant_id).clone(),user_id:actor.to_string(),service_id:row.service_id.clone(),service_name:row.service_name.clone(),requester_type:row.requester_type.clone(),requester_id:row.requester_id.clone(),requester_label:row.requester_label.clone(),approval_request_id:row.id.clone(),scope:Some(LEGACY_SCOPE.into()),granted_at:now,expires_at:contract::legacy_expiry(&contract.validity),revoked:false,org_scoped:false};
                 db.collection::<ApprovalGrant>("approval_grants").insert_one(grant).session(&mut *session).await?;
                 updated.grant_id=Some((*grant_id).clone());updated.selected_choice=input.choice_id.clone();updated.selected_choice_digest=input.choice_digest.clone();updated.state="queued".into();updated.wake_at=Some(now);
-            }else{updated.state="denied".into();updated.payload=None;}
+            } else {
+                updated.state = "denied".into();
+                updated.payload = None;
+                updated.payload_context_version = None;
+            }
             row.status=if input.approved{"approved"}else{"rejected"}.into();row.decided_at=Some(now);row.decision_channel=Some("web".into());row.decision_idempotency_key=Some(input.idempotency_key.clone());row.execution_proposal=Some(version.envelope(updated));
             if collection.replace_one(version.selector(doc!{"_id":&row.id,"status":"pending","execution_proposal.v1.revision":p.revision}),&row).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
             let mut event=super::super::assistant_team_service::event("permission_decided",if input.approved{"An execution permission was saved. NyxID will execute the retained operation and report its result; do not reconstruct or repeat it."}else{"The person denied the execution permission. Nothing was sent; do not repeat this request."}.into(),None).bound_to(p.report_to.as_deref()).for_invocation(p.invocation_id.as_deref());
@@ -958,6 +960,7 @@ pub(super) fn approve_url(frontend_url: &str) -> String {
 /// settlement delivered that receipt; retries of either original/resume turn join it.
 pub(super) async fn existing_effect(
     db: &Database,
+    context: &RequestContext,
     chat: &acks::ChatAuthority,
     connection: &str,
     digest: &str,
@@ -974,6 +977,9 @@ pub(super) async fn existing_effect(
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
     })).await? {
+        if let Ok(p) = proposal(&row) {
+            context.observation.replay(&row.status, &p.state);
+        }
         return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
             AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });
@@ -1132,7 +1138,7 @@ async fn expire_pending(
     id: &str,
     reason: &str,
 ) -> AppResult<()> {
-    db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":id,"user_id":actor,"status":"pending","execution_proposal.v1.state":"pending"}),version.update(doc!{"$set":{"status":"expired","execution_proposal.v1.state":"expired","execution_proposal.v1.failure_code":reason},"$unset":{"execution_proposal.v1.payload":""}})).await?;
+    db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":id,"user_id":actor,"status":"pending","execution_proposal.v1.state":"pending"}),version.update(doc!{"$set":{"status":"expired","execution_proposal.v1.state":"expired","execution_proposal.v1.failure_code":reason},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).await?;
     Ok(())
 }
 

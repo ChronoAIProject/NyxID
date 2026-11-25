@@ -33,46 +33,36 @@ export function NotificationBell({
       disabled={disabled}
       onPress={onPress}
       testID="notification-bell"
+      style={styles.button}
     >
       <View testID="notification-bell-glyph" style={styles.glyph}>
         <Bell size={21} color={colors.textPrimary} />
-        {badge ? (
-          <View
-            testID="notification-bell-badge-ring"
-            style={[styles.badgeRing, { borderColor: colors.sidebarBase }]}
-          >
-            <View
-              testID="notification-bell-badge"
-              style={[styles.badge, { backgroundColor: attention ? colors.warning : colors.primary }]}
-            >
-              <Text
-                maxFontSizeMultiplier={1.2}
-                style={[styles.badgeText, { color: attention ? colors.onWarning : colors.onPrimary }]}
-              >
-                {badge}
-              </Text>
-            </View>
-          </View>
-        ) : null}
       </View>
+      {badge ? (
+        <View
+          pointerEvents="none"
+          testID="notification-bell-badge"
+          style={[styles.badge, { backgroundColor: attention ? colors.warning : colors.primary }]}
+        >
+          <Text
+            maxFontSizeMultiplier={1.2}
+            style={[styles.badgeText, { color: attention ? colors.onWarning : colors.onPrimary }]}
+          >
+            {badge}
+          </Text>
+        </View>
+      ) : null}
     </FloatingButton>
   );
 }
 
 const styles = StyleSheet.create({
-  glyph: { position: "relative", width: 21, height: 21 },
-  badgeRing: {
-    position: "absolute",
-    // The fill starts at the 21px glyph's midpoint; the ring sits outside it.
-    left: 10.5 - 2,
-    top: -6 - 2,
-    borderWidth: 2,
-    borderRadius: radius.full,
-  },
+  button: { flexDirection: "row", gap: 4, paddingHorizontal: 8 },
+  glyph: { width: 21, height: 21 },
   badge: {
-    minWidth: 14,
-    height: 14,
-    paddingHorizontal: 3,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
     borderRadius: radius.full,
     alignItems: "center",
     justifyContent: "center",

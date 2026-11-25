@@ -454,11 +454,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: Some(url),
             connection_webhook_secret_encrypted: Some(encrypted_secret),
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: Some(owner.to_string()),
             created_at: now,
@@ -765,7 +767,10 @@ mod tests {
         )
         .await
         .expect("transient refresh failure should fall back to the existing access token");
-        assert_eq!(active.access_token.as_deref(), Some("existing-access"));
+        assert_eq!(
+            active.access_token.as_ref().map(|s| s.as_str()),
+            Some("existing-access")
+        );
 
         let stored_token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
@@ -814,7 +819,10 @@ mod tests {
         )
         .await
         .expect("terminal refresh failure should still return the existing access token once");
-        assert_eq!(active.access_token.as_deref(), Some("existing-access"));
+        assert_eq!(
+            active.access_token.as_ref().map(|s| s.as_str()),
+            Some("existing-access")
+        );
 
         let stored_token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
@@ -899,6 +907,8 @@ mod tests {
             .await
             .expect("bind blocking webhook receiver");
         let address = listener.local_addr().expect("webhook receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move {
             axum::serve(listener, receiver)
                 .await
@@ -925,10 +935,7 @@ mod tests {
         let mut notifier =
             ConnectionExpiryNotifier::with_test_delivery(Arc::new(test_app_config()), tx);
         notifier.developer_webhook_dispatcher = Some(Arc::new(
-            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
-                keys,
-            ),
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(keys),
         ));
 
         assert!(

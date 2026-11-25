@@ -13,6 +13,11 @@ const RESET_NOTICE =
   "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it.";
 const GREETING = /^Good (morning|afternoon|evening), Dannick$/;
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
+});
+
 function homeHeading(page: Page) {
   return page.getByRole("heading", { level: 1, name: GREETING });
 }
@@ -334,18 +339,17 @@ test("a destroyed member stays visible, cannot be mentioned, and leaves on the n
   ).toBeVisible();
 });
 
-test("a thread that came from a chat app sits in its bot's section and shows its platform", async ({
+test("a thread that came from a chat app shows its source, bot and platform", async ({
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  // Chat-app threads are grouped per bot, collapsed until opened.
-  const section = page
-    .getByRole("navigation", { name: "Agents and conversations" })
-    .getByRole("button", { name: "Telegram bot on Telegram, 1 chat" });
-  await expect(section).toHaveAttribute("aria-expanded", "false");
-  await expect(conversationRow(page, "Morning briefing")).toHaveCount(0);
-  await section.click();
+  const nyxbot = nav(page).getByRole("button", { name: /^NyxBot —/ });
+  await nyxbot.focus();
+  await nyxbot.press("Enter");
+  const threads = page.getByRole("complementary", { name: "Threads", exact: true });
+  const section = threads.getByRole("button", { name: "Private Telegram chat on Telegram, 1 thread", exact: true });
   await expect(section).toHaveAttribute("aria-expanded", "true");
+  await expect(threads.getByText("Telegram · Bot: Telegram bot", { exact: true })).toBeVisible();
   const row = conversationRow(page, "Morning briefing");
   await row.click();
   await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);

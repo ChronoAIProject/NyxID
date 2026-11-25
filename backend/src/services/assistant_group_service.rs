@@ -329,6 +329,79 @@ pub async fn get(db: &Database, owner: &str, id: &str) -> AppResult<AssistantGro
         .ok_or_else(not_found)
 }
 
+pub(crate) async fn get_for_automation_dispatch(
+    db: &Database,
+    owner: &str,
+    id: &str,
+) -> AppResult<AssistantGroup> {
+    use super::{assistant_notification_service as notifications, feature_flag_service as flags};
+    use crate::models::{feature_flag_override, org_membership};
+
+    if !super::security_readiness_service::turn_restart_enrollment_ready()
+        || notifications::has_admission_features(db, owner)
+    {
+        return get(db, owner, id).await;
+    }
+    #[derive(serde::Deserialize)]
+    struct MembershipRole {
+        org_user_id: String,
+        role: org_membership::OrgRole,
+    }
+    #[derive(serde::Deserialize)]
+    struct DispatchGroup {
+        group: AssistantGroup,
+        roles: Vec<MembershipRole>,
+        overrides: Vec<feature_flag_override::FeatureFlagOverride>,
+    }
+    let keys = [notifications::FLAG_KEY, flags::TURN_HANDOFF_FLAG_KEY];
+    let target_keys: Vec<_> = [bson::Bson::Null, owner.into()]
+        .into_iter()
+        .chain(org_membership::OrgRole::ALL.map(|role| role.as_str().into()))
+        .collect();
+    let found = db
+        .collection::<AssistantGroup>(GROUPS)
+        .aggregate([
+            doc! {"$match": owner_filter(owner, id)?},
+            doc! {"$replaceWith": {"group": "$$ROOT"}},
+            doc! {"$lookup": {"from": org_membership::COLLECTION_NAME, "pipeline": [
+                {"$match": {"member_user_id": owner, "revoked_at": null}},
+                {"$project": {"_id": 0, "org_user_id": 1, "role": 1}}
+            ], "as": "roles"}},
+            doc! {"$lookup": {"from": feature_flag_override::COLLECTION_NAME,
+            "let": {"scopes": {"$concatArrays": [[null], "$roles.org_user_id"]}},
+            "pipeline": [{"$match": {"flag_key": {"$in": keys.to_vec()}, "definition_id": null,
+                "target_key": {"$in": target_keys},
+                "$expr": {"$in": [{"$ifNull": ["$org_user_id", null]}, "$$scopes"]}
+            }}], "as": "overrides"}},
+        ])
+        .with_type::<DispatchGroup>()
+        .await?
+        .try_next()
+        .await?
+        .ok_or_else(not_found)?;
+    let roles: Vec<_> = found
+        .roles
+        .into_iter()
+        .map(|row| (row.org_user_id, row.role))
+        .collect();
+    let (org, platform): (Vec<_>, Vec<_>) = found
+        .overrides
+        .into_iter()
+        .partition(|row| row.org_user_id.is_some());
+    let features = flags::resolve_personal_definitions(
+        flags::FEATURE_FLAGS
+            .iter()
+            .filter(|flag| keys.contains(&flag.key))
+            .map(|flag| (flag.key, flag.default_enabled, None)),
+        &platform,
+        &org,
+        &roles,
+        owner,
+    );
+    notifications::cache_features(db, owner, &features);
+    Ok(found.group)
+}
+
 /// Find a group by ID or (case-insensitive) name, for agent tools.
 pub async fn find(db: &Database, owner: &str, reference: &str) -> AppResult<AssistantGroup> {
     let reference = reference.trim();
@@ -459,6 +532,7 @@ pub async fn members(db: &Database, owner: &str, group: &AssistantGroup) -> AppR
         .collect())
 }
 
+#[cfg(test)]
 pub async fn update(
     db: &Database,
     owner: &str,
@@ -472,6 +546,7 @@ pub async fn update(
 
 /// Incremental callers must pass the same snapshot they used to build the
 /// proposed member list, rather than silently rebasing it over a removal.
+#[cfg(test)]
 pub(crate) async fn update_from_snapshot(
     db: &Database,
     owner: &str,
@@ -479,22 +554,56 @@ pub(crate) async fn update_from_snapshot(
     name: Option<&str>,
     member_ids: Option<&[String]>,
 ) -> AppResult<AssistantGroup> {
+    let (name, members) = prepare_update(db, owner, name, member_ids).await?;
+    update_prepared(db, owner, group, name, members, |_| async {}).await
+}
+
+pub(crate) async fn prepare_update(
+    db: &Database,
+    owner: &str,
+    name: Option<&str>,
+    member_ids: Option<&[String]>,
+) -> AppResult<(Option<String>, Option<Vec<AssistantAgent>>)> {
     let name = name.map(valid_name).transpose()?;
     let members = match member_ids {
         Some(ids) => Some(resolve_members(db, owner, ids).await?),
         None => None,
     };
-    update_prepared(db, owner, group, name, members).await
+    Ok((name, members))
+}
+
+pub(crate) type RetirementWindows =
+    std::collections::HashMap<String, crate::models::assistant_conversation::StoppedWindow>;
+
+pub(crate) async fn stop_member_for_retirement<F: Future<Output = ()>>(
+    db: &Database,
+    row: &AssistantConversation,
+    cancel: impl FnOnce(AssistantConversation) -> F,
+    attempts: &mut RetirementWindows,
+) -> AppResult<()> {
+    let stopped = engine::request_stop_row_target(db, row).await?;
+    let target = stopped.as_ref().unwrap_or(row);
+    if let Some(window) = target
+        .active_turn
+        .as_ref()
+        .and_then(engine::unconfirmed_window)
+        .or_else(|| target.stopped_window.clone())
+    {
+        cancel(target.clone()).await;
+        attempts.insert(row.id.clone(), window);
+    }
+    Ok(())
 }
 
 /// Keep the observed roster fixed across transaction retries: a competing edit
 /// must conflict rather than replay an old member list over a newer removal.
-pub(crate) async fn update_prepared(
+pub(crate) async fn update_prepared<F: Future<Output = ()>>(
     db: &Database,
     owner: &str,
     before: &AssistantGroup,
     name: Option<String>,
     members: Option<Vec<AssistantAgent>>,
+    cancel: impl Fn(AssistantConversation) -> F,
 ) -> AppResult<AssistantGroup> {
     if super::org_group_service::is_org(before) || before.collaboration.is_some() {
         return Err(AppError::ValidationError(
@@ -518,11 +627,12 @@ pub(crate) async fn update_prepared(
     };
     // Settle through the normal Stop path before deleting any authority. The
     // transaction below rejects a replacement turn that raced this preparation.
+    let mut attempts = RetirementWindows::new();
     for row in threads
         .iter()
         .filter(|r| r.agent_id.as_ref().is_some_and(|id| removed.contains(id)))
     {
-        match engine::request_stop_row(db, row).await {
+        match stop_member_for_retirement(db, row, &cancel, &mut attempts).await {
             Ok(()) | Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
@@ -560,8 +670,8 @@ pub(crate) async fn update_prepared(
     let mut session = db.client().start_session().await?;
     let (group, _children, retired) = session.start_transaction()
         .read_concern(mongodb::options::ReadConcern::snapshot())
-        .and_run((db.clone(), owner.to_owned(), before.clone(), name, members, ids, removed), |session, context| {
-            let (db, owner, before, name, members, ids, removed) = &*context;
+        .and_run((db.clone(), owner.to_owned(), before.clone(), name, members, ids, removed, attempts), |session, context| {
+            let (db, owner, before, name, members, ids, removed, attempts) = &*context;
             Box::pin(async move {
                 let result: AppResult<_> = async {
                     let mut filter = owner_filter(owner, &before.id)?;
@@ -596,7 +706,7 @@ pub(crate) async fn update_prepared(
                         db.collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
                             .update_many(doc! {"requester_type":"api_key","requester_id":&row.credential_api_key_id,"org_scoped":{"$ne":true}},
                                 super::approval_service::revoke_grant_update(Utc::now())).session(&mut *session).await?;
-                        let (_, revoked) = engine::delete_in_session(db, owner, &row.id, session).await?;
+                        let (_, revoked) = engine::delete_with_retirement_in_session(db, owner, &row.id, Some(attempts), session).await?;
                         children.extend(revoked);
                         retired.push((row.id, row.agent_id));
                     }
@@ -641,6 +751,15 @@ pub(crate) async fn update_prepared(
 /// keys). Active member turns are stopped before their rows are removed; a
 /// worker that races deletion is fenced by the missing conversation row.
 pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
+    delete_prepared(db, owner, id, RetirementWindows::new()).await
+}
+
+pub(crate) async fn delete_prepared(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    attempts: RetirementWindows,
+) -> AppResult<()> {
     get(db, owner, id).await?;
     let threads = member_threads(db, owner, id).await?;
     for row in &threads {
@@ -649,7 +768,7 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
         }
     }
     for row in threads {
-        match engine::delete(db, owner, &row.id).await {
+        match engine::delete_with_retirement(db, owner, &row.id, Some(&attempts)).await {
             Ok(_) | Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
@@ -672,6 +791,16 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
         .session(&mut session)
         .await?
     {
+        if db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .find_one(doc! {"group_id":id,"user_id":owner})
+            .projection(doc! {"_id":1})
+            .session(&mut session)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::AssistantTurnActive);
+        }
         super::trigger_schedule::group::deleted_in_session(db, &group, &mut session).await?;
     }
     let mut attachment_cursor = db

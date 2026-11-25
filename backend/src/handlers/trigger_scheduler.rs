@@ -16,19 +16,21 @@ use crate::{
 use chrono::{Duration, Utc};
 use mongodb::bson::{Document, doc};
 
-pub fn spawn(state: AppState) {
+pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+            let job = &state.jobs.schedules;
+            let Some(_work) = job.tick(&state.shutdown, &mut interval).await else {
                 break;
             };
-            if let Err(error) = tick(&state).await {
+            let result = job.observe(tick(&state)).await;
+            if let Err(error) = result {
                 tracing::warn!(code = error.error_code(), "Trigger scheduler tick deferred");
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
@@ -37,6 +39,7 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
     };
     let due = schedules::due(&state.db, Utc::now()).await?;
     let count = due.len();
+    crate::services::job_health::checkpoint(true);
     // Bounded concurrency lets a slow recipient use its own lease without
     // delaying another owner's scheduled turn.
     use futures::{StreamExt, stream};
@@ -88,6 +91,7 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
                 Ok(())
             }
             .await;
+            crate::services::job_health::checkpoint(result.is_ok());
             if let Err(error) = result {
                 tracing::warn!(
                     code = error.error_code(),
@@ -316,7 +320,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             return schedules::reschedule(&state.db, job, expiry).await;
         }
         Some(format!(
-            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. Then tell the user in one or two plain sentences what you did and the result.\n{}",
+            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. {}\n{}",
+            crate::services::assistant_acknowledgement_service::decision_narration(
+                cards.iter().any(|card| card.status == "allowed")
+            ),
             crate::services::assistant_acknowledgement_service::decisions_note(&cards)
         ))
     } else {
@@ -429,23 +436,13 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         )
         .await;
     }
-    let running = state
-        .db
-        .collection::<TriggerRun>(RUNS)
-        .count_documents(doc! {
-            "trigger_id": &trigger.id,
-            "_id": { "$ne": &run.id },
-            "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
-        })
-        .await?;
-    if running > 0 {
+    if let Some(blocking_run_id) = schedules::find_running_blocker(&state.db, &run, None).await? {
         if trigger.overlap == OverlapPolicy::Skip {
-            return schedules::finish_claimed(
+            return schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await;
@@ -453,7 +450,11 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         let oldest = state
             .db
             .collection::<TriggerRun>(RUNS)
-            .find_one(doc! { "trigger_id": &trigger.id, "outcome": RunOutcome::Pending.as_str() })
+            .find_one(doc! {
+                "trigger_id": &trigger.id,
+                "user_id": &run.user_id,
+                "outcome": RunOutcome::Pending.as_str(),
+            })
             .sort(doc! { "scheduled_at": 1, "_id": 1 })
             .await?;
         if oldest.is_some_and(|other| other.id != run.id) {
@@ -597,13 +598,12 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         Ok(super::assistant_team::Started::Busy) => defer(state, job, &run, "target_busy").await,
         Ok(super::assistant_team::Started::PoolFull) => defer(state, job, &run, "pool_full").await,
         Err(AppError::TriggerRateLimited) => defer(state, job, &run, "budget_exhausted").await,
-        Err(AppError::Conflict(reason)) if reason == "trigger_overlap_skip" => {
-            schedules::finish_claimed(
+        Err(AppError::TriggerOverlapSkip { blocking_run_id }) => {
+            schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await
@@ -776,6 +776,16 @@ async fn deliver_existing(
     if let Err(error) = admitted {
         return match error {
             AppError::TriggerRateLimited => defer(state, job, run, "budget_exhausted").await,
+            AppError::TriggerOverlapSkip { blocking_run_id } => {
+                schedules::finish_overlap_skip(
+                    &state.db,
+                    job,
+                    &run.id,
+                    &blocking_run_id,
+                    &state.config.frontend_url,
+                )
+                .await
+            }
             AppError::Conflict(_) => defer(state, job, run, "overlap").await,
             other => Err(other),
         };
@@ -1061,7 +1071,7 @@ async fn settle_notification_result(
                         - Utc::now())
                     .num_seconds()
                     .max(0) as u64;
-                    let result = tokio::time::timeout(
+                    let result = crate::services::job_health::bounded_wait(
                         std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
                         push::send(
                             &state.db,
@@ -1138,7 +1148,7 @@ async fn settle_notification_result(
         } else {
             RunOutcome::Failed
         },
-        error.or(status.reason.as_deref()),
+        schedules::FinishReason::from_result(error, status.reason.as_deref()),
         &state.config.frontend_url,
     )
     .await
@@ -1175,7 +1185,7 @@ async fn settle_chat_result(
     });
     let text = failure.as_deref().unwrap_or(text);
     let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
-    let result = tokio::time::timeout(
+    let result = crate::services::job_health::bounded_wait(
         std::time::Duration::from_secs(delivery::ATTEMPT_SECONDS),
         crate::services::channel_text_preparation::with_parent(
             crate::services::channel_text_preparation::Parent::Scheduled {
@@ -1216,7 +1226,7 @@ async fn settle_chat_result(
                 } else {
                     RunOutcome::Completed
                 },
-                error,
+                schedules::FinishReason::from_result(error, None),
                 &state.config.frontend_url,
             )
             .await
@@ -1232,7 +1242,7 @@ async fn settle_chat_result(
                 &state.db,
                 &claim,
                 RunOutcome::Failed,
-                Some("result_delivery_failed"),
+                schedules::FinishReason::Scheduler(Some("result_delivery_failed")),
                 &state.config.frontend_url,
             )
             .await

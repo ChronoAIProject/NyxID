@@ -36,6 +36,7 @@ async fn model_then_reply(
         http::Request,
         response::IntoResponse,
     };
+    assert_eq!(headers["accept-encoding"], "identity");
     let raw = zeroize::Zeroizing::new(
         headers
             .get("authorization")
@@ -139,6 +140,7 @@ impl InspectOwnerEgress {
             user_id,
             turn,
             platform_origin,
+            ..
         } = context
         else {
             panic!("expected admitted personal owner turn");

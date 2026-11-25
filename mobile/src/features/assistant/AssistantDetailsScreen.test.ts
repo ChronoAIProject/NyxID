@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
+import { AssistantUploadSession } from "./AssistantUploadSession";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 
 type E = { type: any; props: Record<string, any> };
@@ -15,6 +16,28 @@ function setup(page: "details" | "context" | "title" = "details") {
     alerts: any[] = [],
     accessChanges: any[] = [],
     invalidations: any[] = [];
+  const modelUpdate = deferred<any>();
+  const queries: any[] = [];
+  const drafts = new Map<string, AssistantUploadSession>();
+  const modelSource = {
+    data: [
+      { id: "nyxagent/chat", label: "Fast", available: true },
+      { id: "nyxagent/research", label: "Deep", available: true },
+      {
+        id: "nyxagent/off",
+        label: "Offline model",
+        available: false,
+        description: "Provider maintenance",
+      },
+    ],
+    isError: false,
+    refetch: async () => {},
+  };
+  const platformSource = {
+    data: [{ id: "nyxid/qa", label: "QA model", available: true }],
+    isError: false,
+    refetch: async () => {},
+  };
   const agent = {
     id: "specialist",
     name: "Research",
@@ -27,13 +50,14 @@ function setup(page: "details" | "context" | "title" = "details") {
     conversation: {
       id: "nyxa-thread",
       title: "Saved title",
+      model: "nyxagent/chat",
       agent,
       active_turn: null,
     },
   };
   const rename = deferred<any>(),
     remove = deferred<void>();
-  let route = { params: { conversationId: "nyxa-thread", agentId: agent.id } };
+  let route: { params: import("../../app/navigationTypes").WorkspaceContentParamList["AssistantDetails"] } = { params: { conversationId: "nyxa-thread", agentId: agent.id } };
   const navigation = {
     goBack: () => actions.push(["back"]),
     push: (name: string, params: any) => actions.push(["push", name, params]),
@@ -53,15 +77,21 @@ function setup(page: "details" | "context" | "title" = "details") {
     },
     "react-native": { Alert: { alert: (...a: any[]) => alerts.push(a) } },
     "@tanstack/react-query": {
-      useQuery: (o: any) =>
-        o.queryKey[0] === "assistant"
-          ? {
-              data: history,
-              refetch: async () => {
-                throw new Error("offline after save");
-              },
-            }
-          : { data: { agents: [agent] }, refetch: async () => {} },
+      useQuery: (o: any) => {
+        queries.push(o);
+        return o.queryKey[1] === "models"
+          ? modelSource
+          : o.queryKey[1] === "platform-models"
+            ? platformSource
+            : o.queryKey[0] === "assistant"
+              ? {
+                  data: history,
+                  refetch: async () => {
+                    throw new Error("offline after save");
+                  },
+                }
+              : { data: { agents: [agent] }, refetch: async () => {} };
+      },
       useQueryClient: () => ({
         cancelQueries: async () => {},
         setQueryData: (_key: any, update: any) => {
@@ -97,6 +127,11 @@ function setup(page: "details" | "context" | "title" = "details") {
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/assistantApi": {
       assistantApi: {
+        platformModels: (scope: object) => scope,
+        changeModel: (id: string, model: string) => {
+          writes.push(["model", id, model]);
+          return modelUpdate.promise;
+        },
         rename: (id: string, title: string) => {
           writes.push(["rename", id, title]);
           return rename.promise;
@@ -108,6 +143,13 @@ function setup(page: "details" | "context" | "title" = "details") {
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "../../lib/auth/authAccount": { getAuthAccountId: () => "owner-a" },
+    "./assistantDraftStore": {
+      assistantDraftStore: { get: (key: string) => drafts.get(key) },
+      discardUploadDraft: async (owner: string, key: string) => {
+        writes.push(["clear", owner, key]);
+      },
+    },
     "../groups/useGroupRuntime": { useGroupAvailability: runtime },
     "./useComposerAccessChange": {
       COMPOSER_ACCESS_MODES: ["autopilot", "nyxmode", "ask_every_time"],
@@ -150,6 +192,9 @@ function setup(page: "details" | "context" | "title" = "details") {
     title,
     save,
     accessChanges,
+    modelUpdate,
+    modelSource,
+    platformSource,
     agent,
     rename,
     remove,
@@ -157,6 +202,14 @@ function setup(page: "details" | "context" | "title" = "details") {
     writes,
     alerts,
     invalidations,
+    discovery: () => queries.findLast((q) => q.queryKey[1] === "platform-models"),
+    draft: (key: string, session: AssistantUploadSession, isNyxBot = false) => {
+      drafts.set(`uploads:${key}`, session);
+      if (isNyxBot) agent.kind = "nyxbot";
+      history = undefined;
+      route = { params: { draftKey: key, agentId: isNyxBot ? undefined : agent.id, draftEpoch: epoch } };
+      h.render();
+    },
     guard: () => guard,
     changeTitle: (value: string) => {
       title().props.onChangeText(value);
@@ -252,7 +305,10 @@ test("Delete Chat is a solid destructive row behind confirmation, and returns to
   assert.equal(x.guard().disabled, true);
   x.remove.resolve();
   await x.h.settle();
-  assert.deepEqual(x.writes, [["delete", "nyxa-thread"]]);
+  assert.deepEqual(x.writes, [
+    ["delete", "nyxa-thread"],
+    ["clear", "owner-a", JSON.stringify(["private", "nyxa-thread"])],
+  ]);
   assert.equal(x.actions.length, 1);
   assert.equal(x.actions[0][1].target.kind, "agent");
   assert.equal(x.actions[0][1].target.agentId, "specialist");
@@ -285,15 +341,72 @@ test("permissions are one pop-up menu row, and agent overrides are read-only", (
         n.props.footer.includes("This agent’s override is read-only here."),
     );
   assert.ok(group);
-  assert.equal(
-    x
-      .all()
-      .some(
-        (n) =>
-          typeof n.props.label === "string" && /model/i.test(n.props.label),
-      ),
-    false,
+  assert.ok(
+    x.button("Current model"),
+    "agent permissions do not hide the thread’s model",
   );
+  x.h.unmount();
+});
+
+test("details changes the saved thread model once and preserves its transcript metadata", async () => {
+  const x = setup();
+  assert.equal(x.button("Current model").props.value, "Fast");
+  assert.equal(x.button("Offline model").props.disabled, true);
+  assert.match(x.button("Offline model").props.detail, /Provider maintenance/);
+  x.button("Offline model").props.onPress();
+  assert.deepEqual(x.writes, []);
+  const choose = x.button("QA model").props.onPress;
+  choose();
+  choose();
+  assert.deepEqual(x.writes, [["model", "nyxa-thread", "nyxid/qa"]]);
+  x.modelUpdate.resolve({
+    model: "nyxid/qa",
+    context_reset_reason: "model_changed",
+  });
+  await x.h.settle();
+  assert.equal(x.data().conversation.model, "nyxid/qa");
+  assert.equal(x.data().conversation.context_reset_reason, "model_changed");
+  assert.equal(x.data().conversation.agent.id, x.agent.id);
+  assert.equal(x.button("Current model").props.value, "QA model");
+  x.h.unmount();
+});
+
+test("a stale model choice cannot change a busy, offline, destroyed, or different thread", async () => {
+  for (const transition of [
+    "turn",
+    "offline",
+    "destroyed",
+    "account",
+    "scope",
+    "catalog",
+  ]) {
+    const x = setup();
+    const choose = x.button("Deep").props.onPress;
+    if (transition === "turn")
+      x.data().conversation.active_turn = { turn_id: "active" };
+    if (transition === "destroyed") x.agent.status = "destroyed";
+    if (transition === "offline") x.offline();
+    if (transition === "account") x.accountChange();
+    if (transition === "scope") x.scopeChange();
+    if (transition === "catalog") x.modelSource.isError = true;
+    x.h.render();
+    choose();
+    assert.deepEqual(x.writes, [], transition);
+    x.h.unmount();
+  }
+});
+
+test("a model failure keeps the saved model and platform discovery failure leaves the legacy options", async () => {
+  const x = setup();
+  x.button("Deep").props.onPress();
+  x.modelUpdate.reject(new Error("Model unavailable"));
+  await x.h.settle();
+  assert.equal(x.button("Current model").props.value, "Fast");
+  x.platformSource.isError = true;
+  x.h.render();
+  assert.ok(x.button("Retry loading models"));
+  assert.ok(x.button("Deep"));
+  assert.equal(x.button("QA model"), undefined);
   x.h.unmount();
 });
 
@@ -332,5 +445,59 @@ test("Working context owns a main-page Back guard while reset is pending", () =>
   assert.equal(x.guard().disabled, false);
   context.props.onManageMemory("specialist");
   assert.equal(x.actions[0][1], "AgentDetail");
+  x.h.unmount();
+});
+
+test("unsent NyxBot and specialist details discover models and retain selection per composer", async () => {
+  const x = setup();
+  function newDraft() {
+    return new AssistantUploadSession({
+      // Details can edit the selected draft while its composer is unfocused.
+      current: () => false,
+      available: () => false,
+      changed: () => {},
+      createDraft: async () => "nyxa-new",
+      fileSize: () => 3,
+      readBytes: async () => new Uint8Array(3),
+      upload: async () => { throw new Error("unexpected upload"); },
+      remove: async () => {},
+      disposeFile: () => {},
+    });
+  }
+  const first = newDraft();
+  x.draft("first", first);
+  assert.equal(x.discovery().enabled, true);
+  assert.equal(x.discovery().queryFn({}).agentId, "specialist");
+  assert.equal(x.discovery().queryFn({}).conversationId, undefined);
+  assert.equal(x.button("Offline model").props.disabled, true);
+  x.button("QA model").props.onPress();
+  await x.h.settle();
+  assert.equal(x.button("Current model").props.value, "QA model");
+  assert.equal(x.button("QA model").props.accessibilityState.checked, true);
+  assert.equal(first.model, "nyxid/qa");
+  assert.deepEqual(x.writes, []);
+
+  x.platformSource.data = [];
+  x.h.render();
+  assert.equal(x.button("Current model").props.detail, "The current model is unavailable.");
+  x.platformSource.isError = true;
+  x.h.render();
+  assert.ok(x.button("Retry loading models"));
+
+  const second = newDraft();
+  const oldChoice = x.button("Deep").props.onPress;
+  x.draft("second", second, true);
+  await oldChoice();
+  assert.equal(second.model, undefined);
+  assert.equal(x.discovery().queryFn({}).agentId, "specialist"); // effective NyxBot fixture
+  x.button("Deep").props.onPress();
+  await x.h.settle();
+  assert.equal(second.model, "nyxagent/research");
+  assert.equal(first.model, "nyxid/qa");
+  const switchedChoice = x.button("Fast").props.onPress;
+  x.accountChange();
+  await switchedChoice();
+  assert.equal(second.model, "nyxagent/research");
+  assert.equal(x.discovery().enabled, false);
   x.h.unmount();
 });

@@ -85,6 +85,27 @@ for HTTP response shapes.
   browser-poll login-code result is a separate explicit exchange, not a scoped
   browser session.
 
+## Mobile request review
+
+The mobile review groups the login code and expiry, reported device, client and
+platform, request time, requester address, location, network and reported timezone
+in one card above the actions. Staging environment labels and negative
+origin/timezone signals stay visible. Hardware, locale and raw user agent are
+available under More details within the same card. Code matching and the full
+account access explanation precede the explicit approval and rejection actions.
+Expanding details never approves a request; a new request starts with the details collapsed. A foreground
+refresh of the same request preserves the current disclosure state.
+
+## Production iOS approvals for staging
+
+The production iOS scanner accepts account sign-in QRs from `https://staging.nyxid.ai` and `https://staging-api.nyxid.ai` for users with the production feature flag `auth:staging-qr-login`. The user reviews the request and chooses Approve or Reject on the existing device-login screen. Staging requires an existing active personal account with the same verified email as the active production account. Both environments enforce MFA for accounts with MFA enabled. The resulting session belongs to the staging user. The flag covers camera scans of `/login/device` for account access. Restricted Agent Key issuance uses its existing environment-specific flow.
+
+1. Deploy the backend changes to staging with `BASE_URL=https://staging-api.nyxid.ai` and `STAGING_QR_PRODUCTION_PUBLIC_KEY_PATH` pointing to a mounted copy of the production JWT public PEM. Staging keeps its own JWT keypair. Refresh the mounted public key and restart staging when rotating the production signer.
+2. Deploy the backend to production and distribute the updated iOS app. The feature flag defaults off.
+3. In production Admin → Feature flags, enable `auth:staging-qr-login` for the intended users. To verify, initiate a staging web sign-in, scan its QR in the production app, and approve. The initiating staging browser receives the staging account. Disabling the flag blocks subsequent staging previews and decisions, including approval of an already previewed request.
+
+The phone sends a staging scan to the production API using its ordinary session. Production signs a 20-second assertion for a fixed staging endpoint. Each decision binds the reviewed staging request ID, the action and both account IDs. Staging validates the assertion with its pinned public key and uses its own device-login transaction and private poll for delivery. Production session credentials stay on the production side.
+
 ## Requester hints in `/login/device` and `/login/agent-key`
 
 | Parameter | Accepted values / limit | Meaning |

@@ -84,7 +84,7 @@ async fn maybe_rebuild_bot_token(
     {
         return Ok(None);
     }
-    let current = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, bot).await?);
+    let current = decrypt_bot_token(encryption_keys, bot).await?;
     let Some(token) = adapter.updated_token(&current, &fields)? else {
         return Ok(None);
     };
@@ -100,11 +100,21 @@ async fn maybe_rebuild_bot_token(
         )
         .await
         .map_err(|error| adapter.updated_token_error(error))?;
-    Ok(Some(encryption_keys.encrypt(token.as_bytes()).await?))
+    Ok(Some(
+        super::channel_bot_record::encrypt(
+            encryption_keys,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            &token,
+        )
+        .await?,
+    ))
 }
 
 async fn write_registration_fields(
     keys: &EncryptionKeys,
+    bot: &ChannelBot,
     descriptor: &RegistrationDescriptor,
     fields: &RegistrationValues<'_>,
     set: &mut bson::Document,
@@ -123,7 +133,14 @@ async fn write_registration_fields(
                     field.storage,
                     bson::Binary {
                         subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: keys.encrypt(value.as_bytes()).await?,
+                        bytes: super::channel_bot_record::encrypt(
+                            keys,
+                            &bot.id,
+                            &bot.user_id,
+                            field.storage,
+                            value,
+                        )
+                        .await?,
                     },
                 );
             } else {
@@ -319,10 +336,20 @@ async fn persist_verified_bot(
         String::new()
     };
 
+    let id = link_claim
+        .map(|claim| claim.link.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let bot_token_encrypted = if connection.is_some() {
         Vec::new()
     } else {
-        encryption_keys.encrypt(effective_token.as_bytes()).await?
+        super::channel_bot_record::encrypt(
+            encryption_keys,
+            &id,
+            user_id,
+            "bot_token_encrypted",
+            effective_token,
+        )
+        .await?
     };
 
     let now = Utc::now();
@@ -332,9 +359,7 @@ async fn persist_verified_bot(
         x_events: None,
         last_verification: None,
         ownership_version: 0,
-        id: link_claim
-            .map(|claim| claim.link.id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        id: id.clone(),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
         label: label.to_string(),
@@ -356,12 +381,32 @@ async fn persist_verified_bot(
         poll_error_count: 0,
         last_poll_notice: None,
         error: None,
+        credential_continuity: None,
+        secret_context_versions: Default::default(),
         registration_pin_encrypted: match managed {
-            Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
+            Some((pin, _)) => Some(
+                super::channel_bot_record::encrypt(
+                    encryption_keys,
+                    &id,
+                    user_id,
+                    "registration_pin_encrypted",
+                    pin,
+                )
+                .await?,
+            ),
             None => None,
         },
         webhook_secret_encrypted: if managed.is_some() {
-            Some(encryption_keys.encrypt(raw_secret.as_bytes()).await?)
+            Some(
+                super::channel_bot_record::encrypt(
+                    encryption_keys,
+                    &id,
+                    user_id,
+                    "webhook_secret_encrypted",
+                    &raw_secret,
+                )
+                .await?,
+            )
         } else {
             None
         },
@@ -393,14 +438,16 @@ async fn persist_verified_bot(
         .map_err(|_| AppError::Internal("Unable to serialize channel bot".to_string()))?;
     write_registration_fields(
         encryption_keys,
+        &bot,
         &descriptor,
         fields,
         &mut document,
         &mut doc! {},
     )
     .await?;
-    let bot: ChannelBot = bson::from_document(document)
+    let mut bot: ChannelBot = bson::from_document(document)
         .map_err(|_| AppError::Internal("Invalid channel bot storage fields".to_string()))?;
+    super::channel_bot_record::mark_new(&mut bot, encryption_keys)?;
     insert_registered_bot_linked(
         db,
         &bot,
@@ -765,6 +812,7 @@ async fn insert_registered_bot_inner(
                 bot.credential_source = "telegram_manager".into();
                 bot.manager_instance = (manager.provider != "telegram-new").then(|| bot.platform_bot_id.parse().ok()).flatten();
                 bot.bot_token_encrypted.clear();
+                bot.secret_context_versions.remove("bot_token_encrypted");
                 bot.webhook_secret_hash.clear();
             }
             if bots.count_documents(doc! {"user_id": &bot.user_id, "is_active": true}).session(&mut *session).await? >= u64::from(capacity) {
@@ -806,7 +854,14 @@ async fn insert_registered_bot_inner(
             } else if telegram_request_revision.is_some() {
                 super::channel_connect_link_service::associate_telegram(&db, &mut *session, &bot).await?;
             }
-            bots.insert_one(&bot).session(&mut *session).await?;
+            let mut inserted = bot.clone();
+            if !inserted.secret_context_versions.is_empty() && inserted.credential_continuity.is_none() {
+                super::channel_credential_continuity::initialize(&mut inserted)?;
+            }
+            if let Some(value) = super::channel_signing_migration::capture_attachment(&db,session,&inserted).await? {
+                inserted.credential_continuity = Some(value);
+            }
+            bots.insert_one(&inserted).session(&mut *session).await?;
             if let Some(setup) = approved_setup {
                 let installation = db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
                     .find_one(doc! {"setup_id": &setup.id, "channel_bot_id": &bot.id}).session(&mut *session).await?
@@ -962,12 +1017,13 @@ async fn reconnect_bot_inner(
                     "poll_backoff_until": backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
                     "last_polled_at": last_polled_at, "status": "active", "error": null, "updated_at": bson::DateTime::now(),
                 } },
-            ).session(session).await?;
+            ).session(&mut *session).await?;
             if result.matched_count == 0 {
                 return Err(AppError::Conflict(
                     "Channel bot changed during reconnect; retry".to_string(),
                 ));
             }
+            super::channel_signing_migration::prepare_observed(&db,session,&bot.id).await?;
             Ok(())
         }.await;
         super::api_key_mutation_service::transaction_result(operation)
@@ -994,15 +1050,11 @@ pub async fn reregister_managed_bot(
         .ok_or_else(super::channel_managed::unavailable)?;
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
-    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
-    let pin_bytes = zeroize::Zeroizing::new(
-        keys.decrypt(
-            bot.registration_pin_encrypted
-                .as_deref()
-                .ok_or_else(super::channel_managed::unavailable)?,
-        )
-        .await?,
-    );
+    let token = decrypt_bot_token(keys, bot).await?;
+    let pin_bytes =
+        super::channel_registration::open_secret(keys, bot, "registration_pin_encrypted")
+            .await?
+            .ok_or_else(super::channel_managed::unavailable)?;
     let pin = std::str::from_utf8(&pin_bytes)
         .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
     let credentials = BotCredentials {
@@ -1046,15 +1098,10 @@ pub async fn repair_managed_bot(
         .ok_or_else(super::channel_managed::unavailable)?;
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
-    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
-    let pin = zeroize::Zeroizing::new(
-        keys.decrypt(
-            bot.registration_pin_encrypted
-                .as_deref()
-                .ok_or_else(super::channel_managed::unavailable)?,
-        )
-        .await?,
-    );
+    let token = decrypt_bot_token(keys, bot).await?;
+    let pin = super::channel_registration::open_secret(keys, bot, "registration_pin_encrypted")
+        .await?
+        .ok_or_else(super::channel_managed::unavailable)?;
     let pin = std::str::from_utf8(&pin)
         .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
     let credentials = BotCredentials {
@@ -1068,28 +1115,43 @@ pub async fn repair_managed_bot(
     // encrypted token before Meta can perform the callback handshake.
     if bot.webhook_secret_encrypted.is_none() {
         let secret = zeroize::Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
-        let encrypted = keys.encrypt(secret.as_bytes()).await?;
-        db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-            doc! { "_id": &bot.id, "is_active": true, "webhook_secret_encrypted": bson::Bson::Null },
-            doc! { "$set": {
-                "webhook_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
-                "webhook_secret_hash": hex::encode(Sha256::digest(secret.as_bytes())),
-                "updated_at": bson::DateTime::now(),
-            } },
-        ).await?;
+        let encrypted = super::channel_bot_record::encrypt(
+            keys,
+            &bot.id,
+            &bot.user_id,
+            "webhook_secret_encrypted",
+            &secret,
+        )
+        .await?;
+        let filter = doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true };
+        let set = doc! {
+            "webhook_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
+            "webhook_secret_hash": hex::encode(Sha256::digest(secret.as_bytes())),
+            "updated_at": bson::DateTime::now(),
+        };
+        Box::pin(super::channel_credential_continuity::update_credentials(
+            db,
+            keys,
+            adapter,
+            bot,
+            filter,
+            set,
+            doc! {},
+        ))
+        .await?;
     }
-    let bot = get_bot(db, &bot.id).await?;
+    let current = get_bot(db, &bot.id).await?;
+    if current.user_id != bot.user_id || current.ownership_version != bot.ownership_version {
+        return Err(super::channel_managed::unavailable());
+    }
+    let bot = current;
     if !bot.is_active {
         return Err(super::channel_managed::unavailable());
     }
-    let verify_token = zeroize::Zeroizing::new(
-        keys.decrypt(
-            bot.webhook_secret_encrypted
-                .as_deref()
-                .ok_or_else(super::channel_managed::unavailable)?,
-        )
-        .await?,
-    );
+    let verify_token =
+        super::channel_registration::open_secret(keys, &bot, "webhook_secret_encrypted")
+            .await?
+            .ok_or_else(super::channel_managed::unavailable)?;
     let verify_token = std::str::from_utf8(&verify_token)
         .map_err(|_| AppError::Internal("Invalid webhook token encoding".to_string()))?;
     let webhook_url = format!(
@@ -1287,6 +1349,7 @@ async fn update_bot_inner(
 
     write_registration_fields(
         encryption_keys,
+        &bot,
         &descriptor,
         &fields,
         &mut set_doc,
@@ -1306,14 +1369,25 @@ async fn update_bot_inner(
         );
     }
 
-    let mut update_doc = doc! { "$set": set_doc };
-    if !unset_doc.is_empty() {
-        update_doc.insert("$unset", unset_doc);
+    let mut filter = doc! {"_id":bot_id,"user_id":user_id};
+    if !fields.0.is_empty() {
+        filter.extend(super::channel_credential_continuity::physical_filter(&bot)?);
     }
-
-    db.collection::<ChannelBot>(COLLECTION_NAME)
-        .update_one(doc! { "_id": bot_id, "user_id": user_id }, update_doc)
-        .await?;
+    if !Box::pin(super::channel_credential_continuity::update_credentials(
+        db,
+        encryption_keys,
+        adapter,
+        &bot,
+        filter,
+        set_doc,
+        unset_doc,
+    ))
+    .await?
+    {
+        return Err(AppError::Conflict(
+            "Bot credentials or verification changed. Run verification again.".into(),
+        ));
+    }
 
     get_bot_for_user(db, bot_id, user_id).await
 }
@@ -1670,6 +1744,24 @@ async fn register_webhook_inner(
         adapter,
         doc! { "_id": bot_id, "is_active": true, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
     ).await
+}
+
+/// Finish a previously interrupted manual setup without overwriting an inbound activation.
+pub(crate) async fn resume_manual_registration(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    if bot.is_active && matches!(bot.status.as_str(), "pending" | "failed") {
+        store_webhook_registration(
+            db,
+            adapter,
+            doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true,
+            "status": &bot.status, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn store_webhook_registration(
@@ -2085,9 +2177,12 @@ pub async fn get_bot_for_user(
 pub async fn decrypt_bot_token(
     encryption_keys: &EncryptionKeys,
     bot: &ChannelBot,
-) -> AppResult<String> {
-    let bytes = encryption_keys.decrypt(&bot.bot_token_encrypted).await?;
-    String::from_utf8(bytes).map_err(|e| {
+) -> AppResult<zeroize::Zeroizing<String>> {
+    let bytes =
+        super::channel_registration::open_secret(encryption_keys, bot, "bot_token_encrypted")
+            .await?
+            .ok_or_else(|| AppError::Internal("Missing channel bot token".into()))?;
+    crate::crypto::guarded_utf8(bytes).map_err(|e| {
         AppError::Internal(format!("bot token decryption produced invalid UTF-8: {e}"))
     })
 }
@@ -2281,7 +2376,7 @@ async fn delete_bot_inner(
         Some(if result.is_ok() { "removed" } else { "failed" })
     } else if adapter.serializes_lifecycle() {
         let result = async {
-            let token = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, &bot).await?);
+            let token = decrypt_bot_token(encryption_keys, &bot).await?;
             adapter
                 .remove_bot_webhook(db, http_client, &bot, &token)
                 .await
@@ -2325,7 +2420,7 @@ async fn cleanup_managed_webhook(
         .ok_or_else(super::channel_managed::unavailable)?;
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
-    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
+    let token = decrypt_bot_token(keys, bot).await?;
     let credentials = BotCredentials {
         billing: None,
         token: &token,
@@ -2369,7 +2464,7 @@ async fn verify_under_lifecycle(
         if !bot.is_active {
             return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
         }
-        let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, &bot).await?);
+        let token = decrypt_bot_token(keys, &bot).await?;
         adapter
             .verify_bot_token(
                 http,
@@ -2526,7 +2621,7 @@ pub(crate) async fn erase_personal_bot(
                 if bot.credential_source=="platform" {
                     return cleanup_managed_webhook(db,http,keys,adapter,&bot).await;
                 }
-                let token=zeroize::Zeroizing::new(decrypt_bot_token(keys,&bot).await?);
+                let token=decrypt_bot_token(keys,&bot).await?;
                 if bot.platform=="telegram" {verify_telegram_token_identity(http,adapter,&bot,&token).await?;}
                 adapter.remove_bot_webhook(db,http,&bot,&token).await?;
                 Ok("personal_webhook_removed")
@@ -2545,6 +2640,7 @@ pub(crate) async fn erase_personal_bot(
 
 #[cfg(test)]
 mod tests {
+    mod mixed_records;
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -2671,6 +2767,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -2783,8 +2881,21 @@ mod tests {
             seen_tokens.lock().unwrap().as_slice(),
             &["new_app:old_secret".to_string()]
         );
-        let decrypted = encryption_keys.decrypt(&rebuilt).await.unwrap();
-        assert_eq!(String::from_utf8(decrypted).unwrap(), "new_app:old_secret");
+        let decrypted = crate::crypto::record_field::decrypt(
+            &encryption_keys,
+            COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            Some(3),
+            &rebuilt,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&decrypted).unwrap(),
+            "new_app:old_secret"
+        );
     }
 
     #[tokio::test]
@@ -2816,8 +2927,21 @@ mod tests {
             seen_tokens.lock().unwrap().as_slice(),
             &["old_app:new_secret".to_string()]
         );
-        let decrypted = encryption_keys.decrypt(&rebuilt).await.unwrap();
-        assert_eq!(String::from_utf8(decrypted).unwrap(), "old_app:new_secret");
+        let decrypted = crate::crypto::record_field::decrypt(
+            &encryption_keys,
+            COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            Some(3),
+            &rebuilt,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&decrypted).unwrap(),
+            "old_app:new_secret"
+        );
     }
 
     #[tokio::test]
@@ -2849,8 +2973,21 @@ mod tests {
             seen_tokens.lock().unwrap().as_slice(),
             &["new_app:new_secret".to_string()]
         );
-        let decrypted = encryption_keys.decrypt(&rebuilt).await.unwrap();
-        assert_eq!(String::from_utf8(decrypted).unwrap(), "new_app:new_secret");
+        let decrypted = crate::crypto::record_field::decrypt(
+            &encryption_keys,
+            COLLECTION_NAME,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            Some(3),
+            &rebuilt,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&decrypted).unwrap(),
+            "new_app:new_secret"
+        );
     }
 
     #[tokio::test]
@@ -3038,11 +3175,30 @@ mod tests {
     // ---- decrypt_bot_token ----
 
     #[tokio::test]
+    async fn bot_token_decode_error_omits_plaintext() {
+        let keys = test_encryption_keys();
+        let mut bot = make_lark_bot(&keys, "fixture").await;
+        bot.bot_token_encrypted = keys
+            .encrypt(b"fixture-private-bot-token\xff")
+            .await
+            .unwrap();
+        let error = decrypt_bot_token(&keys, &bot).await.unwrap_err();
+        for output in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!output.contains("fixture-private-bot-token"));
+        }
+    }
+
+    #[tokio::test]
     async fn decrypt_bot_token_roundtrips() {
         let encryption_keys = test_encryption_keys();
         let bot = make_lark_bot(&encryption_keys, "test_app:test_secret").await;
-        let decrypted = decrypt_bot_token(&encryption_keys, &bot).await.unwrap();
-        assert_eq!(decrypted, "test_app:test_secret");
+        let decrypted: zeroize::Zeroizing<String> =
+            decrypt_bot_token(&encryption_keys, &bot).await.unwrap();
+        assert_eq!(decrypted.as_str(), "test_app:test_secret");
     }
 
     // ---- webhook_secret_hash properties ----

@@ -1,20 +1,14 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useEffect } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowRight } from "lucide-react";
 import { DocsLayout, SURFACE_ICONS } from "./docs-layout";
 import { DOCS_TABS, DOCS_SHARED } from "./manifest";
+import { useDocumentTitle } from "@/hooks/use-document-title";
 
 export function DocsIndexPage() {
   useUiTranslation();
-  useEffect(() => {
-    const prev = document.title;
-    document.title = "nyxid - docs";
-    return () => {
-      document.title = prev;
-    };
-  }, []);
+  useDocumentTitle("nyxid - docs");
 
   return (
     <DocsLayout activeTab="ai" hideNav>

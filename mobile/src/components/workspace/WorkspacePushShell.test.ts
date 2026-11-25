@@ -23,7 +23,7 @@ function elements(root: Element): Element[] {
       ),
   ];
 }
-function setup(reduced = false, width = 402, height = 874) {
+function setup(reduced = false, width = 402, height = 874, platform = "ios") {
   let dimensions = { width, height };
   let insets = { top: 0, right: 0, bottom: 0, left: 0 };
   let railHidden = false;
@@ -73,7 +73,7 @@ function setup(reduced = false, width = 402, height = 874) {
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
-      Platform: {OS: "ios"},
+      Platform: { OS: platform },
       View: "View",
       Pressable: "Pressable",
       useWindowDimensions: () => dimensions,
@@ -107,6 +107,9 @@ function setup(reduced = false, width = 402, height = 874) {
     },
     "./useWorkspaceStatusOffset": {
       useWorkspaceStatusOffset: () => statusOffset,
+    },
+    "./WorkspaceKeyboardFocusBoundary": {
+      WorkspaceKeyboardFocusBoundary: "WorkspaceKeyboardFocusBoundary",
     },
     "./workspaceQuickRailPreference": {
       useQuickRailHidden: () => [
@@ -306,7 +309,53 @@ test("the stationary base and full-width translated slab retain the actual navig
     x.find("workspace-sidebar-close-sliver").props.accessibilityLabel,
     "Close navigation",
   );
+  assert.equal(x.find("workspace-sidebar-close-sliver").props.focusable, true);
+  assert.equal(
+    x.find("workspace-sidebar-close-sliver").props.importantForAccessibility,
+    "yes",
+  );
   assert.ok(x.all().includes(x.child));
+  x.harness.unmount();
+});
+
+test("Android excludes the closed compact drawer from native focus search and shows it throughout the reveal and dismissal", () => {
+  const x = setup(false, 402, 874, "android");
+  const sidebarStyle = () =>
+    Object.assign({}, ...x.find("workspace-sidebar-base").props.style);
+  const boundary = () =>
+    x.all().find((node) => node.type === "WorkspaceKeyboardFocusBoundary")!;
+
+  assert.equal(sidebarStyle().display, "none");
+  assert.equal(boundary().props.blocked, false);
+  assert.ok(elements(boundary()).includes(x.child));
+  assert.ok(!elements(boundary()).includes(x.sidebar));
+  assert.ok(x.all().includes(x.sidebar));
+  assert.ok(x.all().includes(x.child));
+
+  x.handlers().onStart();
+  x.render();
+  assert.equal(sidebarStyle().display, undefined);
+  assert.equal(boundary().props.blocked, true);
+  x.handlers().onUpdate({ translationX: 240 });
+  x.handlers().onEnd({ velocityX: 0 });
+  x.render();
+  x.springComplete();
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  assert.equal(boundary().props.blocked, true);
+  assert.ok(!elements(boundary()).includes(x.find("workspace-sidebar-close-sliver")));
+
+  x.find("workspace-sidebar-close-sliver").props.onPress();
+  x.render();
+  assert.equal(sidebarStyle().display, undefined);
+  assert.equal(boundary().props.blocked, true);
+  x.lastComplete();
+  assert.equal(sidebarStyle().display, "none");
+  assert.equal(boundary().props.blocked, false);
+
+  x.rotate(1194, 834);
+  assert.equal(sidebarStyle().display, undefined);
+  assert.equal(boundary().props.blocked, false);
+  assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
   x.harness.unmount();
 });
 
@@ -315,6 +364,11 @@ test("edge pan follows the finger, clamps travel and settles at the projected th
   assert.equal(x.settings.activeOffsetX, 18);
   assert.deepEqual([...x.settings.failOffsetY], [-10, 10]);
   assert.equal(x.find("workspace-sidebar-reveal-edge").props.style.width, 24);
+  const edge = x.find("workspace-sidebar-reveal-edge");
+  assert.equal(edge.props.accessible, false);
+  assert.equal(edge.props.focusable, false);
+  assert.equal(edge.props.accessibilityElementsHidden, true);
+  assert.equal(edge.props.importantForAccessibility, "no-hide-descendants");
   const detector = x.all().find((node) => node.type === "GestureDetector")!;
   assert.equal(
     detector.props.children.props.testID,
@@ -815,6 +869,8 @@ test("wide nested guarded Back uses only the content edge and never closes the s
   x.set({ onEdgeBack: () => backs++ });
   const edge = x.find("workspace-sidebar-reveal-edge");
   assert.equal(edge.props.accessible, false);
+  assert.equal(edge.props.focusable, false);
+  assert.equal(edge.props.importantForAccessibility, "no-hide-descendants");
   assert.equal(edge.props.style.width, 24);
   x.handlers().onStart();
   x.handlers().onUpdate({ translationX: 160 });

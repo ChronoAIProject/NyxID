@@ -19,14 +19,13 @@ use crate::models::node_pending_credential::NodePendingCredential;
 use crate::services::{
     audit_service, node_pending_credential_service, node_service,
     node_ws_manager::{
-        NodeCapabilitiesMsg, NodeConnectionReservation, NodeOutboundMessage, NodeProxyResponse,
-        NodeSshExecResult, NodeWsManager, PendingCredentialCiphertextParams,
-        WsFrameInjectedInbound, WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound,
-        WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
-        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg,
-        WsSshNodeExecDataMsg, WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
-        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
-        WsWebTerminalStartedMsg,
+        NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
+        NodeWsManager, PendingCredentialCiphertextParams, WsFrameInjectedInbound,
+        WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound, WsProxyOpenedInbound,
+        WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
+        WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg, WsSshNodeExecDataMsg,
+        WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
+        WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
     },
     rci_audit_service::{
         self, RciAuditDelivery, RciAuditErrorKind, RciAuditEventKind, RciAuditSubject,
@@ -893,11 +892,10 @@ pub async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Reserve before upgrade and retain the slot until the socket task exits.
-    let Some(reservation) = state.node_ws_manager.try_reserve_connection() else {
+    let Some(handshake) = state.node_ws_manager.try_reserve_handshake() else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Maximum node connections reached",
+            "Maximum pending node handshakes reached",
         )
             .into_response();
     };
@@ -915,7 +913,7 @@ pub async fn ws_handler(
     ws.max_message_size(control_message_limit)
         .max_frame_size(control_message_limit)
         .on_upgrade(move |socket| {
-            handle_node_connection(state, socket, reservation, ip, ua, admission)
+            handle_node_connection(state, socket, handshake, ip, ua, admission)
         })
         .into_response()
 }
@@ -984,7 +982,7 @@ fn normalize_legacy_ip_text(value: &str) -> String {
 async fn handle_node_connection(
     state: AppState,
     socket: WebSocket,
-    _reservation: NodeConnectionReservation,
+    handshake: tokio::sync::OwnedSemaphorePermit,
     ip_address: Option<String>,
     user_agent: Option<String>,
     admission: crate::services::shutdown::Work,
@@ -1253,12 +1251,14 @@ async fn handle_node_connection(
         .run_until_cancelled(authentication)
         .await;
     let Some(auth_result) = auth_result else {
-        let _ = ws_sink
-            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            ws_sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                 code: 1001,
                 reason: "server shutdown".into(),
-            })))
-            .await;
+            }))),
+        )
+        .await;
         return;
     };
 
@@ -1266,15 +1266,30 @@ async fn handle_node_connection(
         Ok(Some(pair)) => pair,
         _ => {
             // Timeout or auth failure -- close connection
-            let _ = ws_sink
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                ws_sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 4001,
                     reason: "Authentication timeout or failure".into(),
-                })))
-                .await;
+                }))),
+            )
+            .await;
             return;
         }
     };
+
+    let Some(_connection) = state.node_ws_manager.try_reserve_connection() else {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            ws_sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1013,
+                reason: "Maximum node connections reached".into(),
+            }))),
+        )
+        .await;
+        return;
+    };
+    drop(handshake);
 
     // Keep claim and publication in the same order for concurrent reconnects
     // on this replica. MongoDB still fences ownership across replicas/generations.
@@ -2497,6 +2512,35 @@ mod tests {
         })
         .await
         .expect("socket reservations must be released even when the client is idle");
+    }
+
+    #[tokio::test]
+    async fn pending_handshake_preserves_authenticated_capacity() {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let db = test_db("ws_pending_capacity").await;
+        let node = test_node(&uuid::Uuid::new_v4().to_string(), "capacity", "fixture");
+        insert_user_and_node(&db, &node.user_id, &node).await;
+        let mut state = test_app_state(db);
+        state.node_ws_manager = std::sync::Arc::new(NodeWsManager::new(30, 1));
+        let (url, server) = start_node_ws_test_server(state.clone()).await;
+        let (mut pending, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert_eq!(state.node_ws_manager.total_connection_count(), 0);
+        let mut connected = auth_test_socket(&url, &node.id, "fixture").await;
+        let ack = connected.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(ack.to_text().unwrap()).unwrap()["type"],
+            "auth_ok"
+        );
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(15), pending.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(closed, Message::Close(Some(frame)) if u16::from(frame.code) == 4001));
+        assert_eq!(state.node_ws_manager.total_connection_count(), 1);
+        connected.close(None).await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -3921,7 +3965,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "GET".to_string(),
-                    path: "/stream".to_string(),
+                    path: "/stream".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,

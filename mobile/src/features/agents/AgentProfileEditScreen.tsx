@@ -4,6 +4,7 @@ import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsFocused } from "@react-navigation/native";
+import { isAgentAccessRefusal } from "./agentAccess";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ZodError } from "zod";
 import type { ContentScreenProps } from "../../app/navigationTypes";
@@ -162,8 +163,9 @@ export function AgentProfileEditScreen({
   const draft = value ?? saved;
   const editable =
     !!baseline &&
-    baseline.can_maintain === true &&
-    baseline.status !== "destroyed" &&
+    !isAgentAccessRefusal(detail.error) &&
+    detail.data?.agent.can_maintain === true &&
+    detail.data.agent.status !== "destroyed" &&
     !(field === "name" && nyxbot);
   const dirty = !done && value !== undefined && value !== saved;
   const canSave = editable && dirty && isConnected && !busy;
@@ -179,8 +181,11 @@ export function AgentProfileEditScreen({
       });
       if (Object.keys(patch).length) {
         const latest = (await agentsApi.detail(agentId)).agent;
-        if (latest.can_maintain !== true || latest.status === "destroyed")
+        if (latest.can_maintain !== true || latest.status === "destroyed") {
+          await queryClient.invalidateQueries({ queryKey: ROOT });
+          if (mounted.current) setDone(true);
           throw localizedError("This agent can no longer be changed. Reload to review its current state.");
+        }
         if (profileHasConflict(baseline, latest, patch))
           throw localizedError("This profile changed elsewhere. Go back and review those changes before saving.");
         await agentsApi.update(agentId, patch);
@@ -188,6 +193,7 @@ export function AgentProfileEditScreen({
       await queryClient.invalidateQueries({ queryKey: ROOT });
       if (mounted.current) setDone(true);
     } catch (cause) {
+      if (isAgentAccessRefusal(cause)) await queryClient.invalidateQueries({ queryKey: ROOT });
       if (mounted.current) setError(() => (errorMessage(cause)));
     } finally {
       lock.current = false;
@@ -221,8 +227,9 @@ export function AgentProfileEditScreen({
       : undefined,
   });
   useEffect(() => {
-    if (done && !busy) navigation.goBack();
-  }, [done, busy, navigation]);
+    const lostAccess = baseline?.can_maintain === true && (detail.data?.agent.can_maintain === false || isAgentAccessRefusal(detail.error));
+    if ((done || lostAccess) && !busy) navigation.goBack();
+  }, [done, busy, baseline, detail.data, detail.error, navigation]);
   return (
     <SettingsPage>
       {!isConnected && (

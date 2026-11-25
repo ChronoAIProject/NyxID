@@ -1,3 +1,5 @@
+#[path = "assistant_handoff_command_tests.rs"]
+mod handoff_command_tests;
 #[path = "assistant_shutdown_tests.rs"]
 mod shutdown_tests;
 #[path = "assistant_nyxagent_survivor_tests.rs"]
@@ -156,12 +158,15 @@ fn preexisting_message_row_without_diagnostics_remains_readable() {
     let row = mongodb::bson::from_document::<AssistantMessage>(mongodb::bson::doc! {
         "_id": "old-message", "conversation_id": "conversation", "user_id": OWNER,
         "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "old",
-        "status": "completed", "error_code": mongodb::bson::Bson::Null,
+        "status": "failed",
         "created_at": mongodb::bson::DateTime::now(), "activities": [], "attachments": []
     })
     .unwrap();
     assert!(row.error_detail.is_none());
     assert!(row.upstream_error_code.is_none());
+    let json = serde_json::to_value(MessageResponse::from(row)).unwrap();
+    assert!(json["error_code"].is_null());
+    assert!(json["turn_metadata"]["failure_reason"].is_null());
 }
 const SESSION: &str = "conv_11111111111111111111111111111111";
 const RESPONSE: &str = "resp_11111111111111111111111111111111_22222222222222222222222222222222";
@@ -388,11 +393,11 @@ async fn setup_options_with_tool_gate(
                     if matches!(failure, Some("invalid_stream" | "invalid_stream_confirmed")) {
                         return (StatusCode::OK, "not an event stream").into_response();
                     }
-                    if matches!(failure, Some("held_success" | "held_budget")) {
+                    if matches!(failure, Some("held_success" | "held_budget" | "held_pdf_rejected")) {
                         let stream = futures::stream::pending::<Result<axum::body::Bytes, Infallible>>();
                         return ([("content-type", "text/event-stream")], Body::from_stream(stream)).into_response();
                     }
-                    if matches!(failure, Some("lookup_budget" | "lookup_success")) {
+                    if matches!(failure, Some("lookup_budget" | "lookup_success" | "lookup_pdf_rejected")) {
                         return ([("content-type","text/event-stream")], "data: {\"type\":\"error\",\"error\":{\"code\":\"subscriber_expired\"}}\n\n").into_response();
                     }
                     if matches!(failure, Some("http_credential" | "http_slow_credential" | "http_credential_confirmed_absent")) {
@@ -509,11 +514,13 @@ async fn setup_options_with_tool_gate(
             if script.get(index) == Some(&"http_budget_absent") {
                 return Json(json!({"status":"not_found","response_id":null,"conversation_id":null,"last_sequence_number":null,"response":null})).into_response();
             }
-            let Some(kind @ ("lookup_budget" | "lookup_success" | "held_success" | "held_budget")) = script.get(index).copied() else {return StatusCode::NOT_FOUND.into_response()};
+            let Some(kind @ ("lookup_budget" | "lookup_success" | "held_success" | "held_budget" | "lookup_pdf_rejected" | "held_pdf_rejected")) = script.get(index).copied() else {return StatusCode::NOT_FOUND.into_response()};
             let budget = matches!(kind, "lookup_budget" | "held_budget");
             let status = if budget {"failed"}else{"completed"};
+            let notices = matches!(kind, "lookup_pdf_rejected" | "held_pdf_rejected")
+                .then(|| json!([{"code":"image_input_unsupported"}]));
             let id = format!("resp_{}_{index:032x}",&SESSION[5..]);
-            Json(json!({"status":status,"response_id":id,"conversation_id":SESSION,"last_sequence_number":2,"response":{"id":id,"conversation":{"id":SESSION},"status":status,"error":budget.then(||json!({"code":"tool_budget_exhausted"})),"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("window {index}")}]}]}})).into_response()
+            Json(json!({"status":status,"response_id":id,"conversation_id":SESSION,"last_sequence_number":2,"response":{"id":id,"conversation":{"id":SESSION},"status":status,"nyxagent_notices":notices,"error":budget.then(||json!({"code":"tool_budget_exhausted"})),"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("window {index}")}]}]}})).into_response()
         }
     }));
     let upstream = upstream.route(
@@ -603,6 +610,7 @@ enum Frame {
     Keepalive,
     Created,
     Delta(&'static str),
+    Data(Value),
     /// A data event this decoder ignores, such as MCP tool progress.
     ToolProgress,
     Completed,
@@ -648,6 +656,7 @@ async fn setup_stream(
                                 "response": {"id": RESPONSE, "conversation": {"id": SESSION}}}),
                             Frame::Delta(text) => json!({"type": "response.output_text.delta",
                                 "sequence_number": sequence, "delta": text}),
+                            Frame::Data(data) => data,
                             Frame::ToolProgress => json!({"type": "response.mcp_call.in_progress",
                                 "sequence_number": sequence}),
                             Frame::Completed => json!({"type": "response.completed", "sequence_number": sequence,
@@ -670,6 +679,141 @@ async fn setup_stream(
     let state = test_app_state(db);
     let server = register_upstream(&state, upstream).await;
     (state, calls, server)
+}
+
+const BEFORE_DISCARD: usize = 5;
+const AFTER_DISCARD: usize = 6;
+const RETRY_DELTA: usize = 11;
+// End on a byte the credential and hex context-marker prefix guards always release.
+const RETRIED_ANSWER: &str = "hello world!";
+
+// NyxAgent .17 correction: the first done clears the abandoned message, then
+// the retry gets a new item. Sequence numbers double as exclusive replay cursors.
+fn discarded_attempt_frames() -> Vec<Value> {
+    let message = |id: &str, status: &str, text: &str| {
+        json!({
+            "type":"message","id":id,"role":"assistant","status":status,
+            "content":[{"type":"output_text","text":text,"annotations":[]}]
+        })
+    };
+    let discarded = message("msg_first", "incomplete", "");
+    let retry = message("msg_retry", "completed", RETRIED_ANSWER);
+    let mut frames = vec![
+        json!({"type":"response.created","response":{"id":RESPONSE,"conversation":{"id":SESSION}}}),
+        json!({"type":"response.in_progress","response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_first","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"msg_first","part":discarded["content"][0]}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_first","delta":"abandoned "}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_first","delta":"attempt."}),
+        json!({"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg_first","text":"","status":"incomplete","logprobs":[],"discarded_output_indices":[0]}),
+        json!({"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"msg_first","part":discarded["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":0,"item":discarded}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_retry","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.content_part.added","output_index":1,"content_index":0,"item_id":"msg_retry","part":discarded["content"][0]}),
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_retry","delta":RETRIED_ANSWER}),
+        json!({"type":"response.output_text.done","output_index":1,"content_index":0,"item_id":"msg_retry","text":RETRIED_ANSWER,"logprobs":[]}),
+        json!({"type":"response.content_part.done","output_index":1,"content_index":0,"item_id":"msg_retry","part":retry["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":1,"item":retry}),
+        json!({"type":"response.completed","response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":"completed","output":[discarded,retry]}}),
+    ];
+    for (seq, frame) in frames.iter_mut().enumerate() {
+        frame["sequence_number"] = json!(seq);
+    }
+    frames
+}
+
+#[tokio::test]
+async fn discarded_attempt_replaces_browser_block_before_retry_and_settlement() {
+    let frames = discarded_attempt_frames()
+        .into_iter()
+        .flat_map(|frame| [Frame::Data(frame), Frame::Sleep(Duration::from_millis(20))])
+        .collect();
+    let (state, _, server) = setup_stream("nyxa_discard", Duration::ZERO, frames).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let updates: Vec<_> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .filter_map(|event| match event["event"].as_str()? {
+            "block.delta" => Some(("delta", event["text"].as_str()?.to_owned())),
+            "block.completed" => Some(("snapshot", event["block"]["text"].as_str()?.to_owned())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        updates,
+        [
+            ("delta", "abandoned ".into()),
+            ("delta", "attempt.".into()),
+            ("snapshot", "".into()),
+            ("delta", RETRIED_ANSWER.into()),
+            ("snapshot", RETRIED_ANSWER.into())
+        ]
+    );
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.last().unwrap().text, RETRIED_ANSWER);
+    server.abort();
+    let _ = server.await;
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn citation_markers_are_removed_from_the_settled_reply_and_checkpoint() {
+    let text = "答案 \u{e200}cite\u{e202}turn652437view1\u{e202}turn652437view2\u{e201}。";
+    let terminal = json!({"type":"response.completed", "sequence_number":1, "response":{
+        "id":RESPONSE, "conversation":{"id":SESSION}, "status":"completed",
+        "output":[{"type":"message","role":"assistant","phase":"final_answer",
+            "content":[{"type":"output_text","text":text,"annotations":[]}]}]
+    }});
+    let (state, _, server) = setup_stream(
+        "nyxa_citations",
+        Duration::ZERO,
+        vec![Frame::Created, Frame::Data(terminal)],
+    )
+    .await;
+    let reply = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let events = drain(reply).await;
+    let block = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .find(|event| event["event"] == "block.completed")
+        .unwrap();
+    assert_eq!(block["block"]["text"], "答案。");
+
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let reply = messages.last().unwrap();
+    assert_eq!(reply.status, "completed");
+    assert_eq!(reply.text, "答案。");
+    let checkpoint = engine::checkpoint(&state.db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.output.as_deref(), Some("答案。"));
+    server.abort();
+    state.db.drop().await.unwrap();
 }
 
 /// Short execution bounds for this test's thread (current-thread runtime).
@@ -2816,7 +2960,7 @@ async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
 }
 
 #[tokio::test]
-async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
+async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
     use crate::models::{
         approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS},
         service_approval_config::ApprovalMode,
@@ -2882,15 +3026,44 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         created_at: Utc::now(),
     };
     let mine = request(&key.name, "pending", 5);
+    let elapsed = request(&key.name, "pending", -1);
     state
         .db
         .collection::<ApprovalRequest>(APPROVALS)
         .insert_many([
             mine.clone(),
             request(&key.name, "approved", 5),
-            request(&key.name, "pending", -1),
+            elapsed.clone(),
             request("Some other agent", "pending", 5),
         ])
+        .await
+        .unwrap();
+    let mut linked = Vec::new();
+    let mut activities = Vec::new();
+    for _ in 0..12 {
+        let mut card = request("", "pending", 5);
+        card.requester_type = "api_key".into();
+        card.requester_label = None;
+        activities.push(doc! {
+            "id": uuid::Uuid::new_v4().to_string(), "label":"service_request", "status":"running",
+            "started_at": bson::DateTime::now(),
+            "decision": {"kind":"approval","id":&card.id,"state":"waiting"},
+        });
+        linked.push(card);
+    }
+    state
+        .db
+        .collection::<ApprovalRequest>(APPROVALS)
+        .insert_many(&linked)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set":{"active_turn.activities":activities}},
+        )
         .await
         .unwrap();
     let Json(page) = history(
@@ -2901,9 +3074,20 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
     )
     .await
     .unwrap();
+    assert!(
+        page.approval_history
+            .iter()
+            .any(|row| row.id == elapsed.id && row.status == "pending")
+    );
     let approvals = serde_json::to_value(&page.approvals).unwrap();
-    assert_eq!(approvals.as_array().unwrap().len(), 1, "{approvals}");
-    assert_eq!(approvals[0]["id"], mine.id);
+    assert_eq!(approvals.as_array().unwrap().len(), 13, "{approvals}");
+    assert!(
+        approvals
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|card| card["id"] == mine.id)
+    );
     assert_eq!(approvals[0]["summary"], "GET /user");
     assert_eq!(approvals[0]["approval_mode"], "per_request");
     assert_eq!(approvals[0]["agent_key_prefix"], key.key_prefix);
@@ -4745,6 +4929,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             digest: None,
@@ -4892,7 +5077,16 @@ async fn denied_owner_action_queues_plain_narration_without_an_execution_continu
         .unwrap();
     assert!(event.text.contains("Delete node Workstation"));
     assert!(event.text.contains("Do not execute or retry"));
-    assert!(event.text.contains(acknowledgements::DECISION_NARRATION));
+    assert!(
+        event
+            .text
+            .contains("A denied card means that action was not sent")
+    );
+    assert!(
+        !event
+            .text
+            .contains(acknowledgements::allowed_card_continuation())
+    );
     f.state.db.drop().await.unwrap();
 }
 
@@ -5457,7 +5651,19 @@ async fn delayed_first_acceptance_emits_system_acknowledgement_without_model_or_
     .await
     .unwrap();
     let events = drain(response).await;
-    assert!(events.contains("\"engine_accepted\":true"));
+    if !events.contains("\"engine_accepted\":true") {
+        let terminal = state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id": OWNER, "role": "assistant"})
+            .projection(doc! {"_id": 0, "turn_id": 1, "status": 1, "error_code": 1,
+            "error_detail.stage": 1, "turn_metadata.timing": 1})
+            .await
+            .unwrap();
+        panic!("Missing engine acceptance. Saved turn metadata {terminal:?}");
+    }
     assert!(
         events.contains("\"capacity_wait_note_origin\":\"nyxid_system\""),
         "{events}"

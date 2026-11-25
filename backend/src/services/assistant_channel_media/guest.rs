@@ -199,6 +199,24 @@ pub async fn for_chat(
     for_turn(db, &row, id).await
 }
 
+/// Recheck the exact inputs disclosed in the refused request before resending it.
+pub(crate) async fn recheck_retry_inputs(
+    db: &Database,
+    row: &AssistantConversation,
+    ids: &[String],
+) -> AppResult<()> {
+    let live = engine::get(db, &row.user_id, &row.id).await?;
+    if live.active_turn.as_ref().map(|turn| &turn.turn_id)
+        != row.active_turn.as_ref().map(|turn| &turn.turn_id)
+    {
+        return Err(missing());
+    }
+    for id in ids {
+        for_turn(db, &live, id).await?;
+    }
+    Ok(())
+}
+
 /// Return only the current guest's allowed inputs. No generic text-read tool is
 /// granted: bounded extracted documents are supplied as quoted untrusted data.
 pub async fn input_for_turn(
@@ -240,7 +258,7 @@ pub async fn input_for_turn(
         };
         if !upload.content_type.starts_with("image/") {
             if upload.extracted_chars.unwrap_or_default() > 0 && remaining > 0 {
-                let clear = match super::super::record_field_service::decrypt(
+                let clear = match crate::crypto::record_field::decrypt(
                     &state.encryption_keys,
                     UPLOADS,
                     &upload.id,

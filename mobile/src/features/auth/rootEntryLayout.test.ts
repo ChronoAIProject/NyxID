@@ -60,6 +60,7 @@ function setup(
       useWorkspaceBack: () => {},
     },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
     "../../components/settings/SettingsList": {},
     "../../components/workspace/WorkspaceSelectionField": {},

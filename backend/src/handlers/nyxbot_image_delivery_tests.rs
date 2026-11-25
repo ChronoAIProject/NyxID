@@ -165,6 +165,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         });
     }
@@ -386,6 +387,7 @@ async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
             size: 100,
             pages: None,
             chat_delivery: delivery,
+            pdf: None,
             image_input: None,
             image_inspection: None,
         })
@@ -3906,6 +3908,7 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
         request_hash: "images".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: false,
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),

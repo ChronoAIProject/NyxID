@@ -584,7 +584,7 @@ async fn commit_once(
             if let Some((observed, authority)) = &mutation {
                 let (live, admin) = super::catalog_mutation_service::validate_parent(db, session, observed, Some(authority)).await?;
                 super::catalog_mutation_service::require_desired_kind(&live, &metadata, authority, admin)?;
-                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin).await?;
+                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin, audit.as_ref().map(|(_,key)|key.as_slice())).await?;
                 if metadata.get_str("offering_kind") == Ok("tool") {
                     super::catalog_mutation_service::require_providerless_tool(db, session, &live).await?;
                 }

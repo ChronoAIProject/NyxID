@@ -55,7 +55,7 @@ async fn fixture(
         &f.state.db,
         &f.member,
         &group.id,
-        "Read this image",
+        if guest { "" } else { "Read this image" },
         Some(std::slice::from_ref(&agent.id)),
         std::slice::from_ref(&image.id),
     )
@@ -443,6 +443,11 @@ async fn collaboration_guest_worker_obeys_image_modality_capability_and_expiry()
         let captured = captures.lock().await;
         assert_eq!(captured.len(), 1, "{mode}: worker must call NyxAgent once");
         let (body, statuses) = &captured[0];
+        let input = body["input"]
+            .as_str()
+            .unwrap_or_else(|| body["input"][0]["content"][0]["text"].as_str().unwrap());
+        let (_, request) = input.rsplit_once("Original request:\n").unwrap();
+        assert!(request.ends_with(": \"\""), "{mode}");
         if mode == "supported" {
             assert_eq!(statuses, &vec![200]);
             assert!(

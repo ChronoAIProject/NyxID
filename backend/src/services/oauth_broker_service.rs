@@ -1210,11 +1210,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: None,
             created_at: Utc::now(),
@@ -1502,11 +1504,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: Some(webhook_url.to_string()),
             revocation_webhook_secret_encrypted: Some(encrypted_secret),
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -2646,6 +2650,9 @@ mod tests {
             .await
             .unwrap();
         let target = url::Url::parse(&webhook_url).unwrap();
+        let _origin = crate::services::resource_adapter::register_test_origin(
+            &target.origin().ascii_serialization(),
+        );
         let address = format!("{}:{}", target.host_str().unwrap(), target.port().unwrap())
             .parse()
             .unwrap();

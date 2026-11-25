@@ -210,15 +210,30 @@ impl Fixture {
         }
     }
     async fn flag(&self, enabled: bool) {
-        flags::set_platform_override(
+        let result = flags::set_platform_override(
             &self.state.db,
             "assistant:org-agents",
             &flags::FlagTarget::Global,
             enabled,
             &self.admin,
         )
-        .await
-        .unwrap();
+        .await;
+        if matches!(
+            result,
+            Err(crate::errors::AppError::SecurityReadinessUnavailable)
+        ) {
+            let report = super::security_readiness_service::serving_report(
+                &self.state.db,
+                "assistant:org-agents",
+            )
+            .await
+            .expect("assess org-agent fixture readiness");
+            panic!(
+                "org-agent flag readiness: enabled={enabled}, activated={}, live_generations={}, blockers={:?}",
+                report.activated, report.live_generations, report.serving_blockers
+            );
+        }
+        result.expect("configure org-agent fixture flag");
     }
     pub(crate) fn request(&self, name: &str) -> team::CreateRequest {
         team::CreateRequest {

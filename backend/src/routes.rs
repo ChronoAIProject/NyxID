@@ -675,6 +675,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/social/mobile-code/redeem",
             post(handlers::social_auth::redeem_mobile_code),
         )
+        .route(
+            "/social/continue",
+            get(handlers::social_auth::continue_signup),
+        )
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
             "/social/apple/callback",
@@ -1026,7 +1030,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // dedicated, more restrictive per-user rate limiter for LLM routes (e.g., 5
     // req/s per user) to prevent API quota burn and separate LLM traffic from
     // lightweight auth requests.
-    let llm_routes = llm_billing_routes!(register_billing_routes, Router::new());
+    let llm_routes = llm_billing_routes!(register_billing_routes, Router::new()).layer(
+        middleware::from_fn(handlers::proxy::ingress::approval_wait_budget),
+    );
 
     let sa_admin_routes = Router::new()
         .route(
@@ -1734,6 +1740,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 handlers::oauth_consent_response::complete_form_post,
             )),
         )
+        .route_layer(axum::Extension(crate::mw::auth::OAuthConsentRoute))
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
         .route(
@@ -2019,6 +2026,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(axum::extract::DefaultBodyLimit::max(
             crate::services::service_preference_service::MAX_REQUEST_BYTES,
         ))
+        .route_layer(axum::Extension(crate::mw::auth::AccountManagementRoute))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens))
@@ -2026,6 +2034,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let key_update_routes = Router::new()
         .route("/keys/{key_id}", put(handlers::key_updates::update_key))
+        .route_layer(axum::Extension(crate::mw::auth::AccountManagementRoute))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
@@ -2389,20 +2398,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::channel_relay::resolve_sender),
         );
 
-    // HTTP Event Gateway — device event ingress (NyxID#221, ADR-013).
-    // Authenticated via API key; rate-limited per conversation.
-    //
-    // `DefaultBodyLimit::disable()` opts this router out of the app-wide
-    // 1 MiB body cap set in `main.rs`. Per the plan §8.1 and the gateway
-    // design doc §NOT in Scope, NyxID deliberately does not enforce an
-    // application-level payload size limit on device events — analyzers
-    // that ship larger JSON blobs or embedded metadata must be accepted.
     let channel_event_routes = Router::new()
         .route(
             "/{conversation_id}",
             post(handlers::channel_events::post_event),
         )
-        .layer(DefaultBodyLimit::disable());
+        .layer(DefaultBodyLimit::max(
+            router_state
+                .as_ref()
+                .map_or(100 * 1024 * 1024, |state| state.config.proxy_max_body_size),
+        ));
 
     let developer_routes = Router::new()
         .route(
@@ -2438,6 +2443,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // the app-wide extractor cap so it cannot preempt them with an opaque 413.
     let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
         .layer(axum::Extension(handlers::proxy::ingress::HttpIngress))
+        .layer(axum::middleware::from_fn(
+            handlers::proxy::ingress::callback,
+        ))
         .layer(DefaultBodyLimit::disable());
 
     let public_passthrough_routes =
@@ -2460,6 +2468,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/v2/poll-web",
             post(handlers::auth_device::poll_auth_device_web_v2),
+        )
+        .route(
+            "/staging/receive",
+            post(handlers::staging_qr::receive).layer(DefaultBodyLimit::max(12 * 1024)),
         )
         .route("/request", post(handlers::auth_device::request_auth_device))
         .route("/poll", post(handlers::auth_device::poll_auth_device))
@@ -3293,7 +3305,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             crate::mw::auth::reject_oauth_client_tokens,
         ));
 
-    let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
+    let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new()).layer(
+        middleware::from_fn(handlers::proxy::ingress::approval_wait_budget),
+    );
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
@@ -3720,6 +3734,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::login_code::revoke),
         )
         .route(
+            "/auth/device/staging",
+            post(handlers::staging_qr::forward).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
             "/auth/device/approve",
             post(handlers::auth_device::approve_auth_device),
         )
@@ -3815,6 +3833,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/integrations/openclaw/mappings",
             post(handlers::openclaw_channel::create_mapping),
         )
+        .route_layer(axum::Extension(crate::mw::auth::AccountManagementRoute))
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
@@ -4028,6 +4047,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // MCP payloads may contain proxied tool inputs. The handlers retain explicit
     // PROXY_MAX_BODY_SIZE / PUBLIC_PROXY_MAX_BODY_SIZE bounds.
     let mcp_transport_routes = mcp_billing_routes!(register_billing_routes, Router::new())
+        .layer(axum::middleware::from_fn(
+            handlers::proxy::ingress::callback,
+        ))
         .layer(DefaultBodyLimit::disable());
     let public_mcp_routes = public_mcp_billing_routes!(register_billing_routes, Router::new())
         .layer(DefaultBodyLimit::disable());
@@ -4061,6 +4083,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )),
     )
 }
+
+#[cfg(test)]
+mod app_management_tests;
 
 #[cfg(test)]
 mod org_membership_tests;

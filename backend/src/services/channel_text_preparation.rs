@@ -16,18 +16,23 @@ pub const MANAGER_LEASE_SECS: i64 = 120;
 
 #[derive(Clone)]
 pub enum Parent {
+    SavedReply { id: String, claim: String },
     Manager { id: String, claim: String },
     Scheduled { id: String, claim: String },
 }
 impl Parent {
     fn collection(&self) -> &'static str {
         match self {
+            Self::SavedReply { .. } => crate::models::assistant_message::COLLECTION_NAME,
             Self::Manager { .. } => crate::models::platform_manager_delivery::COLLECTION_NAME,
             Self::Scheduled { .. } => crate::models::trigger_run::COLLECTION_NAME,
         }
     }
     fn filter(&self) -> Document {
         match self {
+            Self::SavedReply { id, claim } => {
+                doc! {"_id":id,"role":"assistant","handoff_delivery_lease":claim,"$expr":{"$gt":["$handoff_delivery_due_at","$$NOW"]}}
+            }
             Self::Manager { id, claim } => doc! {"_id":id,"state":"dispatching","claim_id":claim,
             "$expr":{"$and":[{"$gt":["$expires_at","$$NOW"]},
                 {"$gt":["$updated_at",{"$subtract":["$$NOW",MANAGER_LEASE_SECS*1000]}]}]}},
@@ -41,6 +46,9 @@ impl Parent {
     }
     fn touch(&self) -> Vec<Document> {
         let field = match self {
+            Self::SavedReply { .. } => {
+                return vec![doc! {"$set":{"handoff_delivery_due_at":{"$add":["$$NOW",120_000]}}}];
+            }
             Self::Manager { .. } => "updated_at",
             Self::Scheduled { .. } => "result_delivery.effect_checked_at",
         };

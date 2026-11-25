@@ -105,18 +105,34 @@ pub(crate) fn parse_openapi_spec_for_url(
 /// For each path+operation, extracts the operationId (or generates one from
 /// method+path), summary/description, parameters, and requestBody schema.
 pub async fn parse_openapi_spec(
-    client: &reqwest::Client,
+    approved: Option<&str>,
+    base: &str,
     url: &str,
 ) -> AppResult<Vec<ParsedEndpoint>> {
     if let Some(spec) = super::api_docs_service::hosted_catalog_spec_for_url(url)? {
         return parse_hosted_openapi_spec_value(&spec);
     }
+    let target =
+        url::Url::parse(url).map_err(|_| AppError::BadRequest("Invalid spec URL".into()))?;
+    let client = if approved == Some(base)
+        && url::Url::parse(base).is_ok_and(|base| base.origin() == target.origin())
+    {
+        super::proxy_destination::http::for_url(approved, base, &target, false)?.ordinary()?
+    } else {
+        super::proxy_destination::http::public_delivery(url)?.1
+    };
     let resp = client
-        .get(url)
+        .get(target)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to fetch OpenAPI spec: {e}")))?;
+        .map_err(|error| {
+            AppError::BadRequest(if super::proxy_destination::http::denied_address(&error) {
+                "Spec destination is not permitted".into()
+            } else {
+                "Failed to fetch OpenAPI spec".into()
+            })
+        })?;
 
     if !resp.status().is_success() {
         return Err(AppError::BadRequest(format!(
@@ -128,7 +144,7 @@ pub async fn parse_openapi_spec(
     let body = resp
         .bytes()
         .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read OpenAPI spec body: {e}")))?;
+        .map_err(|_| AppError::BadRequest("Failed to read OpenAPI spec body".into()))?;
 
     let spec = crate::services::api_docs_service::parse_spec_body(body).await?;
 
@@ -3069,10 +3085,10 @@ mod spec_format_tests {
                 .mount(&server)
                 .await;
         }
-        let client = reqwest::Client::new();
+        let _origin = crate::services::resource_adapter::register_test_origin(&server.uri());
 
         for path in ["/api/v1/openapi.yml", "/api/v1/openapi.json"] {
-            let endpoints = parse_openapi_spec(&client, &format!("{}{path}", server.uri()))
+            let endpoints = parse_openapi_spec(None, "", &format!("{}{path}", server.uri()))
                 .await
                 .unwrap_or_else(|err| panic!("{path}: {err:?}"));
             assert_eq!(endpoints.len(), 1, "{path}");
@@ -3081,7 +3097,7 @@ mod spec_format_tests {
         }
 
         let Err(AppError::BadRequest(message)) =
-            parse_openapi_spec(&client, &format!("{}/api/v1/not-a-spec", server.uri())).await
+            parse_openapi_spec(None, "", &format!("{}/api/v1/not-a-spec", server.uri())).await
         else {
             panic!("an HTML page is not a spec");
         };

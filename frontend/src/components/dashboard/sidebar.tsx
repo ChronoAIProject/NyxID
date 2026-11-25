@@ -17,7 +17,6 @@ import {
   ShieldCheck,
   Bug,
   Layers,
-  Bell,
   WalletCards,
   Coins,
   ReceiptText,
@@ -73,7 +72,6 @@ export const MAIN_NAV = [
 ] as const;
 
 export const APPROVALS_NAV = [
-  { to: "/approvals/settings", icon: Bell, label: "Notifications" },
   { to: "/approvals/history", icon: ClipboardList, label: "Approval History" },
   { to: "/approvals/grants", icon: Lock, label: "Active Grants" },
 ] as const;

@@ -93,36 +93,16 @@ pub async fn media_client(
         {
             return Err(fetch_failed());
         }
-        super::url_validation::validate_public_http_url_with_limit(
-            target,
-            "Media URL",
-            MAX_MEDIA_URL_BYTES,
-        )
-        .await
-        .map_err(|_| fetch_failed())?;
-        let host = parsed.host_str().ok_or_else(fetch_failed)?;
-        // Pin the addresses used for this request and re-check after resolution;
-        // no DNS rebinding or redirect may bypass the public-host boundary.
-        let addresses: Vec<_> = tokio::net::lookup_host((
-            host,
-            parsed.port_or_known_default().ok_or_else(fetch_failed)?,
-        ))
-        .await
-        .map_err(|_| fetch_failed())?
-        .collect();
-        if addresses.is_empty()
-            || addresses
-                .iter()
-                .any(|addr| super::url_validation::is_private_or_internal_ip(addr.ip()))
-        {
-            return Err(fetch_failed());
-        }
-        pinned_client(reqwest::Client::builder(), host, &addresses)
+        super::proxy_destination::http::for_url(None, "", &parsed, true)
+            .map_err(AppError::from)
+            .and_then(|clients| clients.media())
+            .map_err(|_| fetch_failed())
     })
     .await
     .map_err(|_| fetch_failed())?
 }
 
+#[cfg(test)]
 fn pinned_client(
     builder: reqwest::ClientBuilder,
     host: &str,
@@ -138,6 +118,7 @@ fn pinned_client(
 }
 
 #[cfg(test)]
+#[derive(Clone)]
 pub(crate) struct TestPinnedTransport {
     pub target: String,
     pub host: String,

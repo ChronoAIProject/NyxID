@@ -80,6 +80,15 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     },
     scanButtonText: { ...typeScale.label, color: c.primary },
     previewSection: { gap: spacing.lg },
+    codeAndExpiry: {
+      flexDirection: "row" as const,
+      flexWrap: "wrap" as const,
+      gap: spacing.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+    },
+    codeSummary: { flexGrow: 1, flexBasis: "55%" as const },
+    expirySummary: { flexGrow: 1, flexBasis: "30%" as const },
     caution: {
       flexDirection: "row" as const,
       alignItems: "flex-start" as const,
@@ -87,6 +96,7 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     },
     cautionIcon: { marginTop: spacing.xxs },
     cautionText: { ...typeScale.caption, color: c.textSecondary, flex: 1 },
+    scopeText: { ...typeScale.caption, color: c.textSecondary },
     cautionDanger: { ...typeScale.label, color: c.danger },
     detailPanel: {
       borderRadius: radius.lg,
@@ -103,6 +113,15 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     },
     detailLabel: { ...typeScale.overline, color: c.textMuted },
     detailValue: { ...typeScale.body, color: c.textPrimary },
+    compactDetailRow: {
+      flexDirection: "row" as const,
+      alignItems: "flex-start" as const,
+      gap: spacing.md,
+      paddingVertical: spacing.sm,
+    },
+    compactDetailLabel: { flexBasis: "35%" as const, flexShrink: 1 },
+    compactDetailValue: { flex: 1, minWidth: 0, flexShrink: 1 },
+    borderlessDetailRow: { borderBottomWidth: 0 },
     detailValueMono: { ...typeScale.mono },
     detailValueWarning: { color: c.warning },
     detailValueDanger: { color: c.danger },
@@ -122,8 +141,8 @@ export function createDeviceLoginStyles(c: ThemeColors) {
       borderBottomWidth: 1,
       borderBottomColor: c.borderSoft,
     },
-    decisionRow: { flexDirection: "row" as const, gap: spacing.md },
-    decisionButton: { flex: 1 },
+    decisionRow: { gap: spacing.md },
+    decisionButton: { width: "100%" as const },
     signInNotice: { gap: spacing.lg },
     signInText: { ...typeScale.body, color: c.textSecondary },
     errorText: {
@@ -141,6 +160,11 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     modalBackdrop: {
       ...StyleSheet.absoluteFillObject,
       backgroundColor: "rgba(0,0,0,0.65)",
+    },
+    modalScroll: {
+      flexGrow: 0,
+      flexShrink: 1,
+      width: "100%" as const,
     },
     modalCard: {
       width: "100%" as const,

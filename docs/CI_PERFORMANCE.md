@@ -6,7 +6,7 @@
 | --- | --- |
 | PR into `dev` | Changed paths select fast jobs. Rust Clippy checks the workspace's libraries and binaries with two Cargo jobs and its own incremental cache. The frontend runs lint and the production build alongside five Vitest shards. |
 | Push to `dev` | Full correctness suite, independent of changed paths. A running build finishes. GitHub keeps only the newest pending push. The commit shows the full CI result in Actions. Publish Dev Images finishes the running image pair and keeps one pending pair. After both images succeed, it advances staging in Git ancestry order, backend first, and verifies both commits. |
-| PR into `main` | Full suite across all paths, including coverage comparisons and the release image. `Main Merge Guard` admits this repository's `dev` or a dated release branch at a commit on `dev`'s history. Merge a passing release PR with a merge commit. |
+| PR into `main` | Full suite across all paths, including coverage comparisons and the release image. `Main Merge Guard` admits this repository's `dev`, a dated snapshot on `dev`, or a hotfix from current `main` with no unreleased `dev` commits. Merge a passing release PR with a merge commit. |
 | Production publish | Publish Images calls the full gate. A release PR's successful jobs can count when Actions identifies the tested PR merge commit and its Git tree matches the published tree. |
 | Rollup and Oracle-retirement branches | Existing path selection. |
 
@@ -21,6 +21,17 @@ for the full run. PR updates cancel superseded runs. Branch protection requires
 with one read-only GitHub comparison. Run `scripts/cut-release.sh` with your own
 `gh` login to open the PR at the commit staging runs. Keeping that branch fixed
 lets later merges into `dev` proceed without restarting the release PR's CI.
+
+Frontend selection includes `mobile/src/**`: the frontend account-deletion
+tests execute real mobile screens, controls and HTTP helpers in a native mock
+harness. Mobile source changes must run those consumers before merging.
+
+Staging publication runs independently of the full dev CI result. A successful
+publish confirms image rollout; check the separate CI run for correctness.
+The NyxBot model-and-channel smoke check additionally requires both
+`NYXID_CHECK_ACCOUNT` and `NYXID_CHECK_ALERT_URL` in the staging environment.
+Missing configuration emits a warning and a `nyxbot-staging-skipped-*` artifact;
+that deployment has no NyxBot smoke-test evidence.
 
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses

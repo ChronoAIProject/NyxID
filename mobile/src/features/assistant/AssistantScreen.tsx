@@ -1,3 +1,4 @@
+import { AttachmentSourcePicker } from "./AttachmentSourcePicker";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -40,7 +41,6 @@ import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceAgentPicker } from "../../components/workspace/WorkspaceAgentPicker";
 import { ChatHeaderActions } from "./ChatHeaderActions";
 import { workspaceSidebarLayout } from "../../components/workspace/workspacePushState";
-import { NotificationBell } from "../notifications/NotificationBell";
 import {
   useNotificationIndicator,
   useNotificationRuntime,
@@ -186,12 +186,16 @@ import {
   composerTrailingControl,
 } from "./voice/voiceSelection";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
+import { assistantApi } from "../../lib/api/assistantApi";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { safeAssistantLinkUrl } from "./assistantMarkdown";
 import { retryInput } from "./assistantState";
 import type { AssistantAcknowledgement } from "./assistantTypes";
-import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
+import {
+  useRailScrollIndicator,
+  WorkspaceRailMotionContext,
+} from "../../components/workspace/workspaceFloatingInset";
 
 type AssistantScreenProps = {
   contextual?: boolean;
@@ -274,6 +278,8 @@ export function AssistantScreen({
   // The Duo's rail (folded or unfolded) carries New chat, Notifications, Scan
   // QR and Recent chats, and this chat's bar controls (it has no bar there).
   const quickRail = useContext(WorkspaceQuickRailContext);
+  const fullScreen = useContext(WorkspaceRailMotionContext)?.fullScreen ?? false;
+  const columnHeader = quickRail && !fullScreen;
   const { t } = useAppLanguage();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
@@ -501,6 +507,7 @@ export function AssistantScreen({
   const canCompose =
     !running &&
     !destroyed &&
+    !assistant.restricted &&
     assistant.online &&
     !assistant.loading &&
     !assistant.loadingOlder &&
@@ -526,6 +533,7 @@ export function AssistantScreen({
     disabled:
       !assistant.online ||
       !!destroyed ||
+      !!assistant.restricted ||
       assistant.loading ||
       assistant.recoveryRequired ||
       !!route?.params?.openLatest ||
@@ -684,9 +692,17 @@ export function AssistantScreen({
       if (!current()) return;
       const id =
         scope.conversationId ??
-        (await createVoiceDraft(scope.agentId, controller.signal));
+        (await uploads.session.ensureConversation(
+          () => createVoiceDraft(scope.agentId, controller.signal),
+        ));
       if (!current()) return;
       if (!scope.conversationId) {
+        if (uploads.session.model) {
+          await uploads.session.applyDraftModel(id, assistantApi.changeModel);
+          if (!current()) return;
+        }
+        await uploads.session.consumeDraft();
+        if (!current()) return;
         adoptedId.current = id;
         assistant.openConversation(id);
         navigation.setParams({
@@ -852,6 +868,7 @@ export function AssistantScreen({
       navigation.push("AssistantDetails", {
         agentId: currentAgent?.id ?? assistant.agentId,
         conversationId: assistant.conversationId,
+        ...(!assistant.conversationId ? { draftKey, draftEpoch: getAuthEpoch() } : {}),
       }),
     );
   }
@@ -869,38 +886,18 @@ export function AssistantScreen({
     afterPickerDismissal(() => navigation.push("Notifications"));
   }
 
-  function openChatOptions() {
-    const hasVoice = !!voiceThread && voiceThread === assistant.conversationId;
-    // The Duo: More is always Chat details (Settings and Notifications are
-    // on the rail; a live voice call keeps its own preferences control).
-    // Wide windows keep Settings and Notifications in the persistent sidebar.
-    if (quickRail || !hasVoice) return openDetails();
-    const current = () =>
+  const hasVoicePreferences =
+    !!voiceThread && voiceThread === assistant.conversationId;
+  const voiceMenuSurface = hasVoicePreferences ? voiceSurfaceToken : undefined;
+  function openVoicePreferences() {
+    if (
       getAuthEpoch() === voiceEpoch &&
       currentVoiceSurface.current === voiceSurfaceToken &&
-      voiceContext.current.conversationId === voiceThread;
-    const epoch = getAuthEpoch();
-    const stillCurrent = () =>
-      hasVoice ? current() : getAuthEpoch() === epoch;
-    Alert.alert(t("Chat options"), undefined, [
-      ...(hasVoice
-        ? [
-            {
-              text: t("Voice preferences"),
-              onPress: () => {
-                if (current()) setVoicePreferencesOpen(true);
-              },
-            },
-          ]
-        : []),
-      {
-        text: t("Chat details"),
-        onPress: () => {
-          if (stillCurrent()) openDetails();
-        },
-      },
-      { text: t("Cancel"), style: "cancel" },
-    ]);
+      voiceContext.current.focused &&
+      voiceContext.current.conversationId === voiceThread
+    ) {
+      setVoicePreferencesOpen(true);
+    }
   }
   function openSettings() {
     // The same Settings sheet the sidebar's Settings row opens.
@@ -909,32 +906,71 @@ export function AssistantScreen({
     );
   }
 
+  const menuScope = JSON.stringify([
+    pickerScope,
+    assistant.agentId,
+    assistant.conversationId,
+    voiceThread,
+    bell.enabled,
+  ]);
   const headerHandlers = useRef({
     newChat,
-    openOptions: openChatOptions,
+    openDetails,
     openNotifications,
+    openSettings,
+    openVoicePreferences,
+    menuScope,
+    focused,
+    headerDisabled,
   });
   headerHandlers.current = {
     newChat,
-    openOptions: openChatOptions,
+    openDetails,
     openNotifications,
+    openSettings,
+    openVoicePreferences,
+    menuScope,
+    focused,
+    headerDisabled,
   };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
+    function selectOption(
+      option: "openDetails" | "openNotifications" | "openSettings" | "openVoicePreferences",
+    ) {
+      const current = headerHandlers.current;
+      if (
+        current.focused &&
+        (option !== "openNotifications" || !current.headerDisabled) &&
+        current.menuScope === menuScope &&
+        getAuthEpoch() === voiceEpoch &&
+        (!voiceMenuSurface || currentVoiceSurface.current === voiceMenuSurface)
+      ) {
+        current[option]();
+      }
+    }
     const actions = () => (
       <WorkspaceHeaderVisibility>
         <ChatHeaderActions
           newChatDisabled={newChatDisabled}
+          menuDisabled={!focused}
+          menuScope={menuScope}
           onNewChat={() => headerHandlers.current.newChat()}
-          onOptions={() => headerHandlers.current.openOptions()}
+          onDetails={() => selectOption("openDetails")}
+          onSettings={() => selectOption("openSettings")}
           notifications={
-            bell.enabled ? (
-              <NotificationBell
-                unread={bell.unread}
-                needsDecision={bell.needsDecision}
-                disabled={headerDisabled}
-                onPress={() => headerHandlers.current.openNotifications()}
-              />
-            ) : null
+            bell.enabled
+              ? {
+                  unread: bell.unread,
+                  needsDecision: bell.needsDecision,
+                  disabled: headerDisabled,
+                  onPress: () => selectOption("openNotifications"),
+                }
+              : undefined
+          }
+          onVoicePreferences={
+            voiceMenuSurface
+              ? () => selectOption("openVoicePreferences")
+              : undefined
           }
         />
       </WorkspaceHeaderVisibility>
@@ -982,7 +1018,11 @@ export function AssistantScreen({
     bell.enabled,
     bell.unread,
     bell.needsDecision,
-    narrowHeader,
+    quickRail,
+    focused,
+    menuScope,
+    voiceEpoch,
+    voiceMenuSurface,
     t,
   ]);
 
@@ -1015,7 +1055,7 @@ export function AssistantScreen({
     },
     more: {
       label: t("Chat options"),
-      onPress: () => headerHandlers.current.openOptions(),
+      onPress: () => headerHandlers.current.openDetails(),
     },
   });
 
@@ -1030,9 +1070,14 @@ export function AssistantScreen({
         getRevision: () => draftRevision.current,
         send: async (text) => {
           if (running) return guidance.submit(text, uploads.files.length);
-          const accepted = await uploads.session.submit((payload) =>
-            assistant.send(connection.prefix(text), undefined, payload),
-          );
+          const accepted = await uploads.session.submit(async (payload) => {
+            const model = assistant.conversationId ? undefined : uploads.session.model;
+            if (model && payload)
+              await uploads.session.applyDraftModel(payload.conversationId, assistantApi.changeModel);
+            return model && !payload
+              ? assistant.send(connection.prefix(text), undefined, undefined, undefined, model)
+              : assistant.send(connection.prefix(text), undefined, payload);
+          });
           if (accepted) connection.sent();
           return accepted;
         },
@@ -1342,7 +1387,7 @@ export function AssistantScreen({
   }
 
   function renderAcknowledgement(row: AssistantAcknowledgement) {
-    if (row.status !== "pending") return null;
+    if (row.status !== "pending" || (assistant.agent?.owner_kind === "org" && assistant.agent.can_maintain === false && row.kind !== "action")) return null;
     return (
       <AssistantAcknowledgementCard
         key={row.id}
@@ -1412,6 +1457,14 @@ export function AssistantScreen({
     />
   ), [homeVisible, currentAgent, conversation, openPanelChat, createPanelAgent]);
 
+  if (assistant.restricted) return (
+    <WorkspacePage title={translateApp("Chat access is restricted.")}>
+      <ActionButton label={translateApp("Back to workspace")} onPress={() => navigation.setParams({
+        conversationId: undefined, agentId: undefined, acknowledgementId: undefined,
+        messageId: undefined, openLatest: false, draft: false, home: true,
+      })} />
+    </WorkspacePage>
+  );
   return (
     <WorkspacePage
       title={chatTitle}
@@ -1427,6 +1480,35 @@ export function AssistantScreen({
         inset
         onRetry={() => void assistant.recover()}
       />
+      {homeVisible && uploads.otherDraft ? (
+        <View style={styles.errorRow}>
+          <ActionButton
+            label={t("Reopen draft chat")}
+            variant="secondary"
+            onPress={() => {
+              const target = uploads.otherDraft;
+              if (target?.name === "GroupChat")
+                navigation.push("GroupChat", target.params);
+              else if (target?.name === "Assistant")
+                navigation.push("Assistant", target.params);
+            }}
+          />
+          <ActionButton
+            label={t("Discard chat draft")}
+            variant="secondary"
+            onPress={() =>
+              Alert.alert(t("Discard chat draft?"), undefined, [
+                { text: t("Cancel"), style: "cancel" },
+                {
+                  text: t("Discard"),
+                  style: "destructive",
+                  onPress: () => void uploads.discardOtherDraft(),
+                },
+              ])
+            }
+          />
+        </View>
+      ) : null}
       {assistant.agentsError ? (
         <View style={styles.errorRow}>
           <Notice message={assistant.agentsError} tone="error" />
@@ -1852,9 +1934,9 @@ export function AssistantScreen({
               setVoicePreferencesOpen(false);
             }}
             onSnapshot={receiveVoiceSnapshot}
-            // The Duo's More opens Chat details, so the call shows its own
-            // preferences control there.
-            preferencesOpen={quickRail ? undefined : voicePreferencesOpen}
+            // The status column's More opens Details directly, so the call
+            // exposes preferences in its own controls in that layout.
+            preferencesOpen={columnHeader ? undefined : voicePreferencesOpen}
             onPreferencesClose={() => setVoicePreferencesOpen(false)}
             onUpdate={() => void assistant.recover()}
             onReview={(acknowledgementId) => {
@@ -1906,6 +1988,14 @@ export function AssistantScreen({
             <ComposerConnectionPicker state={connection} />
             <AssistantPendingUploads
               files={uploads.files}
+              reselect={uploads.session.reselect}
+              retryDiscard={uploads.session.discardPending ? uploads.retryDiscard : undefined}
+              choose={() => void uploads.pick("files")}
+              dismiss={() => uploads.session.dismissReselection()}
+              resume={() => uploads.session.resume()}
+              canResume={
+                canCompose && !uploads.picking && !uploads.session.sending
+              }
               remove={uploads.remove}
               disabled={running || uploads.session.sending}
               showMentionHandles={false}
@@ -1938,18 +2028,10 @@ export function AssistantScreen({
                             name: agentName,
                           })
                     }
-              // Phones: idle composers are one row; anything typed, attached,
-              // uploading or dictating keeps the full two-row layout.
-              compactWhenIdle={
-                quickRail && narrowHeader &&
-                !dictation.active &&
-                uploads.files.length === 0 &&
-                !uploads.picking &&
-                !uploads.session.sending
-              }
+              compactWhenIdle={!dictation.active}
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={quickRail ? layout : undefined}
+                  layout={layout}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||
@@ -1980,6 +2062,7 @@ export function AssistantScreen({
                   mention={mentionAction}
                   settings={
                     <AssistantComposerSettings
+                      hideTrigger={layout.compact}
                       scope={`${getAuthEpoch()}:${draftKey}`}
                       agentOverride={assistant.agent?.access_mode_override}
                       activeTurn={permissionsLocked}
@@ -2169,6 +2252,7 @@ export function AssistantScreen({
           <RightPanelSlot />
         </View>
       </RightPanelProvider>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }

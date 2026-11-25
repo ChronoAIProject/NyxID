@@ -1,3 +1,6 @@
+import { assistantDraftStore, discardUploadDraft } from "./assistantDraftStore";
+import type { AssistantUploadSession } from "./AssistantUploadSession";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
@@ -83,14 +86,41 @@ export function AssistantDetailsScreen({
   route,
 }: ContentScreenProps<"AssistantDetails">) {
   useAppLanguage();
-  const { conversationId, agentId: requestedAgent } = route.params;
+  const { conversationId, agentId: requestedAgent, draftKey, draftEpoch } = route.params;
   const { runtime, history, agents, conversation, agentId, agent } =
     useChatDetailsData(conversationId, requestedAgent);
   const client = useQueryClient();
-  const scope = `${runtime.epoch}:${conversationId ?? "new"}:${requestedAgent ?? "nyxbot"}`;
-  const [busy, setBusy] = useState(false);
+  const draft = !conversationId && draftKey && draftEpoch === runtime.epoch
+    ? assistantDraftStore.get<AssistantUploadSession>(`uploads:${draftKey}`)
+    : undefined;
+  const canDiscoverModels = runtime.active && (!!conversationId ||
+    (!!draft && !!agentId && agent?.can_use === true && agent.status !== "destroyed"));
+  const platformScope = { conversationId, agentId };
+  const models = useQuery({
+    queryKey: ["assistant", "models", runtime.epoch],
+    queryFn: ({ signal }) => assistantApi.models(signal),
+    enabled: canDiscoverModels,
+    retry: false,
+    staleTime: 60_000,
+  });
+  // This endpoint applies the account feature flag and the thread's effective grants.
+  const platformModels = useQuery({
+    queryKey: ["assistant", "platform-models", runtime.epoch, conversationId ?? null, agentId],
+    queryFn: ({ signal }) => assistantApi.platformModels(platformScope, signal),
+    enabled: canDiscoverModels,
+    retry: false,
+  });
+  const choices = [
+    ...(models.isError ? [] : (models.data ?? [])),
+    ...(platformModels.isError ? [] : (platformModels.data ?? [])),
+  ];
+  const scope = JSON.stringify([runtime.epoch, conversationId, draftKey, requestedAgent]);
+  const [action, setAction] = useState<"delete" | "model">();
+  const busy = action !== undefined;
   const [deleted, setDeleted] = useState(false);
   const [error, setError] = useLocalizedState<string>();
+  const [, updateDraftModel] = useState(0);
+  useEffect(() => draft?.subscribe(() => updateDraftModel((version) => version + 1)), [draft]);
   const mounted = useRef(true);
   const lock = useRef(false);
   const unavailable =
@@ -100,8 +130,37 @@ export function AssistantDetailsScreen({
     agent?.can_use === false ||
     busy ||
     deleted;
-  const latest = useRef({ scope, runtime, unavailable });
-  latest.current = { scope, runtime, unavailable };
+  const modelLocked =
+    !canDiscoverModels || busy || !agents.data ||
+    (conversationId ? unavailable || !!conversation?.active_turn
+      : !draft || draft.disposed || draft.restoring || draft.discardPending || draft.sending);
+  const modelId = conversation?.model ?? draft?.model ?? (draft ? agent?.model : undefined);
+  const currentModel = choices.find((row) => row.id === modelId);
+  const showMissingModel =
+    !!modelId &&
+    !currentModel?.available &&
+    !models.isPending &&
+    !platformModels.isPending &&
+    !models.isError &&
+    !platformModels.isError;
+  const latest = useRef({
+    scope,
+    runtime,
+    unavailable,
+    modelLocked,
+    choices,
+    modelId,
+    draft,
+  });
+  latest.current = {
+    scope,
+    runtime,
+    unavailable,
+    modelLocked,
+    choices,
+    modelId,
+    draft,
+  };
   const access = useComposerAccessChange({
     scope,
     agentOverride: agent?.access_mode_override,
@@ -141,6 +200,63 @@ export function AssistantDetailsScreen({
     );
     if (action) navigation.dispatch(action);
   }, [deleted, busy, navigation, agentId]);
+  async function changeModel(model: string) {
+    const state = latest.current;
+    if (
+      !alive() ||
+      !state.runtime.available() ||
+      state.modelLocked ||
+      model === state.modelId ||
+      lock.current ||
+      !state.choices.some((row) => row.id === model && row.available)
+    )
+      return;
+    lock.current = true;
+    setAction("model");
+    setError(undefined);
+    const key = detailsKey(runtime.epoch, conversationId);
+    try {
+      if (!conversationId) {
+        if (!state.draft || !draftKey ||
+            assistantDraftStore.get(`uploads:${draftKey}`) !== state.draft)
+          return;
+        await state.draft.selectModel(model);
+        return;
+      }
+      const updated = await assistantApi.changeModel(conversationId, model);
+      if (!alive()) return;
+      await client.cancelQueries({ queryKey: key, exact: true });
+      if (!alive()) return;
+      client.setQueryData<typeof history.data>(key, (page) =>
+        page
+          ? {
+              ...page,
+              conversation: {
+                ...page.conversation,
+                model: updated.model,
+                context_reset_at: updated.context_reset_at,
+                context_reset_reason: updated.context_reset_reason,
+              },
+            }
+          : page,
+      );
+      void client.invalidateQueries({ queryKey: key, exact: true });
+    } catch (cause) {
+      if (alive()) {
+        setError(() =>
+          cause instanceof Error
+            ? cause.message
+            : translateApp("Could not confirm the model change."),
+        );
+        if (conversationId) void client.invalidateQueries({ queryKey: key, exact: true });
+        void models.refetch();
+        void platformModels.refetch();
+      }
+    } finally {
+      lock.current = false;
+      if (mounted.current) setAction(undefined);
+    }
+  }
   async function remove() {
     if (
       lock.current ||
@@ -151,10 +267,15 @@ export function AssistantDetailsScreen({
     )
       return;
     lock.current = true;
-    setBusy(true);
+    setAction("delete");
     setError(undefined);
     try {
+      const owner = getAuthAccountId();
       await assistantApi.delete(conversationId);
+      void discardUploadDraft(owner, JSON.stringify(["private", conversationId])).catch(() => {
+        if (runtime.epoch === getAuthEpoch() && owner === getAuthAccountId())
+          Alert.alert(translateApp("The draft could not be discarded. Try again."));
+      });
       if (!alive()) return;
       await Promise.allSettled([
         client.invalidateQueries({ queryKey: ["workspace", "drawer-chats"] }),
@@ -171,7 +292,7 @@ export function AssistantDetailsScreen({
         );
     } finally {
       lock.current = false;
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setAction(undefined);
     }
   }
   const agentName =
@@ -192,7 +313,8 @@ export function AssistantDetailsScreen({
   return (
     <SettingsPage>
       {!runtime.online && (
-        <Notice message={translateApp(
+        <Notice
+          message={translateApp(
             "You’re offline. Reconnect to change this chat.",
           )}
         />
@@ -201,7 +323,9 @@ export function AssistantDetailsScreen({
         <Label muted>{translateApp("Loading chat details…")}</Label>
       )}
       {(history.isError || agents.isError) && (
-        <Notice tone="error" message={translateApp("Couldn’t load chat details.")}
+        <Notice
+          tone="error"
+          message={translateApp("Couldn’t load chat details.")}
         />
       )}
       {(history.isError || agents.isError) && (
@@ -233,7 +357,9 @@ export function AssistantDetailsScreen({
                 ? translateApp("Personal specialist")
                 : translateApp("Your personal assistant")
           }
-          accessibilityHint={agentId ? translateApp("Opens agent details") : undefined}
+          accessibilityHint={
+            agentId ? translateApp("Opens agent details") : undefined
+          }
           onPress={
             agentId
               ? () => navigation.push("AgentDetail", { agentId })
@@ -271,8 +397,63 @@ export function AssistantDetailsScreen({
       </SettingsGroup>
       <SettingsGroup
         inset={false}
-        footer={permissionsFooter || undefined}
+        title={translateApp("Model")}
+        footer={conversationId ? translateApp(
+          "Changing the model restarts the working context for this chat.",
+        ) : undefined}
       >
+        <SettingsRow
+          label={translateApp("Current model")}
+          value={
+            currentModel?.label ||
+            (modelId?.startsWith("nyxid/") ? undefined : modelId)
+          }
+          detail={conversation?.active_turn
+            ? translateApp("Wait for the current turn to finish.")
+            : showMissingModel
+              ? translateApp("The current model is unavailable.")
+              : undefined}
+        />
+        {canDiscoverModels && (models.isPending || platformModels.isPending) &&
+            <Label muted>{translateApp("Loading models…")}</Label>}
+        {choices.map((row) => (
+          <SettingsRow
+            key={row.id}
+            label={row.label || row.id}
+            detail={
+              !row.available
+                ? [translateApp("Unavailable for this chat."), row.description]
+                    .filter(Boolean)
+                    .join(" ")
+                : row.id.startsWith("nyxid/")
+                  ? translateApp("Model usage is billed to you.")
+                  : (row.description ?? undefined)
+            }
+            accessibilityRole="radio"
+            accessibilityState={{ checked: row.id === modelId }}
+            value={
+              row.id === modelId
+                ? translateApp("Selected")
+                : undefined
+            }
+            disabled={modelLocked || !row.available}
+            chevron={false}
+            onPress={() => void changeModel(row.id)}
+          />
+        ))}
+        {(models.isError || platformModels.isError) && (
+          <SettingsRow
+            label={translateApp("Retry loading models")}
+            detail={translateApp("Couldn’t load models.")}
+            disabled={!runtime.active}
+            onPress={() => {
+              if (models.isError) void models.refetch();
+              if (platformModels.isError) void platformModels.refetch();
+            }}
+          />
+        )}
+      </SettingsGroup>
+      <SettingsGroup inset={false} footer={permissionsFooter || undefined}>
         {access.mode ? (
           <SettingsMenuRow
             label={translateApp("Permissions")}
@@ -286,7 +467,8 @@ export function AssistantDetailsScreen({
             onChange={(mode) => void access.change(mode)}
           />
         ) : (
-          <SettingsRow label={translateApp("Permissions")}
+          <SettingsRow
+            label={translateApp("Permissions")}
             value={translateApp("Loading permissions…")}
           />
         )}
@@ -309,7 +491,10 @@ export function AssistantDetailsScreen({
           <SettingsRow
             centered
             destructive
-            label={busy ? translateApp("Deleting…") : translateApp("Delete Chat")
+            label={
+              action === "delete"
+                ? translateApp("Deleting…")
+                : translateApp("Delete Chat")
             }
             disabled={unavailable}
             onPress={() =>

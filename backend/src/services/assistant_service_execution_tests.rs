@@ -682,7 +682,7 @@ fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves
         credential: super::super::api_key_credential_service::generate_secret()
             .to_string()
             .into(),
-        catalog_default_headers: Vec::new(),
+        catalog_default_headers: Default::default(),
         user_service_default_headers: Vec::new(),
         ws_frame_injections: Vec::new(),
         connection_id: None,
@@ -1001,7 +1001,7 @@ fn guest_model_2121_absent_preconditions_preserve_route_fingerprint() {
         auth_method: "bearer".into(),
         auth_key_name: "Authorization".into(),
         credential: "test-only-model-key".to_owned().into(),
-        catalog_default_headers: Vec::new(),
+        catalog_default_headers: Default::default(),
         user_service_default_headers: Vec::new(),
         ws_frame_injections: Vec::new(),
         connection_id: None,

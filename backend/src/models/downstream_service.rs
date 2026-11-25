@@ -332,6 +332,9 @@ pub struct DownstreamService {
     /// Base URL of the downstream service.
     /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
+    /// Exact catalog base approved by a platform administrator for a private direct connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_private_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     /// "http" | "ssh"
@@ -674,6 +677,7 @@ pub mod test_helpers {
             is_active: true,
             created_by: "test".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -795,6 +799,7 @@ mod tests {
             is_active: true,
             created_by: "admin".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -900,6 +905,7 @@ mod tests {
             is_active: true,
             created_by: "admin".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

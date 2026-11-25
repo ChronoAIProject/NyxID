@@ -1356,7 +1356,7 @@ async fn connect_and_serve(
                 }
                 continue;
             }
-            Ok(Message::Text(t)) => t.to_string(),
+            Ok(Message::Text(t)) => t,
             Ok(Message::Close(frame)) => {
                 tracing::info!(?frame, "Server closed node WebSocket");
                 break false;
@@ -1369,13 +1369,14 @@ async fn connect_and_serve(
             }
         };
 
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid message from server");
-                continue;
-            }
-        };
+        let parsed =
+            match serde_json::from_str::<nyxid_service_adapters::secret_json::WireJson>(&text) {
+                Ok(v) => v.0,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Invalid message from server");
+                    continue;
+                }
+            };
 
         match parsed["type"].as_str() {
             Some("heartbeat_ping") => {
@@ -1465,19 +1466,24 @@ async fn connect_and_serve(
                 let request_id = parsed["request_id"].as_str().unwrap_or_default().to_owned();
                 let verified = if let Some(secret) = signing_secret.as_ref() {
                     proxy_uploads
-                        .begin(parsed, &config.node.id, secret.as_str())
+                        .begin(&parsed, &config.node.id, secret.as_str())
                         .await
                 } else {
                     Err(anyhow::anyhow!("upload signature missing"))
                 };
                 match verified {
-                    Ok((metadata, upload)) => {
+                    Ok((mut metadata, upload)) => {
                         if upload.operation() != nyxid_machine::Operation::ProxyUpload {
                             let machine = machine.clone();
                             let tx = tx.clone();
                             tokio::spawn(async move {
-                                super::machine::transfer::execute(machine, metadata, upload, tx)
-                                    .await;
+                                super::machine::transfer::execute(
+                                    machine,
+                                    std::mem::take(&mut metadata.0),
+                                    upload,
+                                    tx,
+                                )
+                                .await;
                             });
                             continue;
                         }
@@ -4459,36 +4465,17 @@ async fn handle_ws_proxy_open(
         return;
     };
 
-    let normalized_path = if path.is_empty() {
-        String::new()
-    } else if path.starts_with('/') {
-        path.to_string()
+    let normalized_path = if path.is_empty() || path.starts_with('/') {
+        nyxid_service_adapters::SecretText::from(path)
     } else {
-        format!("/{path}")
+        nyxid_service_adapters::SecretText::concat(&["/", path])
     };
 
-    // Path-prefix injection: prepend /{prefix}{credential} to the URL path
-    let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
-        format!("/{prefix}{credential}{normalized_path}")
-    } else {
-        normalized_path
-    };
-
-    let mut url = format!("{ws_base}{final_path}");
-    if let Some(q) = query
-        && !q.is_empty()
-    {
-        url = format!("{url}?{q}");
-    }
-
-    // Append query-param credential.
-    if let Some((param_name, param_value)) = cred.query_param() {
-        url = proxy_executor::append_query_param(&url, param_name, param_value);
-    }
+    let url = proxy_executor::credential_url(&ws_base, &normalized_path, query, cred);
 
     // Build WS connect request with header injection.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut ws_request = match url.into_client_request() {
+    let mut ws_request = match url.as_str().into_client_request() {
         Ok(r) => r,
         Err(_) => {
             let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS request invalid").await;
@@ -4671,26 +4658,25 @@ where
     }
 }
 
-fn injection_frame_to_control(frame: ws_frame_injector::WsFrame) -> WsProxyControl {
+fn injection_frame_to_message(frame: ws_frame_injector::WsFrame) -> Message {
+    let bytes = tokio_tungstenite::tungstenite::Bytes::from_owner(frame.payload);
     match frame.kind {
-        WsFrameKind::Text => {
-            let text = String::from_utf8(frame.payload).unwrap_or_default();
-            WsProxyControl::Text(text)
-        }
-        WsFrameKind::Binary => WsProxyControl::Binary(frame.payload),
+        WsFrameKind::Text => Message::Text(bytes.try_into().unwrap_or_default()),
+        WsFrameKind::Binary => Message::Binary(bytes),
     }
 }
 
 async fn send_ws_frame_injected(
     tx: &mpsc::Sender<NodeWsMessage>,
     session_id: &str,
-    action: &ws_frame_injector::InjectionAction,
+    trigger_kind: &'static str,
+    frame_index: usize,
 ) -> bool {
     let json = serde_json::json!({
         "type": "ws_frame_injected",
         "request_id": session_id,
-        "trigger_kind": action.trigger_kind,
-        "frame_index": action.frame_index_in,
+        "trigger_kind": trigger_kind,
+        "frame_index": frame_index,
     });
     send_ws_message(tx, json.to_string()).await
 }
@@ -4767,7 +4753,7 @@ async fn run_ws_proxy_session_with_limits<S>(
                             let frame = IncomingFrame {
                                 direction: WsFrameDirection::Downstream,
                                 kind: WsFrameKind::Text,
-                                payload: t.to_string().into_bytes(),
+                                payload: t.as_bytes(),
                             };
                             if let Some(action) = ws_frame_injector::evaluate(
                                 &ws_frame_injections,
@@ -4775,11 +4761,11 @@ async fn run_ws_proxy_session_with_limits<S>(
                                 &frame,
                                 credential,
                             ) {
-                                let control = injection_frame_to_control(action.send_frame.clone());
-                                if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
+                                let reply = injection_frame_to_message(action.send_frame);
+                                if downstream_sink.send(reply).await.is_err() {
                                     break;
                                 }
-                                if !send_ws_frame_injected(&tx, &session_id, &action).await {
+                                if !send_ws_frame_injected(&tx, &session_id, action.trigger_kind, action.frame_index_in).await {
                                     break;
                                 }
                                 if !action.forward_original {
@@ -4802,7 +4788,7 @@ async fn run_ws_proxy_session_with_limits<S>(
                             let frame = IncomingFrame {
                                 direction: WsFrameDirection::Downstream,
                                 kind: WsFrameKind::Binary,
-                                payload: b.to_vec(),
+                                payload: b.as_ref(),
                             };
                             if let Some(action) = ws_frame_injector::evaluate(
                                 &ws_frame_injections,
@@ -4810,11 +4796,11 @@ async fn run_ws_proxy_session_with_limits<S>(
                                 &frame,
                                 credential,
                             ) {
-                                let control = injection_frame_to_control(action.send_frame.clone());
-                                if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
+                                let reply = injection_frame_to_message(action.send_frame);
+                                if downstream_sink.send(reply).await.is_err() {
                                     break;
                                 }
-                                if !send_ws_frame_injected(&tx, &session_id, &action).await {
+                                if !send_ws_frame_injected(&tx, &session_id, action.trigger_kind, action.frame_index_in).await {
                                     break;
                                 }
                                 if !action.forward_original {
@@ -5616,9 +5602,9 @@ mod tests {
                 run_http_proxy_until_cancel(
                     &mut cancellation.receiver,
                     proxy_executor::execute_proxy_request(
-                        &request,
+                        &proxy_executor::signed_test_request(&request),
                         &credentials,
-                        None,
+                        Some(proxy_executor::TEST_SIGNING_SECRET),
                         &tokio::sync::Mutex::new(ReplayGuard::new()),
                         &NodeMetrics::new(),
                         &tx,
@@ -5725,7 +5711,7 @@ mod tests {
             opening.signature = nyxid_machine::signing::sign(&opening, &[17; 32]);
             let (metadata, upload) = uploads
                 .begin(
-                    serde_json::to_value(&opening).unwrap(),
+                    &serde_json::to_value(&opening).unwrap(),
                     &config.node.id,
                     &"11".repeat(32),
                 )
@@ -5839,9 +5825,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5925,9 +5911,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5958,6 +5944,63 @@ mod tests {
         assert_eq!(metrics.snapshot().success_count, 1);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn node_frame_credentials_apply_only_to_downstream_replies() {
+        let (socket, mut peer) = duplex_websocket_pair().await;
+        let (control_tx, control_rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        let rules = serde_json::from_value(serde_json::json!([{
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "upstream"
+        }, {
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "downstream"
+        }]))
+        .unwrap();
+        let session = tokio::spawn(run_ws_proxy_session_with_limits(
+            "node-frame-test".into(),
+            socket,
+            control_rx,
+            tx,
+            Default::default(),
+            rules,
+            Some("fixture-node-credential".to_owned().into()),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ));
+        let challenge = r#"{"type":"auth_required"}"#;
+        control_tx
+            .send(WsProxyControl::Text(challenge.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            challenge
+        );
+        peer.send(Message::Text(challenge.into())).await.unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            "fixture-node-credential"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(
+            receipt,
+            serde_json::json!({
+                "type": "ws_frame_injected", "request_id": "node-frame-test",
+                "trigger_kind": "json_field_equals", "frame_index": 0
+            })
+        );
+        peer.send(Message::Text("ready".into())).await.unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(reply["data"], "ready");
+        drop(control_tx);
+        session.await.unwrap();
     }
 
     #[tokio::test]
@@ -6504,6 +6547,33 @@ mod tests {
         )
         .unwrap();
         assert!(live.snapshot().get("ordering-fixture").is_none());
+    }
+
+    #[test]
+    fn credential_update_wire_reader_guards_fields_through_store_and_receipt() {
+        use nyxid_service_adapters::secret_json::WireJson;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        config.save(&path).unwrap();
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+        );
+        let raw = r#"{"type":"credential_update","request_id":"receipt","service_slug":"fixture","injection_method":"query_param","param_name":"token","param_value":"dummy-node-value"}"#;
+        let frame = serde_json::from_str::<WireJson>(raw).unwrap().0;
+        assert_eq!(format!("{frame:#?}"), "SecretJson([REDACTED])");
+        let ack = process_credential_update(&frame, &Arc::new(sender), &path, &backend).unwrap();
+        assert!(!ack.contains("dummy-node-value"));
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["status"], "ok");
+        assert_eq!(ack["request_id"], "receipt");
+        assert_eq!(
+            live.snapshot().get("fixture").unwrap().query_param(),
+            Some(("token", "dummy-node-value"))
+        );
+        let error = serde_json::from_str::<WireJson>(&raw[..raw.len() - 1]).unwrap_err();
+        assert!(!format!("{error} {error:?}").contains("dummy-node-value"));
     }
 
     #[test]

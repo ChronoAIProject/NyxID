@@ -16,7 +16,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Runtime {
-    turn_restart_ready_until: Arc<Mutex<Option<Instant>>>,
+    turn_restart_ready_until: Arc<Mutex<[Option<Instant>; 3]>>,
     pub identity: ReplicaIdentity,
     pub config: RolloutConfig,
     pub platform_policy_required: bool,
@@ -103,11 +103,25 @@ pub(crate) fn local_generation() -> Option<&'static str> {
 }
 
 pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v2";
+pub(crate) const TEAM_HANDOFF: &str = "assistant:turn-handoff-v3";
+pub(crate) const CHAT_HANDOFF: &str = "assistant:turn-handoff-v4";
 
 pub(crate) fn turn_restart_enrollment_ready() -> bool {
+    handoff_ready(0)
+}
+
+pub(crate) fn team_restart_enrollment_ready() -> bool {
+    handoff_ready(1)
+}
+
+pub(crate) fn chat_restart_enrollment_ready() -> bool {
+    handoff_ready(2)
+}
+
+fn handoff_ready(index: usize) -> bool {
     RUNTIME
         .get()
-        .and_then(|local| *local.turn_restart_ready_until.lock().ok()?)
+        .and_then(|local| local.turn_restart_ready_until.lock().ok()?[index])
         .is_some_and(|until| Instant::now() < until)
 }
 fn runtime() -> AppResult<&'static Runtime> {
@@ -129,6 +143,8 @@ pub const CAPABILITIES: &[&str] = &[
     super::billing::schedules::recipients::READINESS,
     super::assistant_wake_service::READINESS,
     TURN_HANDOFF,
+    TEAM_HANDOFF,
+    CHAT_HANDOFF,
     super::assistant_platform_model::READINESS,
     super::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
     super::platform_model_service::REGISTRY_READINESS,
@@ -267,16 +283,25 @@ pub async fn observe_with_automation(
     }
     let observed = observe_for(db, local, &capabilities).await;
     let started = Instant::now();
-    let ready = observed.is_ok()
-        && capabilities.contains(&TURN_HANDOFF)
-        && serving_report_for(db, local, TURN_HANDOFF)
-            .await
-            .is_ok_and(|report| report.activated && report.serving_ready);
+    let mut deadlines = [None; 3];
+    for (deadline, capability) in
+        deadlines
+            .iter_mut()
+            .zip([TURN_HANDOFF, TEAM_HANDOFF, CHAT_HANDOFF])
+    {
+        if observed.is_err()
+            || !serving_report_for(db, local, capability)
+                .await
+                .is_ok_and(|report| report.activated && report.serving_ready)
+        {
+            break;
+        }
+        *deadline = Some(started + std::time::Duration::from_secs(15));
+    }
     *local
         .turn_restart_ready_until
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) =
-        ready.then(|| started + std::time::Duration::from_secs(15));
+        .unwrap_or_else(|poison| poison.into_inner()) = deadlines;
     observed
 }
 
@@ -936,6 +961,43 @@ pub(crate) async fn refresh_test_replica_heartbeat(db: &Database) {
         result.matched_count, 1,
         "fixture replica must be registered"
     );
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_test_handoff_readiness(db: &Database, ready: bool) {
+    ready_test_replica(db).await;
+    stop_test_replica(db).await;
+    if !ready {
+        let legacy = overlapping_test_replica(db).await;
+        remove_test_replica_capability(db, &legacy, TURN_HANDOFF).await;
+    }
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert_eq!(turn_restart_enrollment_ready(), ready);
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_v2_only_test_fleet(db: &Database) {
+    let legacy = overlapping_test_replica(db).await;
+    remove_test_replica_capability(db, &legacy, TEAM_HANDOFF).await;
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert!(turn_restart_enrollment_ready());
+    assert!(!team_restart_enrollment_ready());
+    assert!(!chat_restart_enrollment_ready());
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_v3_only_test_fleet(db: &Database) {
+    let legacy = overlapping_test_replica(db).await;
+    remove_test_replica_capability(db, &legacy, CHAT_HANDOFF).await;
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert!(team_restart_enrollment_ready());
+    assert!(!chat_restart_enrollment_ready());
 }
 
 #[cfg(test)]

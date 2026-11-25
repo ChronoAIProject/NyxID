@@ -222,7 +222,13 @@ pnpm bump:android    # PROD_ANDROID_VERSION_CODE → N+1
 pnpm bump:both       # both
 ```
 
-The repository matches NyxID's current TestFlight build on `fun.chrono-ai.nyxid`: **1.0.4 (36)**. For a new upload, keep `APP_VERSION=1.0.4` and set a higher `PROD_IOS_BUILD_NUMBER` in your local `.env.prod`; `pnpm bump:ios` advances an existing build number of 36 to 37. Later uploads must continue to increase the build number.
+For an incremental TestFlight build, get the last accepted version and build
+number from App Store Connect. Record the pushed Git commit alongside each
+accepted build so the next tab can recover its exact source. Compare the
+candidate with the previous release commit, including mobile and shared code.
+If the previous build included worktree edits, include those edits in a shared
+commit and verify the affected screens against the archived build before using
+that commit as the starting point.
 
 ## Troubleshooting / cleaning
 

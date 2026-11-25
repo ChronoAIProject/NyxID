@@ -108,6 +108,10 @@ pub enum XChannelEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_continuity: Option<CredentialContinuity>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// Additional Telegram manager webhook identity. Legacy default has no suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_instance: Option<i64>,
@@ -195,6 +199,24 @@ pub struct ChannelBot {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialContinuity {
+    pub version: u8,
+    pub generations: std::collections::BTreeMap<String, String>,
+    pub pins: std::collections::BTreeMap<String, RetainedCredentialPin>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_producers: std::collections::BTreeMap<String, String>,
+    pub authentication: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedCredentialPin {
+    pub dependencies: String,
+    pub value: String,
 }
 
 fn default_credential_source() -> String {
@@ -363,6 +385,7 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            credential_continuity: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -381,6 +404,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

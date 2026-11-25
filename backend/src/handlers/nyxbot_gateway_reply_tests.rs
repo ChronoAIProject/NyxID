@@ -52,6 +52,18 @@ async fn outcomes(f: &Fixture) -> Vec<bson::Document> {
         .unwrap()
 }
 
+async fn answer_health(f: &Fixture) -> Value {
+    let bot = crate::services::channel_bot_service::get_bot(&f.state.db, &f.channel.channel_bot_id)
+        .await
+        .unwrap();
+    let health = Box::pin(crate::handlers::channel_bots::health_loaded(
+        &f.state, &bot, true, false,
+    ))
+    .await
+    .unwrap();
+    serde_json::to_value(health).unwrap()
+}
+
 #[tokio::test]
 async fn gateway_reply_pending_survivors_use_identical_request_and_one_receipt() {
     let f = pending(
@@ -61,6 +73,22 @@ async fn gateway_reply_pending_survivors_use_identical_request_and_one_receipt()
     )
     .await;
     assert_eq!(status(&f).await, "unknown");
+    let health = answer_health(&f).await;
+    assert_eq!(health["answer_delivery"]["state"], "unconfirmed");
+    assert_eq!(
+        health["answer_delivery"]["reason"],
+        "gateway_receipt_pending"
+    );
+    assert_eq!(health["recommended_action"], "none");
+    patch(
+        &f,
+        doc! {"created_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::minutes(11))},
+    )
+    .await;
+    let stalled = answer_health(&f).await;
+    assert_eq!(stalled["answer_delivery"]["state"], "unconfirmed");
+    assert_eq!(stalled["answer_delivery"]["reason"], "delivery_stalled");
+    assert_eq!(stalled["recommended_action"], "verify");
     let first = sends(&f).await.pop().unwrap();
     let before = raw(&f).await;
     assert!(!before.to_string().contains("Useful answer"));
@@ -84,6 +112,9 @@ async fn gateway_reply_pending_survivors_use_identical_request_and_one_receipt()
     a.unwrap();
     b.unwrap();
     assert_eq!(status(&f).await, "sent");
+    let health = answer_health(&f).await;
+    assert_eq!(health["answer_delivery"]["state"], "confirmed");
+    assert_eq!(health["recommended_action"], "none");
     let requests = sends(&f).await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].url.path(), first.url.path());
@@ -141,7 +172,7 @@ async fn gateway_reply_exact_503_retries_without_claiming_admission() {
 }
 
 #[tokio::test]
-async fn gateway_reply_expiry_stays_unconfirmed_and_health_is_actionless() {
+async fn gateway_reply_expiry_stays_unconfirmed_and_health_reports_the_gateway() {
     let f = pending("gateway_reply_expiry", 409, "routed_reply_in_progress").await;
     patch(
         &f,
@@ -164,12 +195,26 @@ async fn gateway_reply_expiry_stays_unconfirmed_and_health_is_actionless() {
         .await
         .unwrap()
         .unwrap();
+    let health = answer_health(&f).await;
+    assert_eq!(health["answer_delivery"]["state"], "unconfirmed");
+    assert_eq!(
+        health["answer_delivery"]["reason"],
+        "platform_delivery_unconfirmed"
+    );
+    assert_ne!(health["recommended_action"], "none");
+    assert!(
+        health["recommended_action_text"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("check the chat")
+    );
     let advice = crate::services::channel_bot_health::recommend(
         &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true),
     );
-    assert_eq!(advice.action, "none");
+    assert_eq!(advice.action, "gateway");
     assert!(advice.text.contains("gateway accepted"));
-    assert!(advice.text.contains("unless a later reply"));
+    assert!(advice.text.contains("Check the chat"));
     let serialized = serde_json::to_value(&bot.diagnostics).unwrap();
     assert_eq!(
         serialized["last_outbound_error"]["reason"],
@@ -306,6 +351,18 @@ async fn gateway_local_refusals_keep_local_truth_and_received_403_is_gateway_rej
         let row = raw(&f).await;
         let delivery = row.get_document("delivery").unwrap();
         let remote = reason == "received_403";
+        let health = answer_health(&f).await;
+        assert_eq!(health["answer_delivery"]["state"], "rejected", "{reason}");
+        let expected_reason = if remote {
+            "gateway_reply_rejected"
+        } else {
+            "answer_delivery_refused"
+        };
+        assert_eq!(
+            health["answer_delivery"]["reason"], expected_reason,
+            "{reason}"
+        );
+        assert_ne!(health["recommended_action"], "none", "{reason}");
         assert_eq!(
             delivery.get_bool("gateway_attempted").unwrap_or(false),
             remote,
@@ -841,6 +898,7 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
         request_hash: sha256_hex(request.to_string()),
         conversation_id: f.event.conversation_id.clone(),
         terminal: true,
+        answer_delivery: None,
         revision: 1,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
@@ -1100,14 +1158,13 @@ async fn gateway_reply_target_mint_race_uses_only_committed_target() {
         .unwrap()
         .unwrap();
     let d = event.delivery.unwrap();
-    let target = String::from_utf8(
-        f.state
-            .encryption_keys
-            .decrypt(d.target_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let target_bytes = f
+        .state
+        .encryption_keys
+        .decrypt(d.target_ciphertext.as_ref().unwrap())
+        .await
+        .unwrap();
+    let target = std::str::from_utf8(&target_bytes).unwrap();
     assert_eq!(status(&f).await, "unknown");
     let first = sends(&f).await;
     assert_eq!(first.len(), 1);
@@ -1239,3 +1296,43 @@ async fn gateway_dispatch_shape_matrix_retention_and_foreign_scope() {
 
 #[path = "nyxbot_gateway_reask_tests.rs"]
 mod reask_tests;
+
+#[tokio::test]
+async fn gateway_reply_health_distinguishes_stored_preparation_from_observed_output() {
+    use crate::services::nyxbot_response_recovery as recovery;
+    let mut f = fixture("stored_answer_health_2460").await;
+    let stored = pending_recovery(&mut f).await;
+    recovery::finish(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &stored,
+        Some("Stored test answer"),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answer_health(&f).await["answer_delivery"]["state"],
+        "prepared"
+    );
+    let response = Box::pin(native_responses::snapshot(
+        State(f.state.clone()),
+        Path(stored.response_id),
+        bearer(&f.key),
+    ))
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("Stored test answer"));
+    let health = answer_health(&f).await;
+    assert_eq!(health["answer_delivery"]["state"], "unconfirmed");
+    assert!(
+        !health["answer_delivery"]
+            .to_string()
+            .contains("Stored test answer")
+    );
+    assert_eq!(
+        health["answer_delivery"]["reason"],
+        "gateway_does_not_confirm"
+    );
+    assert_eq!(health["recommended_action"], "none");
+}

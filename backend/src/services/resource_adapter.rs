@@ -7,20 +7,6 @@ use sha2::{Digest, Sha256};
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_RESOURCES: usize = 32;
 
-/// Keep the application's connection bounds when disabling redirects for a source read.
-pub(crate) fn http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        let builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .pool_idle_timeout(std::time::Duration::from_secs(90));
-        #[cfg(test)]
-        let builder = builder.pool_max_idle_per_host(0);
-        builder.build().expect("source HTTP client")
-    });
-    &CLIENT
-}
-
 pub struct ResourceCandidate {
     pub selector: String,
     pub revision: String,
@@ -125,7 +111,7 @@ pub fn source(
         "base":target.base_url, "auth":target.auth_method, "key":target.auth_key_name,
         "scheme":target.service.auth_scheme,
         "credential":hex::encode(Sha256::digest(target.credential.as_bytes())),
-        "catalog_headers":target.catalog_default_headers, "headers":target.user_service_default_headers,
+        "catalog_headers":target.catalog_header_binding(std::convert::identity), "headers":target.user_service_default_headers,
         "connection":target.connection_id,
     }));
     Some(ResourceSource {
@@ -345,8 +331,17 @@ mod tests {
     async fn resource_source_client_bounds_a_stalled_tls_connection() {
         // The kernel accepts TCP while no server answers the TLS handshake.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let request =
-            http_client().get(format!("https://{}/source", listener.local_addr().unwrap()));
+        let url = format!("https://{}/source", listener.local_addr().unwrap());
+        let request = crate::services::proxy_destination::http::for_url(
+            None,
+            &url,
+            &url.parse().unwrap(),
+            false,
+        )
+        .unwrap()
+        .ordinary()
+        .unwrap()
+        .get(url);
         let error = tokio::time::timeout(std::time::Duration::from_secs(15), request.send())
             .await
             .expect("source connect timeout must bound the handshake")

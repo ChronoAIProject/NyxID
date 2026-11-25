@@ -73,7 +73,7 @@ pub(crate) async fn execute(
                 return Err(policy::unavailable());
             }
             decoder.push(&chunk).map_err(|_| policy::unavailable())?;
-            if decoder.text.len() > context.limits.max_output_bytes as usize {
+            if decoder.text_len() > context.limits.max_output_bytes as usize {
                 return Err(policy::unavailable());
             }
             if let Some(created) = decoder.created.take() {

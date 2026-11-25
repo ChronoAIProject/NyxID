@@ -46,8 +46,12 @@ pub enum TurnOrigin {
 
 /// A server-authored wake-up item waiting for the agent's next event turn.
 /// `text` is NyxID-authored and bounded; it never carries secrets.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Extended, JSON-quoted channel notice. Older readers receive an explicitly
+    /// marked excerpt in `text` within their existing event-rendering budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_message: Option<String>,
     /// Metadata-only continuation; rendered inside the consuming admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake: Option<super::assistant_wake::WakeReference>,
@@ -105,6 +109,8 @@ pub struct AgentEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelTurnContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<super::channel_message::TextCompleteness>,
     /// Exact server-validated organization source, retained independently of
     /// mutable reply preferences and revalidated before rendering model input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +128,12 @@ pub struct ChannelTurnContext {
     pub sender_kind: super::channel_thread::ThreadSenderKind,
     pub guest: bool,
     pub original_message: bool,
+}
+
+impl std::fmt::Debug for AgentEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentEvent([REDACTED])")
+    }
 }
 
 impl AgentEvent {
@@ -269,10 +281,26 @@ pub struct TurnActivity {
     pub status: String,
     #[serde(default)]
     pub failure: Option<ToolFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_recovery: Option<MemoryRecovery>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub started_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// Content-free linkage between a rejected memory write and one recovery part.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MemoryRecovery {
+    pub failed_activity_id: String,
+    pub part: u8,
+    pub total: u8,
+    /// Native write evidence. A turn can settle while an activity is still running.
+    #[serde(default)]
+    pub committed: bool,
+    /// Retain the claim for deduplication when history can only show an independent save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlinked: bool,
 }
 
 /// Additive strings keep old replicas readable. State is refreshed from the
@@ -311,6 +339,8 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<super::assistant_upload::PdfCoverage>,
     #[serde(default, flatten)]
     pub artifact: super::generated_artifact::Metadata,
 
@@ -399,6 +429,19 @@ pub struct SubscriberCheckpoint {
     pub response_id: String,
     pub sequence: u64,
     pub window_text: String,
+    /// UTF-8 byte boundaries in window_text order.
+    /// Absent on legacy checkpoints and when redaction changed the boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_lengths: Option<Vec<OutputPartLength>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputPartLength {
+    pub output_index: u64,
+    pub content_index: u64,
+    pub bytes: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_snapshot: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -596,6 +639,8 @@ pub struct ActiveTurn {
 pub struct ExecutionAttempt {
     pub epoch: i64,
     pub claim_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_delivery: Option<Box<ChatRestartSource>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,6 +657,10 @@ pub struct RestartAdmission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<ReattachWindow>,
     pub source: RestartSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_source: Option<TeamRestartSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_source: Option<Box<ChatRestartSource>>,
     pub initiating_message_id: String,
     pub initiating_seq: i64,
     pub reply_id: String,
@@ -633,6 +682,8 @@ pub struct ReattachDeployment {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoppedWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_origin: Option<Box<PlatformTurnOrigin>>,
     pub turn_id: String,
     pub credential_id: String,
     pub window_key: String,
@@ -648,6 +699,8 @@ pub struct ThreadSecretFence {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReattachWindow {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub channel_capacity_retry: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<WindowRefusal>,
     #[serde(default)]
@@ -659,6 +712,8 @@ pub struct ReattachWindow {
     pub terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<mongodb::bson::Binary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_context_version: Option<u8>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub capacity_deadline: DateTime<Utc>,
     #[serde(
@@ -719,6 +774,29 @@ pub struct ReattachLimits {
 pub struct CredentialWatchLimits {
     pub interval_seconds: u32,
     pub model_request_max_age_seconds: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeamRestartSource {
+    Assignment { report_to: String },
+    GroupMember { group_id: String, upper_seq: i64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatRestartSource {
+    PersonalManager {
+        origin: Box<PlatformTurnOrigin>,
+    },
+    PrivateChannel {
+        event_id: String,
+        origin: ChannelOrigin,
+    },
+    Wake {
+        report_to: Option<String>,
+        reply_channel: Option<ChannelOrigin>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

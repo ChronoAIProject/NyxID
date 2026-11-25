@@ -442,7 +442,7 @@ pub(crate) async fn render_personal(
                         .limit(65)
                         .session(&mut *session)
                         .await?;
-                    let cards = cursor.stream(&mut *session).try_collect().await?;
+                    let cards = crate::db::read_documents(&mut cursor, session).await?;
                     let thread = conversations
                         .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
                         .session(session)

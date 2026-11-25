@@ -1,3 +1,9 @@
+FROM debian:bookworm-slim AS pdf-runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # Normalize release-only workspace versions outside the dependency layer chain.
 # COPY from this stage is keyed by its output, not the original manifest bytes.
 FROM python:3.12-slim-bookworm AS dependency-recipe
@@ -79,7 +85,7 @@ RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-u
 
 # Copy the real source code, build script, docs, prompts, and catalog spec overlays
 # (docs, prompts, specs, and assets are embedded via include_str!/include_bytes!)
-COPY shared/native-app-links.json shared/native-app-links.json
+COPY shared/native-app-links.json shared/allowed-card-continuation.json shared/
 COPY backend/src backend/src
 COPY backend/build.rs backend/build.rs
 COPY backend/prompts backend/prompts
@@ -128,11 +134,7 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN npm run build:credential-accept
 
 # ── Runtime ─────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM pdf-runtime AS runtime
 
 # Create a non-root user. The ids are pinned to the values `-r` already assigned
 # on this base image, so existing volumes keep their ownership.

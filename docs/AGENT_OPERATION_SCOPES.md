@@ -426,3 +426,39 @@ The additional parameters and response fields are additive. Old replicas
 reject the new parameters under their existing closed schema and retain the
 old unpaged result; upgrade all serving replicas before relying on pagination.
 No stored model, execution policy or permission is changed by discovery.
+
+### Filter or save read-only operations
+
+To narrow a newly granted specialist connection in one MCP call, pass the
+exact granted service ID to `nyxid__set_agent_operations`.
+
+```json
+{
+  "subagent": "merchant",
+  "service_id": "<granted connection ID>",
+  "selection": {"expected_revision": 0, "read_only": true}
+}
+```
+
+Use the current revision for a previously edited service. The save transaction
+selects active, published endpoint IDs with the same HTTP/catalog effect class
+as a read action card. A GET can be marked as changing. A POST needs a trusted
+read contract to qualify. Method, catalog marks and the request's default
+effects determine the class. The operation's name and summary have no effect.
+
+A restricted specialist keeps only its previously selected read IDs and their
+saved input limits. A changed contract that would widen access causes a conflict.
+The shorthand excludes explicit path rules and services without matching stable
+endpoints receive an empty selection. More than 256 matching IDs fails the save.
+Later publications require an explicit scope edit to join a saved selection.
+Existing configuration, guest, sharing, webhook approval and Number rollout
+requirements apply. A webhook card binds the compiled contract digest.
+
+For an inventory, pass `effect_class` to `nyxid__get_agent_operations` with
+`read`, `change`, `sensitive` or `destructive`. For service endpoints the
+current classifier emits read, change and destructive. Sensitive can return
+an empty inventory. Keep the filter on every cursor call. Each service shows
+only matching published endpoints and their selected IDs and inputs. For a
+complete editable selection including explicit rules, omit `effect_class`.
+Replicas with the older MCP schema reject the new arguments. The saved snapshot
+uses the existing explicit scope format on every replica.

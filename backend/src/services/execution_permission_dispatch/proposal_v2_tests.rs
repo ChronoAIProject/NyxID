@@ -24,7 +24,7 @@ async fn row(f: &Fixture) -> ApprovalRequest {
     }
     row
 }
-fn choice(row: &ApprovalRequest, id: &str) -> Decision {
+pub(super) fn choice(row: &ApprovalRequest, id: &str) -> Decision {
     let p = v2::proposal(row).unwrap();
     let c = p.choices.iter().find(|c| c.id == id).unwrap();
     Decision {
@@ -35,7 +35,7 @@ fn choice(row: &ApprovalRequest, id: &str) -> Decision {
         idempotency_key: Uuid::new_v4().to_string(),
     }
 }
-async fn call(f: &Fixture, path: &str, token: &str) -> (StatusCode, String) {
+pub(super) async fn call(f: &Fixture, path: &str, token: &str) -> (StatusCode, String) {
     let r = f
         .router()
         .oneshot(
@@ -55,7 +55,7 @@ async fn call(f: &Fixture, path: &str, token: &str) -> (StatusCode, String) {
         .unwrap();
     (status, String::from_utf8(body.to_vec()).unwrap())
 }
-async fn run(f: &Fixture, row: &ApprovalRequest) {
+pub(super) async fn run(f: &Fixture, row: &ApprovalRequest) {
     if let Some(r) = v2::execute(&f.state, row).await.unwrap() {
         let _ = axum::body::to_bytes(r.into_body(), 1024 * 1024)
             .await
@@ -104,6 +104,19 @@ async fn external_proxy_uuid_and_slug_save_resume_readback_without_task_or_dupli
         run(&f, &approved).await;
         run(&f, &approved).await;
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        let capture = super::migration_tests::Capture::default();
+        let (_, replay) = tracing::instrument::WithSubscriber::with_subscriber(
+            call(&f, &route, "one"),
+            capture.subscriber(),
+        )
+        .await;
+        assert!(replay.contains(&requested.id));
+        {
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["decision"], "hard_denial");
+            assert_eq!(events[0]["cause"], "occurrence_already_reviewed");
+        }
         let completed = row(&f).await;
         assert_eq!(v2::proposal(&completed).unwrap().state, "completed");
         assert_eq!(completed.activity_outcome.as_deref(), Some("completed"));
@@ -288,6 +301,19 @@ async fn external_revocation_and_uncertain_barrier_never_replay() {
                 _ => "cancelled",
             }
         );
+        if scenario == "uncertain" {
+            let capture = super::migration_tests::Capture::default();
+            let (_, body) = tracing::instrument::WithSubscriber::with_subscriber(
+                call(&f, "/proxy/s/execution-fixture/status", "async-occurrence"),
+                capture.subscriber(),
+            )
+            .await;
+            assert!(body.contains(&r.id));
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["decision"], "operational_error");
+            assert_eq!(events[0]["cause"], "provider_outcome_unknown");
+        }
         assert!(f.server.received_requests().await.unwrap().is_empty());
         f.cleanup().await;
     }
@@ -1049,6 +1075,9 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
             super::super::phase_b_tests::enroll_global(&f.state.db, &f.owner).await;
             approval_timeout(&f, 10).await;
             let (app, mut request) = connected_request(&f, kind).await;
+            let app = app.layer(axum::middleware::from_fn(
+                crate::handlers::proxy::ingress::approval_wait_budget,
+            ));
             if idempotency {
                 request
                     .headers_mut()
@@ -1057,6 +1086,9 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
             request
                 .headers_mut()
                 .insert("x-nyxid-approval-mode", "async".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("x-nyxid-approval-wait-seconds", "10".parse().unwrap());
             let response =
                 tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(request))
                     .await
@@ -1066,6 +1098,7 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
                 .await
                 .unwrap();
             let pending = row(&f).await;
+            assert!((pending.expires_at - pending.created_at).num_seconds() > 10);
             assert!(v2::proposal(&pending).unwrap().background_allowed);
             assert!(v2::proposal(&pending).unwrap().waiter_until.is_none());
             assert!(f.server.received_requests().await.unwrap().is_empty());
@@ -1085,6 +1118,11 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
             let calls = f.server.received_requests().await.unwrap();
             assert_eq!(calls.len(), 1);
             assert!(!calls[0].headers.contains_key("x-nyxid-approval-mode"));
+            assert!(
+                !calls[0]
+                    .headers
+                    .contains_key("x-nyxid-approval-wait-seconds")
+            );
             f.cleanup().await;
         }
     }
@@ -1252,7 +1290,11 @@ async fn external_connected_rejection_preserves_http_and_mcp_legacy_wording() {
         super::super::phase_b_tests::enroll_global(&f.state.db, &f.owner).await;
         approval_timeout(&f, 10).await;
         let (app, request) = connected_request(&f, kind).await;
-        let waiter = tokio::spawn(app.oneshot(request));
+        let capture = super::migration_tests::Capture::default();
+        let waiter = tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+            app.oneshot(request),
+            capture.subscriber(),
+        ));
         let pending = pending_request(&f).await;
         let mut decision = choice(&pending, "operation");
         decision.approved = false;
@@ -1285,6 +1327,12 @@ async fn external_connected_rejection_preserves_http_and_mcp_legacy_wording() {
         } else {
             assert!(text.contains("Approval request was rejected"), "{text}");
             assert!(text.contains(&f.state.config.frontend_url), "{text}");
+        }
+        {
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1, "{kind}");
+            assert_eq!(events[0]["decision"], "hard_denial", "{kind}");
+            assert_eq!(events[0]["cause"], "proposal_not_live", "{kind}");
         }
         v2::sweep(&f.state).await.unwrap();
         assert!(f.server.received_requests().await.unwrap().is_empty());

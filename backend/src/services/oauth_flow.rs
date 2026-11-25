@@ -261,7 +261,7 @@ pub async fn refresh_oauth_token(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     use super::credential_record_service as records;
     let raw = db
         .collection::<bson::Document>(COLLECTION_NAME)
@@ -538,7 +538,7 @@ pub async fn refresh_oauth_token(
         "OAuth token refreshed"
     );
 
-    Ok(new_access_token.to_string())
+    Ok(zeroize::Zeroizing::new(new_access_token.to_owned()))
 }
 
 #[cfg(test)]

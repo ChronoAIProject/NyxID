@@ -608,7 +608,9 @@ call returns `approval_expired`, `approval_denied`, `approval_wait_timed_out`, o
 `approval_unavailable` on failure and links to `/assistant/approvals` (pending
 and history). The web history response adds bounded `approval_history`, scoped
 to the same owner/chat key as before, while `approvals` stays pending-only for
-older clients. New clients render terminal proxy cards after reload; an approval
+older clients. History also loads exact service approvals linked by server-recorded
+activities on the requested page and its active turn, including HTTP cards without
+a key label. New clients render terminal proxy cards after reload; an approval
 receipt says “Approved”, not that execution or delivery succeeded.
 
 The turn summary's “Completed” describes the model turn, “actions” counts tool
@@ -893,10 +895,28 @@ optional `failure.reason`; old rows and unknown reasons retain generic copy.
 Only native diagnostics populate it, never downstream tool text. Neither audit
 nor activity stores rejected note contents or secret matches. Storage/internal
 failures mean the write is unconfirmed: inspect notes before retrying, since the
-write may already have committed. A subsequent successful save does not erase a
-failed step or prove that all of its intended facts were recovered. Prompts require
-reporting unresolved facts and only confirming saves with successful receipts.
-There is no inferred compensation link between different calls.
+write may already have committed. A definite rejection eligible for a retry of
+the same operation can return
+`details.failed_activity_id`. To recover that intent in the same live turn and
+for the same agent, pass it in `recovery` with a 1-based `part` and a fixed
+`total` of 1–10. A split can only recover a failed new note. A replacement uses
+one part and the original replacement ID. NyxBot can address a personal
+specialist by its name or ID. The server resolves the name before writing.
+Validation and owner confirmation run before reserving a part. A part stays
+reserved while its outcome is running, committed or uncertain, and can be
+retried after a definite rejection. If the original activity has left the
+live turn when the exact approval is consumed, the authorized save runs
+independently and returns
+`recovery_status: unlinked_after_approval`. The settled web activity preserves
+the original failure and counts confirmed saves that NyxBot explicitly linked
+to it. The count describes write receipts. If a note committed before its
+activity receipt could be recorded, history shows that part as unconfirmed.
+Copy contains no note text. The agent must report unresolved parts using the
+tool receipts.
+
+During a rolling upgrade, an older replica can reject the new argument or
+settle a turn without preserving the new receipt. Older history still renders
+ordinary write outcomes. Verify linked recovery after the backend rollout.
 
 Owner/team appends use an atomic capacity fence; replacements return the atomic
 post-write snapshot, so later edits cannot change the receipt. Destroyed agents
@@ -1022,12 +1042,19 @@ Acknowledgement DTO adds `decider`, `decided_by` and `reason`.
 `{id,service_slug,service_name,summary,approval_mode,agent_key_prefix,created_at,expires_at}`.
 Per-service approval policies (per_request or grant, decided on the approvals
 page, Telegram or the mobile app) are enforced in the execution path and block
-the tool call for the channel's approval timeout. The chat now surfaces those
-requests as approval cards at the transcript tail, matched by the key's name in
-`requester_label` and the owner as request owner or notified approver; the card
-decides through the ordinary `POST /approvals/requests/{id}/decide`, and the
-waiting tool call then proceeds within the same turn. Known gap: renaming the
-assistant key hides cards for requests created under the old name.
+the tool call for the channel's approval timeout. For an interactive NyxBot
+per-request service write over HTTP or MCP, the deadline is the earlier of
+the owner's timeout and 80 seconds, both measured from callback ingress.
+The card counts down to the stored deadline in seconds. After expiry the
+tool reports that nothing was sent and the owner must make a fresh request.
+The chat surfaces these
+requests as approval cards at the transcript tail. Server-recorded activity
+links identify current API-key calls, and the key name still identifies older
+labelled cards. Both paths check the acting user and the owner or notified
+approver. The card decides through `POST /approvals/requests/{id}/decide`.
+On a live connection the tool then proceeds within the same turn. Losing an
+HTTP or MCP waiter or reaching the card deadline expires its undispatched
+per-request card. Grant-mode decisions can serve several connected callers.
 
 `activities` lists the tool calls the chat's key made during that turn, oldest
 first: `{id,label,status,started_at,ended_at}` with status `running`, `completed`
@@ -1647,7 +1674,10 @@ returned by DTOs, Debug, logs, audit or tools. Each fresh binding gets a new mar
 The preamble exists only in the upstream request, never in NyxID's stored user
 message. Image requests retain the input array: the combined text goes in its
 `input_text` part and image parts remain unchanged.
-Attachment-only messages still carry this preamble. The current attachment
+Attachment-only messages still carry this preamble. An empty caption stays
+empty after the context block. Telegram ingress paths that require nonempty
+text use a single paperclip (📎) for a captionless file. The specialist's
+instructions and the conversation determine how to respond. The current attachment
 listing and expiry/image-omission notices occur exactly once in every request,
 including automatic continuations and session/credential recovery retries.
 Other turn notes are sent on the first upstream request, and again when recovery
@@ -1723,6 +1753,28 @@ closed. Cached upstream replay may contain only a terminal response, so terminal
 output is authoritative. Returned `conversation.id` and `response.id` are always
 stored on success. Locally guessing the first session ID is incorrect.
 
+NyxAgent can discard a partial model attempt after a successful retry. NyxID
+applies `response.output_text.done` at its output and content index and clears
+all `discarded_output_indices` on that frame. Live deltas still concatenate.
+A correction that rewrites visible text sends a full `block.completed` snapshot
+on the same block. Web and mobile continue applying later deltas to it. The
+coalesced reattach checkpoint saves the corrected text and its part lengths.
+For older checkpoints or text changed by redaction, recovery reconstructs the
+indices from upstream replay or its retained snapshot before publishing updates.
+Empty incomplete messages contribute neither text nor separators to settlement.
+
+For a completed response, NyxID settles every assistant message marked
+`phase: final_answer`, preserving the order of its output-text parts and the
+two-newline separator. If the response has no explicit final answer, NyxID
+uses its unphased assistant messages. When both kinds are absent and the
+response contains commentary text, NyxID settles all assistant text in order
+so the guest receives the available reply. Older runtimes can split an answer
+over several messages. Tool position and paragraph breaks do not identify an answer
+boundary. Running snapshots and failed or cancelled responses retain partial
+text. Web history and channel delivery use the settled answer. During a rolling
+deploy the settling replica determines the text for a turn, including future
+receipt recovery or multipart delivery of that same reply.
+
 NyxID events have a strictly increasing `cursor`: `turn.status` (also carries
 `conversation_id`), `message.started`, `block.started`, `block.delta`,
 `block.completed`, `message.completed`, `turn.completed`, and `turn.continuing`. They reuse the Direct
@@ -1735,7 +1787,7 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | Upstream result | NyxID action |
 | --- | --- |
 | Bound 404 `not_found` | Clear binding (`session_lost`), emit notice, retry once unbound with recap and same turn/idempotency key |
-| 503 `capacity_exceeded` / `draining`, 409 `session_busy` | Retry proven refusals within a fixed window per request, measured from first dispatch: 120 seconds interactive, up to 600 seconds trigger. Original grace bounds the first ordinary trigger request; confirmation turns use 120 seconds. New explicit task/image requests get fresh windows within the total-turn cap. Full jitter up to 15 seconds; delta-seconds Retry-After (1–60) is a minimum. Same body/key for refusal retries; retry expiry never shortens a dispatched response/read bound |
+| 503 `capacity_exceeded` / `draining`, 409 `session_busy` | Retry proven refusals within a fixed window per request, measured from first dispatch: 120 seconds interactive, up to 600 seconds trigger. An admitted channel question whose first dispatch returns 503 `capacity_exceeded` keeps its slot for up to 600 seconds total from that dispatch. Each reattempt rechecks the original source, target expiry and authority. Stop, worker loss, acceptance or an ambiguous response ends the retry. Original grace bounds the first ordinary trigger request; confirmation turns use 120 seconds. New explicit task/image requests get fresh windows within the total-turn cap. Full jitter up to 15 seconds; delta-seconds Retry-After (1–60) is a minimum. Same body/key for refusal retries; retry expiry never shortens a dispatched response/read bound |
 | 401/403 or `agent_key_required` | Replace credential, clear binding, emit notice, retry once with recap |
 | `stale_response`, `outcome_unknown` | Fail without retry; discard binding |
 | `insufficient_credits`, `wallet_suspended`, `plan_entitlement_required` | Terminal billing refusal: no credential replacement, retry, backoff or rebind. Show top-up, suspended-wallet support/billing, or plan-entitlement guidance respectively |

@@ -227,16 +227,11 @@ impl LarkFamilyAdapter {
         registration: bool,
     ) -> AppResult<zeroize::Zeroizing<String>> {
         let config = lark_family_token_exchange_config();
-        let credential_json = zeroize::Zeroizing::new(
-            serde_json::json!({
-                "app_id": app_id,
-                "app_secret": app_secret,
-            })
-            .to_string(),
-        );
-        let mut credential_map = serde_json::Map::new();
-        credential_map.insert("app_id".to_string(), serde_json::json!(app_id));
-        credential_map.insert("app_secret".to_string(), serde_json::json!(app_secret));
+        let credential_map = crate::crypto::secret_json::SecretJson(serde_json::json!({
+            "app_id": app_id, "app_secret": app_secret,
+        }));
+        let credential_json = crate::crypto::secret_json::to_secret_string(&credential_map)
+            .map_err(|_| AppError::Internal("Invalid token_exchange credential".into()))?;
 
         if registration {
             let key = provider_token_exchange_service::cache_key(
@@ -1649,6 +1644,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

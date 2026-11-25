@@ -7,7 +7,6 @@
 //! transaction; a caller must never commit a partial reservation.
 
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
 use mongodb::bson::{self, Bson, Document, doc};
 
 use crate::errors::{AppError, AppResult};
@@ -394,7 +393,7 @@ pub async fn reserve_runtime_window_in_session(
         })
         .session(&mut *session)
         .await?;
-    let mut grants: Vec<CreditGrant> = cursor.stream(&mut *session).try_collect().await?;
+    let mut grants: Vec<CreditGrant> = crate::db::read_documents(&mut cursor, session).await?;
     grants.retain(|grant| {
         super::super::grants::service_scope_applies(
             &grant.scope,

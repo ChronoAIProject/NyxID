@@ -8,7 +8,7 @@ pub(super) async fn outcome(
     source: &str,
     result: Result<&Inbound, ()>,
 ) -> AppResult<Option<&'static str>> {
-    if row.platform == "x" {
+    if matches!(row.platform.as_str(), "x" | "whatsapp") {
         let observed = match &result {
             Ok(Inbound::Turn(_)) => Some(XOutcome::TurnStarted),
             Ok(Inbound::Queued) => Some(XOutcome::Queued),
@@ -21,14 +21,8 @@ pub(super) async fn outcome(
             x_diagnostics::for_channel(&state.db, row, outcome).await;
         }
     }
-    let code = match result {
-        Ok(Inbound::Silent("handled")) => return Ok(None),
-        Ok(Inbound::Silent(reason)) => reason,
-        Ok(Inbound::Busy) => "refused_busy",
-        Ok(Inbound::Queued) => "queued",
-        Ok(Inbound::Reply(_)) => "reply_without_turn",
-        Ok(Inbound::Turn(_)) => return Ok(None), // Bound in the turn transaction.
-        Err(()) => "refused_processing_error",
+    let Some(code) = disposition(row, result) else {
+        return Ok(None);
     };
     match diagnostics::finish(&state.db, row, source, code).await {
         Ok(true) => Ok(Some(code)),
@@ -38,6 +32,39 @@ pub(super) async fn outcome(
             Ok(None)
         }
     }
+}
+
+fn disposition(row: &NyxbotChannel, result: Result<&Inbound, ()>) -> Option<&'static str> {
+    Some(match result {
+        Ok(Inbound::Silent("handled")) => return None,
+        Ok(Inbound::Silent(reason)) => reason,
+        Ok(Inbound::Busy) => "refused_busy",
+        Ok(Inbound::Queued) => "queued",
+        Ok(Inbound::Reply(reply))
+            if row.platform == "whatsapp" && matches!(reply.kind, Some(NoticeKind::GuestBusy)) =>
+        {
+            "refused_busy"
+        }
+        Ok(Inbound::Reply(_)) => "reply_without_turn",
+        Ok(Inbound::Turn(_)) => return None, // Bound in the turn transaction.
+        Err(()) => "refused_processing_error",
+    })
+}
+
+pub(super) async fn native_whatsapp_outcome(
+    state: &AppState,
+    row: &NyxbotChannel,
+    result: Result<&Inbound, ()>,
+) {
+    let observed = match result {
+        Ok(Inbound::Turn(_)) => XOutcome::TurnStarted,
+        Ok(Inbound::Queued) => XOutcome::Queued,
+        _ => match disposition(row, result) {
+            Some("reply_without_turn") | None => return,
+            Some(code) => XOutcome::admission(code),
+        },
+    };
+    x_diagnostics::for_channel(&state.db, row, observed).await;
 }
 
 pub(super) async fn telegram_group_outcome(
@@ -90,7 +117,7 @@ pub(super) async fn gateway_source(
     activity: &Value,
     event: &str,
 ) -> AppResult<Option<String>> {
-    if activity["conversation"]["kind"] == "private" {
+    if activity["conversation"]["kind"] == "private" && row.platform != "whatsapp" {
         return Ok(None);
     }
     if row.gateway_source.is_none() {

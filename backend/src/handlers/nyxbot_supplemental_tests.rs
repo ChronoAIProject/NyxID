@@ -574,6 +574,7 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         request_hash: "fixture".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: true,
+        answer_delivery: None,
         revision: 1,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
@@ -1004,6 +1005,453 @@ async fn result_hook(f: &Fixture, row: &AssistantConversation) {
         None,
     ))
     .await;
+}
+
+#[tokio::test]
+async fn private_chat_handoff_direct_anchor_is_saved_only() {
+    let (mut fixture, _) = Box::pin(image_fixture("telegram", "direct")).await;
+    let thread = fixture
+        .state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id":&fixture.channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.event.relay_message_id = None;
+    for saved in [false, true] {
+        let mut decision = supplemental::Decision::new(Purpose::TeamResult);
+        decision.saved_result = saved;
+        let anchor = supplemental::event_anchor(
+            &fixture.state,
+            &fixture.event,
+            &fixture.channel,
+            &thread,
+            &mut decision,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            anchor.as_deref(),
+            saved.then_some(fixture.event.event_id.as_str())
+        );
+    }
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn private_chat_handoff_ordinary_subscriber_close_keeps_failure_copy() {
+    let fixture = Box::pin(fixture("closed_channel_subscriber")).await;
+    let closed = || {
+        let (sender, receiver) = broadcast::channel(1);
+        drop(sender);
+        receiver
+    };
+    let error = final_reply(closed()).await.unwrap_err();
+    let expected = engine::TurnError::new("turn_lost");
+    assert_eq!(
+        (error.code, error.message),
+        (expected.code, expected.message)
+    );
+    let wire = body_text(late_delivery::provider_stream(
+        fixture.state.clone(),
+        fixture.event.id.clone(),
+        "response".into(),
+        json!({"type":"response.created"}),
+        closed(),
+        Utc::now(),
+    ))
+    .await;
+    assert!(
+        wire.contains("response.failed")
+            && wire.contains("turn_lost")
+            && wire.contains("NyxBot could not finish this turn."),
+        "{wire}"
+    );
+    assert_eq!(status(&fixture).await, "streamed");
+    assert!(sends(&fixture).await.is_empty());
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_wake_expired_saved_delivery_preserves_owner_history() {
+    let (fixture, platform, row) = Box::pin(result_fixture(ChronoDuration::minutes(1))).await;
+    let saved = result_message(&fixture, &row).await;
+    let reply = saved.get_str("_id").unwrap();
+    let origin = &fixture.event.delivery.as_ref().unwrap().origin;
+    let source = sources::ResultSource::capture(row.active_turn.as_ref().unwrap(), origin);
+    let messages = fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    messages.update_one(doc! {"_id":reply},doc! {"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::hours(24)),"handoff_delivery":{"agent_id":&row.agent_id,"targets":[{"source":bson::to_bson(&source).unwrap(),"origin":bson::to_bson(origin).unwrap(),"additional":false}]},"handoff_delivery_due_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+    Box::pin(handoff_delivery::deliver(&fixture.state, reply))
+        .await
+        .unwrap();
+    let after = messages
+        .find_one(doc! {"_id":reply})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !after.contains_key("handoff_delivery_due_at")
+            && !after.contains_key("handoff_delivery_lease")
+    );
+    let history = Box::pin(crate::handlers::assistant_nyxagent::history(
+        State(fixture.state.clone()),
+        crate::handlers::assistant_team::owner_auth(OWNER).unwrap(),
+        Path(row.id),
+        axum::extract::Query(Default::default()),
+    ))
+    .await
+    .unwrap()
+    .0;
+    let history = serde_json::to_value(history).unwrap();
+    let messages = history["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["text"], "Useful answer");
+    assert!(platform.received_requests().await.unwrap().is_empty());
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn private_chat_handoff_settlement_parity() {
+    Box::pin(settlement_parity(false)).await;
+}
+
+#[tokio::test]
+async fn nyxbot_wake_settlement_parity() {
+    Box::pin(settlement_parity(true)).await;
+}
+
+async fn settlement_parity(wake: bool) {
+    use crate::models::assistant_conversation::{
+        EngineWorkerInstance, ReattachDeployment, TurnOrigin,
+    };
+    use crate::services::{
+        assistant_team_service, feature_flag_service as flags, security_readiness_service,
+    };
+    let (fixture, platform, mut initial) = Box::pin(notice_fixture()).await;
+    let db = &fixture.state.db;
+    mock_platform(&platform, "confirmed").await;
+    security_readiness_service::observe_test_handoff_readiness(db, true).await;
+    let messages =
+        db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    let conversations = db.collection::<bson::Document>(CONVERSATIONS);
+    let events = db.collection::<bson::Document>(EVENTS);
+    let original_event = events
+        .find_one(doc! {"_id":&fixture.event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let origin = fixture.event.delivery.as_ref().unwrap().origin.clone();
+    initial.channel = None;
+    initial.reply_channel = Some(origin.clone());
+    let active = initial.active_turn.as_mut().unwrap();
+    active.initiating_message_seq = Some(1);
+    active.worker_instance = Some(EngineWorkerInstance {
+        id: Uuid::new_v4().to_string(),
+        hostname: None,
+    });
+    let mut start =
+        engine::TurnStart::from(&engine::parse_turn(br#"{"text":"Same question"}"#).unwrap());
+    if wake {
+        active.origin = TurnOrigin::Event;
+        active.channel_event_id = None;
+        active.asked_from = None;
+        active.events.push(assistant_team_service::event(
+            "subagent_settled",
+            "done".into(),
+            None,
+        ));
+        initial.event_streak = 1;
+    } else {
+        active.channel_context = Some(serde_json::from_value(json!({"source_event_id":fixture.event.id,"channel_id":fixture.channel.id,"channel_bot_id":fixture.channel.channel_bot_id,"conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true})).unwrap());
+        start.owner_instruction_source =
+            Some(engine::OwnerInstructionSource::VerifiedPrivateChannel);
+    }
+    start.origin = active.origin;
+    start.reply_channel = initial.reply_channel.clone();
+    let reply_id = Uuid::new_v4().to_string();
+    let mut baseline = None;
+    for enabled in [false, true] {
+        let mut row = initial.clone();
+        flags::set_platform_override(
+            db,
+            flags::TURN_HANDOFF_FLAG_KEY,
+            &flags::FlagTarget::User(OWNER.into()),
+            enabled,
+            OWNER,
+        )
+        .await
+        .unwrap();
+        if enabled {
+            engine::enroll_restart(&mut row, &start, "question", ReattachDeployment {
+                destination_hash: "local-test".into(),
+                limits: serde_json::from_value(json!({"protocol":"nyxagent-reattach-v1","credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15},"max_events":64,"recent_events":32,"max_event_bytes":65536,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32})).unwrap(),
+            }, false);
+            let admission = row
+                .active_turn
+                .as_mut()
+                .unwrap()
+                .restart_admission
+                .as_mut()
+                .unwrap();
+            assert_eq!(admission.version, 4);
+            admission.reply_id.clone_from(&reply_id);
+        }
+        messages
+            .delete_many(doc! {"conversation_id":&row.id,"role":"assistant"})
+            .await
+            .unwrap();
+        conversations
+            .replace_one(doc! {"_id":&row.id}, bson::to_document(&row).unwrap())
+            .await
+            .unwrap();
+        events
+            .replace_one(doc! {"_id":&fixture.event.id}, &original_event)
+            .await
+            .unwrap();
+        let result = engine::TurnResult {
+            text: "Useful answer".into(),
+            session_id: Some("session".into()),
+            response_id: Some("response".into()),
+            error: None,
+        };
+        assert!(
+            engine::finish_turn(db, &row, &row.credential_api_key_id, &reply_id, &result)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut reply = messages
+            .find_one(doc! {"_id":&reply_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut conversation = conversations
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let queued_event = events
+            .find_one(doc! {"_id":&fixture.event.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.remove("settled_by_attempt").is_some(), enabled);
+        let saved_route = reply.remove("handoff_delivery");
+        assert_eq!(saved_route.is_some(), enabled && wake);
+        if let Some(saved_route) = saved_route {
+            let active = row.active_turn.as_ref().unwrap();
+            let source = sources::ResultSource::capture(active, &origin);
+            assert_eq!(
+                saved_route,
+                bson::Bson::Document(
+                    doc! {"agent_id":&row.agent_id,"targets":[{"origin":bson::to_bson(&origin).unwrap(),"source":bson::to_bson(&source).unwrap(),"additional":false}]}
+                )
+            );
+            assert_eq!(
+                reply.remove("handoff_delivery_due_at").as_ref(),
+                reply.get("created_at")
+            );
+        }
+        let settled_at = reply.remove("created_at").unwrap();
+        assert_eq!(conversation.remove("updated_at"), Some(settled_at.clone()));
+        if conversation.get_datetime("context_reset_at").is_ok() {
+            assert_eq!(
+                conversation.remove("context_reset_at"),
+                Some(settled_at.clone())
+            );
+        }
+        let metadata = reply.get_document_mut("turn_metadata").unwrap();
+        assert_eq!(
+            metadata
+                .get_document_mut("work")
+                .unwrap()
+                .remove("settled_at"),
+            Some(settled_at.clone())
+        );
+        let duration = settled_at.as_datetime().unwrap().timestamp_millis()
+            - row
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .started_at
+                .timestamp_millis();
+        assert_eq!(
+            metadata
+                .get_document_mut("timing")
+                .unwrap()
+                .remove("total_ms"),
+            Some(bson::Bson::Int64(duration))
+        );
+        Box::pin(crate::handlers::assistant_team::after_turn(
+            &fixture.state,
+            &row,
+            &result.text,
+            None,
+        ))
+        .await;
+        let wire = if wake {
+            let sends = platform.received_requests().await.unwrap();
+            assert_eq!(sends.len(), if enabled { 2 } else { 1 });
+            assert_eq!(
+                serde_json::from_slice::<Value>(&sends.last().unwrap().body).unwrap()["text"],
+                result.text
+            );
+            sends.last().unwrap().body.clone()
+        } else {
+            assert!(
+                crate::services::channel_turn_delivery::detach(db, &fixture.event.id)
+                    .await
+                    .is_ok()
+            );
+            Box::pin(late_delivery::process(&fixture.state, &fixture.event.id)).await;
+            let sends = sends(&fixture).await;
+            assert_eq!(sends.len(), if enabled { 2 } else { 1 });
+            assert!(String::from_utf8_lossy(&sends.last().unwrap().body).contains(&result.text));
+            sends.last().unwrap().body.clone()
+        };
+        let actual = (reply, conversation, queued_event, wire);
+        if let Some(expected) = baseline.take() {
+            assert_eq!(actual, expected)
+        } else {
+            baseline = Some(actual)
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn saved_wake_recovers_the_unsent_suffix_and_preserves_uncertain_sends() {
+    for uncertain in [false, true] {
+        Box::pin(saved_wake_delivery_race(uncertain, false)).await;
+    }
+}
+
+#[tokio::test]
+async fn saved_wake_recovers_while_the_predecessor_is_still_alive() {
+    Box::pin(saved_wake_delivery_race(false, true)).await;
+}
+
+async fn saved_wake_delivery_race(uncertain: bool, overlapping: bool) {
+    use crate::services::{channel_text_delivery as journal, durable_wake_tests as crash};
+    let (fixture, platform, mut row) = Box::pin(result_fixture(ChronoDuration::minutes(1))).await;
+    mock_platform(&platform, "confirmed").await;
+    let origin = fixture.event.delivery.as_ref().unwrap().origin.clone();
+    let turn = row.active_turn.as_mut().unwrap();
+    let mut event = crate::services::assistant_team_service::event("result", "done".into(), None);
+    event.reply_to.push(origin.clone());
+    event.source_event_ids.push(fixture.event.id.clone());
+    turn.events.push(event);
+    let target = sources::SavedDestination {
+        source: sources::ResultSource::capture(turn, &origin),
+        origin: origin.clone(),
+        additional: true,
+    };
+    let key = sources::saved_key(&turn.turn_id, &origin);
+    let db = &fixture.state.db;
+    journal::ensure_indexes(db).await.unwrap();
+    let saved = result_message(&fixture, &row).await;
+    let reply = saved.get_str("_id").unwrap();
+    let messages =
+        db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    messages.update_one(doc! {"_id":reply},doc! {"$set":{"text":"x".repeat(5000),"handoff_delivery":{"agent_id":&row.agent_id,"targets":[bson::to_bson(&target).unwrap()]},"handoff_delivery_due_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+    db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&fixture.channel.id},doc! {"$set":{"last_message_id":"newer-inbound","last_relay_message_id":"newer-inbound"}}).await.unwrap();
+    let site = if uncertain {
+        "text_part_provider_accepted"
+    } else {
+        "text_suffix_prepared"
+    };
+    let original = Box::pin(handoff_delivery::deliver(&fixture.state, reply));
+    if overlapping {
+        crash::resume_after(site, original, async {
+            let before = messages
+                .find_one(doc! {"_id":reply})
+                .await
+                .unwrap()
+                .unwrap();
+            messages
+                .update_one(
+                    doc! {"_id":reply},
+                    doc! {"$set":{"handoff_delivery_due_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            Box::pin(handoff_delivery::deliver(&fixture.state, reply))
+                .await
+                .unwrap();
+            let after = messages
+                .find_one(doc! {"_id":reply})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                before.get_str("handoff_delivery_lease").unwrap(),
+                after.get_str("handoff_delivery_lease").unwrap()
+            );
+        })
+        .await;
+        let receipt = journal::load(db, &key).await.unwrap().unwrap();
+        assert_eq!(
+            receipt.parts[0].state,
+            crate::models::channel_text_delivery::TextPartState::Sent
+        );
+        assert_eq!(
+            receipt.parts[1].state,
+            crate::models::channel_text_delivery::TextPartState::Pending
+        );
+    } else {
+        crash::drop_after(site, original).await;
+    }
+    assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+    messages
+        .update_one(
+            doc! {"_id":reply},
+            doc! {"$set":{"handoff_delivery_due_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+        .update_one(
+            doc! {"logical_key":&key,"parts.1.preparation.version":1},
+            doc! {"$set":{"parts.1.preparation.lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        Box::pin(handoff_delivery::deliver(&fixture.state, reply)),
+        Box::pin(handoff_delivery::deliver(&fixture.state, reply))
+    );
+    first.unwrap();
+    second.unwrap();
+    let sent = platform.received_requests().await.unwrap();
+    assert_eq!(sent.len(), if uncertain { 1 } else { 2 });
+    for request in sent {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["reply_to_message_id"], 17);
+    }
+    let receipt = journal::load(db, &key).await.unwrap().unwrap();
+    assert_eq!(receipt.parts.len(), 2);
+    use crate::models::channel_text_delivery::TextPartState;
+    assert_eq!(
+        receipt.parts[0].state,
+        if uncertain {
+            TextPartState::Sending
+        } else {
+            TextPartState::Sent
+        }
+    );
+    assert_eq!(
+        receipt.parts[1].state,
+        if uncertain {
+            TextPartState::Pending
+        } else {
+            TextPartState::Sent
+        }
+    );
+    db.drop().await.unwrap();
 }
 
 async fn result_message(f: &Fixture, row: &AssistantConversation) -> bson::Document {
@@ -1546,3 +1994,6 @@ async fn supplemental_result_preparation_failure_does_not_claim() {
         f.state.db.drop().await.unwrap();
     }).await;
 }
+
+#[path = "nyxbot_thread_reference_tests.rs"]
+mod thread_reference_tests;

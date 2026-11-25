@@ -18,10 +18,6 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  useAutomationSetup,
-  type AutomationSetup,
-} from "@/hooks/use-automations";
 import { AutomationPreferences } from "@/components/assistant/automation-preferences";
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -34,11 +30,14 @@ import {
   useUpdateTrigger,
 } from "@/hooks/use-triggers";
 import {
+  isAutomationHistoryAccessError,
   useAutomationChats,
   useAutomationRuns,
+  useAutomationSetup,
   useCancelAutomationRun,
   useRunAutomation,
   useSchedulePreview,
+  type AutomationSetup,
 } from "@/hooks/use-automations";
 import {
   useNyxBotAgents,
@@ -147,6 +146,8 @@ function AutomationsContent() {
           : translateUi("Webhook");
   };
   function actions(row: TriggerResponse) {
+    const agentId = row.delivery.type === "assistant" ? row.delivery.agent_id : undefined;
+    const restricted = agents.data?.agents.some((a) => a.id === agentId && a.can_use === false);
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -161,6 +162,7 @@ function AutomationsContent() {
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => setEditing(row)}>{translateUi("Edit")}</DropdownMenuItem>
           <DropdownMenuItem
+            disabled={restricted && row.status !== "active"}
             onClick={() => {
               void update
                 .mutateAsync({
@@ -175,7 +177,7 @@ function AutomationsContent() {
             {row.status === "active" ? translateUi("Pause") : translateUi("Resume")}
           </DropdownMenuItem>
           <DropdownMenuItem
-            disabled={row.status !== "active" || run.isPending}
+            disabled={row.status !== "active" || run.isPending || restricted}
             onClick={() => {
               void run
                 .mutateAsync(row.id)
@@ -298,7 +300,7 @@ function AutomationsContent() {
         />
       )}
       {history && (
-        <AutomationHistory row={history} onClose={() => setHistory(null)} />
+        <AutomationHistory key={history.id} row={history} onClose={() => setHistory(null)} />
       )}
       <OneTimeSecretDialog
         open={secrets.length > 0}
@@ -403,6 +405,7 @@ export function AutomationEditor({
     }
   }, [form, ownerTimezone, hasCalendarTimezone]);
   const values = form.watch();
+  const restrictedTarget = values.delivery_type === "assistant" && agents.data?.agents.some((a) => a.id === values.agent_id && a.can_use === false);
   const chats = useAutomationChats(values.deliver_type === "chat");
   const [spec, setSpec] = useState<ScheduleSpec>();
   const serialized = JSON.stringify(values);
@@ -545,6 +548,7 @@ export function AutomationEditor({
     );
   }
   async function save(v: AutomationForm) {
+    if (restrictedTarget) return;
     try {
       setError(undefined);
       if (!settings.data?.timezone)
@@ -831,7 +835,7 @@ export function AutomationEditor({
                   {select("agent_id", translateUi("Target agent"), [
                     ["", "Choose an agent…"],
                     ...(agents.data?.agents
-                      .filter((a) => a.status !== "destroyed")
+                      .filter((a) => a.status !== "destroyed" && a.can_use !== false)
                       .map((a) => [a.id, a.display_name ?? a.name] as const) ??
                       []),
                   ])}
@@ -904,7 +908,7 @@ export function AutomationEditor({
             <GroupedDialogActions
               changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "label", label: "Label" }, { key: "instruction", label: "Instruction" }, { key: "source", label: "Source", format: labelValue({ schedule: "Schedule", webhook: "Webhook" }) }, { key: "kind", label: "Schedule type", format: labelValue({ cron: "Calendar", every: "Every", at: "Once" }) }, { key: "expression", label: "Cron expression" }, { key: "timezone", label: "Timezone" }, { key: "amount", label: "Interval" }, { key: "unit", label: "Interval unit", format: labelValue({ minutes: "Minutes", hours: "Hours", days: "Days" }) }, { key: "anchor", label: "Anchor" }, { key: "at", label: "Run at" }, { key: "start", label: "Start" }, { key: "end", label: "End" }, { key: "max_runs", label: "Maximum runs" }, { key: "grace_seconds", label: "Grace period (seconds)" }, { key: "delivery_type", label: "Delivery type", format: labelValue({ assistant: "Assistant", notification: "Notification", webhook: "Webhook", agent: "Device agent" }) }, { key: "agent_id", label: "Target agent", format: (value) => { const agent = agents.data?.agents.find((agent) => agent.id === value); return agent?.display_name || agent?.name || String(value || "None"); } }, { key: "thread_policy", label: "Thread", format: labelValue({ default: values.source === "webhook" ? "Default (dedicated thread)" : "Default (NyxBot home, specialist dedicated)", home: "Home thread", dedicated: "One thread for this automation", new: "New thread each run" }) }, { key: "confirmation_policy", label: "Confirmation policy", format: labelValue({ changes: "Every changing action (recommended)", destructive: "Only destructive actions" }) }, { key: "deliver_type", label: "Send result to", format: labelValue({ thread: "Web thread", chat: "Channel chat", notification: "Mobile push" }) }, { key: "chat_id", label: "Chat", format: (value) => { const chat = chats.data?.find((chat) => chat.id === value); return chat ? `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}` : value ? "Saved chat" : "None"; } }, { key: "overlap", label: "If still running", format: labelValue({ skip: "Skip", queue: "Queue one" }) }, { key: "webhook_url", label: "Webhook URL", format: (value) => value === form.formState.defaultValues?.webhook_url ? "Saved destination (hidden)" : "New destination (hidden)" }, { key: "conversation_id", label: "Device conversation" }, { key: "verification_mode", label: "Verification method", format: labelValue({ bearer: "Bearer token", query: "Query token", hmac: "HMAC signature" }) }, { key: "signature_header", label: "Signature header" }])}
               intent={row ? "edit" : "create"}
-              disabled={!form.formState.isValid}
+              disabled={!form.formState.isValid || restrictedTarget}
               label={translateUi("automation")}
               dirty={form.formState.isDirty || prefillDirty}
               pending={busy}
@@ -937,7 +941,20 @@ function AutomationHistory({
   const history = useAutomationRuns(row.id);
   const cancelRun = useCancelAutomationRun();
   const [cancelling, setCancelling] = useState<string | null>(null);
-  const runs = history.data?.pages.flatMap((page) => page.runs) ?? [];
+  const [olderRunsFailed, setOlderRunsFailed] = useState(false);
+  const error = history.error;
+  const accessDenied = isAutomationHistoryAccessError(error);
+  const pages = accessDenied ? [] : history.data?.pages ?? [];
+  const runs = pages.flatMap((page) => page.runs);
+  const hasHistory = pages.length > 0;
+  const hasOlderRuns = hasHistory && history.hasNextPage;
+  // Polling refreshes the loaded pages and can clear the query's next-page error.
+  const retryOlderRuns = hasOlderRuns && (olderRunsFailed || history.isFetchNextPageError);
+  if (!hasHistory) {
+    if (cancelling !== null) setCancelling(null);
+    if (olderRunsFailed) setOlderRunsFailed(false);
+  }
+  const historyById = new Map(runs.map((run) => [run.id, run]));
   return (
     <Dialog
       open
@@ -965,20 +982,32 @@ function AutomationHistory({
             </DialogFooter>
           </DialogContent>
         </Dialog>
-        {cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
-        {history.error ? (
-          <ErrorBanner message={history.error.message} />
-        ) : history.isPending ? (
+        {accessDenied ? (
+          <ErrorBanner message={error.message} />
+        ) : error && !hasHistory ? (
+          <ErrorBanner message={error.message} onRetry={() => void history.refetch()} />
+        ) : history.isRefetchError && history.fetchStatus === "idle" ? (
+          <ErrorBanner
+            message={translateUi("Could not refresh run history.")}
+            onRetry={() => void history.refetch({ cancelRefetch: false })}
+          />
+        ) : null}
+        {hasHistory && cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
+        {!hasHistory && !error && (
           <Skeleton className="h-24 w-full" aria-label={translateUi("Loading runs")} />
-        ) : !runs.length ? (
+        )}
+        {hasHistory && runs.length === 0 && (
           <GroupedList>
             <GroupedRow title={translateUi("No runs yet.")} />
           </GroupedList>
-        ) : (
+        )}
+        {runs.length > 0 && (
           <div className="space-y-6">
             {runs.map((run) => (
               <GroupedList
                 key={run.id}
+                id={`automation-run-${run.id}`}
+                tabIndex={-1}
                 title={run.outcome.replaceAll("_", " ")}
                 footer={
                   <>
@@ -1003,7 +1032,19 @@ function AutomationHistory({
                         {formatAutomationTime(run.missed.from, zone)}{translateUi(" and")}{" "}
                         {formatAutomationTime(run.missed.through, zone)}.
                       </p>
-                    ) : run.failure_reason ? (
+                    ) : run.outcome === "skipped" && (run.reason === "overlap_skip" || run.reason === "overlap") ? (
+                      <OverlapSkipDetails
+                        runId={run.blocking_run_id}
+                        scheduledAt={historyById.get(run.blocking_run_id ?? "")?.scheduled_at}
+                        hasOlderRuns={hasOlderRuns}
+                        retryOlderRuns={retryOlderRuns}
+                        zone={zone}
+                      />
+                    ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "permit" ? (
+                      <p>{translateUi("A temporary server problem interrupted this run. Check completed actions before starting another run.")}</p>
+                    ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "shutdown" ? (
+                      <p>{translateUi("NyxID restarted during this run. Check completed actions before starting another run.")}</p>
+                    ) : run.failure_reason && (run.failure_reason.stage !== "scheduler" || !run.reason) ? (
                       <p>
                         {run.failure_reason.stage === "model_proxy"
                           ? translateUi("Model request failed")
@@ -1059,19 +1100,72 @@ function AutomationHistory({
             ))}
           </div>
         )}
-        {history.hasNextPage && (
-          <GroupedList>
+        {hasOlderRuns && (
+          <GroupedList footer={retryOlderRuns && (
+            <p role="alert" className="text-destructive">{translateUi("Could not load older runs.")}</p>
+          )}>
             <GroupedRow asChild interactive>
               <button
                 type="button"
-                disabled={history.isFetchingNextPage}
-                onClick={() => void history.fetchNextPage()}
-              >{translateUi("Load older runs")}</button>
+                disabled={history.isFetching}
+                onClick={async () => {
+                  const result = await history.fetchNextPage({ cancelRefetch: false });
+                  if (result.isFetchNextPageError) {
+                    setOlderRunsFailed(true);
+                  } else if (result.data && result.data.pages.length > pages.length) {
+                    setOlderRunsFailed(false);
+                  }
+                }}
+              >{history.isFetchingNextPage
+                ? translateUi("Loading older runs…")
+                : retryOlderRuns
+                  ? translateUi("Retry loading older runs")
+                  : translateUi("Load older runs")}</button>
             </GroupedRow>
           </GroupedList>
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function OverlapSkipDetails({ runId, scheduledAt, hasOlderRuns, retryOlderRuns, zone }: {
+  readonly runId: string | null | undefined;
+  readonly scheduledAt: string | undefined;
+  readonly hasOlderRuns: boolean;
+  readonly retryOlderRuns: boolean;
+  readonly zone: string;
+}) {
+  if (!runId) {
+    return <p>{translateUi("Skipped because another run was in progress. The blocking run was not recorded.")}</p>;
+  }
+  if (!scheduledAt && retryOlderRuns) {
+    return <p>{translateUi("Skipped because of run {{value1}}. Retry loading older runs to look for it.", { value1: runId })}</p>;
+  }
+  if (!scheduledAt) {
+    return (
+      <p>{hasOlderRuns
+        ? translateUi("Skipped because of run {{value1}}. Load older runs to look for it.", { value1: runId })
+        : translateUi("Skipped because of run {{value1}}. That run is unavailable in history.", { value1: runId })}
+      </p>
+    );
+  }
+  return (
+    <p>
+      <button
+        type="button"
+        className="text-primary-text underline"
+        onClick={() => {
+          const section = document.getElementById(`automation-run-${runId}`);
+          section?.scrollIntoView({ block: "nearest" });
+          section?.focus({ preventScroll: true });
+        }}
+      >
+        {translateUi("Skipped because of the run scheduled for {{value1}}", {
+          value1: formatAutomationTime(scheduledAt, zone, true),
+        })}
+      </button>
+    </p>
   );
 }
 

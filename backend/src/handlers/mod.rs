@@ -34,6 +34,8 @@ pub mod assistant_action_effects_services;
 pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
+#[cfg(test)]
+mod assistant_handoff_test_upstream;
 pub mod assistant_readiness;
 pub mod assistant_sharing;
 pub mod auth;
@@ -53,7 +55,7 @@ pub mod channel_conversations;
 pub mod channel_events;
 pub mod channel_managed;
 #[cfg(test)]
-mod channel_managed_tests;
+pub(crate) mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
@@ -137,6 +139,7 @@ pub mod social_auth;
 pub mod ssh_exec;
 pub mod ssh_tunnel;
 pub mod ssh_web_terminal;
+pub mod staging_qr;
 pub mod telegram_new;
 pub mod trigger_webhooks;
 pub mod triggers;

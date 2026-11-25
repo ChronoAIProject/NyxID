@@ -12,7 +12,11 @@ jest.mock("../../../theme/ThemeContext", () => {
   return { useTheme: () => ({ colors: lightColors, mode: "light" }) };
 });
 jest.mock("../../../i18n/LanguageProvider", () => ({
-  useAppLanguage: () => ({ language: "en", t: (phrase: string) => phrase }),
+  useAppLanguage: () => ({
+    language: "en",
+    t: (phrase: string, values?: { language: string }) =>
+      values ? phrase.replace("{{language}}", values.language) : phrase,
+  }),
 }));
 // The picker receives the settings state; importing its type must not load native recognition.
 jest.mock("expo-speech-recognition", () => ({
@@ -57,6 +61,9 @@ function language() {
       },
       ...languageOptions(["zh-CN", "ja-JP", "en-US"]),
     ],
+    manualEntry: false,
+    retry: jest.fn(),
+    openSpeechSettings: jest.fn(),
     choose: jest.fn(),
   };
 }
@@ -71,6 +78,28 @@ it("wraps the full-screen modal content in its own safe-area provider on first o
   expect(content.getByLabelText("Close")).toBeTruthy();
   expect(content.getByLabelText("Search languages")).toBeTruthy();
   expect(content.getByText("All languages")).toBeTruthy();
+});
+it("keeps the active language visible while picking another language for the next recording", async () => {
+  const state = language();
+  const close = jest.fn();
+  await render(
+    <DictationLanguagePicker
+      currentRecordingLanguage="Chinese (China)"
+      language={state}
+      onClose={close}
+    />,
+  );
+  expect(
+    screen.getByRole("header", { name: "Language for the next recording" }),
+  ).toBeTruthy();
+  const search = screen.getByLabelText("Search languages");
+  await fireEvent.changeText(search, "en-US");
+  expect(
+    screen.getByText("This recording continues in Chinese (China)."),
+  ).toBeTruthy();
+  await fireEvent.press(screen.getByRole("radio"));
+  expect(state.choose).toHaveBeenCalledWith("en-US");
+  expect(close).toHaveBeenCalledTimes(1);
 });
 it("searches endonyms and fullwidth codes, retains checked selection, and applies one choice for the next recording", async () => {
   const state = language();
@@ -104,4 +133,44 @@ it("shows an empty search state and can close without changing the language", as
   await fireEvent.press(screen.getByLabelText("Close"));
   expect(close).toHaveBeenCalledTimes(1);
   expect(state.choose).not.toHaveBeenCalled();
+});
+it("offers retry, speech settings and an explicit validated language when the provider returns no list", async () => {
+  const state = {
+    ...language(),
+    manualEntry: true,
+    listUnavailable: true,
+    options: [language().options[0]!],
+  };
+  const close = jest.fn();
+  await render(<DictationLanguagePicker language={state} onClose={close} />);
+  await fireEvent.press(screen.getByText("Retry language list"));
+  expect(state.retry).toHaveBeenCalledTimes(1);
+  await fireEvent.press(screen.getByText("Speech recognition settings"));
+  expect(state.openSpeechSettings).toHaveBeenCalledTimes(1);
+  await fireEvent.changeText(screen.getByLabelText("Language code"), " ZH_cn ");
+  await fireEvent.press(screen.getByText("Use language code"));
+  expect(state.choose).toHaveBeenCalledWith("zh-CN");
+  expect(close).toHaveBeenCalledTimes(1);
+});
+
+it("rejects invalid manual language codes before persisting any choice", async () => {
+  const state = {
+    ...language(),
+    manualEntry: true,
+    listUnavailable: true,
+    options: [language().options[0]!],
+  };
+  const close = jest.fn();
+  await render(<DictationLanguagePicker language={state} onClose={close} />);
+  for (const value of [
+    "English",
+    "zh CN",
+    "en-US;lang=ja-JP",
+    "en-u-ca-gregory",
+  ]) {
+    await fireEvent.changeText(screen.getByLabelText("Language code"), value);
+    await fireEvent.press(screen.getByText("Use language code"));
+    expect(state.choose).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  }
 });

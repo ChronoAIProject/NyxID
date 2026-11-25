@@ -168,8 +168,8 @@ async fn queued_source_bind_and_delivery_command_count_parity() {
                 .await
                 .unwrap();
                 session.commit_transaction().await.unwrap();
-                assert_eq!(source.as_deref(), Some(ingress.as_str()));
-                source_link(&turn, source.as_deref().unwrap());
+                assert_eq!(source.trace_request.as_deref(), Some(ingress.as_str()));
+                source_link(&turn, source.trace_request.as_deref().unwrap());
                 scope(TurnContext::for_turn(&turn), async {
                     assert!(delivery::claim_send(&db, "source", "claim").await.unwrap());
                     delivery::finish(&db, "source", "claim", "unknown")

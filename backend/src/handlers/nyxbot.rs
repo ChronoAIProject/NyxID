@@ -14,6 +14,7 @@
 use crate::models::nyxbot_gateway_release::ReleaseReason;
 use crate::services::assistant_links::AssistantPage;
 use crate::services::channel_inbound_diagnostics::{self as x_diagnostics, Outcome as XOutcome};
+use crate::services::nyxbot_channel_key as channel_key;
 use crate::services::nyxbot_dispatch_identity as dispatch_identity;
 use crate::services::nyxbot_gateway_release_service as releases;
 use crate::services::org_channel_service::OrgAccess;
@@ -45,7 +46,7 @@ use crate::{
         channel_bot::ChannelBot,
         nyxbot_channel::{
             COLLECTION_NAME as CHANNELS, EVENTS_COLLECTION_NAME as EVENTS, LINK_CODE_TTL_HOURS,
-            NyxbotChannel, NyxbotEvent, NyxbotThread, NyxbotWatch,
+            NoticeLanguage, NyxbotChannel, NyxbotEvent, NyxbotThread, NyxbotWatch,
             THREADS_COLLECTION_NAME as THREADS, WATCHES_COLLECTION_NAME as WATCHES,
         },
         nyxbot_event_binding::{COLLECTION_NAME as EVENT_BINDINGS, NyxbotEventBinding},
@@ -58,6 +59,7 @@ use crate::{
 };
 
 use super::assistant_team::{Pool, Started, start_server_turn};
+use crate::services::channel_notices::Notice;
 
 #[path = "nyxbot_provider_refusal.rs"]
 mod provider_refusal;
@@ -511,9 +513,9 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
         401 => "gateway_not_authenticated",
         403 => "gateway_permission_required",
         400 if response.body["code"].as_str() == Some("invalid_request")
-            && response.body["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("provider")) =>
+            && response.body["detail"].as_str().is_some_and(|detail| {
+                detail.trim() == PROVIDER_SLUG || detail.contains("provider")
+            }) =>
         {
             "gateway_provider_not_registered"
         }
@@ -996,10 +998,14 @@ async fn connect_inner(
     if gateway {
         let agent = create_gateway_agent_key(state, owner, &label).await?;
         agent_key_ciphertext = Some(
-            state
-                .encryption_keys
-                .encrypt(agent.full_key.as_bytes())
-                .await?,
+            channel_key::seal(
+                &state.encryption_keys,
+                &id,
+                owner,
+                &agent.id,
+                &agent.full_key,
+            )
+            .await?,
         );
         agent_key_id = Some(agent.id.clone());
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
@@ -1032,6 +1038,11 @@ async fn connect_inner(
         route_api_key_id: route_key.id.clone(),
         route_id: None,
         agent_api_key_id: agent_key_id.clone(),
+        secret_context_versions: if gateway && state.encryption_keys.contextual_record_writes() {
+            [(channel_key::FIELD.to_owned(), 3)].into()
+        } else {
+            Default::default()
+        },
         agent_key_ciphertext,
         gateway_channel_id: None,
         gateway_record_id: None,
@@ -2209,10 +2220,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     releases::record_ack(&state.db, &release, &channel_id, version)
         .await
         .map_err(|_| "storage_unavailable")?;
-    let Ok(ciphertext) = state
-        .encryption_keys
-        .encrypt(agent.full_key.as_bytes())
-        .await
+    let Ok(ciphertext) = channel_key::seal(&state.encryption_keys, &row.id, owner, &agent.id, &agent.full_key).await
     else {
         return Err(discard("encryption_unavailable").await);
     };
@@ -2236,12 +2244,17 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     if let Some(bot_id) = next.gateway_bot_id.as_deref() {
         set.insert("gateway_bot_id", bot_id);
     }
-    let swap = doc! {"$set": set, "$unset": {"pending_agent_api_key_id": "",
-    "pending_route_api_key_id": "",
-    "gateway_groups": "", "gateway_fallback_at": "",
-    "relay_attempted_at": ""}};
-    let fence = doc! {"_id": &row.id, "status": "active", "transport": "direct",
-    "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": &agent.id};
+    let mut unset = doc! {"pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+        "gateway_groups": "", "gateway_fallback_at": "", "relay_attempted_at": ""};
+    if state.encryption_keys.contextual_record_writes() {
+        set.insert(channel_key::VERSION_PATH, 3);
+    } else {
+        unset.insert(channel_key::VERSION_PATH, "");
+    }
+    let swap = doc! {"$set": set, "$unset": unset};
+    let fence = doc! {"_id": &row.id, "user_id":owner, "status": "active", "transport": "direct",
+        "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": &agent.id,
+        "pending_route_api_key_id": &route_key.id, "gateway_setup_release_id": &release.id};
     let swapped = transport::swap_route(state, row, &route_key.id, fence, swap).await;
     match swapped {
         Ok(true) => {}
@@ -2305,14 +2318,7 @@ async fn decrypt_agent_key(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> AppResult<Option<Zeroizing<String>>> {
-    let Some(ciphertext) = row.agent_key_ciphertext.as_ref() else {
-        return Ok(None);
-    };
-    let bytes = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
-    Ok(Some(Zeroizing::new(
-        String::from_utf8(bytes.to_vec())
-            .map_err(|_| AppError::Internal("Channel key unavailable".into()))?,
-    )))
+    channel_key::open(&state.encryption_keys, row).await
 }
 
 /// Stop NyxBot answering a bot: delete the gateway channel (gateway path),
@@ -3687,6 +3693,7 @@ impl std::fmt::Display for InboundReply {
 }
 
 struct Sender<'a> {
+    truncated_original_bytes: Option<usize>,
     /// Provider classification before any normalization used by legacy chat.
     /// Only the new execution-source proof uses this distinction.
     original_kind: Option<crate::models::channel_thread::ThreadSenderKind>,
@@ -4087,7 +4094,7 @@ async fn start_chat_turn(
     let native = row.transport == "gateway" && row.gateway_source.is_some();
     if native && text.trim().is_empty() && had_media {
         return Ok(Inbound::Reply(
-            crate::services::nyxbot_response_recovery::MEDIA_UNAVAILABLE.into(),
+            Notice::MediaUnavailable.text(chat.notice_language).into(),
         ));
     }
     let private = chat.kind.as_deref() == Some("private");
@@ -4117,7 +4124,7 @@ async fn start_chat_turn(
         if !crate::services::org_channel_service::guest_rate(&state.db, &execution, &row.id).await?
         {
             return Ok(Inbound::Reply(
-                "Please wait a moment before sending another message.".into(),
+                Notice::SlowDown.text(chat.notice_language).into(),
             ));
         }
         Some(execution)
@@ -4210,7 +4217,19 @@ async fn start_chat_turn(
             Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
         }
     }
+    let original_bytes = sender.truncated_original_bytes.unwrap_or(text.len());
+    let unnamed = (!private && guest && sender.display_name.is_none())
+        .then(|| chats::unnamed_sender(&row.platform, sender.id));
+    let attributed = (!private)
+        .then(|| chats::attributed(sender.display_name.or(unnamed.as_deref()), text, guest));
+    let (message, completeness) = crate::services::channel_turn_context::bounded_message(
+        attributed.as_deref().unwrap_or(text),
+        engine::MAX_MESSAGE_CHARS,
+        original_bytes,
+        sender.truncated_original_bytes.is_some(),
+    );
     let source_context = crate::models::assistant_conversation::ChannelTurnContext {
+        text_completeness: Some(completeness),
         org_origin: execution.is_some().then(|| Box::new(origin.clone())),
         source_event_id: event_key.to_owned(),
         channel_id: row.id.clone(),
@@ -4273,25 +4292,12 @@ async fn start_chat_turn(
         } else {
             " With this message the owner declined the pending action; do not retry it."
         });
-    }
-    let mut message = if private {
-        excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
-    } else {
-        // Some platforms send no names: guests are still told apart.
-        let unnamed = (guest && sender.display_name.is_none())
-            .then(|| chats::unnamed_sender(&row.platform, sender.id));
-        excerpt(
-            &chats::attributed(sender.display_name.or(unnamed.as_deref()), text, guest),
-            engine::MAX_MESSAGE_CHARS - 16,
-        )
-    };
-    if text.contains("[post truncated]") && !message.contains("[post truncated]") {
-        const MARKER: &str = "\n[post truncated]";
-        message = message
-            .chars()
-            .take(engine::MAX_MESSAGE_CHARS - MARKER.len())
-            .collect();
-        message.push_str(MARKER);
+        if allow {
+            note.push(' ');
+            note.push_str(
+                crate::services::assistant_acknowledgement_service::allowed_card_continuation(),
+            );
+        }
     }
     let title = if shared {
         None
@@ -4317,7 +4323,17 @@ async fn start_chat_turn(
             )
         }))
     };
-    late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
+    late_delivery::prepare(
+        state,
+        event_key,
+        row,
+        &origin,
+        sender,
+        guest,
+        addressed,
+        chat.notice_language,
+    )
+    .await?;
     let telegram_input = if !guest
         && canonical_platform(&row.platform) == "telegram"
         && !sender.media.is_empty()
@@ -4427,8 +4443,15 @@ async fn start_chat_turn(
                 && exists
                 && origin.thread.is_none()
                 && let Some(key) = question_key.as_deref()
-                && let Some(reply) =
-                    repeated_question(state, row, &conversation_id, key, &origin).await?
+                && let Some(reply) = repeated_question(
+                    state,
+                    row,
+                    &conversation_id,
+                    key,
+                    &origin,
+                    chat.notice_language,
+                )
+                .await?
             {
                 return Ok(Inbound::Reply(reply.into()));
             }
@@ -4439,7 +4462,7 @@ async fn start_chat_turn(
                 return Ok(if addressed {
                     Inbound::Reply(InboundReply::fixed(
                         NoticeKind::GuestBusy,
-                        "I'm answering another message right now. Please try again in a moment.",
+                        Notice::GuestBusy.text(chat.notice_language),
                     ))
                 } else {
                     Inbound::Silent("refused_busy")
@@ -4451,13 +4474,15 @@ async fn start_chat_turn(
             // The chat is busy (or the owner's channel pool is full): queue the
             // message for the agent's next turn instead of bouncing it. Its
             // reply is an asynchronous update delivered back to this chat.
-            let note = format!(
-                "Queued verified channel message; answer it next. The individually verified sources \
-                are listed by event_id in this turn's context. Message (JSON quoted data): {}",
-                json!(excerpt(text, 3000))
+            let (body, completeness) = crate::services::channel_turn_context::bounded_message(
+                text,
+                engine::MAX_MESSAGE_CHARS,
+                original_bytes,
+                sender.truncated_original_bytes.is_some(),
             );
-            let mut event =
-                crate::services::assistant_team_service::bound_event("message", note, None, None);
+            let mut source_context = source_context;
+            source_context.text_completeness = Some(completeness);
+            let mut event = queued_channel_message(&body, original_bytes);
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
             event.source_event_ids = vec![event_key.to_owned()];
@@ -4505,6 +4530,32 @@ async fn start_chat_turn(
     }
 }
 
+fn queued_channel_message(
+    body: &str,
+    original_bytes: usize,
+) -> crate::models::assistant_conversation::AgentEvent {
+    const PREFIX: &str = "Queued verified channel message; answer it next. The individually verified sources are listed by event_id in this turn's context. Message (JSON quoted data): ";
+    let mut event = crate::services::assistant_team_service::bound_event(
+        "message",
+        format!("{PREFIX}{}", json!(body)),
+        None,
+        None,
+    );
+    let limit = engine::event_text_limit(&event);
+    if event.text.chars().nth(limit).is_some() {
+        // One input character can occupy six characters in a JSON string.
+        let (preview, _) = crate::services::channel_turn_context::bounded_message(
+            body,
+            (limit - PREFIX.len() - 2) / 6,
+            original_bytes,
+            true,
+        );
+        let legacy = format!("{PREFIX}{}", json!(preview));
+        event.channel_message = Some(std::mem::replace(&mut event.text, legacy));
+    }
+    event
+}
+
 /// When `key` is the question the thread is answering right now, or one
 /// already queued there, the reply to a repeat of it (and the chat is added
 /// to the running answer's recipients).
@@ -4514,6 +4565,7 @@ async fn repeated_question(
     conversation_id: &str,
     key: &str,
     origin: &ChannelOrigin,
+    language: Option<NoticeLanguage>,
 ) -> AppResult<Option<String>> {
     let actor = origin
         .org_execution
@@ -4531,9 +4583,9 @@ async fn repeated_question(
         .map(|queued| {
             queued.map(|queued| {
                 if queued {
-                    "That question is already queued; I'll answer it in this thread.".into()
+                    Notice::QueuedThread.text(language).into()
                 } else {
-                    "I'm already working on that question and will answer in this thread.".into()
+                    Notice::WorkingThread.text(language).into()
                 }
             })
         });
@@ -4545,16 +4597,14 @@ async fn repeated_question(
         .filter(|turn| turn.invocation_id.is_none() && turn.question_key.as_deref() == Some(key))
     {
         if turn.asked_from.as_ref() == Some(origin) {
-            return Ok(Some(
-                "I'm still working on that question and will answer it shortly.".into(),
-            ));
+            return Ok(Some(Notice::Working.text(language).into()));
         }
         let waiting =
             engine::also_deliver(&state.db, actor, conversation_id, &turn.turn_id, origin).await?;
         return Ok(Some(if waiting {
-            "I'm already working on that question; I'll send the answer here too.".into()
+            Notice::WorkingHereToo.text(language).into()
         } else {
-            "I'm already working on that question; you'll find the answer in NyxID.".into()
+            Notice::WorkingNyxid.text(language).into()
         }));
     }
     if current
@@ -4594,14 +4644,12 @@ async fn repeated_question(
                 None => false,
             };
             return Ok(Some(if waiting {
-                "I'm already working on that question; I'll send the answer here.".into()
+                Notice::WorkingHere.text(language).into()
             } else {
-                "I've just answered that question; you'll find it in NyxID.".into()
+                Notice::Answered.text(language).into()
             }));
         }
-        return Ok(Some(
-            "That question is already queued; I'll answer it next.".into(),
-        ));
+        return Ok(Some(Notice::QueuedNext.text(language).into()));
     }
     Ok(None)
 }
@@ -4651,6 +4699,15 @@ async fn final_reply(
                             {
                                 error.message = message.to_owned();
                             }
+                            if error.code == "capacity_exceeded" {
+                                error.metadata = Some(Box::new(
+                                    crate::models::assistant_message::TurnMetadata {
+                                        capacity_wait_ms: event["error"]["capacity_wait_ms"]
+                                            .as_u64(),
+                                        ..Default::default()
+                                    },
+                                ));
+                            }
                             Err(Box::new(error))
                         };
                     }
@@ -4659,7 +4716,9 @@ async fn final_reply(
             }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => {
-                return Err(Box::new(engine::TurnError::new("turn_lost")));
+                return Err(Box::new(
+                    engine::TurnError::new("turn_lost").at_stage("subscriber_closed"),
+                ));
             }
         }
     }
@@ -5445,7 +5504,7 @@ async fn get_event_context_inner(
                         .status(StatusCode::OK)
                         .header("content-type", "application/json")
                         .header("cache-control", "no-store")
-                        .body(Body::from(bytes))
+                        .body(Body::from(bytes::Bytes::from_owner(bytes)))
                         .unwrap_or_else(|_| {
                             problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
                         })
@@ -5481,7 +5540,7 @@ async fn get_event_context_inner(
             .status(StatusCode::OK)
             .header("content-type", "application/json")
             .header("cache-control", "no-store")
-            .body(Body::from(bytes))
+            .body(Body::from(bytes::Bytes::from_owner(bytes)))
             .unwrap_or_else(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")),
         Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
@@ -5859,6 +5918,7 @@ async fn custom_responses(
         return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
     }
     let sender = Sender {
+        truncated_original_bytes: None,
         original_kind: None,
         original_message: true,
         media: Vec::new(),
@@ -6489,7 +6549,7 @@ async fn dispatch_relay_response(
         .filter(|text| !text.is_empty())
         .unwrap_or(text);
     if text.is_empty() && !media.is_empty() {
-        text = "Please review the attached Telegram media.".into();
+        text = crate::services::telegram_input::ATTACHMENT_ONLY.into();
     }
     let human = sender_kind == crate::models::channel_thread::ThreadSenderKind::Human;
     // Admission includes chat reconciliation and turn preparation. Keep that
@@ -6502,6 +6562,7 @@ async fn dispatch_relay_response(
         activity,
         context["event_ref"].as_str(),
         &Sender {
+            truncated_original_bytes: None,
             original_kind: None,
             media,
             kind: sender_kind,
@@ -6772,6 +6833,22 @@ async fn gateway_inbound(
             admission_diagnostics::telegram_group_outcome(state, row, source, activity, code).await;
         }
     }
+    if row.platform == "whatsapp" && activity["conversation"]["kind"] == "private" {
+        if row.gateway_source.is_some() {
+            admission_diagnostics::native_whatsapp_outcome(
+                state,
+                row,
+                result.as_ref().map_err(|_| ()),
+            )
+            .await;
+        }
+        if matches!(result, Ok(Inbound::Busy)) {
+            let language =
+                crate::services::channel_notices::chat_language(&state.db, &row.id, partition)
+                    .await?;
+            return Ok(Inbound::Reply(Notice::NativeBusy.text(language).into()));
+        }
+    }
     result
 }
 
@@ -6833,6 +6910,7 @@ async fn gateway_inbound_inner(
             &json!({"conversation":{"type":kind}}),
             message,
             text,
+            None,
             event_key,
             true,
         ))
@@ -6923,28 +7001,15 @@ async fn gateway_inbound_inner(
             chats::direct_partition(chat_id, sender.id, thread_id),
         );
     }
-    // Encrypted; opaque, never logged.
-    if let Some(event_ref) = event_ref
-        && let Ok(sealed) = state.encryption_keys.encrypt(event_ref.as_bytes()).await
-    {
-        metadata.extend(
-            crate::services::channel_supplemental_delivery::reference_fields(
-                sealed,
-                Utc::now() + ChronoDuration::minutes(29),
-                relay_message_id.as_deref(),
-            ),
-        );
-    }
-    if !metadata.is_empty() {
-        let _ = Box::pin(async {
-            state
-                .db
-                .collection::<NyxbotThread>(THREADS)
-                .update_one(doc! {"_id": &chat.id}, doc! {"$set": metadata})
-                .await
-        })
-        .await;
-    }
+    let _ = Box::pin(crate::services::nyxbot_thread_reference::record_activity(
+        &state.db,
+        &state.encryption_keys,
+        &chat,
+        metadata,
+        event_ref,
+        relay_message_id.as_deref(),
+    ))
+    .await;
     // Only legacy admission implies addressing. A gateway may already have
     // accepted broader thread admission before its acknowledgement is stored.
     // Versioned facts must use explicit evidence even during that window.
@@ -7159,27 +7224,59 @@ pub async fn deliver_to_for(
     images: Option<&images::ImageSendPlan>,
     purpose: supplemental::Purpose,
 ) {
-    let mut decision = supplemental::Decision::new(purpose);
-    decision.turn = row.active_turn.as_ref().map(|turn| turn.turn_id.clone());
-    decision.event = origin.native_event_id.clone().or_else(|| {
-        row.active_turn
-            .as_ref()
-            .filter(|turn| turn.asked_from.as_ref() == Some(origin))
-            .and_then(|turn| turn.channel_event_id.clone())
+    let source = row.active_turn.as_ref().map(|turn| {
+        crate::services::channel_supplemental_delivery::ResultSource::capture(turn, origin)
     });
-    let trace = row
-        .active_turn
+    let _ = deliver_from_source(state, row, origin, text, images, purpose, source).await;
+}
+
+async fn deliver_from_source(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    text: &str,
+    images: Option<&images::ImageSendPlan>,
+    purpose: supplemental::Purpose,
+    source: Option<crate::services::channel_supplemental_delivery::ResultSource>,
+) -> AppResult<()> {
+    let mut decision = supplemental::Decision::new(purpose);
+    let turn_id = source.as_ref().map(|source| source.turn_id.clone());
+    decision.turn.clone_from(&turn_id);
+    decision.event = source
         .as_ref()
-        .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
+        .and_then(|binding| binding.event_id.clone())
+        .or_else(|| origin.native_event_id.clone());
+    decision.source = source;
+    decision.saved_result = row.active_turn.is_none() && turn_id.is_some();
+    let trace = turn_id
+        .as_deref()
+        .and_then(crate::turn_trace::TurnContext::for_turn);
     crate::turn_trace::scope(trace, async {
         // Boxed: the image and platform sends make this future large, and it is
         // awaited deep inside turn settlement.
         let result: AppResult<()> = Box::pin(async {
+            let fixed = match purpose {
+                supplemental::Purpose::CheckingNotice => Some(Notice::Checking),
+                supplemental::Purpose::CapacityNotice => Some(Notice::Pending),
+                _ => None,
+            };
+            let text = if let Some(notice) = fixed {
+                notice.text(
+                    crate::services::channel_notices::chat_language(
+                        &state.db,
+                        &origin.nyxbot_channel_id,
+                        &origin.partition,
+                    )
+                    .await?,
+                )
+            } else {
+                text
+            };
             if origin.thread.is_some() {
                 let image_turn = images.and_then(|plan| {
-                    row.active_turn.as_ref().map(|turn| images::ImageTurn {
+                    turn_id.as_deref().map(|turn_id| images::ImageTurn {
                         plan,
-                        turn_id: &turn.turn_id,
+                        turn_id,
                         app_visible: !row.guest_turn && row.channel.is_none(),
                     })
                 });
@@ -7201,9 +7298,60 @@ pub async fn deliver_to_for(
             if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
                 return Err(AppError::NotFound("Native reply source unavailable".into()));
             }
+            let mut bound_anchor = None;
+            if decision.saved_result && channel.gateway_source.is_none() {
+                use crate::services::channel_supplemental_delivery::{Source, source_for};
+                match source_for(&state.db, &row.id, origin, decision.source.as_ref()).await? {
+                    Source::Event(event) => {
+                        bound_anchor = supplemental::event_anchor(
+                            state,
+                            &event,
+                            &channel,
+                            &thread,
+                            &mut decision,
+                        )
+                        .await?;
+                        if bound_anchor.is_none() {
+                            return Ok(());
+                        }
+                    }
+                    Source::Missing => {
+                        decision.skip(supplemental::Reason::MissingAnchor);
+                        return Ok(());
+                    }
+                    Source::Unbound if channel.transport != "gateway" => {
+                        let Some(id) = thread.last_message_id.as_deref() else {
+                            decision.skip(supplemental::Reason::MissingAnchor);
+                            return Ok(());
+                        };
+                        use crate::services::channel_supplemental_delivery::{
+                            result_window, validate_anchor,
+                        };
+                        match validate_anchor(&state.db, &channel, &thread, id, None).await? {
+                            Ok(Some(message)) => {
+                                if let Err(reason) = result_window(purpose, message.created_at) {
+                                    decision.skip(reason);
+                                    return Ok(());
+                                }
+                                bound_anchor = Some(id.to_owned());
+                                decision.anchor = supplemental::Anchor::ChatPointer;
+                            }
+                            Err(reason) => {
+                                decision.skip(reason);
+                                return Ok(());
+                            }
+                            Ok(None) => {
+                                decision.skip(supplemental::Reason::MissingAnchor);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Source::Unbound => {}
+                }
+            }
             let mut reply = bounded_reply(text);
             if let Some(plan) = images
-                && let Some(turn) = row.active_turn.as_ref()
+                && let Some(turn_id) = turn_id.as_deref()
             {
                 let report = images::report_or_failure(
                     state,
@@ -7213,10 +7361,15 @@ pub async fn deliver_to_for(
                         },
                         owner: &row.user_id,
                         conversation_id: &row.id,
-                        turn_id: &turn.turn_id,
+                        turn_id,
                         channel: &channel,
                         thread: &thread,
-                        anchor: images::thread_anchor(&channel, &thread),
+                        anchor: bound_anchor.as_ref().map_or_else(
+                            || images::thread_anchor(&channel, &thread),
+                            |id| images::ImageAnchor::Inbound {
+                                message_id: id.clone(),
+                            },
+                        ),
                         audience: images::ImageAudience {
                             owner_private: !row.guest_turn
                                 && (row.channel.is_none()
@@ -7251,15 +7404,25 @@ pub async fn deliver_to_for(
             // reference yet: it is answered through NyxID's relay, as before.
             let relay_era =
                 thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
-            if (channel.transport != "gateway" || relay_era) && thread.last_message_id.is_some() {
-                decision.anchor = supplemental::Anchor::ChatPointer;
-                decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
-            }
             if channel.transport == "gateway" && !relay_era {
                 supplemental::relay(state, row, origin, &channel, &thread, &reply, &mut decision)
                     .await?;
-            } else if let Some(message_id) = thread.last_message_id.as_deref() {
-                direct_reply(state, &channel, message_id, &reply, None).await?;
+            } else if let Some(message_id) = bound_anchor
+                .as_deref()
+                .or(thread.last_message_id.as_deref())
+            {
+                if bound_anchor.is_none() {
+                    decision.anchor = supplemental::Anchor::ChatPointer;
+                }
+                if decision.saved_result {
+                    supplemental::prepare_local_result(
+                        state, &channel, &thread, message_id, &reply,
+                    )
+                    .await?;
+                }
+                decision.dispatch(supplemental::Egress::LocalRelay);
+                supplemental::send_local(state, &channel, message_id, origin, &reply, &decision)
+                    .await?;
                 decision.outcome("confirmed");
             }
             Ok(())
@@ -7267,9 +7430,15 @@ pub async fn deliver_to_for(
         .await;
         decision.result(&result);
         if let Err(error) = &result {
-            tracing::debug!(%error, "NyxBot channel update not delivered");
+            tracing::debug!(
+                error_code = error.error_code(),
+                "NyxBot channel update not delivered"
+            );
         }
-        decision.record(state, row).await;
+        decision
+            .record_ids(state, &row.user_id, &row.id, turn_id.as_deref())
+            .await;
+        result
     })
     .await
 }
@@ -7614,7 +7783,7 @@ pub async fn relay_callback(
         && chats::native_message(&raw)
             .is_some_and(|m| !crate::services::telegram_input::attachments(m).is_empty())
     {
-        text = "Please review the attached Telegram media.".into();
+        text = crate::services::telegram_input::ATTACHMENT_ONLY.into();
     }
     let raw_title = ["message", "edited_message", "channel_post"]
         .iter()
@@ -7631,7 +7800,7 @@ pub async fn relay_callback(
         .map(str::to_owned);
     let message_id = claims.message_id.clone();
     // Private chats are tracked only where inbound diagnostics exist.
-    let track_admission = kind != "private" || row.platform == "x";
+    let track_admission = kind != "private" || matches!(row.platform.as_str(), "x" | "whatsapp");
     let admission_facts = if track_admission {
         match crate::services::nyxbot_admission_service::begin(
             &state.db,
@@ -7686,37 +7855,39 @@ pub async fn relay_callback(
                 "relay_before_media_text",
             )
             .await;
-            let text = if matches!(row.platform.as_str(), "lark" | "feishu")
-                && raw
-                    .pointer("/event/message/message_type")
-                    .and_then(Value::as_str)
-                    == Some("post")
-                && (admitted.source_media_declared.unwrap_or(0) > 0
-                    || feature_flag_service::personal_flag_enabled(
-                        &state.db,
-                        &row.user_id,
-                        feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
-                    )
-                    .await
-                    .unwrap_or(false))
-            {
-                let bot_id =
-                    match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
-                        Ok(bot) => own_user_id(&state, &bot).await,
-                        Err(_) => None,
-                    };
-                crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
-                    .map(|post| post.text)
-                    .unwrap_or_default()
-            } else {
-                chats::named_mentions(&text, &raw)
-            };
+            let (text, truncated_original_bytes) =
+                if matches!(row.platform.as_str(), "lark" | "feishu")
+                    && raw
+                        .pointer("/event/message/message_type")
+                        .and_then(Value::as_str)
+                        == Some("post")
+                    && (admitted.source_media_declared.unwrap_or(0) > 0
+                        || feature_flag_service::personal_flag_enabled(
+                            &state.db,
+                            &row.user_id,
+                            feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                        )
+                        .await
+                        .unwrap_or(false))
+                {
+                    let bot_id =
+                        match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+                            Ok(bot) => own_user_id(&state, &bot).await,
+                            Err(_) => None,
+                        };
+                    crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
+                        .map(|post| (post.text, post.truncated_original_bytes))
+                        .unwrap_or_default()
+                } else {
+                    (chats::named_mentions(&text, &raw), None)
+                };
             if Box::pin(thread_follow::inbound(
                 &state,
                 &row,
                 &payload,
                 &message_id,
                 &text,
+                truncated_original_bytes,
                 &admitted.id,
             ))
             .await?
@@ -7822,6 +7993,7 @@ pub async fn relay_callback(
                 }
             };
             let sender = Sender {
+                truncated_original_bytes,
                 original_kind: None,
                 media: if canonical_platform(&row.platform) == "telegram" {
                     chats::native_message(&raw)
@@ -7863,10 +8035,7 @@ pub async fn relay_callback(
                     None
                 }
                 Inbound::Silent(_) => None,
-                Inbound::Busy => Some(
-                    "I couldn't accept this message right now. Please try again in a moment."
-                        .into(),
-                ),
+                Inbound::Busy => Some(Notice::Capacity.text(chat.notice_language).into()),
                 Inbound::Turn(receiver) => {
                     let _ = final_reply(receiver).await;
                     late_delivery::process(&state, &admitted.id).await;
@@ -8277,6 +8446,9 @@ pub(crate) mod thread_controls;
 #[path = "nyxbot_late_delivery.rs"]
 pub(crate) mod late_delivery;
 
+#[path = "nyxbot_handoff_delivery.rs"]
+pub(crate) mod handoff_delivery;
+
 #[cfg(test)]
 mod future_size_tests {
     use super::*;
@@ -8341,6 +8513,7 @@ mod custom_event_contract_tests {
             provider_api_key_id: Some("key".into()),
             provider_key_ciphertext: None,
             producer_secret_ciphertext: None,
+            secret_context_versions: Default::default(),
             producer_key_id: "producer".into(),
             gateway_channel_id: Some("cmaeg1".into()),
             custom_event_url: None,

@@ -137,7 +137,20 @@ async fn voice_stuck_five_token_rows_without_window_recover_once() {
     for suffix in ["response:1", "responses", "0"] {
         for legacy in [false, true] {
             let (f, _, id) = fixture(suffix, legacy).await;
-            recover_all(&f).await;
+            // A successful bounded sweep can stop before it visits this request.
+            // Run the worker until its five durable rows have reached settlement.
+            let meters = f.db.collection::<Document>(METERS);
+            loop {
+                recover_all(&f).await;
+                if meters
+                    .count_documents(doc! {"billing_request_id": &id, "released": true})
+                    .await
+                    .unwrap()
+                    == 5
+                {
+                    break;
+                }
+            }
             check(&f, &id, [0; 5]).await;
             recover_all(&f).await;
             assert_eq!(

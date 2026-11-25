@@ -1,3 +1,5 @@
+import { ApiError } from "@/lib/api-client";
+import allowedCardContinuation from "../../../shared/allowed-card-continuation.json";
 import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -75,9 +77,7 @@ function liveSend(
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
 export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
-  const narration = "Then tell the user in one or two plain sentences what you did and the result.";
-  const instruction = continuationInstruction(acknowledgement);
-  return `${instruction} ${narration}`;
+  return `${continuationInstruction(acknowledgement)} ${allowedCardContinuation}`;
 }
 
 function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): string {
@@ -226,22 +226,31 @@ export function useNyxAgentAssistantChat({
     // NyxID pushes changes over the live stream; these polls are the
     // fallback without it and a slow backstop with it. A turn NyxID (not
     // this page) starts here reaches the thread row first: `streaming`.
-    refetchInterval: (query) =>
-      streaming || nyxAgentTransport.hasUnsettledInterruption(selectedConversationId) || query.state.data?.conversation.active_turn
+    refetchInterval: (query) => {
+      // An owner can decide a proxy approval outside this thread.
+      const oldestDeadline = Date.now() - 15_000;
+      if (query.state.data?.approvals.some((row) =>
+        (!row.status || row.status === "pending") && Date.parse(row.expires_at) >= oldestDeadline
+      )) return 2000;
+      return streaming || nyxAgentTransport.hasUnsettledInterruption(selectedConversationId) || query.state.data?.conversation.active_turn
         ? (live ? 5000 : 2000)
         : query.state.data?.cma_operations.some(isCmaOperationPending)
           ? 5000
           : livePollInterval(
-              query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
-                query.state.data?.approvals.some((row) => !row.status || row.status === "pending")
+              query.state.data?.acknowledgements.some((row) => row.status === "pending")
                 ? 2000
                 : // Waiting on something outside the chat: notice when it happens.
                   (query.state.data?.waiting.length ?? 0) > 0
                   ? 10_000
                   : false,
               live,
-            ),
+            );
+    },
   });
+  const historyDenied = history.error instanceof ApiError && (history.error.status === 403 || history.error.status === 404);
+  useEffect(() => {
+    if (historyDenied) void queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) });
+  }, [historyDenied, queryClient, userId]);
   // A settled turn, a decided card or a resolved wait changes the agent's
   // summary and its thread row.
   const seenHistory = useRef<NyxAgentHistory | undefined>(undefined);
@@ -359,7 +368,7 @@ export function useNyxAgentAssistantChat({
   // continuation is sent as soon as its turn has settled and history is fresh.
   useEffect(() => {
     for (const [conversationId, queued] of pendingContinuations.current) {
-      if (queued.owner !== userId) {
+      if (queued.owner !== userId || !enabled || historyDenied) {
         pendingContinuations.current.delete(conversationId);
         continue;
       }
@@ -404,8 +413,11 @@ export function useNyxAgentAssistantChat({
   const approvalDecision = useDecideApproval();
   const decideApproval = useCallback(
     async (requestId: string, approved: boolean) => {
-      await approvalDecision.mutateAsync({ requestId, approved });
-      await queryClient.invalidateQueries({ queryKey: historyKey });
+      try {
+        await approvalDecision.mutateAsync({ requestId, approved });
+      } finally {
+        await queryClient.invalidateQueries({ queryKey: historyKey });
+      }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [approvalDecision.mutateAsync, queryClient, selectedConversationId, userId],
@@ -427,6 +439,7 @@ export function useNyxAgentAssistantChat({
       : { ...viewSession, clientId: "nyxagent-draft", conversationId: undefined },
     continuations: nyxAgentTransport.continuations(viewId),
     isStreaming: nyxAgentTransport.isRunning(viewId),
+    historyDenied,
     isLoading: history.isLoading,
     interruption: nyxAgentTransport.getInterruption(viewId),
     error: historyErrorMessage(history.error ?? threads.threadsError ?? agents.error)

@@ -8,9 +8,19 @@
 //! layering rule (`CLAUDE.md#2 Layer Architecture`). Handlers import from
 //! here just like any other service-layer helper.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use crate::errors::{AppError, AppResult};
 
 pub const MAX_URL_LEN: usize = 2048;
+
+pub(crate) fn url_host_for_logs(value: &str) -> String {
+    url::Url::parse(value)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .and_then(|url| Some(format!("{}://{}", url.scheme(), url.host_str()?)))
+        .unwrap_or_else(|| "<invalid-url>".to_owned())
+}
 
 /// Validate a user-supplied URL that will be stored and later shown to a
 /// remote operator. Unlike `validate_base_url`, this rejects private,
@@ -50,10 +60,7 @@ pub(crate) async fn validate_public_http_url_with_limit(
     // to be exhaustive; the DNS resolution check below is the actual safety
     // guard and catches private, loopback, link-local, and metadata targets
     // regardless of which hostname resolved to them.
-    if matches!(
-        normalized_host.as_str(),
-        "localhost" | "metadata.google.internal"
-    ) {
+    if normalized_host == "localhost" || is_cloud_metadata_host(&normalized_host) {
         return Err(AppError::ValidationError(format!(
             "{field_name} must not target a private or internal hostname"
         )));
@@ -137,11 +144,8 @@ pub fn validate_advisory_http_url(url: &str, field_name: &str, max_len: usize) -
 ///   - Must not contain userinfo (`user:pass@`).
 ///   - Must be <= 2048 chars (matches `validate_public_http_url`).
 ///
-/// When `hosted_mode` is true, this also rejects loopback, private,
-/// link-local, CGNAT, unspecified, broadcast, and cloud-metadata targets via
-/// DNS resolution. Self-hosted/development deployments skip that DNS/IP-class
-/// guard so they can target local services while still enforcing the URL
-/// shape above.
+/// Deployments can enable loopback for development. A strictly public call
+/// declines that opt-in. Catalog exceptions require a server-resolved ID.
 pub async fn validate_user_endpoint_url(
     url: &str,
     hosted_mode: bool,
@@ -181,9 +185,8 @@ pub async fn validate_user_endpoint_url(
         )));
     }
 
-    if hosted_mode {
-        validate_public_http_url(url, field_name).await?;
-    }
+    let access = super::proxy_destination::Access::for_request(None, url, &parsed, hosted_mode)?;
+    super::proxy_destination::Destination::resolve(&parsed, access).await?;
 
     Ok(())
 }
@@ -220,17 +223,52 @@ pub fn validate_base_url(url: &str) -> AppResult<()> {
 }
 
 /// Returns true if the hostname is a known cloud metadata endpoint.
-fn is_cloud_metadata_host(host: &str) -> bool {
-    let normalized = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    normalized == "metadata.google.internal"
-        || normalized == "169.254.169.254"
-        || normalized == "fd00:ec2::254"
-        || normalized == "100.100.100.200"
-        || normalized == "168.63.129.16"
+pub(super) fn is_cloud_metadata_host(host: &str) -> bool {
+    let host = normalize_host(host);
+    matches!(
+        host.as_str(),
+        "metadata"
+            | "metadata.google.internal"
+            | "metadata.goog"
+            | "instance-data"
+            | "instance-data.ec2.internal"
+    ) || host
+        .parse::<IpAddr>()
+        .ok()
+        .and_then(canonical_ip)
+        .is_some_and(is_metadata_ip)
+}
+
+fn canonical_ip(ip: IpAddr) -> Option<IpAddr> {
+    let IpAddr::V6(v6) = ip else {
+        return Some(ip);
+    };
+    let bytes = v6.octets();
+    let v4 = match v6.segments() {
+        [0x64, 0xff9b, 0, 0, 0, 0, ..] => Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]),
+        [0x64, 0xff9b, 1, ..] => {
+            // RFC 6052 splits IPv4 around the reserved octet at bit 64 for a /48.
+            if bytes[8] != 0 || bytes[11..] != [0; 5] {
+                return None;
+            }
+            Ipv4Addr::new(bytes[6], bytes[7], bytes[9], bytes[10])
+        }
+        _ if !v6.is_loopback() && !v6.is_unspecified() => {
+            return Some(v6.to_ipv4().map_or(ip, IpAddr::V4));
+        }
+        _ => return Some(ip),
+    };
+    Some(IpAddr::V4(v4))
+}
+
+fn is_metadata_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => matches!(
+            v4.octets(),
+            [169, 254, 169, 254] | [169, 254, 170, 2] | [100, 100, 100, 200] | [168, 63, 129, 16]
+        ),
+        IpAddr::V6(v6) => v6 == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
+    }
 }
 
 /// Validate an optional documentation spec URL.
@@ -279,30 +317,54 @@ fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(crate) fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AddressClass {
+    Public,
+    Private,
+    Loopback,
+    Reserved,
+}
+
+pub(super) fn address_class(ip: IpAddr) -> AddressClass {
+    let Some(ip) = canonical_ip(ip) else {
+        return AddressClass::Reserved;
+    };
+    if ip.is_unspecified() || ip.is_multicast() || is_metadata_ip(ip) {
+        return AddressClass::Reserved;
+    }
+    if ip.is_loopback() {
+        return AddressClass::Loopback;
+    }
     match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.is_loopback()
-                || ipv4.is_private()
-                || ipv4.is_link_local()
-                || ipv4.is_unspecified()
-                || ipv4.is_broadcast()
-                || is_rfc6598_cgnat(ipv4)
+        IpAddr::V4(v4)
+            if v4.is_link_local()
+                || matches!(v4.octets(), [0, ..] | [192, 0, 0, _] | [240..=255, ..]) =>
+        {
+            AddressClass::Reserved
         }
-        std::net::IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-                || ipv6.is_unspecified()
-                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-                || ipv6
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
+        IpAddr::V4(v4)
+            if v4.is_private()
+                || is_rfc6598_cgnat(v4)
+                || matches!(v4.octets(), [198, 18..=19, ..]) =>
+        {
+            AddressClass::Private
         }
+        IpAddr::V6(v6) if v6.is_unicast_link_local() => AddressClass::Reserved,
+        IpAddr::V6(v6)
+            if v6.is_unique_local() || matches!(v6.segments(), [0xfec0..=0xfeff, ..]) =>
+        {
+            AddressClass::Private
+        }
+        _ => AddressClass::Public,
     }
 }
 
-fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
-    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+pub(crate) fn is_private_or_internal_ip(ip: IpAddr) -> bool {
+    address_class(ip) != AddressClass::Public
+}
+
+fn is_rfc6598_cgnat(ip: Ipv4Addr) -> bool {
+    ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])
 }
 
 #[cfg(test)]
@@ -311,6 +373,117 @@ mod tests {
         MAX_URL_LEN, reject_url_userinfo, validate_advisory_http_url, validate_base_url,
         validate_optional_spec_url, validate_public_http_url, validate_user_endpoint_url,
     };
+
+    #[test]
+    fn diagnostics_format_scheme_and_host() {
+        for (input, expected) in [
+            (
+                "https://user:pass@example.com:8443/path?query=value#fragment",
+                "https://example.com",
+            ),
+            ("http://[::1]:8080/test", "http://[::1]"),
+            ("not a url", "<invalid-url>"),
+            ("data:text/plain,fixture", "<invalid-url>"),
+        ] {
+            assert_eq!(super::url_host_for_logs(input), expected);
+        }
+    }
+
+    #[test]
+    fn proxy_destination_public_address_classes() {
+        use super::AddressClass::{Loopback, Private, Public, Reserved};
+
+        let mismatches: Vec<_> = [
+            ("64:ff9b::808:808", Public),
+            ("64:ff9b::a00:1", Private),
+            ("64:ff9b::7f00:1", Loopback),
+            ("64:ff9b::a9fe:a9fe", Reserved),
+            ("64:ff9b:1:808:8:800::", Public),
+            ("64:ff9b:1:a00:0:100::", Private),
+            ("64:ff9b:1:7f00:0:100::", Loopback),
+            ("64:ff9b:1:a9fe:a9:fe00::", Reserved),
+            ("64:ff9b:1:808:8:800::1", Reserved),
+            ("64:ff9b:1:808:108:800::", Reserved),
+            ("64:ff9b:2:a9fe:a9:fe00::", Public),
+            ("fec0::", Private),
+            ("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", Private),
+            ("198.17.255.255", Public),
+            ("198.18.0.0", Private),
+            ("198.19.255.255", Private),
+            ("198.20.0.0", Public),
+            ("192.0.0.0", Reserved),
+            ("192.0.0.255", Reserved),
+            ("192.0.1.0", Public),
+            ("240.0.0.0", Reserved),
+            ("255.255.255.254", Reserved),
+        ]
+        .into_iter()
+        .filter_map(|(literal, expected)| {
+            (super::address_class(literal.parse().unwrap()) != expected).then_some(literal)
+        })
+        .collect();
+        assert!(
+            mismatches.is_empty(),
+            "incorrect address classes {mismatches:?}"
+        );
+
+        let nonpublic = [
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.31.0.1",
+            "192.168.1.1",
+            "169.254.170.2",
+            "100.64.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fd12::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:169.254.169.254",
+            "::192.168.1.1",
+            "168.63.129.16",
+        ];
+        let allowed: Vec<_> = nonpublic
+            .into_iter()
+            .filter(|ip| !super::is_private_or_internal_ip(ip.parse().unwrap()))
+            .collect();
+        assert!(
+            allowed.is_empty(),
+            "unexpected public classification {allowed:?}"
+        );
+        for ip in ["93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(!super::is_private_or_internal_ip(ip.parse().unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_private_network_requires_explicit_authority() {
+        for hosted in [false, true] {
+            assert!(
+                validate_user_endpoint_url("http://192.168.1.1", hosted, "endpoint_url")
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_destination_metadata_literals_are_normalized() {
+        for base in [
+            "http://[::ffff:a9fe:a9fe]",
+            "http://169.254.170.2",
+            "http://[::a9fe:a9fe]",
+            "http://Metadata.Google.Internal.",
+            "http://MeTaDaTa.GoOg.",
+            "http://[64:ff9b::a9fe:a9fe]",
+            "http://[64:ff9b:1:a9fe:a9:fe00::]",
+        ] {
+            assert!(validate_base_url(base).is_err(), "{base}");
+        }
+    }
 
     #[test]
     fn validate_base_url_accepts_public_url() {
@@ -496,7 +669,7 @@ mod tests {
     async fn validate_user_endpoint_url_allows_path() {
         // Base path `/v1` is a legitimate prefix.
         assert!(
-            validate_user_endpoint_url("https://api.example.com/v1", false, "endpoint_url")
+            validate_user_endpoint_url("https://93.184.216.34/v1", false, "endpoint_url")
                 .await
                 .is_ok()
         );

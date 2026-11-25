@@ -15,11 +15,10 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
     sessionStorage.setItem(MOCK_NYXBOT_STORAGE, selection);
   }
 }
-const mockNyxbotEnabled =
-  globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ??
-  (import.meta.env.DEV &&
-    typeof window !== "undefined" &&
-    sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1");
+const nyxbotPreview = import.meta.env.DEV && typeof window !== "undefined" &&
+  sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1";
+const mockNyxbotEnabled = globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ?? nyxbotPreview;
+const mockNotificationsEnabled = globalThis.__nyxidAssistantHttpFaults?.notificationsEnabled ?? nyxbotPreview;
 
 const mockModelControlsEnabled =
   globalThis.__nyxidAssistantHttpFaults?.modelControlsEnabled ??
@@ -44,6 +43,7 @@ const MOCK_USER = {
       "assistant:system-skills",
       ...(mockModelControlsEnabled ? ["assistant:model-controls"] : []),
       ...(mockNyxbotEnabled ? ["assistant:nyxagent-engine"] : []),
+      ...(mockNotificationsEnabled ? ["assistant:notifications"] : []),
       ...(globalThis.__nyxidAssistantHttpFaults?.voiceEnabled ? ["assistant:voice"] : []),
     ],
   },
@@ -1070,10 +1070,11 @@ const MOCK_SESSIONS = [
 
 // ── Push Devices ──
 const MOCK_PUSH_DEVICES = {
+  push_enabled: true,
   devices: [
     {
-      id: "dev-0001",
-      platform: "ios",
+      device_id: "dev-0001",
+      platform: "apns",
       device_name: "iPhone 15 Pro",
       registered_at: "2026-04-01T09:00:00Z",
       last_used_at: "2026-05-06T14:00:00Z",

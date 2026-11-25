@@ -377,6 +377,77 @@ pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> Oper
     }
 }
 
+type CompiledRoute = (
+    crate::models::downstream_service::ProxyOperationRule,
+    super::mcp_service::McpDurableEndpointMetadata,
+);
+
+/// Use the same constrained templates for raw HTTP and generic MCP calls.
+static COMPILED_ROUTES: LazyLock<HashMap<&'static str, Vec<CompiledRoute>>> = LazyLock::new(|| {
+    let mut specs = HashMap::new();
+    for (&key, spec) in PARSED_SPECS.iter() {
+        let mut routes = Vec::new();
+        for (template, item) in spec["paths"].as_object().into_iter().flatten() {
+            for (method, operation) in item.as_object().into_iter().flatten() {
+                if operation.get("operationId").is_none() {
+                    continue;
+                }
+                let Ok(rule) = super::proxy_authorization::rule_from_endpoint(
+                    method,
+                    template,
+                    operation.get("parameters"),
+                ) else {
+                    continue;
+                };
+                let marks = OperationMarks::of(operation);
+                let risk = operation["x-aevatar-tool"]["readOnly"]
+                    .as_bool()
+                    .map(|read| {
+                        use crate::models::service_endpoint::EndpointRisk;
+                        if read {
+                            EndpointRisk::Read
+                        } else {
+                            EndpointRisk::Write
+                        }
+                    });
+                routes.push((
+                    rule,
+                    super::mcp_service::McpDurableEndpointMetadata {
+                        catalog_contract: true,
+                        risk,
+                        destructive: marks.destructive,
+                        changes_existing: marks.changes_existing,
+                        append_only: marks.append_only,
+                        append_only_query: marks.append_only_query,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+        specs.insert(key, routes);
+    }
+    specs
+});
+
+pub(crate) fn compiled_effects(
+    key: &str,
+    method: &reqwest::Method,
+    path: &super::proxy_authorization::CanonicalPath,
+    query: Option<&str>,
+    method_override: bool,
+) -> Option<super::mcp_service::OperationEffects> {
+    let mut effects = None;
+    for (rule, metadata) in COMPILED_ROUTES.get(key)? {
+        if super::proxy_authorization::rule_matches(rule, method.as_str(), path) {
+            effects = Some(super::agent_operation_scope_service::intersect_effects(
+                effects,
+                super::mcp_service::request_effects(method, *metadata, query, method_override),
+            ));
+        }
+    }
+    effects
+}
+
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
     PARSED_SPECS.get(spec_key).cloned()

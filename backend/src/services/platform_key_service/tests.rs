@@ -289,7 +289,7 @@ async fn seeded_provider_platform_binding_resolves_proxy_gateway_and_realtime() 
                 &[],
             )
             .unwrap();
-            assert_eq!(url, format!("wss://{host}/v1/realtime"));
+            assert_eq!(url.as_str(), format!("wss://{host}/v1/realtime"));
             let request = crate::handlers::proxy::build_downstream_ws_request(
                 &url,
                 &resolution.target,
@@ -1850,23 +1850,67 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
         BillingMetric, LanePricing, PricingSyncStatus, ServiceBilling,
     };
     use crate::models::usage_meter::{COLLECTION_NAME as METER, UsageMeterRow};
+    use axum::http::{HeaderMap, Response};
     use axum::{
         body::{Body, to_bytes},
         extract::{Path, State},
     };
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use std::io::{Read, Seek, Write};
+    use tracing::instrument::WithSubscriber;
+
+    const JSON: &str = r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":321,"total_tokens":1555}}"#;
+    const SSE: &str = "data: {\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":321,\"total_tokens\":1555}}\n\ndata: [DONE]\n\n";
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(JSON.as_bytes()).unwrap();
+    gzip.write_all(&vec![b' '; crate::services::proxy_http_response::USAGE_CAPTURE_MAX_BYTES])
+        .unwrap();
+    let encoded = bytes::Bytes::from(gzip.finish().unwrap());
+    let encoded_reply = encoded.clone();
+    let mock = axum::Router::new().route(
+        "/{route}",
+        axum::routing::post(move |Path(route): Path<String>, headers: HeaderMap| {
+            let encoded = encoded_reply.clone();
+            async move {
+                assert_eq!(headers["authorization"], "Bearer platform-secret");
+                let mut reply = Response::builder().header(
+                    "content-type",
+                    if route == "sse" {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    },
+                );
+                let body = if route == "encoded"
+                    || headers.get("accept-encoding").is_some_and(|v| v == "gzip")
+                {
+                    reply = reply.header("content-encoding", "gzip");
+                    Body::from(encoded)
+                } else {
+                    assert_eq!(headers["accept-encoding"], "identity");
+                    match route.as_str() {
+                        "sse" => Body::from(SSE),
+                        "chunked" => Body::from_stream(futures::stream::iter([
+                            Ok::<_, std::io::Error>(&JSON[..12]),
+                            Ok(&JSON[12..]),
+                        ])),
+                        _ => Body::from(JSON),
+                    }
+                };
+                reply.body(body).unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
     let db = connect_transaction_test_database("review_non_llm_token_lane").await;
     let user = owner(&db, UserType::Person).await;
     let mut config = crate::test_utils::test_app_config();
     config.billing_enabled = true;
     let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
-    let upstream = MockServer::start().await;
     let mut catalog = platform_service();
     catalog.slug = "chrono-llm-public".into();
-    catalog.base_url = upstream.uri();
+    catalog.base_url = url;
     catalog.credential_encrypted = state
         .encryption_keys
         .encrypt(b"platform-secret")
@@ -1901,25 +1945,16 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
     )
     .await
     .unwrap();
-    for (route, content_type, response_body) in [
-        (
-            "json",
-            "application/json",
-            r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":321,"total_tokens":1555}}"#,
-        ),
-        (
-            "sse",
-            "text/event-stream",
-            "data: {\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":321,\"total_tokens\":1555}}\n\ndata: [DONE]\n\n",
-        ),
-    ] {
-        Mock::given(method("POST"))
-            .and(path(format!("/{route}")))
-            .and(header("authorization", "Bearer platform-secret"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(response_body, content_type))
-            .expect(1)
-            .mount(&upstream)
-            .await;
+    let mut log = tempfile::tempfile().unwrap();
+    let writer = log.try_clone().unwrap();
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish(),
+    );
+    for route in ["json", "chunked", "sse", "encoded"] {
         let mut request = axum::http::Request::builder()
             .method("POST")
             .uri(format!(
@@ -1927,6 +1962,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
                 connection.service.slug
             ))
             .header("content-type", "application/json")
+            .header("accept-encoding", "gzip")
             .body(Body::from(r#"{"model":"test","messages":[]}"#))
             .unwrap();
         request.extensions_mut().insert(
@@ -1941,11 +1977,52 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
             Path((connection.service.slug.clone(), route.into())),
             request,
         ))
+        .with_subscriber(subscriber.clone())
         .await
         .unwrap();
         assert_eq!(response.status(), 200);
-        to_bytes(response.into_body(), 10_000).await.unwrap();
+        match route {
+            "encoded" => {
+                assert_eq!(response.headers()["content-encoding"], "gzip");
+                assert_eq!(
+                    response.headers()["content-length"],
+                    encoded.len().to_string()
+                );
+                assert_eq!(
+                    to_bytes(response.into_body(), 10_000).await.unwrap(),
+                    encoded
+                );
+            }
+            _ => {
+                assert!(!response.headers().contains_key("content-encoding"));
+                assert_eq!(
+                    response.headers().contains_key("content-length"),
+                    route == "json"
+                );
+                assert_eq!(
+                    to_bytes(response.into_body(), 10_000).await.unwrap(),
+                    if route == "sse" { SSE } else { JSON }
+                );
+            }
+        }
     }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    log.rewind().unwrap();
+    let mut warnings = String::new();
+    log.read_to_string(&mut warnings).unwrap();
+    let encoded_warnings: Vec<_> = warnings
+        .lines()
+        .filter(|l| l.contains("Encoded response received for usage capture"))
+        .collect();
+    assert_eq!(encoded_warnings.len(), 1);
+    let warning = encoded_warnings[0];
+    assert!(
+        warning.contains("service_id=")
+            && warning.contains("status=200")
+            && warning.contains("gzip")
+    );
+    assert!(!warning.contains("prompt_tokens"));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let rows: Vec<UsageMeterRow> = db
@@ -1956,9 +2033,12 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
                 .try_collect()
                 .await
                 .unwrap();
-            if rows.len() == 2 {
+            if rows.len() == 4 {
+                assert_eq!(
+                    rows.iter().filter(|row| row.quantity == Some(1555)).count(),
+                    3
+                );
                 for row in rows {
-                    assert_eq!(row.quantity, Some(1555));
                     assert_eq!(row.metric, BillingMetric::Tokens);
                     assert_eq!(row.lago_metric_code, "platform_svc_chrono-llm-public_pk");
                     assert_eq!(
@@ -2036,7 +2116,7 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
         auth_key_name: "Authorization".into(),
         credential: "server-secret".to_owned().into(),
         service,
-        catalog_default_headers: vec![],
+        catalog_default_headers: Default::default(),
         user_service_default_headers: vec![],
         ws_frame_injections: vec![],
         connection_id: None,

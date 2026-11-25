@@ -87,6 +87,12 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             TRIGGERS,
+            doc! { "user_id": 1, "created_at": -1, "_id": 1 },
+            "trigger_owner_created",
+            false,
+        ),
+        (
+            TRIGGERS,
             doc! { "user_id": 1, "source": 1 },
             "trigger_owner_source",
             false,
@@ -282,6 +288,7 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         outcome: RunOutcome::Pending,
         confirmation_policy: None,
         reason: None,
+        blocking_run_id: None,
         failure_reason: None,
         started_at: None,
         finished_at: None,
@@ -309,12 +316,12 @@ pub(crate) async fn insert_run(
     db: &Database,
     run: &TriggerRun,
     session: &mut ClientSession,
-) -> AppResult<()> {
+) -> AppResult<TriggerRun> {
     super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let stored = db
         .collection::<Document>(TRIGGERS)
         .find_one_and_update(
-            doc! { "_id": &run.trigger_id, "status": "active" },
+            doc! { "_id": &run.trigger_id, "user_id": &run.user_id, "status": "active" },
             doc! { "$inc": {"run_version":1,"history_count":1} },
         )
         .session(&mut *session)
@@ -336,25 +343,32 @@ pub(crate) async fn insert_run(
     }
     let trigger: Trigger = bson::from_document(stored)
         .map_err(|error| AppError::Internal(format!("Read trigger during admission: {error}")))?;
-    let outstanding = db
-        .collection::<TriggerRun>(RUNS)
-        .count_documents(doc! {
-            "trigger_id": &run.trigger_id,
-            "outcome": {
-                "$in": [
-                    RunOutcome::Pending.as_str(),
-                    RunOutcome::Started.as_str(),
-                    RunOutcome::Waiting.as_str(),
-                ],
-            },
-            "reason": { "$nin": ["overlap_skip", "queue_full"] },
-        })
-        .session(&mut *session)
-        .await?;
+    let outstanding = doc! {
+        "trigger_id": &run.trigger_id,
+        "user_id": &run.user_id,
+        "outcome": {
+            "$in": [
+                RunOutcome::Pending.as_str(),
+                RunOutcome::Started.as_str(),
+                RunOutcome::Waiting.as_str(),
+            ],
+        },
+        "reason": { "$nin": ["overlap_skip", "queue_full"] },
+    };
     let mut run = run.clone();
-    if outstanding > 0 && trigger.overlap == crate::models::trigger_schedule::OverlapPolicy::Skip {
-        run.reason = Some("overlap_skip".into());
-    } else if outstanding >= 2 {
+    if trigger.overlap == crate::models::trigger_schedule::OverlapPolicy::Skip {
+        if let Some(blocking_run_id) = find_blocking_run(db, outstanding, Some(session)).await? {
+            run.reason = Some("overlap_skip".into());
+            run.blocking_run_id = Some(blocking_run_id);
+        }
+    } else if db
+        .collection::<Document>(RUNS)
+        .count_documents(outstanding)
+        .limit(2)
+        .session(&mut *session)
+        .await?
+        >= 2
+    {
         run.reason = Some("queue_full".into());
     }
     db.collection::<TriggerRun>(RUNS)
@@ -372,7 +386,48 @@ pub(crate) async fn insert_run(
         })
         .session(session)
         .await?;
-    Ok(())
+    Ok(run)
+}
+
+async fn find_blocking_run(
+    db: &Database,
+    filter: Document,
+    session: Option<&mut ClientSession>,
+) -> AppResult<Option<String>> {
+    let runs = db.collection::<Document>(RUNS);
+    let lookup = runs
+        .find_one(filter)
+        .sort(doc! { "scheduled_at": 1, "_id": 1 })
+        .projection(doc! { "_id": 1 });
+    let blocker = match session {
+        Some(session) => lookup.session(session).await?,
+        None => lookup.await?,
+    };
+    blocker
+        .map(|row| {
+            row.get_str("_id")
+                .map(str::to_owned)
+                .map_err(|error| AppError::Internal(format!("Read blocking schedule run: {error}")))
+        })
+        .transpose()
+}
+
+pub(crate) async fn find_running_blocker(
+    db: &Database,
+    run: &TriggerRun,
+    session: Option<&mut ClientSession>,
+) -> AppResult<Option<String>> {
+    find_blocking_run(
+        db,
+        doc! {
+            "trigger_id": &run.trigger_id,
+            "user_id": &run.user_id,
+            "_id": { "$ne": &run.id },
+            "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
+        },
+        session,
+    )
+    .await
 }
 
 /// Advance the schedule and create its occurrence in one transaction. The job's
@@ -435,7 +490,7 @@ pub async fn claim_occurrence(
                 let at = compute::latest(spec, now)?.unwrap_or(due).max(due);
                 let mut run = new_run(&trigger, at, at + compute::grace(spec, at)?);
                 run.dispatch_at = Some(at + dispatch_offset(&trigger.id, spec, at)?);
-                insert_run(&db, &run, session).await?;
+                let run = insert_run(&db, &run, session).await?;
                 // Catch-up executes only the newest occurrence. All missed work is
                 // one metadata-only summary with one deterministic identity/audit.
                 let missed = if due < at {
@@ -528,16 +583,14 @@ pub async fn enqueue_now(db: &Database, trigger: &Trigger) -> AppResult<TriggerR
         .unwrap_or(Duration::hours(1));
     let run = new_run(trigger, now, now + grace);
     let db = db.clone();
-    let saved = run.clone();
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
         .and_run2(async move |session| {
-            transactions::transaction_result(insert_run(&db, &saved, session).await)
+            transactions::transaction_result(insert_run(&db, &run, session).await)
         })
         .await
-        .map_err(transactions::map_transaction_error)?;
-    Ok(run)
+        .map_err(transactions::map_transaction_error)
 }
 
 pub async fn history(
@@ -570,6 +623,28 @@ pub async fn history(
         .await?)
 }
 
+/// Preserve who chose the terminal code, including when recovering an old reply.
+#[derive(Clone, Copy)]
+pub enum FinishReason<'a> {
+    Scheduler(Option<&'a str>),
+    SettledTurn(&'a str),
+    Overlap { blocking_run_id: &'a str },
+}
+
+impl<'a> FinishReason<'a> {
+    pub fn from_result(turn: Option<&'a str>, delivery: Option<&'a str>) -> Self {
+        turn.map_or(Self::Scheduler(delivery), Self::SettledTurn)
+    }
+
+    fn code(self) -> Option<&'a str> {
+        match self {
+            Self::Scheduler(code) => code,
+            Self::SettledTurn(code) => Some(code),
+            Self::Overlap { .. } => Some("overlap"),
+        }
+    }
+}
+
 pub async fn finish(
     db: &Database,
     run_id: &str,
@@ -581,7 +656,7 @@ pub async fn finish(
         db,
         doc! {"_id": run_id, "outcome": {"$in": ["pending", "started", "waiting"]}},
         outcome,
-        reason,
+        FinishReason::Scheduler(reason),
         frontend,
     )
     .await
@@ -607,7 +682,7 @@ pub async fn finish_thread_result(
         } else {
             RunOutcome::Completed
         },
-        error,
+        FinishReason::from_result(error, None),
         frontend,
     )
     .await
@@ -617,27 +692,29 @@ async fn finish_matching(
     db: &Database,
     filter: Document,
     outcome: RunOutcome,
-    reason: Option<&str>,
+    reason: FinishReason<'_>,
     frontend: &str,
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
-    let work_db = db.clone();
-    let reason = reason.map(str::to_owned);
-    let frontend = frontend.to_owned();
     let run = session
         .start_transaction()
-        .and_run2(async move |session| {
-            let result = Box::pin(finish_update(
-                &work_db,
-                filter.clone(),
-                outcome,
-                reason.as_deref(),
-                &frontend,
-                session,
-            ))
-            .await;
-            transactions::transaction_result(result)
-        })
+        .and_run(
+            (db, filter, outcome, reason, frontend),
+            |session, (db, filter, outcome, reason, frontend)| {
+                Box::pin(async move {
+                    let result = Box::pin(finish_update(
+                        db,
+                        filter.clone(),
+                        *outcome,
+                        *reason,
+                        frontend,
+                        session,
+                    ))
+                    .await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(transactions::map_transaction_error)?;
     if let Some(run) = run {
@@ -658,7 +735,25 @@ pub fn finish_claimed<'a>(
     // The scheduler settles many exit paths. Keep each transaction's state
     // out of its polling frame while it starts a complete assistant turn.
     Box::pin(finish_claimed_inner(
-        db, job, run_id, outcome, reason, frontend,
+        db, job, run_id, outcome, reason, None, frontend,
+    ))
+}
+
+pub fn finish_overlap_skip<'a>(
+    db: &'a Database,
+    job: &'a Document,
+    run_id: &'a str,
+    blocking_run_id: &'a str,
+    frontend: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(finish_claimed_inner(
+        db,
+        job,
+        run_id,
+        RunOutcome::Skipped,
+        Some("overlap"),
+        Some(blocking_run_id),
+        frontend,
     ))
 }
 
@@ -668,6 +763,7 @@ async fn finish_claimed_inner(
     run_id: &str,
     outcome: RunOutcome,
     reason: Option<&str>,
+    blocking_run_id: Option<&str>,
     frontend: &str,
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
@@ -676,6 +772,7 @@ async fn finish_claimed_inner(
     let id = run_id.to_owned();
 
     let reason = reason.map(str::to_owned);
+    let blocking_run_id = blocking_run_id.map(str::to_owned);
     let frontend = frontend.to_owned();
     let run = session
         .start_transaction()
@@ -705,7 +802,10 @@ async fn finish_claimed_inner(
                         "outcome": { "$in": [RunOutcome::Pending.as_str(),RunOutcome::Waiting.as_str()] },
                     },
                     outcome,
-                    reason.as_deref(),
+                    blocking_run_id.as_deref().map_or(
+                        FinishReason::Scheduler(reason.as_deref()),
+                        |blocking_run_id| FinishReason::Overlap { blocking_run_id },
+                    ),
                     &frontend,
                     session,
                 ))
@@ -722,34 +822,60 @@ async fn finish_claimed_inner(
     Ok(())
 }
 
+fn scheduler_failure(
+    reason: Option<&str>,
+) -> Box<crate::models::assistant_message::TurnFailureReason> {
+    let code = reason
+        .and_then(super::assistant_nyxagent::diagnostic_code)
+        .unwrap_or("run_failed");
+    Box::new(crate::models::assistant_message::TurnFailureReason::new(
+        "nyxid",
+        "scheduler",
+        code,
+        None,
+    ))
+}
+
 async fn finish_update(
     db: &Database,
     filter: Document,
     outcome: RunOutcome,
-    reason: Option<&str>,
+    finish_reason: FinishReason<'_>,
     frontend: &str,
     session: &mut ClientSession,
 ) -> AppResult<Option<TriggerRun>> {
+    let reason = finish_reason.code();
     let now = Utc::now();
     let collection = db.collection::<TriggerRun>(RUNS);
+    let mut fields = doc! {
+        "outcome": outcome.as_str(),
+        "reason": {"$cond": [{"$and": [{"$eq": ["$coordinator.protocol", 2]}, outcome == RunOutcome::Completed && reason.is_none()]}, "coordinator_completed", {"$literal": reason}]},
+        "finished_at": date(now),
+        "duration_ms": {
+            "$cond": [
+                { "$ne": ["$started_at", null] },
+                { "$subtract": [date(now), "$started_at"] },
+                null,
+            ],
+        },
+    };
+    if let FinishReason::Overlap { blocking_run_id } = finish_reason {
+        fields.insert("blocking_run_id", doc! { "$literal": blocking_run_id });
+    }
+    if reason == Some("cancelled") {
+        fields.insert("failure_reason", bson::Bson::Null);
+    } else if outcome == RunOutcome::Failed
+        && let FinishReason::Scheduler(reason) = finish_reason
+    {
+        let fallback = bson::to_bson(&scheduler_failure(reason))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        fields.insert(
+            "failure_reason",
+            doc! {"$ifNull": ["$failure_reason", {"$literal": fallback}]},
+        );
+    }
     let action = collection
-        .find_one_and_update(
-            filter,
-            vec![doc! {
-                "$set": {
-                    "outcome": outcome.as_str(),
-                    "reason": {"$cond": [{"$and": [{"$eq": ["$coordinator.protocol", 2]}, outcome == RunOutcome::Completed && reason.is_none()]}, "coordinator_completed", {"$literal": reason}]},
-                    "finished_at": date(now),
-                    "duration_ms": {
-                        "$cond": [
-                            { "$ne": ["$started_at", null] },
-                            { "$subtract": [date(now), "$started_at"] },
-                            null,
-                        ],
-                    },
-                },
-            }],
-        )
+        .find_one_and_update(filter, vec![doc! {"$set": fields}])
         .return_document(ReturnDocument::After);
     let mut run = action.session(&mut *session).await?;
     if let Some(run) = &mut run {
@@ -1014,29 +1140,20 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
-    let running = db
-        .collection::<TriggerRun>(RUNS)
-        .count_documents(doc! {
-            "trigger_id": &run.trigger_id,
-            "_id": { "$ne": &run.id },
-            "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
-        })
-        .session(&mut *session)
-        .await?;
-    if running > 0 {
-        return Err(AppError::Conflict(
-            match trigger.overlap {
-                crate::models::trigger_schedule::OverlapPolicy::Skip => "trigger_overlap_skip",
-                _ => "trigger_overlap_queue",
+    if let Some(blocking_run_id) = find_running_blocker(db, &run, Some(session)).await? {
+        return Err(match trigger.overlap {
+            crate::models::trigger_schedule::OverlapPolicy::Skip => {
+                AppError::TriggerOverlapSkip { blocking_run_id }
             }
-            .into(),
-        ));
+            _ => AppError::Conflict("trigger_overlap_queue".into()),
+        });
     }
     if !claim.continuation {
         let oldest = db
             .collection::<TriggerRun>(RUNS)
             .find_one(doc! {
                 "trigger_id": &run.trigger_id,
+                "user_id": owner,
                 "outcome": RunOutcome::Pending.as_str(),
                 "reason": { "$nin": ["overlap_skip", "queue_full"] },
             })

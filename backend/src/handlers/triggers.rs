@@ -121,6 +121,7 @@ pub struct TriggerDeliveryResponse {
     pub status: TriggerDeliveryRecordStatus,
     pub attempts: u32,
     pub last_status_code: Option<u16>,
+    pub failure_reason: Option<String>,
     pub replay_available: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -460,7 +461,6 @@ pub async fn redeliver_trigger_delivery(
     let delivery = trigger_service::redeliver(
         &state.db,
         &state.encryption_keys,
-        &state.http_client,
         &trigger,
         &event_id,
         state
@@ -548,6 +548,7 @@ fn delivery_response(record: TriggerDeliveryRecord) -> TriggerDeliveryResponse {
         status: record.status,
         attempts: record.attempts,
         last_status_code: record.last_status_code,
+        failure_reason: record.failure_reason,
         replay_available: record.envelope_encrypted.is_some(),
         created_at: record.created_at.to_rfc3339(),
         updated_at: record.updated_at.to_rfc3339(),
@@ -642,6 +643,8 @@ pub struct RunResponse {
     pub finished_at: Option<String>,
     pub outcome: crate::models::trigger_run::RunOutcome,
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_run_id: Option<String>,
     pub failure_reason: Option<RunFailureReasonResponse>,
     pub thread_id: Option<String>,
     pub duration_ms: Option<i64>,
@@ -707,6 +710,7 @@ pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunRe
         finished_at: run.finished_at.map(|t| t.to_rfc3339()),
         outcome: run.outcome,
         reason: run.reason,
+        blocking_run_id: run.blocking_run_id,
         failure_reason: run.failure_reason.map(|reason| RunFailureReasonResponse {
             source: reason.source,
             stage: reason.stage,
@@ -902,6 +906,7 @@ mod tests {
                 status: TriggerDeliveryRecordStatus::Failed,
                 attempts: 1,
                 last_status_code: Some(503),
+                failure_reason: None,
                 envelope_encrypted: Some(vec![4, 5, 6]),
                 created_at: now,
                 updated_at: now,

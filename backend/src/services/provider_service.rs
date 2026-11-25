@@ -6728,6 +6728,7 @@ pub async fn seed_default_services(
             is_active: true,
             created_by: "system".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -8207,8 +8208,6 @@ pub async fn update_provider_if_unchanged(
         }
     }
 
-    use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
-
     if clearing_credentials {
         unset_doc.insert("client_id_encrypted", "");
         unset_doc.insert("client_secret_encrypted", "");
@@ -8230,15 +8229,11 @@ pub async fn update_provider_if_unchanged(
         filter.extend(guard);
     }
 
-    let updated = db
-        .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(filter, update_doc)
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
+    let updated = super::channel_signing_migration::update_provider(db, filter, update_doc)
+        .await?
+        .map(bson::from_document::<ProviderConfig>)
+        .transpose()
+        .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?;
     let Some(updated) = updated else {
         return Err(provider_update_miss_error(
             db,

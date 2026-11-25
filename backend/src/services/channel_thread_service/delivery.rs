@@ -118,8 +118,12 @@ async fn send_reply_inner(
         (ReplyAuthority::Gateway(token), _) => {
             validate_target(db, bot, &source, target).await?;
             if let Some(token) = token {
-                crate::services::channel_relay_service::consume_reply_token_use(db, &token.usage)
-                    .await?;
+                crate::services::channel_relay_service::consume_reply_token_use(
+                    db,
+                    &token.usage,
+                    &source.user_id,
+                )
+                .await?;
             }
             (
                 Delivery::begin(db, bot, &source, components.len()).await?,
@@ -223,6 +227,7 @@ async fn send_reply_inner(
         let mut record = source.clone();
         record.id = uuid::Uuid::new_v4().to_string();
         record.direction = "outbound".into();
+        record.text_completeness = None;
         record.platform_message_id = Some(id.clone());
         record.sender_platform_id = Some(bot.platform_bot_id.clone());
         record.sender_display_name = None;

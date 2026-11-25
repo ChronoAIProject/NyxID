@@ -174,6 +174,8 @@ pub struct UpdateReplyResponse {
 #[derive(Debug, Serialize)]
 pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<crate::models::channel_message::TextCompleteness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery: Option<DeliveryItem>,
     pub attachments: Vec<MessageAttachmentItem>,
     pub id: String,
@@ -188,6 +190,7 @@ pub struct MessageItem {
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_status: Option<String>,
+    pub callback_failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
     pub created_at: String,
@@ -401,6 +404,7 @@ pub(crate) fn message_to_item(
     base_url: &str,
 ) -> MessageItem {
     MessageItem {
+        text_completeness: msg.text_completeness,
         delivery: None,
         attachments: msg
             .attachments
@@ -425,6 +429,7 @@ pub(crate) fn message_to_item(
         sender_platform_id: msg.sender_platform_id.clone(),
         sender_display_name: msg.sender_display_name.clone(),
         content_type: msg.content_type.clone(),
+        callback_failure_reason: msg.callback_failure_reason.clone(),
         callback_status: msg.callback_status.clone(),
         reply_to_message_id: msg.reply_to_message_id.clone(),
         created_at: msg.created_at.to_rfc3339(),
@@ -652,10 +657,12 @@ fn validate_message_bot_scope(
 async fn consume_reply_token_use(
     state: &AppState,
     claims: &jwt::RelayReplyClaims,
+    owner_id: &str,
 ) -> AppResult<()> {
     crate::services::channel_relay_service::consume_reply_token_use(
         &state.db,
         &reply_token_use(claims)?,
+        owner_id,
     )
     .await
 }
@@ -821,7 +828,7 @@ async fn resolve_reply_token_message_context_classified(
                 .into());
             }
         } else if consume {
-            consume_reply_token_use(state, &claims).await?;
+            consume_reply_token_use(state, &claims, &original.user_id).await?;
         }
 
         Ok(ReplyRequestContext {
@@ -1943,11 +1950,14 @@ async fn deliver_reply(
         platform_bot_id: Some(&bot.platform_bot_id),
         platform_secrets: platform_secrets.as_ref(),
     };
-    let send_result = if let Some(parts) = crate::services::channel_reply_plan::ordinary(
+    let parts = crate::services::channel_reply_plan::ordinary(
         &outbound,
         adapter.platform_id(),
         platform_conversation_id,
-    )? {
+    )?;
+    let send_result = if let Ok(key) = crate::services::channel_supplemental_delivery::SAVED_RELAY_KEY.try_with(Clone::clone) {
+        Box::pin(crate::services::channel_reply_delivery::send_saved_parts(&key,&state.db,&state.http_client,adapter,&bot,&original,&attributed_api_key_id,platform_conversation_id,&credentials,parts.unwrap_or_else(||vec![outbound.clone()]))).await.map(|(stored,outcome)| {stored_parts=Some(stored);outcome})
+    } else if let Some(parts) = parts {
         Box::pin(crate::services::channel_reply_delivery::send_parts(
             &state.db,
             &state.http_client,
@@ -4417,6 +4427,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -4460,6 +4472,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -4485,6 +4498,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: Some("delivered".to_string()),
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: None,
@@ -4495,6 +4509,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -4520,6 +4535,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: None,
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: Some(message.id.clone()),
@@ -4999,6 +5015,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5262,6 +5279,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -5616,6 +5635,7 @@ mod tests {
             .await
             .unwrap();
         let colliding = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5914,6 +5934,7 @@ mod tests {
         }
         // Another chat's reply shares the platform message ID, not the bucket.
         let sibling = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,

@@ -342,6 +342,21 @@ async fn tracked_commands_and_wire_match_main() {
             "tracked-key"
         );
         let commands = recorded.lock().unwrap().clone();
+        let live_updates: Vec<_> = commands
+            .iter()
+            .filter(|cmd| {
+                cmd.get_str("findAndModify")
+                    == Ok(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
+            })
+            .filter_map(|cmd| cmd.get_document("update").ok()?.get_document("$set").ok())
+            .filter(|set| set.get_str("observation_state") == Ok("ready"))
+            .collect();
+        let [set] = live_updates.as_slice() else {
+            panic!("{verb} {route} must persist exactly one live sandbox observation");
+        };
+        for field in ["request_ciphertext", "request_context_version"] {
+            assert!(!set.contains_key(field), "{verb} {route} wrote {field}");
+        }
         let mut normalized = normalized_commands(&commands, &f);
         if let Some(creation) = &permit.creation {
             normalized = normalized.replace(&creation.id, "<creation>");
@@ -358,7 +373,10 @@ async fn tracked_commands_and_wire_match_main() {
         f.db.drop().await.unwrap();
     }
     // Captured on origin/main 4a31e80cae8eb2aea8f1cae327bc3321551a54f2.
+    // Driver 3.7 places top-level writeConcern after command metadata. Moving
+    // that field back reproduced the original fingerprint for all 17 traces.
     // Normalize only session/time/fixture identities, ciphertext and signed JWTs.
+    // These pins deliberately differ from main because a live observation no longer writes the request pair (#1956 PR 9).
     let expected: std::collections::BTreeMap<String, String> =
         serde_json::from_str(include_str!("assistant_cma_legacy_tracked_commands.json")).unwrap();
     assert_eq!(traces.len(), expected.len());
@@ -826,7 +844,7 @@ async fn legacy_production_workspace_creation_is_forwarded_verbatim() {
     .await
     .expect("production workspace-only request must pass");
     let response = crate::services::proxy_service::forward_request_with_resource_proof(
-        &reqwest::Client::new(),
+        crate::services::proxy_service::Redirects::Return,
         &f.target,
         reqwest::Method::POST,
         "/api/v1/agents",

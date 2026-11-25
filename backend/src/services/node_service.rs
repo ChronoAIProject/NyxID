@@ -135,9 +135,7 @@ async fn decrypt_signing_secret(
         .ok_or_else(|| AppError::NodeOffline("Node is missing its signing secret".into()))?;
     match node.signing_secret_context_version {
         // Exact legacy decode; random v0 nonces may start with any magic bytes.
-        None if keys.allow_legacy_record_reads() => {
-            keys.decrypt(ciphertext).await.map(Zeroizing::new)
-        }
+        None if keys.allow_legacy_record_reads() => keys.decrypt(ciphertext).await,
         None => Err(AppError::Internal(
             "Legacy node secret reads are disabled".into(),
         )),

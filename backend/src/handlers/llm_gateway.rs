@@ -449,6 +449,8 @@ async fn llm_proxy_request_inner(
     // policies can short-circuit without decrypting downstream credentials.
     let request_method_str = request.method().as_str().to_string();
     let method = request.method().clone();
+    let caller_uri = request.uri().clone();
+    let caller_path = path.clone();
     let query = request.uri().query().map(String::from);
     let headers = request.headers().clone();
     let body_bytes =
@@ -1057,8 +1059,14 @@ async fn llm_proxy_request_inner(
             let reqwest_headers = convert_headers(&headers);
 
             state.billing.mark_forwarded(&metered).await?;
+            let location = super::proxy::AsyncLocationContext::new(
+                &target,
+                &caller_uri,
+                &caller_path,
+                &delegated,
+            );
             let downstream_result = proxy_service::forward_request_with_egress_guard(
-                llm_scope.client(&state.http_client),
+                llm_scope.redirects(),
                 &target,
                 reqwest_method,
                 &path,
@@ -1070,7 +1078,7 @@ async fn llm_proxy_request_inner(
                 None,
                 &state.token_exchange_cache,
                 &state.cloud_response_cache,
-                Vec::new(),
+                vec![llm_usage_service::identity_encoding_header()],
                 billing_egress_permit,
                 egress_guard.as_ref(),
             )
@@ -1092,6 +1100,7 @@ async fn llm_proxy_request_inner(
                     downstream_result,
                 )
                 .await?;
+            llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             let usage_context = llm_usage_service::UsageAuditContext {
                 db: state.db.clone(),
@@ -1104,8 +1113,10 @@ async fn llm_proxy_request_inner(
                 api_key_name: auth_user.api_key_name.clone(),
             };
 
+            let location = location.map(|ctx| ctx.after_redirects(&downstream_response));
             build_filtered_response(
                 downstream_response,
+                location.as_ref(),
                 Some(usage_context),
                 state.config.proxy_stream_idle_timeout_secs,
                 metered.clone(),
@@ -2009,8 +2020,10 @@ async fn gateway_provider_request(
             .await?
         } else {
             state.billing.mark_forwarded(&metered).await?;
+            // The body selects the provider, so only external downloads have a caller URL.
+            let location = super::proxy::AsyncLocationContext::for_target(&target, &delegated);
             let downstream_result = proxy_service::forward_request_with_egress_guard(
-                llm_scope.client(&state.http_client),
+                llm_scope.redirects(),
                 &target,
                 reqwest_method,
                 &final_path,
@@ -2022,7 +2035,7 @@ async fn gateway_provider_request(
                 None,
                 &state.token_exchange_cache,
                 &state.cloud_response_cache,
-                Vec::new(),
+                vec![llm_usage_service::identity_encoding_header()],
                 billing_egress_permit,
                 egress_guard.as_ref(),
             )
@@ -2044,9 +2057,10 @@ async fn gateway_provider_request(
                     downstream_result,
                 )
                 .await?;
+            llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             // If translator needs translation, parse and translate the response
-            if translator.needs_translation() {
+            if translator.needs_translation() && !downstream_response.status().is_redirection() {
                 if is_streaming {
                     // Streaming: translate SSE events on the fly
                     build_translated_sse_response(
@@ -2074,6 +2088,7 @@ async fn gateway_provider_request(
             } else {
                 build_filtered_response(
                     downstream_response,
+                    location.as_ref(),
                     Some(usage_context),
                     idle_timeout_secs,
                     metered.clone(),
@@ -2368,6 +2383,7 @@ async fn read_response_with_limit(response: reqwest::Response) -> AppResult<byte
 
 async fn build_filtered_response(
     downstream_response: reqwest::Response,
+    location: Option<&super::proxy::AsyncLocationContext>,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
     idle_timeout_secs: u64,
     metered: crate::services::billing::MeteredProxyContext,
@@ -2389,6 +2405,14 @@ async fn build_filtered_response(
         let name_lower = name.as_str().to_lowercase();
         // Skip content-length for SSE -- the body is streamed, length unknown
         if is_sse && name_lower == "content-length" {
+            continue;
+        }
+        if status.is_redirection() && name_lower == "location" {
+            if let Some(value) = location
+                .and_then(|context| context.header_value(status, &name_lower, value.to_str().ok()?))
+            {
+                response_builder = response_builder.header(name, value);
+            }
             continue;
         }
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
@@ -3020,6 +3044,7 @@ pub(super) async fn check_llm_approval_descriptor(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -3196,11 +3221,11 @@ impl LlmOperationScope {
         )
     }
 
-    fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
+    fn redirects(&self) -> proxy_service::Redirects {
         if self.guest || self.identity.is_some() {
-            proxy_service::no_redirect_http_client()
+            proxy_service::Redirects::Return
         } else {
-            shared
+            proxy_service::Redirects::SameOrigin
         }
     }
 }
@@ -3523,7 +3548,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: "test-token".to_owned().into(),
             service,
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,

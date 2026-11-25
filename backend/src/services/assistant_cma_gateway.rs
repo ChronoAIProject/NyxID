@@ -56,6 +56,8 @@ pub enum CmaGatewayError {
     Unavailable,
     #[error("CMA returned an invalid response")]
     InvalidResponse,
+    #[error("Direct proxy destination is not permitted")]
+    DestinationRefused,
     #[error("CMA configuration is unavailable")]
     ConfigurationRequired,
     #[error("Invalid CMA request")]
@@ -77,6 +79,9 @@ impl From<CmaGatewayError> for AppError {
             CmaGatewayError::InvalidRequest => Self::ValidationError("Invalid CMA request".into()),
             CmaGatewayError::Conflict => {
                 Self::Conflict("CMA resource state changed; refresh before retrying".into())
+            }
+            CmaGatewayError::DestinationRefused => {
+                Self::ValidationError("Direct proxy destination is not permitted".into())
             }
             CmaGatewayError::ConfigurationRequired => {
                 Self::Conflict("cma_configuration_required".into())
@@ -655,7 +660,8 @@ impl CatalogCmaGateway {
             base.as_str().trim_end_matches('/'),
             creation.path.trim_start_matches('/')
         );
-        let mut request = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+        let client = catalog_http_client(&service, &url, &creation.method)?;
+        let mut request = client
             .request(
                 reqwest::Method::from_bytes(creation.method.as_bytes())
                     .map_err(|_| CmaGatewayError::InvalidRequest)?,
@@ -682,16 +688,10 @@ impl CatalogCmaGateway {
         let guard = registry::verify(Some(&admission), &target, Some(&caller))?
             .ok_or(CmaGatewayError::ConfigurationRequired)?;
         guard.before_send(&request).await?;
-        let response = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+        let response = client
             .execute(request)
             .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    CmaGatewayError::Timeout
-                } else {
-                    CmaGatewayError::Unavailable
-                }
-            })?;
+            .map_err(|e| catalog_http_error(&service, &creation.method, &creation.path, e))?;
         let response = guard.observe_response(response).await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -775,8 +775,8 @@ impl CatalogCmaGateway {
         }
         let response = tokio::time::timeout(
             Duration::from_secs(20),
-            super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
-                .get(url)
+            catalog_http_client(&service, url.as_str(), "GET")?
+                .get(url.clone())
                 .headers(self.identity_headers(&service, &owner).await?)
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .timeout(Duration::from_secs(MAX_STREAM_SECONDS))
@@ -784,7 +784,7 @@ impl CatalogCmaGateway {
         )
         .await
         .map_err(|_| CmaGatewayError::Timeout)?
-        .map_err(|_| CmaGatewayError::Unavailable)?;
+        .map_err(|e| catalog_http_error(&service, "GET", url.path(), e))?;
         let status = response.status().as_u16();
         if status != 200 {
             let body = bounded_body(response).await;
@@ -847,10 +847,13 @@ impl CatalogCmaGateway {
         let mut limits = WebSocketConfig::default();
         limits.max_message_size = Some(MAX_DESKTOP_FRAME_BYTES);
         limits.max_frame_size = Some(MAX_DESKTOP_FRAME_BYTES);
-        let result = tokio::time::timeout(
-            Duration::from_secs(20),
-            tokio_tungstenite::connect_async_with_config(request, Some(limits), true),
-        )
+        let destination = catalog_destination(&service, url.as_str()).await?;
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let stream = destination.connect().await?;
+            stream.set_nodelay(true)?;
+            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(limits), None)
+                .await
+        })
         .await
         .map_err(|_| CmaGatewayError::Timeout)?;
         match result {
@@ -989,8 +992,9 @@ impl CatalogCmaGateway {
             .await
             .map_err(|_| CmaGatewayError::Unavailable)?,
         );
-        let mut request = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
-            .request(method, url)
+        let client = catalog_http_client(&service, url.as_str(), method.as_str())?;
+        let mut request = client
+            .request(method.clone(), url.clone())
             .timeout(Duration::from_secs(20))
             .header(reqwest::header::ACCEPT, "application/json")
             .header("X-NyxID-Identity-Token", assertion.as_str());
@@ -1060,16 +1064,10 @@ impl CatalogCmaGateway {
             .await
             .map_err(|_| CmaGatewayError::Forbidden)?;
         }
-        let response = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+        let response = client
             .execute(request)
             .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    CmaGatewayError::Timeout
-                } else {
-                    CmaGatewayError::Unavailable
-                }
-            })?;
+            .map_err(|e| catalog_http_error(&service, method.as_str(), url.path(), e))?;
         let status = response.status().as_u16();
         let body = bounded_body(response).await;
         if !(200..300).contains(&status) {
@@ -1150,6 +1148,83 @@ pub fn validate_idempotency_key(value: &str) -> CmaResult<()> {
         return Err(CmaGatewayError::InvalidRequest);
     }
     Ok(())
+}
+
+async fn catalog_destination(
+    service: &DownstreamService,
+    url: &str,
+) -> CmaResult<super::proxy_destination::Destination> {
+    super::proxy_destination::Destination::for_request(
+        service
+            .approved_private_base_url
+            .as_deref()
+            .filter(|_| service.owner_user_id.is_none()),
+        &service.base_url,
+        url,
+    )
+    .await
+    .map_err(|failure| {
+        catalog_failure(
+            service,
+            "GET",
+            Url::parse(url).ok().as_ref().map_or("/", Url::path),
+            failure,
+        )
+    })
+}
+
+fn catalog_failure(
+    service: &DownstreamService,
+    method: &str,
+    path: &str,
+    failure: super::proxy_destination::Failure,
+) -> CmaGatewayError {
+    use super::proxy_destination::Failure;
+    failure.log(service, method, path, false);
+    match failure {
+        Failure::AddressNotPermitted | Failure::UrlShape => CmaGatewayError::DestinationRefused,
+        Failure::ResolutionUnavailable | Failure::TransportUnavailable => {
+            CmaGatewayError::Unavailable
+        }
+    }
+}
+
+fn catalog_http_client(
+    service: &DownstreamService,
+    raw: &str,
+    method: &str,
+) -> CmaResult<reqwest::Client> {
+    let url = Url::parse(raw).map_err(|_| {
+        catalog_failure(
+            service,
+            method,
+            "/{path}",
+            super::proxy_destination::Failure::UrlShape,
+        )
+    })?;
+    let approved = service
+        .approved_private_base_url
+        .as_deref()
+        .filter(|_| service.owner_user_id.is_none());
+    super::proxy_destination::http::for_url(approved, &service.base_url, &url, false)
+        .map_err(|failure| catalog_failure(service, method, url.path(), failure))?
+        .cma()
+        .map_err(|_| CmaGatewayError::Unavailable)
+}
+
+fn catalog_http_error(
+    service: &DownstreamService,
+    method: &str,
+    path: &str,
+    error: reqwest::Error,
+) -> CmaGatewayError {
+    if let Some(failure) = super::proxy_destination::http::connection_failure(&error) {
+        catalog_failure(service, method, path, failure)
+    } else if error.is_timeout() {
+        CmaGatewayError::Timeout
+    } else {
+        CmaGatewayError::Unavailable
+    }
 }
 
 fn validated_base(raw: &str) -> CmaResult<Url> {

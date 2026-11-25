@@ -668,6 +668,7 @@ async fn cold_guest_model_setup(native: bool) {
     let input = seen[1]["input"].as_str().unwrap();
     assert!(input.contains("The linking administrator supplies transport only"));
     assert!(input.contains("Guest model and tool use is charged to the organization"));
+    assert!(input.contains("including writes that meet the tool's stated conditions"));
     assert!(
         input.contains(
             "Guest execution cannot use account tools, machines, saved logins or approvals"
@@ -919,12 +920,13 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
             sink.lock().await[observation_index] = json!({"conversation_id":conversation.id,"api_key_id":key.id,"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
+                "request_key":headers["idempotency-key"].to_str().unwrap(),
                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
                 "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context});
             completed_calls.send_modify(|count| *count += 1);
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":if status.is_success(){"response.completed"}else{"response.failed"},"sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
-                "conversation":{"id":session},"status":if status.is_success(){"completed"}else{"failed"},"error":if status.is_success(){Value::Null}else{json!({"code":"model_error","message":"Model callback refused"})},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
+                "conversation":{"id":session},"status":if status.is_success(){"completed"}else{"failed"},"error":if status.is_success(){Value::Null}else{json!({"code":"model_error","message":"Model callback refused"})},"output":if status.is_success(){json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}])}else{json!([])}}});
             let setup = conversation.guest_model_setup;
             axum::response::Sse::new(futures::stream::once(async move {
                 if setup {futures::future::pending::<()>().await;}
@@ -1037,6 +1039,16 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
         )
         .await
         .unwrap();
+
+    if route_retry {
+        let settings = chats::ChatSettings {
+            notice_language: Some("zh-CN".into()),
+            ..Default::default()
+        };
+        chats::update_chat(&state, OWNER, &parent.id, &settings)
+            .await
+            .unwrap();
+    }
 
     let mut event_id = Uuid::new_v4().to_string();
     let facts = ChannelThreadFacts {
@@ -1230,6 +1242,12 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             .await
             .unwrap()
             .unwrap();
+        if route_retry {
+            assert_eq!(
+                event.delivery.as_ref().unwrap().notice_language,
+                Some(NoticeLanguage::Simplified)
+            );
+        }
         assert!(event.turn_id.is_some());
         let guest = state
             .db
@@ -1355,6 +1373,24 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
     let refused: Vec<_> = seen.iter().filter(|call| call["status"] != 200).collect();
     assert_eq!(refused.len(), usize::from(route_retry));
     if route_retry {
+        let repaired = &seen[3];
+        assert_eq!(refused[0]["conversation_id"], repaired["conversation_id"]);
+        assert_eq!(repaired["status"], 200);
+        assert_ne!(
+            refused[0]["request_key"], repaired["request_key"],
+            "the repaired model execution must not replay the rejected request"
+        );
+        let Json(health) = crate::handlers::channel_bots::health(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(OWNER),
+            Path(row.channel_bot_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            health.diagnostics.inbound_outcomes["guest_model_route_mismatch"].count,
+            1
+        );
         assert!(
             refused[0]["body"]
                 .as_str()
@@ -1558,6 +1594,7 @@ async fn org_channel_native_discord_recovery_keeps_member_identity_and_refuses_r
             &stored.id,
             "already-settled",
             stored.reply_channel.as_ref().unwrap(),
+            None,
         )
         .await
         .unwrap()

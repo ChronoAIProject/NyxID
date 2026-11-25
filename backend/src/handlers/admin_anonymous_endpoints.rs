@@ -297,6 +297,7 @@ mod tests {
             is_active: true,
             created_by: created_by.to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

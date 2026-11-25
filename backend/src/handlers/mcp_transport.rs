@@ -26,6 +26,7 @@ use crate::services::{
     operation_descriptor, proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::turn_trace::{GuestServiceFailure, Stage};
 
 use super::services_helpers::fetch_service;
 
@@ -223,6 +224,41 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
             "isError": is_error,
         }),
     )
+}
+
+fn guest_service_failure(
+    auth: &McpAuthContext,
+    reason: GuestServiceFailure,
+    mut response: Response,
+) -> Response {
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.is_org_channel_guest())
+    {
+        reason.record(Stage::Mcp, None);
+        response
+            .extensions_mut()
+            .insert(crate::models::assistant_conversation::ToolFailure {
+                kind: "tool_error".into(),
+                reason: Some(reason.as_str().into()),
+                status: None,
+            });
+    }
+    response
+}
+
+fn operation_access_failure(
+    auth: &McpAuthContext,
+    request_id: Option<serde_json::Value>,
+    error: &crate::errors::AppError,
+) -> Response {
+    let response = tool_result(request_id, &error.to_string(), true);
+    if matches!(error, crate::errors::AppError::ApiKeyScopeForbidden(_)) {
+        guest_service_failure(auth, GuestServiceFailure::GuestOperationDenied, response)
+    } else {
+        response
+    }
 }
 
 fn concurrency_limited_response(id: Option<serde_json::Value>) -> Response {
@@ -513,6 +549,14 @@ async fn service_tool_content(
     };
     let status = response.status;
     let is_error = !(200..300).contains(&status);
+    let guest_downstream_error = (400..600).contains(&status)
+        && auth
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.is_org_channel_guest());
+    if guest_downstream_error {
+        GuestServiceFailure::DownstreamHttpError.record(Stage::Mcp, Some(status));
+    }
     let Some(media) = response.media.filter(|_| !is_error) else {
         let text = if is_error {
             format!("Error ({status}): {}", response.text)
@@ -536,7 +580,8 @@ async fn service_tool_content(
             vec![serde_json::json!({ "type": "text", "text": text })],
             is_error,
             is_error.then(|| crate::models::assistant_conversation::ToolFailure {
-                reason: None,
+                reason: guest_downstream_error
+                    .then(|| GuestServiceFailure::DownstreamHttpError.as_str().into()),
                 kind: "service_status".into(),
                 status: Some(status),
             }),
@@ -747,6 +792,7 @@ fn untracked_discovery_allowed(name: Option<&str>) -> bool {
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    connection_cancellation: tokio_util::sync::CancellationToken,
     execution_permission:
         Option<std::sync::Arc<crate::services::execution_permission_dispatch::RequestContext>>,
     oauth_lineage: Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage>,
@@ -827,6 +873,7 @@ impl McpAuthContext {
 
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            connection_cancellation: Default::default(),
             execution_permission: None,
             oauth_lineage: None,
             machine_source: None,
@@ -1151,6 +1198,7 @@ async fn authenticate_mcp_or_public(
                     chat.execution_permission = execution_permission.clone();
                 }
                 return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
+                    connection_cancellation: Default::default(),
                     execution_permission,
                     oauth_lineage: None,
                     machine_source: if chat.is_none()
@@ -1216,19 +1264,21 @@ async fn authenticate_mcp_or_public(
         }
     }
 
-    let token = headers
+    let credential = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.strip_prefix("Bearer ")
-                .or_else(|| s.strip_prefix("DPoP "))
-        });
+        .and_then(auth::AccessScheme::parse);
+    let token = credential.map(|(_, token)| token);
+    let dpop = credential.is_some_and(|(scheme, _)| scheme == auth::AccessScheme::Dpop);
 
     // A raw API key must never acquire an unrelated stored MCP session via
     // bearer/JWT fallback. Public-purpose keys have no session authority.
     if let Some(token) = token.filter(|token| {
         token.starts_with(crate::crypto::token::AGENT_KEY_PREFIX) || token.starts_with("nyx_")
     }) {
+        if dpop {
+            return Err(mcp_401(&state.config.base_url));
+        }
         if allow_public {
             let (_, key, child) = crate::services::key_service::validate_api_key(&state.db, token)
                 .await
@@ -1248,9 +1298,12 @@ async fn authenticate_mcp_or_public(
     }
 
     // --- Try JWT-based auth ---
-    if let Some(token) = token {
+    if let Some((scheme, token)) = credential {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                scheme
+                    .require_binding(&claims)
+                    .map_err(|_| mcp_401(&state.config.base_url))?;
                 let authority_user =
                     crate::services::oauth_token_authority_service::validate_claims_with_user_for_route(
                         &state.db, &claims,
@@ -1450,7 +1503,7 @@ async fn authenticate_mcp_or_public(
                 ctx.user_agent = request_ua.clone();
                 return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
             }
-            Err(_) if session_fallback => {
+            Err(_) if session_fallback && !dpop => {
                 // Any JWT error (expired, invalid issuer, etc.) -- fall through
                 // to session-based auth. The MCP session ID is the real auth
                 // mechanism for long-lived connections; the JWT is only needed
@@ -1795,7 +1848,7 @@ pub async fn mcp_post(
     if watch_initialize {
         state.db = crate::services::transaction_service::durable_database(&state.db);
     }
-    let auth = match authenticate_mcp_or_public(
+    let mut auth = match authenticate_mcp_or_public(
         &state,
         &headers,
         !is_initialize,
@@ -1815,6 +1868,7 @@ pub async fn mcp_post(
         Err(resp) => return resp,
     };
 
+    auth.connection_cancellation = cancellation.clone();
     if let Some(context) = &auth.execution_permission {
         context.capture_idempotency(&headers);
         context.bind_cancellation(cancellation);
@@ -2304,6 +2358,10 @@ async fn handle_initialize(
                 return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions");
             }
             Err(error) => {
+                let error = crate::services::api_key_mutation_service::map_transaction_error(error);
+                if matches!(error, crate::errors::AppError::Conflict(_)) {
+                    return rpc_error(request.id.clone(), -32000, "Account is unavailable");
+                }
                 tracing::error!(%error, "Failed to persist MCP session");
                 return rpc_error(request.id.clone(), -32603, "Internal error");
             }
@@ -2632,9 +2690,8 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
     )
 }
 
-/// Schedule creation has no client-generated object ID. Approval handles and
-/// the universal-tool wrapper are transport, not a different creation. Keep the
-/// old digest as a lookup candidate for replies written by older replicas.
+/// Approval handles, memory recovery links and the universal-tool wrapper do
+/// not change what the tool writes. Keep the exact digest for older replicas.
 fn chat_retry_digest(params: &serde_json::Value) -> String {
     let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
         let arguments = params["arguments"]["arguments_json"]
@@ -2644,13 +2701,19 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     } else {
         (params["name"].as_str(), params.get("arguments").cloned())
     };
-    if name == Some("nyxid__create_schedule")
-        && let Some(arguments) = arguments
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
+    if let Some(arguments) = arguments
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
     {
-        arguments.remove("acknowledgement_id");
-        return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        let field = match name {
+            Some("nyxid__create_schedule") => Some("acknowledgement_id"),
+            Some("nyxid__remember") => Some("recovery"),
+            _ => None,
+        };
+        if let Some(field) = field {
+            arguments.remove(field);
+            return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+        }
     }
     chat_activity_digest(params)
 }
@@ -3842,17 +3905,26 @@ fn dispatch_service_tool<'a>(
                 if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
                     crate::services::lark_attachment_tool::diagnostics::error(&e);
                 }
-                return tool_result(
+                let response = tool_result(
                     request.id.clone(),
                     &format!("Invalid tool arguments: {e}"),
                     true,
                 );
+                return if matches!(
+                    e,
+                    crate::errors::AppError::BadRequest(_)
+                        | crate::errors::AppError::ValidationError(_)
+                ) {
+                    guest_service_failure(auth, GuestServiceFailure::InvalidToolArguments, response)
+                } else {
+                    response
+                };
             }
         };
         if let Err(error) =
             prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
         {
-            return tool_result(request.id.clone(), &error.to_string(), true);
+            return operation_access_failure(auth, request.id.clone(), &error);
         }
         if let Some(refused) = guest_service_refusal(
             state,
@@ -3897,7 +3969,14 @@ fn dispatch_service_tool<'a>(
         };
         let operation = prepared.operation_descriptor();
         match box_tool_future(|| {
-            authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone())
+            authorize_mcp_tool_operation(
+                state,
+                auth,
+                service,
+                &operation,
+                request.id.clone(),
+                Some(&mut prepared),
+            )
         })
         .await
         {
@@ -4284,6 +4363,7 @@ async fn authorize_mcp_tool_operation(
     service: &mcp_service::McpToolService,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
+    prepared: Option<&mut mcp_service::PreparedProxyCall>,
 ) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     let target = crate::services::mcp_approval::approval_target_for_tool(
         &state.db,
@@ -4299,7 +4379,15 @@ async fn authorize_mcp_tool_operation(
             true,
         )
     })?;
-    authorize_mcp_operation(state, auth, target, operation, request_id).await
+    authorize_mcp_operation(
+        state,
+        auth,
+        target,
+        operation,
+        request_id,
+        prepared.filter(|_| auth.chat.is_some() && service.source.is_user_service()),
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -4309,6 +4397,7 @@ async fn authorize_mcp_operation(
     target: crate::services::mcp_approval::McpApprovalTarget,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
+    prepared: Option<&mut mcp_service::PreparedProxyCall>,
 ) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     // A shell can do anything: SSH stays the owner's. Service calls were
     // checked against the owner's guest access before this point.
@@ -4351,53 +4440,70 @@ async fn authorize_mcp_operation(
         // An approval the owner granted for their own requests is theirs: a
         // guest in the same chat shares the chat's key, not the approval.
         approval_service::ApprovalOutcome::Allowed { required: true } if guest_turn(auth) => {
-            return Err(guest_refused(request_id));
+            return Err(guest_service_failure(
+                auth,
+                GuestServiceFailure::ApprovalRequired,
+                guest_refused(request_id),
+            ));
         }
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
         approval_service::ApprovalOutcome::Denied => {
-            return Err(tool_result(
-                request_id,
-                "Operation denied by approval policy",
-                true,
+            return Err(guest_service_failure(
+                auth,
+                GuestServiceFailure::ApprovalDenied,
+                tool_result(request_id, "Operation denied by approval policy", true),
             ));
         }
         // Nobody but the owner asks the owner to approve: a guest's request
         // would look like the owner's own.
         approval_service::ApprovalOutcome::NeedsApproval(_) if guest_turn(auth) => {
-            return Err(guest_refused(request_id));
+            return Err(guest_service_failure(
+                auth,
+                GuestServiceFailure::ApprovalRequired,
+                guest_refused(request_id),
+            ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
+    if let Some(prepared) = prepared {
+        let state = state.clone();
+        let auth = auth.clone();
+        let operation = operation.clone();
+        prepared.defer_service_approval(move || {
+            Box::pin(async move {
+                wait_for_mcp_approval(&state, &auth, &target, &operation, &pending).await
+            })
+        });
+    } else {
+        wait_for_mcp_approval(state, auth, &target, operation, &pending)
+            .await
+            .map_err(|message| tool_result(request_id, &message, true))?;
+    }
+    Ok(None)
+}
+
+async fn wait_for_mcp_approval(
+    state: &AppState,
+    auth: &McpAuthContext,
+    target: &crate::services::mcp_approval::McpApprovalTarget,
+    operation: &operation_descriptor::OperationDescriptor,
+    pending: &approval_service::PendingApproval,
+) -> Result<(), String> {
     let notify_user_ids = approval_service::approval_notification_recipients(
         &state.db,
-        &approval_owner_user_id,
-        &pending,
+        &auth.effective_approval_owner_user_id(),
+        pending,
     )
     .await
-    .map_err(|e| {
-        tool_result(
-            request_id.clone(),
-            &format!("Approval check failed: {e}"),
-            true,
-        )
-    })?;
-    let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
-        tool_result(
-            request_id.clone(),
-            "Approval recipient list unexpectedly empty",
-            true,
-        )
-    })?;
+    .map_err(|e| format!("Approval check failed: {e}"))?;
+    let timeout_recipient = notify_user_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| "Approval recipient list unexpectedly empty".to_owned())?;
     let channel = notification_service::get_or_create_channel(&state.db, &timeout_recipient)
         .await
-        .map_err(|e| {
-            tool_result(
-                request_id.clone(),
-                &format!("Approval channel lookup failed: {e}"),
-                true,
-            )
-        })?;
+        .map_err(|e| format!("Approval channel lookup failed: {e}"))?;
     let timeout_secs = channel.approval_timeout_secs;
     let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
@@ -4410,7 +4516,17 @@ async fn authorize_mcp_operation(
         auth.api_key_id.as_deref(),
     )
     .await
-    .map_err(|_| tool_result(request_id.clone(), "Group approval is unavailable", true))?;
+    .map_err(|_| "Group approval is unavailable".to_owned())?;
+    let waiter = approval_service::ConnectedWait::for_service(
+        &state.db,
+        &pending.resolution.mode,
+        &mut request_operation,
+        operation,
+        auth.chat.as_ref(),
+        timeout_secs,
+    )
+    .await
+    .map_err(|e| format!("Approval check failed: {e}"))?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -4432,11 +4548,7 @@ async fn authorize_mcp_operation(
     )
     .await
     .map_err(|_| {
-        tool_result(
-            request_id.clone(),
-            &serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string(),
-            true,
-        )
+        serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string()
     })?;
 
     if let Some(chat) = auth.chat.as_ref() {
@@ -4447,15 +4559,20 @@ async fn authorize_mcp_operation(
             false,
         )
         .await
-        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
+        .map_err(|_| ACTIVITY_RECORDING_RETRY.to_owned())?;
     }
     let req_id = approval_request.id.clone();
-    approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+    waiter
+        .wait(
+            &approval_request,
+            &auth.connection_cancellation,
+            timeout_secs,
+        )
         .await
         .map_err(|error| {
             let outcome =
                 approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
-            tool_result(request_id.clone(), &outcome.to_string(), true)
+            outcome.to_string()
         })?;
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(
@@ -4465,18 +4582,12 @@ async fn authorize_mcp_operation(
             true,
         )
         .await
-        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
+        .map_err(|_| ACTIVITY_RECORDING_RETRY.to_owned())?;
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
             .await
-            .map_err(|_| {
-                tool_result(
-                    request_id,
-                    "The originating invocation turn was stopped or replaced",
-                    true,
-                )
-            })?;
+            .map_err(|_| "The originating invocation turn was stopped or replaced".to_owned())?;
     }
-    Ok(None)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4533,7 +4644,9 @@ fn annotate_shared_connection(
 }
 
 fn chat_access_hint(auth: &McpAuthContext) -> &'static str {
-    if auth
+    if guest_turn(auth) {
+        "chat_access meanings: granted = the guest has service access within the specialist's live guest limits. Each call must also pass the effective approval policy. Use the arguments the tool requires. NyxID will refuse actions that require owner approval. Report the tool's actual outcome."
+    } else if auth
         .org_agent_access
         .as_ref()
         .is_some_and(|a| a.shared().is_some())
@@ -4646,14 +4759,7 @@ async fn guest_service_refusal(
         };
         if let Some(connection) = shared.connections().get(service_id) {
             if connection.user_id == shared.owner() {
-                let effects = mcp_service::operation_effects(
-                    prepared.method(),
-                    service
-                        .durable_endpoint_metadata
-                        .get(&endpoint.endpoint_id)
-                        .copied()
-                        .unwrap_or_default(),
-                );
+                let effects = prepared.effects();
                 if prepared.carries_method_override()
                     || !crate::services::shared_agent_service::permits(
                         shared.level(service_id),
@@ -4683,35 +4789,40 @@ async fn guest_service_refusal(
     else {
         return Some(guest_refused(request_id));
     };
-    if prepared
-        .authorize_agent_operations(&agent.guest_operation_scopes, service, endpoint)
-        .is_err()
+    if let Err(error) =
+        prepared.authorize_agent_operations(&agent.guest_operation_scopes, service, endpoint)
     {
-        return Some(guest_refused(request_id));
+        let response = guest_refused(request_id);
+        return Some(
+            if matches!(error, crate::errors::AppError::ApiKeyScopeForbidden(_)) {
+                guest_service_failure(auth, GuestServiceFailure::GuestOperationDenied, response)
+            } else {
+                response
+            },
+        );
     }
     let access = crate::services::agent_operation_scope_service::guest_level(
         &agent,
         &service.service_id,
         crate::services::agent_operation_scope_service::mcp_catalog_id(service),
     );
-    let metadata = service
-        .durable_endpoint_metadata
-        .get(&endpoint.endpoint_id)
-        .copied()
-        .unwrap_or_default();
     // A method override may be honoured in place of the method the call is
     // sent with, and approvals see only the latter: guests never send one.
     if prepared.carries_method_override() {
-        return Some(tool_result(
-            request_id,
-            &crate::services::assistant_acknowledgement_service::guest_method_override_refusal(
-                &service.service_slug,
-            )
-            .to_string(),
-            true,
+        return Some(guest_service_failure(
+            auth,
+            GuestServiceFailure::GuestOperationDenied,
+            tool_result(
+                request_id,
+                &crate::services::assistant_acknowledgement_service::guest_method_override_refusal(
+                    &service.service_slug,
+                )
+                .to_string(),
+                true,
+            ),
         ));
     }
-    let mut effects = prepared.guest_effects(metadata);
+    let mut effects = prepared.effects();
     if service.is_generic_proxy
         && (crate::services::agent_operation_scope_service::mcp_catalog_id(service).is_some()
             || matches!(&service.source, mcp_service::McpToolSource::Platform { .. }))
@@ -4746,14 +4857,18 @@ async fn guest_service_refusal(
         GuestAccess::Read => reads && uses,
     };
     (!allowed).then(|| {
-        tool_result(
-            request_id,
-            &crate::services::assistant_acknowledgement_service::guest_service_refusal(
-                &service.service_slug,
-                access,
-            )
-            .to_string(),
-            true,
+        guest_service_failure(
+            auth,
+            GuestServiceFailure::GuestOperationDenied,
+            tool_result(
+                request_id,
+                &crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                    &service.service_slug,
+                    access,
+                )
+                .to_string(),
+                true,
+            ),
         )
     })
 }
@@ -4835,12 +4950,7 @@ async fn webhook_service_gate(
     if service.source.is_user_service() {
         return Ok(None);
     }
-    let metadata = service
-        .durable_endpoint_metadata
-        .get(&endpoint.endpoint_id)
-        .copied()
-        .unwrap_or_default();
-    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    let effects = prepared.effects();
     // Method overrides have unknown effects; they must never bypass a card.
     let read_only = effects.reads && !prepared.carries_method_override();
     let destructive = effects.destructive || prepared.carries_method_override();
@@ -4998,6 +5108,21 @@ fn native_team_tool_result(
     is_error: bool,
 ) -> Response {
     let mut response = tool_result(request_id, &value.to_string(), is_error);
+    if name == "nyxid__remember" && value["details"]["failed_activity_id"].is_string() {
+        // The reference identifies this activity, so identical rejections
+        // still count as the same result for continuation progress.
+        let mut stable = value.clone();
+        stable["details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_activity_id");
+        response
+            .extensions_mut()
+            .insert(result_digest(&serde_json::json!({
+                "content": [{"type":"text","text":stable.to_string()}],
+                "isError": is_error,
+            })));
+    }
     // Only a trusted native remember diagnostic may enrich persisted activity.
     // Never interpret arbitrary downstream result text as safe UI metadata.
     if name == "nyxid__remember"
@@ -5096,6 +5221,16 @@ async fn handle_account_tool(
         };
         let (value, is_error) =
             Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
+        if name == "nyxid__list_schedules" && !is_error {
+            let content = vec![serde_json::json!({"type":"text","text":value.to_string()})];
+            let (content, digest) =
+                box_tool_future(|| retained_results::project(state, auth, content, false)).await;
+            let mut response = content_result(request_id, content, false);
+            if let Some(digest) = digest {
+                response.extensions_mut().insert(digest);
+            }
+            return response;
+        }
         return native_team_tool_result(request_id, name, &value, is_error);
     }
     let result = tools.execute(&user, name, args).await;
@@ -5622,7 +5757,7 @@ async fn handle_meta_call_tool(
     }
 
     let execution_arguments = webhook_execution_arguments(auth, &inner_args);
-    let prepared = match mcp_service::prepare_chat_proxy_tool_call(
+    let mut prepared = match mcp_service::prepare_chat_proxy_tool_call(
         &state.db,
         &state.encryption_keys,
         if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
@@ -5648,7 +5783,16 @@ async fn handle_meta_call_tool(
             if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
                 crate::services::lark_attachment_tool::diagnostics::error(&e);
             }
-            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            let response = tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            return if matches!(
+                e,
+                crate::errors::AppError::BadRequest(_)
+                    | crate::errors::AppError::ValidationError(_)
+            ) {
+                guest_service_failure(auth, GuestServiceFailure::InvalidToolArguments, response)
+            } else {
+                response
+            };
         }
     };
     if result_query.is_some()
@@ -5663,7 +5807,7 @@ async fn handle_meta_call_tool(
     if let Err(error) =
         prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
     {
-        return tool_result(request_id, &error.to_string(), true);
+        return operation_access_failure(auth, request_id, &error);
     }
     if let Some(refused) = guest_service_refusal(
         state,
@@ -5708,7 +5852,14 @@ async fn handle_meta_call_tool(
     };
     let operation = prepared.operation_descriptor();
     match box_tool_future(|| {
-        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone())
+        authorize_mcp_tool_operation(
+            state,
+            auth,
+            service,
+            &operation,
+            request_id.clone(),
+            Some(&mut prepared),
+        )
     })
     .await
     {
@@ -7078,6 +7229,7 @@ async fn handle_mcp_ssh_exec(
         },
         &operation,
         request_id.clone(),
+        None,
     )
     .await
     {
@@ -8115,6 +8267,7 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            connection_cancellation: Default::default(),
             execution_permission: None,
             oauth_lineage: None,
             machine_source: None,
@@ -8730,6 +8883,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_wait_2705_mcp_shorter_owner_deadline_returns_model_guidance() {
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "mcp_nyxbot_write_deadline",
+        )
+        .await;
+        let db = &f.state.db;
+        db.collection::<mongodb::bson::Document>(
+            crate::models::notification_channel::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"user_id": &f.owner},
+            doc! {"$set": {"approval_required": true, "approval_timeout_secs": 30}},
+        )
+        .await
+        .unwrap();
+        let target = crate::services::mcp_approval::McpApprovalTarget {
+            service_id: uuid::Uuid::new_v4().to_string(),
+            service_owner_user_id: f.owner.clone(),
+            service_name: "Drive".into(),
+            service_slug: "drive".into(),
+            is_auto_connected: false,
+        };
+        let mut auth = McpAuthContext::user(f.owner.clone(), AuthMethod::ApiKey);
+        auth.is_api_key = true;
+        auth.api_key_id = Some(f.chat.api_key_id.clone());
+        auth.chat = Some(f.chat);
+        let ingress = chrono::Utc::now() - chrono::Duration::seconds(31);
+        let operation = operation_descriptor::build_mcp_descriptor("POST", "/folders", None);
+        let result = approval_service::CALLBACK_INGRESS
+            .scope(
+                ingress,
+                authorize_mcp_operation(
+                    &f.state,
+                    &auth,
+                    target,
+                    &operation,
+                    Some(serde_json::json!(42)),
+                    None,
+                ),
+            )
+            .await;
+        let response = result.expect_err("expired tool call");
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let rpc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rpc["result"]["isError"], true, "{rpc}");
+        let outcome: serde_json::Value =
+            serde_json::from_str(rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(outcome["code"], "approval_expired");
+        assert!(
+            outcome["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Nothing was sent")
+        );
+        let card = approval_service::get_request(db, outcome["request_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(card.status, "expired");
+        assert_eq!(
+            card.expires_at.timestamp_millis(),
+            (ingress + chrono::Duration::seconds(30)).timestamp_millis()
+        );
+    }
+
+    #[tokio::test]
     async fn catalog_backed_proxy_and_mcp_paths_enforce_the_same_approval_policy() {
         let Some(db) = connect_test_database("mcp_approval_target_parity").await else {
             eprintln!("skipping MCP approval parity test: no local MongoDB available");
@@ -8894,7 +9114,7 @@ mod tests {
         let proxy_auto_allowed = proxy_call(proxy_request()).await.unwrap();
         assert_eq!(proxy_auto_allowed.status(), StatusCode::OK);
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, None)
                 .await
                 .is_ok()
         );
@@ -8933,7 +9153,7 @@ mod tests {
         let proxy_grant_covered = proxy_call(proxy_request()).await.unwrap();
         assert_eq!(proxy_grant_covered.status(), StatusCode::OK);
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, None)
                 .await
                 .is_ok()
         );
@@ -8972,7 +9192,7 @@ mod tests {
             crate::errors::AppError::ApprovalFailed { .. }
         ));
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, None)
                 .await
                 .is_err()
         );
@@ -10313,6 +10533,21 @@ mod curation_auth_regressions {
         headers.remove("authorization");
         headers.insert("mcp-session-id", sid.parse().unwrap());
         assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn credential_policy_mcp_service_account_uses_ordinary_bearer() {
+        let f = fixture("mcp_service_account_scheme", false).await;
+        let token = token(&f, None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_ok());
+        headers.insert("authorization", format!("DPoP {token}").parse().unwrap());
+        assert!(matches!(
+            authenticate_mcp(&f.state, &headers, false).await,
+            Err(response) if response.status() == StatusCode::UNAUTHORIZED
+        ));
+        f.state.db.drop().await.unwrap();
     }
 
     #[tokio::test]

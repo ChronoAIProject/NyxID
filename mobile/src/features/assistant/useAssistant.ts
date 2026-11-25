@@ -18,6 +18,7 @@ import NetInfo from "@react-native-community/netinfo";
 import { useQuery } from "@tanstack/react-query";
 import { assistantApi, streamAssistantTurn } from "../../lib/api/assistantApi";
 import { agentsApi } from "../../lib/api/agentsApi";
+import { isAgentAccessRefusal } from "../agents/agentAccess";
 import { ApiError } from "../../lib/api/ApiError";
 import { createIdempotencyKey } from "../../lib/api/idempotency";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -28,6 +29,7 @@ import { settledInterruptedTurn } from "./interruptedTurn";
 import {
   assistantTurnBody,
   restoreRefusedAssistantSend,
+  isAttachmentBindRefusal,
 } from "./assistantTurnRequest";
 import type { AssistantUploadedMessage } from "./AssistantUploadSession";
 import {
@@ -65,6 +67,7 @@ export function useAssistant(
   );
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [indexedAgentId, setIndexedAgentId] = useState<string>();
+  const [deniedThread, setDeniedThread] = useState<string>();
   const [history, setHistory] = useState<AssistantHistory>();
   const [live, setLive] = useState<AssistantLiveReply>();
   const [inputText, setInputText] = useState<string>();
@@ -143,6 +146,10 @@ export function useAssistant(
     routeAgentId,
   );
   const agent = agents.data?.agents.find((item) => item.id === agentId);
+  const deniedUse = agent?.can_use === false;
+  const restricted = deniedUse || (!!conversationId && deniedThread === conversationId);
+  const refreshAgents = useRef(agents.refetch);
+  refreshAgents.current = agents.refetch;
   const indexOwner = useRef(agentId);
   indexOwner.current = agentId;
   const updateHistory = useCallback((value: AssistantHistory | undefined) => {
@@ -245,12 +252,20 @@ export function useAssistant(
             page,
             !!beforeSeq,
           );
+          setDeniedThread(undefined);
           updateHistory(merged);
           setRecoveryRequired(false);
           return merged;
         })
         .catch((cause: unknown) => {
           if (!current()) return undefined;
+          if (isAgentAccessRefusal(cause)) {
+            setDeniedThread(id);
+            updateHistory(undefined);
+            streamController.current?.abort();
+            setLive(undefined);
+            void refreshAgents.current();
+          }
           // A live invalidation may replace the initial load and own its only
           // remaining read. Its subscriber intentionally ignores refresh errors,
           // so keep the empty conversation's recovery action reachable here.
@@ -300,6 +315,7 @@ export function useAssistant(
       cancelHistory();
       streamController.current?.abort();
       selected.current = id;
+      setDeniedThread(undefined);
       setConversationId(id);
       updateHistory(undefined);
       setLive(undefined);
@@ -379,18 +395,18 @@ export function useAssistant(
   }, [cancelHistory]);
 
   useEffect(() => {
-    if (!active) {
+    if (!active || deniedUse) {
       cancelHistory();
       streamController.current?.abort();
       return;
     }
     void recover();
-  }, [active, recover, cancelHistory]);
+  }, [active, deniedUse, recover, cancelHistory]);
 
   useEffect(() => {
     // Refocusing can rerun this with the previous chat in the same commit that
     // openConversation leaves it; loading that stale chat would strand `loading`.
-    if (!conversationId || !active || selected.current !== conversationId)
+    if (deniedUse || !conversationId || !active || selected.current !== conversationId)
       return;
     let current = true;
     const operation = ++reopenSequence.current;
@@ -416,7 +432,7 @@ export function useAssistant(
     return () => {
       current = false;
     };
-  }, [conversationId, active, refreshHistory]);
+  }, [conversationId, active, deniedUse, refreshHistory]);
 
   const interruptedSettlement =
     interruption?.conversationId === conversationId
@@ -439,7 +455,7 @@ export function useAssistant(
     !!history?.waiting.length ||
     sending;
   useEffect(() => {
-    if (!active || !conversationId || !needsPolling || loadingOlder) return;
+    if (restricted || !active || !conversationId || !needsPolling || loadingOlder) return;
     let polling = false;
     const interval = setInterval(() => {
       if (polling) return;
@@ -451,7 +467,7 @@ export function useAssistant(
         });
     }, 2000);
     return () => clearInterval(interval);
-  }, [active, conversationId, needsPolling, loadingOlder, refreshHistory]);
+  }, [active, restricted, conversationId, needsPolling, loadingOlder, refreshHistory]);
 
   // A server invalidation can describe a change newer than an in-flight GET.
   // Only ordinary initial reads/polls may share that earlier snapshot.
@@ -460,7 +476,7 @@ export function useAssistant(
     [refreshHistory],
   );
   useAssistantLiveRefresh(
-    active,
+    active && !restricted,
     conversationId,
     loadingOlder || needsPolling,
     refreshLiveHistory,
@@ -472,9 +488,11 @@ export function useAssistant(
       retryOf?: string,
       uploads?: AssistantUploadedMessage,
       acknowledgementId?: string,
+      model?: string,
     ) => {
       if (sendLock.current) throw localizedError("A message is already being sent.");
       if (!activeRef.current) throw localizedError("Reconnect to send a message.");
+      if (restricted) throw localizedError("Chat access is restricted.");
       if (recoveryRequired)
         throw localizedError("Refresh or open the saved chat before sending again.");
       if (
@@ -500,6 +518,7 @@ export function useAssistant(
       assistantTurnBody({
         conversationId: selected.current ?? uploads?.conversationId,
         agentId,
+        model,
         text,
         retryOf,
         acknowledgementId,
@@ -533,6 +552,7 @@ export function useAssistant(
           {
             conversationId: id,
             agentId,
+            model,
             text,
             retryOf,
             acknowledgementId,
@@ -560,6 +580,7 @@ export function useAssistant(
         );
       } catch (cause) {
         if (mounted.current && epoch.current === localEpoch) {
+          if (isAgentAccessRefusal(cause)) void refreshAgents.current();
           // An explicit pre-admission client error can safely leave its text editable.
           const refused =
             cause instanceof ApiError &&
@@ -568,6 +589,8 @@ export function useAssistant(
           if (!refused) adoptKnownDraft();
           setRecoveryRequired(!refused);
           if (refused) {
+            if (uploads?.attachmentIds.length && isAttachmentBindRefusal(cause))
+              throw cause;
             setError(() => (errorMessage(cause)));
           } else {
             // Keep this separate from request errors: final refresh, live
@@ -604,7 +627,7 @@ export function useAssistant(
       }
       return !keepDraft;
     },
-    [agentId, agent, recoveryRequired, refreshHistory, refreshIndex],
+    [agentId, agent, restricted, recoveryRequired, refreshHistory, refreshIndex],
   );
 
   useEffect(() => {
@@ -618,6 +641,7 @@ export function useAssistant(
       !history
     )
       return;
+    if (restricted) { continuations.current.delete(id); return; }
     const queued = continuations.current.get(id);
     if (!queued?.length) return;
     continuations.current.delete(id);
@@ -630,7 +654,7 @@ export function useAssistant(
       undefined,
       queued[0]!.id,
     ).catch((cause) => setError(() => (errorMessage(cause))));
-  }, [active, conversationId, history, sending, loadingOlder, send]);
+  }, [active, restricted, conversationId, history, sending, loadingOlder, send]);
 
   async function decide(acknowledgementId: string, choice: "allow" | "deny") {
     const id = selected.current;
@@ -830,6 +854,7 @@ export function useAssistant(
     active,
     agentId,
     agent,
+    restricted,
     agents: agents.data?.agents ?? [],
     agentsLoading: agents.isPending,
     agentsError: agents.isError ? errorMessage(agents.error) : undefined,

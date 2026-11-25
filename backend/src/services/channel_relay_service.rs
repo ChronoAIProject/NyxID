@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_message::{
-    COLLECTION_NAME, CallbackDisposition, CallbackRefusal, ChannelMessage,
+    COLLECTION_NAME, CallbackDisposition, CallbackRefusal, ChannelMessage, TextCompleteness,
 };
 use crate::services::channel_platform::InboundMessage;
 
@@ -227,6 +227,10 @@ pub(crate) fn inbound_metadata(
         .then(|| super::channel_adapters::lark::effective_file_name(&inbound.raw_data))
         .flatten();
     ChannelMessage {
+        text_completeness: inbound.text.as_ref().map(|text| TextCompleteness {
+            original_bytes: text.len(),
+            truncated: false,
+        }),
         effective_attachment_filenames: if is_lark_file {
             attachments
                 .iter()
@@ -278,6 +282,7 @@ pub(crate) fn inbound_metadata(
         thread_id: inbound.thread_id.clone(),
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_failure_reason: None,
         callback_http_status: None,
         callback_disposition: None,
         reply_to_message_id: None,
@@ -309,6 +314,7 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        text_completeness: None,
         effective_attachment_filenames: Vec::new(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
@@ -334,6 +340,7 @@ pub async fn store_outbound_message(
         thread_id: None,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: None,
+        callback_failure_reason: None,
         callback_http_status: None,
         callback_disposition: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
@@ -385,6 +392,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        text_completeness: None,
         effective_attachment_filenames: Vec::new(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
@@ -412,6 +420,7 @@ pub async fn store_device_event_message(
         thread_id: inherited_thread_id,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_failure_reason: None,
         callback_http_status: None,
         callback_disposition: None,
         reply_to_message_id: None,
@@ -474,6 +483,73 @@ pub(crate) async fn is_linked_org_nyxbot_route(
         .is_some())
 }
 
+pub(super) async fn callback_request(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    bot_id: Option<&str>,
+    key_id: &str,
+    raw: &str,
+) -> AppResult<reqwest::RequestBuilder> {
+    use super::{nyxbot_gateway_service, proxy_destination::http};
+    use crate::models::nyxbot_channel::COLLECTION_NAME as CHANNELS;
+
+    // Managed callbacks are constructed from the owning channel and the current
+    // server configuration. A matching host alone does not identify a route.
+    let direct_prefix = format!(
+        "{}/api/v1/nyxbot/relay/",
+        config.base_url.trim_end_matches('/')
+    );
+    let direct = raw
+        .strip_prefix(&direct_prefix)
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+    let gateway = raw
+        .rsplit_once("/callbacks/")
+        .map(|(_, id)| id)
+        .filter(|id| !id.is_empty() && !id.contains(['/', '?', '#']));
+    if let Some(bot) = bot_id
+        && (direct.is_some() || gateway.is_some())
+    {
+        let mut filter = doc! {"channel_bot_id":bot, "route_api_key_id":key_id, "status":"active"};
+        if let Some(id) = direct {
+            filter.insert("_id", id);
+        } else if let Some(id) = gateway {
+            filter.insert("transport", "gateway");
+            filter.insert("gateway_channel_id", id);
+        }
+        if db
+            .collection::<mongodb::bson::Document>(CHANNELS)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some()
+        {
+            if direct.is_some() {
+                return Ok(nyxbot_gateway_service::GATEWAY_HTTP_CLIENT.post(raw));
+            }
+            if let Some(id) = gateway {
+                let service =
+                    super::assistant_service::resolve_admin_service_by_slug(db, "cmaeg").await?;
+                let base = nyxbot_gateway_service::validated_base(&service.base_url)?;
+                let target = format!("{base}/callbacks/{id}");
+                if target == raw {
+                    return Ok(nyxbot_gateway_service::GATEWAY_HTTP_CLIENT.post(target));
+                }
+            }
+        }
+    }
+    let (url, client) = http::public_delivery(raw).map_err(|err| match err {
+        AppError::ValidationError(_) => AppError::ChannelRelayFailed(
+            super::webhook_delivery_service::DESTINATION_REFUSED.into(),
+        ),
+        err => err,
+    })?;
+    Ok(client.post(url))
+}
+
+pub(super) fn destination_refused(error: &AppError) -> bool {
+    matches!(error, AppError::ChannelRelayFailed(reason) if reason == super::webhook_delivery_service::DESTINATION_REFUSED)
+}
+
 /// Forward an inbound message to the agent's callback URL.
 ///
 /// Emits an RS256 callback JWT in `X-NyxID-Callback-Token` whose
@@ -487,16 +563,25 @@ pub(crate) async fn is_linked_org_nyxbot_route(
 /// Returns a [`CallbackDelivery`] so callers can observe the actual upstream
 /// status code in addition to the success/error result.
 #[allow(clippy::too_many_arguments)]
-pub async fn forward_to_agent(
-    http_client: &reqwest::Client,
+pub(super) async fn forward_to_agent(
+    request: AppResult<reqwest::RequestBuilder>,
     config: &AppConfig,
     keys: &crate::crypto::jwt::JwtKeys,
-    callback_url: &str,
     mut payload: CallbackPayload,
     api_key_id: &str,
     api_key_hash: &str,
     user_access_token: Option<&str>,
 ) -> CallbackDelivery {
+    let request = match request {
+        Ok(request) => request,
+        Err(err) => {
+            return CallbackDelivery {
+                http_status: None,
+                disposition: None,
+                result: Err(err),
+            };
+        }
+    };
     let jti = uuid::Uuid::new_v4().to_string();
     payload.correlation_id = jti.clone();
 
@@ -548,8 +633,7 @@ pub async fn forward_to_agent(
     let timeout =
         std::time::Duration::from_secs(u64::from(config.channel_relay_callback_timeout_secs));
 
-    let mut request = http_client
-        .post(callback_url)
+    let mut request = request
         .header("Content-Type", "application/json")
         .header("X-NyxID-Callback-Token", &callback_token)
         .header("X-NyxID-Signature", &signature)
@@ -557,6 +641,14 @@ pub async fn forward_to_agent(
         .header("X-NyxID-Timestamp", &timestamp)
         .header("X-NyxID-Platform", &payload.platform)
         .timeout(timeout);
+
+    // Strict callback decoders depend on the signed JSON schema. The relay
+    // forwards the full text; receivers can verify its UTF-8 size from the body.
+    if let Some(text) = &payload.content.text {
+        request = request
+            .header("X-NyxID-Text-Original-Bytes", text.len().to_string())
+            .header("X-NyxID-Text-Truncated", "false");
+    }
 
     // Include the bot owner's access token so the receiving agent can make
     // NyxID API calls (proxy, approvals, etc.) on behalf of the user.
@@ -570,9 +662,13 @@ pub async fn forward_to_agent(
             return CallbackDelivery {
                 http_status: None,
                 disposition: None,
-                result: Err(AppError::ChannelRelayFailed(format!(
-                    "callback request failed: {e}"
-                ))),
+                result: Err(AppError::ChannelRelayFailed(
+                    if super::proxy_destination::http::denied_address(&e) {
+                        super::webhook_delivery_service::DESTINATION_REFUSED.into()
+                    } else {
+                        "callback request failed".into()
+                    },
+                )),
             };
         }
     };
@@ -588,7 +684,6 @@ pub async fn forward_to_agent(
         },
         200 => {
             tracing::warn!(
-                callback_url = %callback_url,
                 message_id = %payload.message_id,
                 "Agent returned 200 with body; sync replies are no longer supported. \
                  Body discarded. Use POST /api/v1/channel-relay/reply for async replies."
@@ -599,6 +694,13 @@ pub async fn forward_to_agent(
                 result: Ok(()),
             }
         }
+        300..=399 => CallbackDelivery {
+            http_status: Some(code),
+            disposition: None,
+            result: Err(AppError::ChannelRelayFailed(
+                super::webhook_delivery_service::DESTINATION_REFUSED.into(),
+            )),
+        },
         _ => CallbackDelivery {
             http_status: Some(code),
             disposition: None,
@@ -966,30 +1068,128 @@ pub fn build_callback_payload(
 pub(crate) async fn consume_reply_token_use(
     db: &mongodb::Database,
     usage: &crate::models::reply_token_use::ReplyTokenUse,
+    owner_id: &str,
 ) -> AppResult<()> {
-    match db
-        .collection::<crate::models::reply_token_use::ReplyTokenUse>(
-            crate::models::reply_token_use::COLLECTION_NAME,
-        )
-        .insert_one(usage)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error)
+    let result = super::transaction_service::run_db_only(
+        db,
+        &(db, usage, owner_id),
+        |tx, (db, usage, owner_id)| {
+            Box::pin(async move {
+                fence_reply_token_owners(db, usage, owner_id, tx).await?;
+                db.collection::<crate::models::reply_token_use::ReplyTokenUse>(
+                    crate::models::reply_token_use::COLLECTION_NAME,
+                )
+                .insert_one(*usage)
+                .session(tx)
+                .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    match result {
+        Err(AppError::DatabaseError(error))
             if matches!(error.kind.as_ref(),
             mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write))
                 if write.code == 11000) =>
         {
             Err(AppError::Unauthorized("Reply token already used".into()))
         }
-        Err(error) => Err(error.into()),
+        result => result,
     }
+}
+
+pub(crate) async fn fence_reply_token_owners(
+    db: &mongodb::Database,
+    usage: &crate::models::reply_token_use::ReplyTokenUse,
+    owner_id: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &usage.api_key_id, "is_active": true})
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Relay agent key is unavailable".into()))?;
+    super::erasure_admission::fence_in_session(db, owner_id, tx).await?;
+    if key.user_id != owner_id {
+        super::erasure_admission::fence_in_session(db, &key.user_id, tx).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
+
+    #[tokio::test]
+    async fn reply_token_claim_respects_owner_erasure() {
+        use crate::models::{
+            api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
+            reply_token_use::{COLLECTION_NAME as TOKEN_USES, ReplyTokenUse},
+            user::{COLLECTION_NAME as USERS, User, UserType},
+        };
+        use crate::test_utils::{connect_transaction_test_database, test_user};
+        let db = connect_transaction_test_database("relay_reply_erasure").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let key_owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&owner, UserType::Person),
+                test_user(&key_owner, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(API_KEYS)
+            .insert_one(
+                doc! {"_id": &key_id, "user_id": &key_owner, "name": "Fixture",
+                "key_prefix": "fixture", "key_hash": "fixture-hash", "scopes": "proxy",
+                "is_active": true, "created_at": bson::DateTime::now()},
+            )
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<ApiKey>(API_KEYS)
+                .find_one(doc! {"_id": &key_id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let use_token = || ReplyTokenUse {
+            id: uuid::Uuid::new_v4().to_string(),
+            exp_at: Utc::now() + chrono::Duration::minutes(1),
+            api_key_id: key_id.clone(),
+            conversation_id: "synthetic-conversation".into(),
+            consumed_at: Utc::now(),
+        };
+        let first = use_token();
+        consume_reply_token_use(&db, &first, &owner).await.unwrap();
+        assert!(matches!(
+            consume_reply_token_use(&db, &first, &owner).await,
+            Err(AppError::Unauthorized(_))
+        ));
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        let held = use_token();
+        assert!(matches!(
+            consume_reply_token_use(&db, &held, &owner).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(
+            db.collection::<ReplyTokenUse>(TOKEN_USES)
+                .find_one(doc! {"_id": &held.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn native_event_id_uses_update_identity_and_rejects_invalid_telegram_ids() {
@@ -1550,6 +1750,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -1575,6 +1776,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some("key-1".to_string()),
             callback_status: Some("pending".to_string()),
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: None,
@@ -1626,6 +1828,65 @@ mod tests {
         };
 
         (message, conversation, inbound)
+    }
+
+    #[tokio::test]
+    async fn long_inbound_text_survives_lark_callback_and_history_reports_length() {
+        use crate::services::channel_adapters::lark::LarkFamilyAdapter;
+        use crate::services::channel_platform::PlatformAdapter;
+        use crate::services::provider_token_exchange_service::TokenExchangeCache;
+        use serde_json::json;
+        let cache = std::sync::Arc::new(TokenExchangeCache::new());
+        let (_, conversation, _) = attachment_callback_fixture();
+        for adapter in [
+            LarkFamilyAdapter::lark(cache.clone()),
+            LarkFamilyAdapter::feishu(cache),
+        ] {
+            for chars in [12, 1000, 2000, 5000, 6000, 10_000] {
+                let pattern = "正文🦉e\u{301}\nhttps://example.org/\n```rs\n\"\\\n```\n";
+                let text: String = pattern.chars().cycle().take(chars).collect();
+                let body = json!({"schema":"2.0","header":{"event_type":"im.message.receive_v1"},
+                    "event":{"sender":{"sender_id":{"open_id":"ou_sender"}},
+                    "message":{"message_id":"om_long","chat_id":"oc_group","chat_type":"group",
+                    "message_type":"text","content":json!({"text":text}).to_string()}}});
+                let parsed = adapter
+                    .parse_inbound(&serde_json::to_vec(&body).unwrap())
+                    .await
+                    .unwrap();
+                let inbound = &parsed[0];
+                let message = inbound_metadata(
+                    "bot",
+                    &conversation.id,
+                    "owner",
+                    adapter.platform_id(),
+                    inbound,
+                    "key",
+                    "source",
+                );
+                let callback = build_callback_payload(
+                    &message,
+                    &conversation,
+                    "key",
+                    "agent",
+                    inbound,
+                    None,
+                    "https://nyxid.example",
+                );
+                let callback = serde_json::to_value(callback).unwrap();
+                assert!(callback["content"]["text"].as_str() == Some(&text));
+                let stored = bson::to_document(&message).unwrap();
+                assert!(!stored.contains_key("text"));
+                let history = crate::handlers::channel_relay::message_to_item(
+                    &bson::from_document(stored).unwrap(),
+                    "https://nyxid.example",
+                );
+                let history = serde_json::to_value(history).unwrap();
+                assert!(history.get("text").is_none());
+                let expected = json!({"original_bytes":text.len(), "truncated":false});
+                assert_eq!(history["text_completeness"], expected);
+                assert!(callback["content"].get("text_completeness").is_none());
+            }
+        }
     }
 
     #[test]
@@ -2213,10 +2474,9 @@ mod tests {
             ("oversized", CallbackDisposition::Unknown),
         ] {
             let delivery = forward_to_agent(
-                &client,
+                Ok(client.post(format!("http://{address}/{path}"))),
                 &config,
                 &keys,
-                &format!("http://{address}/{path}"),
                 test_payload(),
                 "key",
                 "hash",
@@ -2278,10 +2538,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2300,12 +2559,14 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
 
+        let mut payload = test_payload();
+        let long_message = "文🦉".repeat(3000);
+        payload.content.text = Some(long_message.clone());
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
-            test_payload(),
+            payload,
             "key-1",
             "test_api_key_hash",
             None,
@@ -2316,6 +2577,16 @@ mod tests {
         let request = captured_request(&captured).await;
         assert!(!header_value(&request.headers, "X-NyxID-Signature").is_empty());
         assert!(!header_value(&request.headers, "X-NyxID-Callback-Token").is_empty());
+        assert_eq!(
+            header_value(&request.headers, "X-NyxID-Text-Original-Bytes"),
+            long_message.len().to_string()
+        );
+        assert_eq!(
+            header_value(&request.headers, "X-NyxID-Text-Truncated"),
+            "false"
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(wire["content"]["text"].as_str() == Some(long_message.as_str()));
         server.abort();
     }
 
@@ -2330,10 +2601,9 @@ mod tests {
         let expected_platform = payload.platform.clone();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             payload,
             "key-1",
             "test_api_key_hash",
@@ -2368,10 +2638,9 @@ mod tests {
         let api_key_hash = "test_api_key_hash";
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             api_key_hash,
@@ -2404,10 +2673,9 @@ mod tests {
         let keys = test_jwt_keys();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2436,10 +2704,9 @@ mod tests {
         let keys = test_jwt_keys();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2473,10 +2740,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2498,10 +2764,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2523,10 +2788,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2548,10 +2812,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post("http://127.0.0.1:1/callback")),
             &config,
             &keys,
-            "http://127.0.0.1:1/callback",
             test_payload(),
             "key-1",
             "test_api_key_hash",

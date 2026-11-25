@@ -24,6 +24,8 @@ function setup(
     initialKeyboard ? initialKeyboard.screenY + initialKeyboard.height : 0,
   ),
   inSheet = false,
+  androidContentBottom: number | null = null,
+  safeAreaBottom = 24,
 ) {
   const keyboardListeners = new Map<
     string,
@@ -32,6 +34,7 @@ function setup(
   let onDimensions: (() => void) | undefined;
   let metrics = initialKeyboard;
   let windowHeight = initialWindowHeight;
+  let screenHeight = initialWindowHeight;
   let state = "active";
   let onApp: ((state: string) => void) | undefined;
   const layouts: Array<() => void> = [];
@@ -39,6 +42,7 @@ function setup(
   let animations = 0;
   const viewports: (KeyboardViewportFrame | undefined)[] = [];
   const harness = hookHarness<Element>({
+    expo: { requireOptionalNativeModule: () => ({ contentBottom: () => androidContentBottom }) },
     "react-native": {
       View: "View",
       Platform: { OS: platform },
@@ -66,8 +70,8 @@ function setup(
       },
       Dimensions: {
         get: (name: string) => {
-          assert.equal(name, "window");
-          return { height: windowHeight };
+          assert.ok(name === "window" || name === "screen");
+          return { height: name === "screen" ? screenHeight : windowHeight };
         },
         addEventListener: (_name: string, callback: () => void) => {
           onDimensions = callback;
@@ -83,7 +87,7 @@ function setup(
       useSafeAreaFrame: () => safeAreaFrame,
       useSafeAreaInsets: () => ({
         top: safeAreaTop,
-        bottom: 24,
+        bottom: safeAreaBottom,
         left: 0,
         right: 0,
       }),
@@ -122,6 +126,7 @@ function setup(
     show: (frame: Frame) => {
       metrics = frame;
       windowHeight = Math.max(windowHeight, frame.screenY + frame.height);
+      screenHeight = Math.max(screenHeight, frame.screenY + frame.height);
       keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
     },
     hide: () => {
@@ -141,6 +146,7 @@ function setup(
       onApp!(next);
     },
     metrics: (frame: Frame | undefined) => { metrics = frame; },
+    windowHeight: (height: number) => { windowHeight = height; },
     settledLayout: () => {
       for (const layout of layouts.splice(0)) layout();
     },
@@ -180,6 +186,50 @@ test("an already resized window consumes no additional inset with a status bar",
   );
   env.harness.unmount();
 });
+
+for (const [viewHeight, expectedOverlap] of [[482, 35], [447, 0]] as const) {
+  test(`Android IME-resized window retains its keyboard and reserves ${expectedOverlap}pt of remaining overlap`, () => {
+    const env = setup(undefined, 24, "android", { y: 0, height: 914 }, 914);
+    const frame = { screenY: 563, height: 351 };
+    env.windowHeight(563);
+    env.metrics(frame);
+    env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+    assert.equal(env.measurements.length, 1, "screen coordinates remain valid after native resize");
+    env.measurements.shift()!(0, 92, 411, viewHeight);
+    assert.equal(env.bottom(), expectedOverlap);
+    assert.deepEqual(env.viewport(), { y: 92, height: viewHeight - expectedOverlap });
+    env.resize();
+    env.measurements.shift()!(0, 92, 411, viewHeight);
+    assert.equal(env.bottom(), expectedOverlap, "resize events cannot erase the IME frame");
+    env.hide();
+    assert.equal(env.bottom(), 0);
+    env.harness.unmount();
+  });
+}
+
+for (const reportedTop of [895.99, 896, 920, 920.01]) {
+  test(`Android keeps the IME inset when the visible display frame ends at ${reportedTop}`, () => {
+    const env = setup(undefined, 24, "android", { y: 0, height: 920 }, 920, false, 896, 0);
+    const frame = { screenY: reportedTop, height: 336 };
+    env.metrics(frame);
+    env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+    assert.equal(env.measurements.length, 1);
+    env.measurements.shift()!(0, 0, 411, 872);
+    assert.equal(env.bottom(), 336);
+    assert.deepEqual(env.viewport(), { y: 0, height: 536 });
+
+    // The native resize can arrive after the show event with the same metrics.
+    env.windowHeight(560);
+    env.resize();
+    env.measurements.shift()!(0, 0, 411, 536);
+    assert.equal(env.bottom(), 0);
+    assert.deepEqual(env.viewport(), { y: 0, height: 536 });
+
+    env.hide();
+    assert.equal(env.viewport(), undefined);
+    env.harness.unmount();
+  });
+}
 
 test("a newer resized layout wins over a pending pre-resize measurement", () => {
   const env = setup();

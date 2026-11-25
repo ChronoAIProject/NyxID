@@ -164,6 +164,8 @@ async fn route(state: &AppState, id: &str) -> ChannelConversation {
 async fn typed_x_notifications_are_durable_gated_signed_deduplicated_and_never_replyable() {
     for metered in [false, true] {
         let (mut state, adapter, server, owner, connection) = channel_x_tests::fixture().await;
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         if metered {
             channel_x_tests::billing::enable_billing(&mut state, &owner).await;
         }

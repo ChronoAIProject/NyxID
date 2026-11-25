@@ -519,6 +519,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
         );
         active.heartbeat_at = Some(Utc::now());
         active.activities = vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             id: "a".into(),
             label: "internal__tool".into(),
@@ -1402,6 +1403,16 @@ async fn voice_loads_selected_bot_profile_and_service_guidance_for_all_clients()
         .await
         .unwrap();
     let original = initial_context(&state.db, &call).await.unwrap();
+    assert!(original.live.contains(APPROVAL_REPORTING));
+    for context in [None, Some(original.delegation.as_str())] {
+        let config = super::super::responses::configuration("test-model", context);
+        assert!(
+            config["responses"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(APPROVAL_REPORTING)
+        );
+    }
     assert!(original.live.contains("Root display"));
     assert!(original.live.contains(root.persona.as_deref().unwrap()));
     for context in [&original.live, &original.delegation] {
@@ -1841,6 +1852,14 @@ async fn native_voice_tool_refusal_does_not_change_the_mcp_protocol_or_block_fol
         tokio::time::timeout(std::time::Duration::from_secs(3),async {
             while events.lock().await.len()<4 {tokio::task::yield_now().await;}
         }).await.unwrap();
+        let commands = events.lock().await;
+        let item = commands.iter().map(|command| &command["item"])
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "native-call").unwrap();
+        let output: Value = serde_json::from_str(item["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["tool"], "sandbox__submit_execution_handler");
+        assert_eq!(output["isError"], true);
+        assert_eq!(output["content"][0]["text"], "Invalid service arguments; no operation dispatched.");
+        drop(commands);
         native.close(&state).await;
         server.abort();
     }).await;

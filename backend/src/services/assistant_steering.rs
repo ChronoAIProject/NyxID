@@ -18,6 +18,44 @@ use uuid::Uuid;
 
 pub const MAX_CHARS: usize = 32_000;
 
+pub(crate) enum OwnerControl<'a> {
+    Capabilities,
+    Guidance(&'a Steering),
+}
+
+tokio::task_local! {
+    static CONTROL: (String, &'static str, String);
+}
+
+impl OwnerControl<'_> {
+    pub(crate) async fn send<F: Future>(self, owner: &str, request: F) -> F::Output {
+        let (method, resource) = match self {
+            Self::Capabilities => ("GET", "/v1/capabilities".to_owned()),
+            Self::Guidance(receipt) => (
+                "POST",
+                format!("/v1/conversations/{}/steer", receipt.session_id),
+            ),
+        };
+        CONTROL
+            .scope((owner.to_owned(), method, resource), request)
+            .await
+    }
+}
+
+pub(crate) fn personal_control(
+    actor: &str,
+    operation: &super::operation_descriptor::OperationDescriptor,
+) -> bool {
+    CONTROL
+        .try_with(|(owner, method, path)| {
+            owner == actor
+                && operation.protocol == super::operation_descriptor::Protocol::Http
+                && operation.method.as_deref() == Some(*method)
+                && operation.resource.as_deref() == Some(path.as_str())
+        })
+        .unwrap_or(false)
+}
+
 pub fn unavailable(row: &AssistantConversation, turn_id: &str) -> Option<&'static str> {
     if row.guest_turn
         || row.group_id.is_some()

@@ -547,6 +547,7 @@ pub async fn issue_selected(
     {
         return Err(AppError::AgentKeyLoginKeyIneligible);
     }
+    super::erasure_admission::fence_in_session(db, actor, session).await?;
     if let Selection::New(input) = selection {
         let owner = api_key_scope_service::resolve_scope_owner_id(
             db,
@@ -804,7 +805,7 @@ pub async fn deny(
 async fn claim_delivery(
     db: &Database,
     row: &AgentKeyLoginRequest,
-    transaction: Option<&mut mongodb::ClientSession>,
+    transaction: &mut mongodb::ClientSession,
 ) -> AppResult<Option<AgentKeyLoginRequest>> {
     let collection = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME);
     let now = Utc::now();
@@ -812,11 +813,25 @@ async fn claim_delivery(
         doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}, "delivery_credential_encrypted": {"$ne": bson::Bson::Null}},
         doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
     ).return_document(ReturnDocument::Before);
-    Ok(if let Some(tx) = transaction {
-        claim.session(tx).await?
-    } else {
-        claim.await?
-    })
+    Ok(claim.session(transaction).await?)
+}
+
+pub(super) async fn fence_delivery_owners(
+    db: &Database,
+    actor: &str,
+    key_owner: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, actor, tx).await?;
+    if actor != key_owner {
+        super::erasure_admission::fence_in_session(db, key_owner, tx).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_DELIVERY_CLAIM: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
 }
 
 #[tracing::instrument(
@@ -871,22 +886,26 @@ pub async fn poll(
     // Resolve and decrypt before consuming the exchange. A failed read or KMS
     // call leaves the approved row available for retry and expiry cleanup.
     let delivery = prepare_delivery(db, encryption, &row).await?;
-    let delivered = if let Some(revision) = row.mfa_policy_revision.as_deref() {
-        let context = (db.clone(), row.clone());
-        let result = super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
-            let (db, row) = c;
-            super::approved_sign_in_policy::fence(db, row.approved_user_id.as_deref().ok_or(AppError::AgentKeyLoginDenied)?, row.mfa_policy_revision.as_deref(), tx).await?;
-            claim_delivery(db, row, Some(tx)).await
-        })).await;
-        if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
+    #[cfg(test)]
+    if let Ok((prepared, resume)) = BEFORE_DELIVERY_CLAIM.try_with(Clone::clone) {
+        prepared.notify_one();
+        resume.notified().await;
+    }
+    let context = (db.clone(), &row, delivery.api_key.owner_id.as_str());
+    let delivered = super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
+        let (db, row, owner_id) = c;
+        let actor = row.approved_user_id.as_deref().ok_or(AppError::AgentKeyLoginDenied)?;
+        super::approved_sign_in_policy::fence(db, actor, row.mfa_policy_revision.as_deref(), tx).await?;
+        fence_delivery_owners(db, actor, owner_id, tx).await?;
+        claim_delivery(db, row, tx).await
+    })).await;
+    if matches!(delivered, Err(AppError::AuthDeviceCodeDenied)) {
+        if let Some(revision) = row.mfa_policy_revision.as_deref() {
             super::approved_sign_in_policy::deny_undelivered(db, COLLECTION_NAME, &row.id, revision).await?;
-            return Err(AppError::AgentKeyLoginDenied);
         }
-        result?
-    } else {
-        claim_delivery(db, &row, None).await?
-    };
-    let delivered = match delivered {
+        return Err(AppError::AgentKeyLoginDenied);
+    }
+    let delivered = match delivered? {
         Some(delivered) => delivered,
         None => return Err(current_decision_error(db, &row.id).await?),
     };
@@ -940,16 +959,11 @@ pub async fn prepare_credential_delivery(
     encrypted: Option<&[u8]>,
     key_was_created: bool,
 ) -> AppResult<Delivery> {
-    let plaintext = Zeroizing::new(
-        encryption
-            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
-            .await?,
-    );
-    let credential = Zeroizing::new(
-        std::str::from_utf8(&plaintext)
-            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?
-            .to_owned(),
-    );
+    let plaintext = encryption
+        .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
+        .await?;
+    let credential = crate::crypto::guarded_utf8(plaintext)
+        .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?;
     prepare_decoded_credential_delivery(
         db,
         credential_id,

@@ -617,7 +617,7 @@ async fn run_inner(
         fence_admin(db, &row.user_id, &agent.user_id, tx).await?;
         let event=team::bound_event(KIND,INSTRUCTION.into(),None,None);
         engine::append_events_in_session(db,&row.user_id,&row.id,&[event],tx).await?;
-        Ok(engine::begin_owner_turn_in_session(db,tx,keys,&row.user_id,start,ids,agent,None,None,None).await?.into_started()?.conversation)
+        Ok(engine::begin_owner_turn_in_session(db,tx,keys,&row.user_id,start,ids,agent,None,None,None, None).await?.into_started()?.conversation)
     })).await?;
     if let Some(turn) = active.active_turn.as_ref() {
         crate::turn_trace::admitted(&turn.turn_id, turn.started_at, turn.retry_of.as_deref());
@@ -1017,6 +1017,7 @@ mod tests {
                         start,
                         ids,
                         agent,
+                        None,
                         None,
                         None,
                         None,
@@ -1670,6 +1671,7 @@ async fn org_follow_setup_revocation(change: &str) {
         &start,
         &ids,
         &f.agent,
+        None,
         None,
         None,
         None,

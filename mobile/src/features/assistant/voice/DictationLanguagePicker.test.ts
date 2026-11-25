@@ -41,6 +41,9 @@ test("picker item keys remain unique across automatic, Suggested and All section
     label: "Japanese",
     summary: "Japanese",
     suggested: ["ja-JP"],
+    manualEntry: false,
+    retry() {},
+    openSpeechSettings() {},
     options: [
       { value: "automatic", label: "Device language", detail: "Japanese" },
       {

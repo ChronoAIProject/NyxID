@@ -35,6 +35,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: read
     environment:
       name: staging
       url: https://staging.nyxid.ai
@@ -42,7 +43,7 @@ jobs:
       # Check the live commits inside this slot. A late rerun can be older.
       group: deploy-nyxid-staging
       queue: max
-    timeout-minutes: 17
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
         with:
@@ -51,7 +52,35 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
       - name: Roll out backend and frontend
+        id: rollout
         env:
+          NYXID_PIN_CHECK_IMAGES: ${{ secrets.NYXID_CHECK_ACCOUNT != '' && secrets.NYXID_CHECK_ALERT_URL != '' }}
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
           NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
           NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
-        run: python3 .github/scripts/deploy_staging.py
+        run: python3 .github/scripts/deploy_images.py staging
+
+      - name: Check NyxBot and restore a compatible release on failure
+        if: steps.rollout.outputs.deployed == 'true'
+        id: nyxbot
+        env:
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
+          NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          BACKEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.backend_digest }}
+          FRONTEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.frontend_digest }}
+          PREVIOUS_COMMIT: ${{ steps.rollout.outputs.previous }}
+          NYXID_CHECK_ACCOUNT: ${{ secrets.NYXID_CHECK_ACCOUNT }}
+          NYXID_CHECK_ALERT_URL: ${{ secrets.NYXID_CHECK_ALERT_URL }}
+          NYXID_ROLLBACK_PAIR: ${{ vars.NYXID_ROLLBACK_PAIR }}
+        run: python3 .github/scripts/post_deploy_check.py staging
+
+      - name: Archive deployment check result
+        if: ${{ !cancelled() && steps.nyxbot.outputs.outcome != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: nyxbot-staging-${{ steps.nyxbot.outputs.outcome }}-${{ github.run_attempt }}${{ steps.nyxbot.outputs.image_suffix }}
+          path: ${{ runner.temp }}/nyxbot-deploy.json
+          retention-days: 90
+          if-no-files-found: error

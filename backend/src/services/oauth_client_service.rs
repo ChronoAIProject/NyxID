@@ -1,3 +1,6 @@
+use super::oauth_client_webhook_record as webhook_record;
+use crate::crypto::aes::EncryptionKeys;
+use crate::models::security_effect_intent::SecurityEffectIntent;
 use chrono::{NaiveDate, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, Bson, Document, doc, spec::BinarySubtype};
@@ -236,11 +239,13 @@ pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>
 /// Well-known client ID for native MCP clients (Cursor, Claude Code, etc.).
 const MCP_CLIENT_ID: &str = "nyx-mcp";
 
-/// Seed default OAuth clients at startup (idempotent).
-///
-/// Creates the `nyx-mcp` public client used by MCP desktop apps. The client
-/// has no registered redirect URIs because loopback URIs are validated
-/// dynamically per RFC 8252 section 7.3.
+const MCP_REDIRECTS: &[&str] = &[
+    "http://127.0.0.1/callback",
+    "http://localhost/callback",
+    "cursor://anysphere.cursor-mcp/oauth/callback",
+];
+
+/// Seed the native callbacks used by the shared public MCP client.
 pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
@@ -253,7 +258,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         id: MCP_CLIENT_ID.to_string(),
         client_name: "NyxID MCP Client".to_string(),
         client_secret_hash: "NONE".to_string(),
-        redirect_uris: vec![],
+        redirect_uris: MCP_REDIRECTS.iter().map(|uri| (*uri).to_owned()).collect(),
         allowed_scopes: DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
         scope_provenance: crate::models::oauth_client::ScopeProvenance::Defaulted,
         grant_types: "authorization_code".to_string(),
@@ -262,11 +267,13 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         delegation_scopes: String::new(),
         default_service_catalog_slugs: Vec::new(),
         broker_capability_enabled: false,
+        first_party_management: false,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
         connection_webhook_url: None,
         connection_webhook_secret_encrypted: None,
         connection_webhook_key_id: None,
+        secret_context_versions: Default::default(),
         connection_webhook_enabled: false,
         created_by: Some("system".to_string()),
         created_at: now,
@@ -290,13 +297,23 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
 }
 
 async fn reconcile_default_client(db: &mongodb::Database, existing: &OauthClient) -> AppResult<()> {
+    if existing.redirect_uris.is_empty()
+        && existing.client_type == "public"
+        && existing.created_by.as_deref() == Some("system")
+    {
+        db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
+            doc! {"_id": MCP_CLIENT_ID, "client_type":"public", "created_by":"system", "redirect_uris":{"$size":0}},
+            doc! {"$set":{"redirect_uris": MCP_REDIRECTS.to_vec(), "updated_at": bson::DateTime::now()}},
+        ).await?;
+    }
     if let Some(updated_scopes) = merge_missing_default_mcp_scopes(&existing.allowed_scopes)? {
         apply_client_update(
             db,
             doc! { "_id": MCP_CLIENT_ID },
-            doc! { "allowed_scopes": &updated_scopes,
-            "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            doc! { "$set": { "allowed_scopes": &updated_scopes,
+            "updated_at": bson::DateTime::from_chrono(Utc::now()) } },
             true,
+            None,
         )
         .await?;
 
@@ -372,11 +389,12 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
                 "allowed_scopes": &client.allowed_scopes,
                 "updated_at": bson::DateTime::from_chrono(client.updated_at),
             },
-            doc! {
+            doc! { "$set": {
                 "allowed_scopes": &updated_scopes,
                 "updated_at": now,
-            },
+            } },
             true,
+            None,
         )
         .await?;
 
@@ -412,7 +430,7 @@ pub async fn create_client(
     scope_provenance: crate::models::oauth_client::ScopeProvenance,
     broker_capability_enabled: bool,
     revocation_webhook_url: Option<&str>,
-    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    revocation_webhook_secret: Option<(&EncryptionKeys, &str)>,
     default_service_catalog_slugs: &[String],
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
@@ -428,7 +446,7 @@ pub async fn create_client(
         scope_provenance,
         broker_capability_enabled,
         revocation_webhook_url,
-        revocation_webhook_secret_encrypted,
+        revocation_webhook_secret,
         default_service_catalog_slugs,
     )
     .await
@@ -448,7 +466,7 @@ pub async fn create_client_with_id(
     scope_provenance: crate::models::oauth_client::ScopeProvenance,
     broker_capability_enabled: bool,
     revocation_webhook_url: Option<&str>,
-    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    revocation_webhook_secret: Option<(&EncryptionKeys, &str)>,
     default_service_catalog_slugs: &[String],
 ) -> AppResult<(OauthClient, Option<String>)> {
     let now = Utc::now();
@@ -460,6 +478,28 @@ pub async fn create_client_with_id(
     } else {
         ("NONE".to_string(), None)
     };
+
+    let mut secret_context_versions = Default::default();
+    let revocation_webhook_secret_encrypted =
+        if let Some((keys, secret)) = revocation_webhook_secret {
+            super::credential_record_service::mark_version(
+                &mut secret_context_versions,
+                keys,
+                webhook_record::REVOCATION,
+            );
+            Some(
+                webhook_record::encrypt(
+                    keys,
+                    client_id,
+                    created_by,
+                    webhook_record::REVOCATION,
+                    secret,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
     let client = OauthClient {
         id: client_id.to_string(),
@@ -474,11 +514,13 @@ pub async fn create_client_with_id(
         delegation_scopes: delegation_scopes.to_string(),
         default_service_catalog_slugs: default_service_catalog_slugs.to_vec(),
         broker_capability_enabled,
+        first_party_management: false,
         revocation_webhook_url: revocation_webhook_url.map(str::to_string),
         revocation_webhook_secret_encrypted,
         connection_webhook_url: None,
         connection_webhook_secret_encrypted: None,
         connection_webhook_key_id: None,
+        secret_context_versions,
         connection_webhook_enabled: false,
         created_by: Some(created_by.to_string()),
         created_at: now,
@@ -1228,13 +1270,14 @@ pub async fn get_client_for_creator(
 async fn apply_client_update(
     db: &mongodb::Database,
     filter: Document,
-    set_doc: Document,
+    mutation: Document,
     security: bool,
+    audit: Option<SecurityEffectIntent>,
 ) -> AppResult<mongodb::results::UpdateResult> {
-    if !security {
+    if !security && audit.is_none() {
         return Ok(db
             .collection::<OauthClient>(OAUTH_CLIENTS)
-            .update_one(filter, doc! { "$set": set_doc })
+            .update_one(filter, mutation)
             .await?);
     }
     let client_id = filter
@@ -1243,26 +1286,62 @@ async fn apply_client_update(
         .to_owned();
     let mut session = db.client().start_session().await?;
     let db = db.clone();
-    session.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
-        let db = &db;
-        let result: AppResult<mongodb::results::UpdateResult> = async {
-            let result = db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(filter.clone(),
-                doc! { "$set": set_doc.clone(), "$inc": { "machine_external_security_revision": 1_i64 } })
-                .session(&mut *session).await?;
-            if result.matched_count != 0 {
-                if set_doc.get_bool("is_active").ok() == Some(false) {
-                    for collection in [CONSENTS,REFRESH_TOKENS,AUTH_CODES] {
-                        db.collection::<bson::Document>(collection).delete_many(doc! {"client_id":&client_id})
-                            .session(&mut *session).await?;
-                    }
+    session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let db = &db;
+            let result: AppResult<mongodb::results::UpdateResult> = async {
+                let mut update = mutation.clone();
+                if security {
+                    update.insert("$inc", doc! { "machine_external_security_revision": 1_i64 });
                 }
-                super::machine_external_grant_service::invalidate_client_in_session(
-                    db, &client_id, "oauth_client_security_changed", 100, session).await?;
+                let result = db
+                    .collection::<OauthClient>(OAUTH_CLIENTS)
+                    .update_one(filter.clone(), update)
+                    .session(&mut *session)
+                    .await?;
+                if result.matched_count == 0 {
+                    return Ok(result);
+                }
+                if let Some(intent) = audit.as_ref() {
+                    super::security_effect_service::enqueue_in_session(
+                        db,
+                        session,
+                        std::slice::from_ref(intent),
+                    )
+                    .await?;
+                }
+                if security {
+                    if mutation
+                        .get_document("$set")
+                        .ok()
+                        .and_then(|set| set.get_bool("is_active").ok())
+                        == Some(false)
+                    {
+                        for collection in [CONSENTS, REFRESH_TOKENS, AUTH_CODES] {
+                            db.collection::<bson::Document>(collection)
+                                .delete_many(doc! {"client_id":&client_id})
+                                .session(&mut *session)
+                                .await?;
+                        }
+                    }
+                    super::machine_external_grant_service::invalidate_client_in_session(
+                        db,
+                        &client_id,
+                        "oauth_client_security_changed",
+                        100,
+                        session,
+                    )
+                    .await?;
+                }
+                Ok(result)
             }
-            Ok(result)
-        }.await;
-        super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Update the redirect URIs on an OAuth client.
@@ -1275,13 +1354,14 @@ pub async fn update_redirect_uris(
     let result = apply_client_update(
         db,
         doc! { "_id": client_id, "is_active": true },
-        doc! {
+        doc! { "$set": {
             "redirect_uris": bson::to_bson(redirect_uris).map_err(|e| {
                 AppError::Internal(format!("Failed to convert redirect_uris to bson: {e}"))
             })?,
             "updated_at": bson::DateTime::from_chrono(now),
-        },
+        } },
         true,
+        None,
     )
     .await?;
 
@@ -1304,7 +1384,7 @@ pub async fn update_client_for_creator(
     allowed_scopes: Option<&str>,
     broker_capability_enabled: Option<bool>,
     revocation_webhook_url: Option<&str>,
-    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    revocation_webhook_secret: Option<(&EncryptionKeys, &str)>,
     default_service_catalog_slugs: Option<&[String]>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
@@ -1341,7 +1421,22 @@ pub async fn update_client_for_creator(
         set_doc.insert("revocation_webhook_url", url);
     }
 
-    if let Some(secret) = revocation_webhook_secret_encrypted {
+    let mut unset = Document::new();
+    if let Some((keys, value)) = revocation_webhook_secret {
+        let secret = webhook_record::encrypt(
+            keys,
+            client_id,
+            created_by,
+            webhook_record::REVOCATION,
+            value,
+        )
+        .await?;
+        super::credential_record_service::mark_classic_update(
+            &mut set_doc,
+            &mut unset,
+            keys,
+            webhook_record::REVOCATION,
+        );
         set_doc.insert(
             "revocation_webhook_secret_encrypted",
             Binary {
@@ -1365,11 +1460,12 @@ pub async fn update_client_for_creator(
     let result = apply_client_update(
         db,
         doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-        set_doc,
+        doc! { "$set": set_doc, "$unset": unset },
         redirect_uris.is_some()
             || delegation_scopes.is_some()
             || allowed_scopes.is_some()
             || broker_capability_enabled.is_some(),
+        None,
     )
     .await?;
 
@@ -1380,8 +1476,9 @@ pub async fn update_client_for_creator(
     get_client_for_creator(db, client_id, created_by).await
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AdminUpdateClient<'a> {
+    pub management_designation: Option<(bool, SecurityEffectIntent)>,
     pub client_name: Option<&'a str>,
     pub redirect_uris: Option<&'a [String]>,
     pub allowed_scopes: Option<&'a str>,
@@ -1426,6 +1523,9 @@ pub async fn admin_update_client(
         set_doc.insert("broker_capability_enabled", enabled);
     }
 
+    if let Some((enabled, _)) = &update.management_designation {
+        set_doc.insert("first_party_management", *enabled);
+    }
     if let Some(active) = update.is_active {
         set_doc.insert("is_active", active);
     }
@@ -1433,11 +1533,12 @@ pub async fn admin_update_client(
     let result = apply_client_update(
         db,
         doc! { "_id": client_id },
-        set_doc,
+        doc! { "$set": set_doc },
         update.redirect_uris.is_some()
             || update.allowed_scopes.is_some()
             || update.broker_capability_enabled.is_some()
             || update.is_active.is_some(),
+        update.management_designation.map(|(_, intent)| intent),
     )
     .await?;
 
@@ -1463,10 +1564,11 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
     let result = apply_client_update(
         db,
         doc! { "_id": client_id },
-        doc! { "is_active": false,
+        doc! { "$set": { "is_active": false,
             "updated_at": bson::DateTime::from_chrono(now),
-        },
+        } },
         true,
+        None,
     )
     .await?;
 
@@ -1487,10 +1589,11 @@ pub async fn delete_client_for_creator(
     let result = apply_client_update(
         db,
         doc! { "_id": client_id, "created_by": created_by },
-        doc! { "is_active": false,
+        doc! { "$set": { "is_active": false,
             "updated_at": bson::DateTime::from_chrono(now),
-        },
+        } },
         true,
+        None,
     )
     .await?;
 
@@ -1534,10 +1637,11 @@ pub async fn rotate_client_secret_for_creator(
     apply_client_update(
         db,
         doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-        doc! { "client_secret_hash": new_hash,
+        doc! { "$set": { "client_secret_hash": new_hash,
             "updated_at": bson::DateTime::from_chrono(Utc::now()),
-        },
+        } },
         true,
+        None,
     )
     .await?;
 
@@ -2576,11 +2680,13 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: Some(created_by.to_string()),
                 created_at,
@@ -2647,11 +2753,13 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: Some("dynamic_registration".to_string()),
                 created_at: now,
@@ -3177,11 +3285,13 @@ mod tests {
                     delegation_scopes: String::new(),
                     default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
+                    first_party_management: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,
                     connection_webhook_secret_encrypted: None,
                     connection_webhook_key_id: None,
+                    secret_context_versions: Default::default(),
                     connection_webhook_enabled: false,
                     created_by: Some(created_by.to_string()),
                     created_at: now,
@@ -3194,6 +3304,7 @@ mod tests {
                 .insert_one(&Consent {
                     revision: None,
                     write_version: None,
+                    reviewed_redirect_hash: None,
                     issuance_fence: None,
                     id: format!("consent-{client_id}"),
                     user_id: "user-with-consent".to_string(),
@@ -3434,11 +3545,13 @@ mod tests {
                     delegation_scopes: String::new(),
                     default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
+                    first_party_management: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,
                     connection_webhook_secret_encrypted: None,
                     connection_webhook_key_id: None,
+                    secret_context_versions: Default::default(),
                     connection_webhook_enabled: false,
                     created_by: Some("system".to_string()),
                     created_at: now,
@@ -3450,6 +3563,7 @@ mod tests {
             seed_default_clients(&db).await.expect("seed runs");
 
             let upgraded = get_client(&db, MCP_CLIENT_ID).await.unwrap();
+            assert_eq!(upgraded.redirect_uris, MCP_REDIRECTS);
             for scope in ["roles", "groups"] {
                 assert!(
                     upgraded

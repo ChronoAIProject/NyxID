@@ -27,6 +27,8 @@ pub struct AssistantUpload {
     pub content_type: String,
     pub size: i64,
     pub pages: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<PdfCoverage>,
     #[serde(default)]
     pub extracted_chars: Option<i64>,
     pub chunks: usize,
@@ -58,4 +60,43 @@ impl std::fmt::Debug for AssistantUpload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AssistantUpload([REDACTED])")
     }
+}
+
+/// Page numbers are one-based. Text availability is not evidence of a model read.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PdfCoverage {
+    pub classification: String,
+    pub text_pages: Vec<u32>,
+    pub image_pages: Vec<u32>,
+    pub unread_pages: Vec<u32>,
+    /// Older workers recorded planned images before dispatch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_input_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// A single inline raster, never a payload chunk and never a user attachment.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PdfPage {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub origin: String,
+    pub parent_attachment_id: String,
+    /// String keys share the old sparse index with numeric payload chunk keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<String>,
+    pub page: u32,
+    pub render_version: String,
+    pub user_id: String,
+    pub conversation_id: String,
+    pub group_id: Option<String>,
+    pub size: i64,
+    pub content_type: String,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
+    #[serde(with = "super::bson_bytes::required")]
+    pub data_encrypted: Vec<u8>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
 }

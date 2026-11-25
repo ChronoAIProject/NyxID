@@ -547,7 +547,12 @@ pub async fn discover_endpoints(
         .openapi_spec_url
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("Service has no openapi_spec_url configured".into()))?;
-    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, api_spec_url).await?;
+    let parsed = openapi_parser::parse_openapi_spec(
+        service.approved_private_base_url.as_deref(),
+        &service.base_url,
+        api_spec_url,
+    )
+    .await?;
 
     for endpoint in &parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {

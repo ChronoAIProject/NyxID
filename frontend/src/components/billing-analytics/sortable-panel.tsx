@@ -1,4 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, MoveDiagonal2 } from "lucide-react";
@@ -39,7 +39,11 @@ export function SortablePanel({
     transition,
     isDragging,
     isOver,
-  } = useSortable({ id: panel.id, disabled });
+  } = useSortable({
+    id: panel.id,
+    disabled,
+    attributes: { roleDescription: translateUi("sortable") },
+  });
   useEffect(() => () => cancelResizeRef.current?.(), []);
 
   function columns() {

@@ -26,7 +26,11 @@ pub(crate) fn owned(connection: &UserService) -> bool {
         && connection.catalog_service_id.is_some()
 }
 
-fn linked(connection: &UserService, endpoint: &UserEndpoint, catalog: &DownstreamService) -> bool {
+pub(super) fn linked(
+    connection: &UserService,
+    endpoint: &UserEndpoint,
+    catalog: &DownstreamService,
+) -> bool {
     owned(connection)
         && catalog.service_type == "http"
         && endpoint.id == connection.endpoint_id

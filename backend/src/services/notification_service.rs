@@ -728,6 +728,15 @@ pub async fn send_approval_notification(
                     telegram_chat_id = Some(chat_id);
                 }
             } else {
+                // Each recipient sees the deadline of the same connected request.
+                let expires_in_secs = if super::approval_service::CONNECTED_WAIT_BUDGET
+                    .try_with(|_| ())
+                    .is_ok()
+                {
+                    (request.expires_at - Utc::now()).num_seconds().max(0) as u32
+                } else {
+                    channel.approval_timeout_secs
+                };
                 match telegram_service::send_approval_message(
                     http_client,
                     bot_token,
@@ -740,7 +749,7 @@ pub async fn send_approval_notification(
                         .action_description
                         .as_deref()
                         .unwrap_or(&request.operation_summary),
-                    channel.approval_timeout_secs,
+                    expires_in_secs,
                     effective_org_name,
                 )
                 .await
@@ -1010,16 +1019,16 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
     }
 
     let channel = default_channel(user_id);
-    match collection.insert_one(&channel).await {
+    match super::erasure_admission::insert_owned(db, COLLECTION_NAME, user_id, &channel).await {
         Ok(_) => Ok(channel),
-        Err(e) if is_duplicate_key_error(&e) => {
+        Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
             // Another request created it first; fetch the existing channel
             collection
                 .find_one(doc! { "user_id": user_id })
                 .await?
                 .ok_or_else(|| AppError::Internal("Channel creation conflict".to_string()))
         }
-        Err(e) => Err(AppError::DatabaseError(e)),
+        Err(error) => Err(error),
     }
 }
 

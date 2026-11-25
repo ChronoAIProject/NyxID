@@ -31,6 +31,26 @@ export const NOTIFICATION_KIND_LABEL: Record<NotificationKind, string> = {
 };
 
 export type NotificationTone = "default" | "warning" | "danger" | "success";
+
+/** Search the same human-readable content the feed presents, including identities. */
+export function notificationMatchesSearch(item: AssistantNotification, query: string): boolean {
+  const normalize = (value: string) => value.normalize("NFKC").toLowerCase();
+  const terms = normalize(query).trim().split(/\s+/u).filter(Boolean);
+  if (!terms.length) return true;
+  const text = normalize([
+    notificationTitle(item),
+    notificationSentence(item).text,
+    item.preview,
+    item.source.label,
+    item.actor?.name,
+    item.actor?.display_name,
+    ...(item.participants ?? []).flatMap(actor => [actor.name, actor.display_name]),
+    notificationContextLabel(item),
+    item.platform,
+  ].filter(Boolean).join(" "));
+  return terms.every(term => text.includes(term));
+}
+
 export function notificationTone(kind: NotificationKind): NotificationTone {
   switch (kind) {
     case "automation_problem":
@@ -106,7 +126,7 @@ export function notificationAccessibilityLabel(
   const count = notificationCountLabel(item.count);
   if (count) parts.push(count);
   if (notificationPending(item)) parts.push(translateApp("needs your decision"));
-  if (!item.read) parts.push("unread");
+  if (!item.read) parts.push(translateApp("unread"));
   return parts.join(", ");
 }
 

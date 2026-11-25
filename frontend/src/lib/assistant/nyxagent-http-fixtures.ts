@@ -1,4 +1,5 @@
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
+import type { NotificationReadRequest } from "@/schemas/assistant-notifications";
 import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
 import { createMockConnectReply, mockCreatedBotCount } from "@/lib/assistant/mock-setup-journeys";
 import {
@@ -135,6 +136,7 @@ interface State {
   channels: NyxAgentChannelAgent[];
   chats?: NyxAgentChannelChat[];
   groups?: GroupRecord[];
+  briefingRead?: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -223,6 +225,7 @@ export class NyxAgentHttpFixtures {
   private channels: NyxAgentChannelAgent[] = [];
   private chats: NyxAgentChannelChat[] = [];
   private groups: GroupRecord[] = [];
+  private briefingRead = false;
 
   constructor() {
     try {
@@ -234,6 +237,7 @@ export class NyxAgentHttpFixtures {
         this.channels = state.channels;
         this.chats = state.chats ?? [];
         this.groups = state.groups ?? [];
+        this.briefingRead = state.briefingRead ?? false;
       }
     } catch {
       this.rows.clear();
@@ -319,6 +323,7 @@ export class NyxAgentHttpFixtures {
       channels: this.channels,
       chats: this.chats,
       groups: this.groups,
+      briefingRead: this.briefingRead,
     };
     sessionStorage.setItem(STORAGE, JSON.stringify(state));
   }
@@ -1444,11 +1449,59 @@ export class NyxAgentHttpFixtures {
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
+  /** The seeded Telegram briefing also appears in the preview account's activity feed. */
+  private notifications(url: URL, init: RequestInit) {
+    const briefing = [...this.rows.values()].find(
+      row => row.history.conversation.title === NYXAGENT_FIXTURE_CHANNEL_THREAD,
+    );
+    const thread = briefing?.history.conversation;
+    const unread = thread && !this.briefingRead ? 1 : 0;
+    if (url.pathname.endsWith("/summary")) {
+      return json({
+        unread_count: unread,
+        needs_decision_count: 0,
+        by_kind: { chat_update: unread },
+        by_source: thread && unread ? [{ source_type: "conversation", id: thread.id, unread }] : [],
+      });
+    }
+    if (url.pathname.endsWith("/read") && init.method === "POST") {
+      const scope = JSON.parse(String(init.body)) as NotificationReadRequest;
+      const matches = thread && (
+        ("all" in scope && thread.created_at <= scope.before) ||
+        ("ids" in scope && scope.ids.includes(thread.id)) ||
+        ("source" in scope && scope.source.type === "conversation" && scope.source.id === thread.id)
+      );
+      if (matches) {
+        this.briefingRead = true;
+        this.save();
+      }
+      return new Response(null, { status: 204 });
+    }
+    const kinds = url.searchParams.get("kind")?.split(",");
+    const visible = (!kinds || kinds.includes("chat_update")) && (url.searchParams.get("unread_only") !== "true" || unread);
+    const items = thread && visible ? [{
+      id: thread.id,
+      kind: "chat_update",
+      source: { type: "conversation", id: thread.id, conversation_id: thread.id, label: thread.title },
+      title: thread.title,
+      preview: "Your morning calendar briefing is ready.",
+      platform: "telegram",
+      url: `/assistant?c=${thread.id}`,
+      read: this.briefingRead,
+      created_at: thread.created_at,
+      updated_at: thread.created_at,
+    }] : [];
+    return json({ as_of: new Date().toISOString(), next_cursor: null, items });
+  }
+
   readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
     if (!endpoint.startsWith(ROOT)) return undefined;
     this.tick();
     const url = new URL(endpoint, window.location.origin);
     const method = init.method ?? "GET";
+    if (url.pathname === `${ROOT}/notifications` || url.pathname === `${ROOT}/notifications/summary` || url.pathname === `${ROOT}/notifications/read`) {
+      return this.notifications(url, init);
+    }
     if (url.pathname === `${ROOT}/live`) {
       return globalThis.__nyxidAssistantHttpFaults?.nyxagentLive
         ? this.live()

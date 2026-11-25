@@ -56,7 +56,7 @@ pub struct AuthDeviceRequestBody {
     pub client_device_memory: Option<f64>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct AuthDeviceRequestResponse {
     pub device_code: String,
     pub user_code: String,
@@ -69,7 +69,7 @@ pub struct AuthDeviceRequestResponse {
     pub interval: u32,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDevicePollBody {
     pub device_code: String,
 }
@@ -78,8 +78,10 @@ pub struct AuthDevicePollBody {
 #[serde(tag = "auth_kind", rename_all = "snake_case")]
 pub enum AuthDevicePollResponse {
     AccountSession {
-        access_token: String,
-        refresh_token: String,
+        #[schema(value_type = String)]
+        access_token: zeroize::Zeroizing<String>,
+        #[schema(value_type = String)]
+        refresh_token: zeroize::Zeroizing<String>,
         token_type: &'static str,
         expires_in: i64,
     },
@@ -96,14 +98,14 @@ impl std::fmt::Debug for AuthDevicePollResponse {
     }
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDeviceApproveBody {
     pub user_code: String,
     pub selection: Option<agent_key::Selection>,
     pub credential_expires_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDeviceDenyBody {
     pub user_code: String,
 }
@@ -121,12 +123,20 @@ pub struct AuthDeviceWebDeliveryResponse {
     pub login_code: Option<super::login_code::MintResponse>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDevicePreviewBody {
     pub user_code: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+crate::errors::redacted_debug!(
+    AuthDeviceRequestResponse,
+    AuthDevicePollBody,
+    AuthDeviceApproveBody,
+    AuthDeviceDenyBody,
+    AuthDevicePreviewBody,
+);
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct AuthDevicePreviewResponse {
     pub supports_grant_choice: bool,
     pub requested_profile: Option<String>,
@@ -905,6 +915,9 @@ fn trace_poll_error(client_ip_hash: &str, outcome: &str) {
 
 #[cfg(test)]
 mod tests {
+    mod staging_qr_tests {
+        include!("auth_device/staging_qr_tests.rs");
+    }
     use super::*;
     use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
     use axum::http::{StatusCode, header};
@@ -2544,3 +2557,7 @@ mod tests {
         assert_ne!(approve_json, serde_json::json!({ "ok": true }));
     }
 }
+
+#[cfg(test)]
+#[path = "device_login_debug_tests.rs"]
+mod device_login_debug_tests;

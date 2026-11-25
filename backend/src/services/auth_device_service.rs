@@ -43,7 +43,7 @@ const AUTH_DEVICE_USER_CODE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ"
 pub(crate) use super::login_client_context::*;
 pub use crate::models::login_client_context::LoginClientContext as InitiateInput;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InitiateOutput {
     pub device_code: String,
     pub user_code: String,
@@ -71,8 +71,8 @@ pub enum PollClaim {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccountDelivery {
-    pub access_token: String,
-    pub refresh_token: String,
+    pub access_token: Zeroizing<String>,
+    pub refresh_token: Zeroizing<String>,
     pub expires_in: i64,
     pub user_id: String,
     pub session_id: String,
@@ -84,7 +84,7 @@ impl std::fmt::Debug for AccountDelivery {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApproveInput {
     pub user_id: String,
     pub user_code: String,
@@ -92,13 +92,15 @@ pub struct ApproveInput {
     pub approver_user_agent: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DenyInput {
     pub user_id: String,
     pub user_code: String,
     pub denier_ip: Option<String>,
     pub denier_user_agent: Option<String>,
 }
+
+crate::errors::redacted_debug!(InitiateOutput, ApproveInput, DenyInput,);
 
 #[tracing::instrument(
     name = "auth_device.initiate",
@@ -553,6 +555,14 @@ pub async fn preview(
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (_, row) = find_by_user_code(db, &user_code_hmac).await?;
 
+    Ok(preview_row(row, viewer_ip, viewer_ip_attribution))
+}
+
+pub(super) fn preview_row(
+    row: AuthDeviceCode,
+    viewer_ip: Option<&str>,
+    viewer_ip_attribution: AuthDeviceClientIpAttribution,
+) -> PreviewOutput {
     tracing::Span::current().record("row_id", row.id.as_str());
     let context = InitiateInput {
         requested_profile: row.requested_profile,
@@ -579,7 +589,7 @@ pub async fn preview(
         client_hardware_concurrency: row.client_hardware_concurrency,
         client_device_memory: row.client_device_memory,
     };
-    Ok(context_preview(
+    context_preview(
         context,
         row.created_at,
         row.expires_at,
@@ -587,10 +597,9 @@ pub async fn preview(
         row.supports_grant_choice,
         viewer_ip,
         viewer_ip_attribution,
-    ))
+    )
 }
 
-#[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
 pub async fn approve(
     db: &Database,
     config: &AppConfig,
@@ -600,12 +609,43 @@ pub async fn approve(
     input: ApproveInput,
     authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    approve_bound(
+        db,
+        config,
+        jwt_keys,
+        encryption_keys,
+        hmac_key,
+        input,
+        authority,
+        None,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn approve_bound(
+    db: &Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    encryption_keys: &EncryptionKeys,
+    hmac_key: &[u8],
+    input: ApproveInput,
+    authority: super::session_authority::DerivedMfaAuthority,
+    staging: Option<super::staging_qr::VerifiedMatch>,
+) -> AppResult<()> {
     let mfa_policy_revision = app_policy::authorize(db, &input.user_id, authority).await?;
     let mfa_assured = authority.verified;
     let started_at = std::time::Instant::now();
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if staging
+        .as_ref()
+        .is_some_and(|verified| verified.request_id != row.id)
+    {
+        return Err(AppError::AuthDeviceUserCodeInvalid);
+    }
     let now = Utc::now();
 
     tracing::Span::current().record("row_id", row.id.as_str());
@@ -626,6 +666,7 @@ pub async fn approve(
             mfa_assured,
             mfa_policy_revision.as_deref(),
             authority,
+            staging,
         )
         .await;
     }
@@ -661,6 +702,9 @@ pub async fn approve(
         transaction.start_transaction().and_run2(async move |session| {
     let db = &db_owned;
     let operation: AppResult<String> = async {
+    if let Some(verified) = staging.as_ref() {
+        verified.fence(db, &input.user_id, session, mfa_assured).await?;
+    }
     app_policy::fence_approval(db, &input.user_id, authority, mfa_policy_revision.as_deref(), session).await?;
     let claimed = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
@@ -747,15 +791,27 @@ pub async fn approve(
     Ok(())
 }
 
+pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+    deny_bound(db, hmac_key, input, None).await
+}
+
 #[tracing::instrument(
     name = "auth_device.deny",
     skip_all,
     fields(row_id, user_id = %input.user_id)
 )]
-pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+pub(super) async fn deny_bound(
+    db: &Database,
+    hmac_key: &[u8],
+    input: DenyInput,
+    expected_id: Option<&str>,
+) -> AppResult<()> {
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if expected_id.is_some_and(|id| id != row.id) {
+        return Err(AppError::AuthDeviceUserCodeInvalid);
+    }
     let now = Utc::now();
 
     tracing::Span::current().record("row_id", row.id.as_str());
@@ -815,14 +871,14 @@ pub async fn decrypt_tokens(
     encryption_keys: &EncryptionKeys,
     encrypted_access: &[u8],
     encrypted_refresh: &[u8],
-) -> AppResult<(String, String)> {
-    let access_plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted_access).await?);
-    let refresh_plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted_refresh).await?);
+) -> AppResult<(Zeroizing<String>, Zeroizing<String>)> {
+    let access_plaintext = encryption_keys.decrypt(encrypted_access).await?;
+    let refresh_plaintext = encryption_keys.decrypt(encrypted_refresh).await?;
 
-    let access_token = String::from_utf8(access_plaintext.to_vec()).map_err(|_| {
+    let access_token = crate::crypto::guarded_utf8(access_plaintext).map_err(|_| {
         AppError::Internal("auth-device delivery access token is not valid UTF-8".to_string())
     })?;
-    let refresh_token = String::from_utf8(refresh_plaintext.to_vec()).map_err(|_| {
+    let refresh_token = crate::crypto::guarded_utf8(refresh_plaintext).map_err(|_| {
         AppError::Internal("auth-device delivery refresh token is not valid UTF-8".to_string())
     })?;
 
@@ -2458,8 +2514,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(decrypted_access, access);
-        assert_eq!(decrypted_refresh, refresh);
+        assert_eq!(decrypted_access.as_str(), access);
+        assert_eq!(decrypted_refresh.as_str(), refresh);
     }
 
     #[tokio::test]

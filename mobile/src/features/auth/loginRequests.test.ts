@@ -63,7 +63,23 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
   let device: () => Promise<ReturnType<typeof preview>> = async () => preview();
   let agent: () => Promise<ReturnType<typeof preview>> = async () => preview();
   let decision: () => Promise<void> = async () => {};
+  const stagingBinding = {
+    request_id: "11111111-1111-4111-8111-111111111111",
+    production_user: "22222222-2222-4222-8222-222222222222",
+    staging_user: "33333333-3333-4333-8333-333333333333",
+  };
   const api = {
+    previewStagingDevice: async (code: string, binding?: typeof stagingBinding) => {
+      calls.push(binding ? "staging-refresh" : "staging-preview");
+      if (binding) assert.deepEqual(binding, stagingBinding);
+      return { ...authDevicePreviewSchema.parse(await device()), stagingBinding };
+    },
+    decideStagingDevice: async (action: string, code: string, binding: typeof stagingBinding) => {
+      calls.push("staging-" + action);
+      assert.deepEqual(binding, stagingBinding);
+      decisionCodes.push(code);
+      return decision();
+    },
     previewAuthDevice: async () => {
       calls.push("device");
       return authDevicePreviewSchema.parse(await device());
@@ -164,6 +180,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
         },
       },
       "react-native-safe-area-context": {
+        SafeAreaProvider: "SafeAreaProvider",
         useSafeAreaInsets: () => ({ bottom: 0, top: 0 }),
       },
       "lucide-react-native": Object.fromEntries(
@@ -179,6 +196,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
         ].map((n) => [n, n]),
       ),
       "../../app/WorkspaceHeader": {
+        WorkspaceSheetContext: { Provider: "WorkspaceSheetProvider" },
         useWorkspaceSheet: () => ({}),
         useWorkspaceBack: (input: { disabled: boolean }) => {
           navigationDisabled = input.disabled;
@@ -190,6 +208,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
       "../../components/ScreenContainer": {
         ScreenContainer: "ScreenContainer",
       },
+      "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
       "../../lib/accessibility/useReducedMotion": {
         useReducedMotion: () => true,
       },
@@ -1083,6 +1102,8 @@ test("Device Login pending foreground refresh preserves the expanded raw user ag
   env.mount();
   env.field("ABCDEFGH");
   await env.press("Continue");
+  (env.nodes().find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress as () => void)();
+  env.harness.flush();
   (
     env
       .nodes()
@@ -1093,6 +1114,7 @@ test("Device Login pending foreground refresh preserves the expanded raw user ag
   env.advance(750);
   await env.app("background");
   await env.app("active");
+  assert.ok(env.nodes().some((node) => node.props.accessibilityLabel === "Hide more details"));
   assert.ok(
     env
       .nodes()
@@ -2538,3 +2560,18 @@ test("removing a delayed linked code or editing it cancels its automatic preview
     if (action !== "unmount") env.harness.unmount();
   }
 });
+
+for (const [button, action] of [["Approve staging account session", "approve"], ["Reject", "deny"]]) {
+  test(`a staging device scan keeps the reviewed request bound through ${action}`, async () => {
+    const env = setup();
+    env.mount("device", { start_scanner: true });
+    const scanner = env.nodes().find((node) => node.type === "DeviceCodeScanner")!;
+    (scanner.props.onCode as (code: string, kind: string) => void)("ABCDEFGH", "staging-device");
+    await env.harness.settle();
+    assert.deepEqual(env.calls, ["staging-preview"]);
+    env.advance(750);
+    await env.press(button!);
+    assert.deepEqual(env.calls, ["staging-preview", "staging-" + action]);
+    assert.deepEqual(env.decisionCodes, ["ABCDEFGH"]);
+  });
+}

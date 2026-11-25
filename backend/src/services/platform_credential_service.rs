@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bson::doc;
+use super::channel_signing_migration::{self as signing, Generations};
+use bson::{Document, doc};
 use zeroize::Zeroizing;
 
 use super::channel_managed::{PlatformCredentialBacking, PlatformCredentialDescriptor};
@@ -17,13 +18,131 @@ use crate::models::platform_credential::{COLLECTION_NAME, PlatformCredential};
 #[derive(Clone)]
 pub struct PlatformCredentialSnapshot {
     projected: PlatformCredential,
+    pub(super) generations: Generations,
+    pub(super) primary_generations: Generations,
+    pub(super) auxiliary_generations: Generations,
+    pub(super) prepared_sources: BTreeMap<String, String>,
+    signing_filters: Vec<(&'static str, Document)>,
     oauth_source: Option<crate::models::provider_config::ProviderConfig>,
     auxiliary: Option<PlatformCredential>,
+    observed_absent_auxiliary: bool,
 }
 impl std::ops::Deref for PlatformCredentialSnapshot {
     type Target = PlatformCredential;
     fn deref(&self) -> &Self::Target {
         &self.projected
+    }
+}
+
+impl PlatformCredentialSnapshot {
+    pub(super) fn check_proofs(
+        &self,
+        bot: &crate::models::channel_bot::ChannelBot,
+    ) -> AppResult<()> {
+        if let Some(evidence) = super::channel_credential_continuity::verified(bot)? {
+            for (collection, expected) in &evidence.shared_producers {
+                if self.source_id(collection) == Some(expected.as_str())
+                    && self.prepared_sources.get(collection) != Some(expected)
+                {
+                    return Err(AppError::Conflict(
+                        "Channel signing credential requires fingerprint preparation".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn source_id(&self, collection: &str) -> Option<&str> {
+        if collection == crate::models::provider_config::COLLECTION_NAME {
+            self.oauth_source.as_ref().map(|row| row.id.as_str())
+        } else if self.oauth_source.is_some() {
+            self.auxiliary.as_ref().map(|row| row.id.as_str())
+        } else {
+            Some(&self.projected.id)
+        }
+    }
+
+    pub(super) async fn exact_sources(
+        &self,
+        db: &mongodb::Database,
+        tx: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        for (coll, filter) in &self.signing_filters {
+            if db
+                .collection::<Document>(coll)
+                .find_one(filter.clone())
+                .projection(doc! {"_id":1})
+                .session(&mut *tx)
+                .await?
+                .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn producer_ids(&self) -> (&str, Option<&str>) {
+        (&self.id, self.auxiliary.as_ref().map(|row| row.id.as_str()))
+    }
+
+    /// A composite mutation also writes its provider. The provider fence orders
+    /// concurrent inserts, and this read catches inserts committed before it.
+    pub(super) async fn auxiliary_presence_matches(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        if !self.observed_absent_auxiliary {
+            return Ok(true);
+        }
+        Ok(db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"provider": &self.projected.provider})
+            .projection(doc! {"_id": 1})
+            .session(session)
+            .await?
+            .is_none())
+    }
+
+    pub(super) async fn fence_projection(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        let platform = if let Some(provider) = &self.oauth_source {
+            let filter = doc! {"_id":&provider.id,"slug":&provider.slug,"updated_at":bson::DateTime::from_chrono(provider.updated_at)};
+            if !signing::fence_projection(
+                db,
+                session,
+                crate::models::provider_config::COLLECTION_NAME,
+                filter,
+                &self.primary_generations,
+                Some("channel_observation_version"),
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+            self.auxiliary
+                .as_ref()
+                .map(|p| (p, &self.auxiliary_generations))
+        } else {
+            Some((&self.projected, &self.primary_generations))
+        };
+        let Some((platform, generations)) = platform else {
+            return self.auxiliary_presence_matches(db, session).await;
+        };
+        signing::fence_projection(
+            db,
+            session,
+            COLLECTION_NAME,
+            doc! {"_id":&platform.id,"provider":&platform.provider},
+            generations,
+            Some("channel_observation_version"),
+        )
+        .await
     }
 }
 
@@ -56,9 +175,7 @@ pub async fn load(
     descriptor: &PlatformCredentialDescriptor,
 ) -> AppResult<Option<PlatformCredentialSnapshot>> {
     if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
-        let providers = db.collection::<crate::models::provider_config::ProviderConfig>(
-            crate::models::provider_config::COLLECTION_NAME,
-        );
+        let providers = db.collection::<Document>(crate::models::provider_config::COLLECTION_NAME);
         let (row, auxiliary) = if has_auxiliary_fields(descriptor) {
             // Keep the snapshot pinned between reads even with no retained history window.
             let mut session = db.client().start_session().await?;
@@ -68,7 +185,7 @@ pub async fn load(
                 .and_run(
                     (
                         providers.clone(),
-                        db.collection::<PlatformCredential>(COLLECTION_NAME),
+                        db.collection::<Document>(COLLECTION_NAME),
                         provider_slug,
                         descriptor.provider,
                     ),
@@ -93,6 +210,71 @@ pub async fn load(
                 None,
             )
         };
+        let mut prepared_sources = BTreeMap::new();
+        let mut signing_filters = Vec::new();
+        for (coll, source, fields) in [
+            (
+                crate::models::provider_config::COLLECTION_NAME,
+                row.as_ref(),
+                &[
+                    "slug",
+                    "client_id_encrypted",
+                    "client_secret_encrypted",
+                    "secret_context_versions",
+                ][..],
+            ),
+            (
+                COLLECTION_NAME,
+                auxiliary.as_ref(),
+                &["provider", "secrets", "secret_context_versions"][..],
+            ),
+        ] {
+            if let Some(source) = source {
+                signing_filters.push((
+                    coll,
+                    super::record_storage::source_predicate(source, fields),
+                ));
+                if source.contains_key(signing::SIGNING_PREPARATION_FIELD) {
+                    prepared_sources.insert(
+                        coll.into(),
+                        source
+                            .get_str("_id")
+                            .map_err(|_| {
+                                AppError::Internal("Invalid signing producer identity".into())
+                            })?
+                            .into(),
+                    );
+                }
+            }
+        }
+        let primary_generations = row
+            .as_ref()
+            .map(|row| signing::generations(crate::models::provider_config::COLLECTION_NAME, row))
+            .transpose()?
+            .unwrap_or_default();
+        let auxiliary_generations = auxiliary
+            .as_ref()
+            .map(|row| signing::generations(COLLECTION_NAME, row))
+            .transpose()?
+            .unwrap_or_default();
+        let mut generations = primary_generations.clone();
+        generations.extend(
+            auxiliary_generations
+                .iter()
+                .filter(|(name, _)| {
+                    !is_oauth_field(name)
+                        && descriptor.fields.iter().any(|f| f.name == name.as_str())
+                })
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        let row = row
+            .map(bson::from_document::<crate::models::provider_config::ProviderConfig>)
+            .transpose()
+            .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?;
+        let auxiliary = auxiliary
+            .map(bson::from_document::<PlatformCredential>)
+            .transpose()
+            .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?;
         let oauth_source = row.clone();
         let auxiliary_source = auxiliary.clone();
         let mut projected = row.map(|row| PlatformCredential {
@@ -140,19 +322,50 @@ pub async fn load(
         }
         return Ok(projected.map(|projected| PlatformCredentialSnapshot {
             projected,
+            generations,
+            prepared_sources,
+            signing_filters,
+            primary_generations,
+            auxiliary_generations,
             oauth_source,
+            observed_absent_auxiliary: has_auxiliary_fields(descriptor)
+                && auxiliary_source.is_none(),
             auxiliary: auxiliary_source,
         }));
     }
-    Ok(db
-        .collection::<PlatformCredential>(COLLECTION_NAME)
-        .find_one(doc! { "provider": descriptor.provider })
+    let Some(row) = db
+        .collection::<Document>(COLLECTION_NAME)
+        .find_one(doc! {"provider":descriptor.provider})
         .await?
-        .map(|row| PlatformCredentialSnapshot {
-            projected: row,
-            oauth_source: None,
-            auxiliary: None,
-        }))
+    else {
+        return Ok(None);
+    };
+    let primary_generations = signing::generations(COLLECTION_NAME, &row)?;
+    let mut prepared_sources = BTreeMap::new();
+    if row.contains_key(signing::SIGNING_PREPARATION_FIELD) {
+        prepared_sources.insert(
+            COLLECTION_NAME.into(),
+            row.get_str("_id")
+                .map_err(|_| AppError::Internal("Invalid signing producer identity".into()))?
+                .into(),
+        );
+    }
+    let filter = super::record_storage::source_predicate(
+        &row,
+        &["provider", "secrets", "secret_context_versions"],
+    );
+    Ok(Some(PlatformCredentialSnapshot {
+        signing_filters: vec![(COLLECTION_NAME, filter)],
+        prepared_sources,
+        projected: bson::from_document(row)
+            .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?,
+        generations: primary_generations.clone(),
+        primary_generations,
+        auxiliary_generations: Generations::new(),
+        oauth_source: None,
+        auxiliary: None,
+        observed_absent_auxiliary: false,
+    }))
 }
 
 pub fn configured(
@@ -302,9 +515,7 @@ async fn decrypt_platform_field(
             )
             .await
         }
-        None if keys.allow_legacy_record_reads() => {
-            keys.decrypt(encrypted).await.map(Zeroizing::new)
-        }
+        None if keys.allow_legacy_record_reads() => keys.decrypt(encrypted).await,
         _ => Err(AppError::Internal(
             "Invalid platform credential storage version".into(),
         )),
@@ -418,18 +629,17 @@ pub(crate) async fn migrate_storage_snapshot(
             .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?,
     );
     verify_current_storage_snapshot(keys, &candidate).await?;
-    Ok(db
-        .collection::<bson::Document>(COLLECTION_NAME)
-        .update_one(
-            super::record_storage::exact_document_predicate(source),
-            doc! {"$set":{
-                "secrets":candidate.get("secrets").cloned(),
-                "secret_context_versions":candidate.get("secret_context_versions").cloned()
-            }},
-        )
-        .await?
-        .matched_count
-        == 1)
+    let db = super::transaction_service::durable_database(db);
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
+    let result = async {
+        let mut set = doc!{"secrets":candidate.get("secrets"),"secret_context_versions":candidate.get("secret_context_versions")};
+        signing::authorize_rewrap(&db,&mut session,COLLECTION_NAME,source,&mut set).await?;
+        let changed = db.collection::<Document>(COLLECTION_NAME).update_one(super::record_storage::exact_document_predicate(source),doc!{"$set":set}).session(&mut session).await?.matched_count==1;
+        Ok(changed)
+    }
+    .await;
+    super::org_membership_authority::finish(session, result).await
 }
 
 pub async fn update(
@@ -565,13 +775,17 @@ pub async fn update(
     super::transaction_service::run_db_only(&db, &context, |tx, context| {
         let &(db, filter, update, upsert) = context;
         Box::pin(async move {
-            let result = db
-                .collection::<PlatformCredential>(COLLECTION_NAME)
-                .update_one(filter.clone(), update.clone())
-                .upsert(upsert)
-                .session(&mut *tx)
-                .await?;
-            if result.matched_count == 0 && result.upserted_id.is_none() {
+            if signing::update_in_session(
+                db,
+                tx,
+                COLLECTION_NAME,
+                filter.clone(),
+                update.clone(),
+                upsert,
+            )
+            .await?
+            .is_none()
+            {
                 return Err(AppError::Conflict(
                     "Platform credentials changed; reload and retry".into(),
                 ));
@@ -602,15 +816,10 @@ pub async fn delete(
             .await?;
             return Ok(());
         }
-        db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
-            .update_one(
-                doc! { "slug": &provider_slug },
-                doc! {
+        signing::update_provider(db,doc!{"slug":provider_slug},doc! {
                     "$unset": { "client_id_encrypted": "", "client_secret_encrypted": "", "secret_context_versions.client_id_encrypted": "", "secret_context_versions.client_secret_encrypted": "" },
                     "$set": { "updated_at": bson::DateTime::now() },
-                },
-            )
-            .await?;
+                }).await?;
         return Ok(());
     }
     let db = super::transaction_service::durable_database(db);
@@ -752,11 +961,14 @@ async fn update_provider_oauth(
         }
         return Ok(());
     }
-    let result = db
-        .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
-        .update_one(doc! { "_id":&provider.id, "slug": provider_slug }, update)
-        .await?;
-    if result.matched_count == 0 {
+    if signing::update_provider(
+        db,
+        doc! { "_id":&provider.id, "slug": provider_slug },
+        update,
+    )
+    .await?
+    .is_none()
+    {
         return Err(AppError::NotFound(
             "OAuth provider is not configured".to_string(),
         ));
@@ -779,10 +991,13 @@ async fn write_composite_provider(
     db: &mongodb::Database,
     provider_slug: &str,
     provider_name: &'static str,
-    update: bson::Document,
+    mut update: bson::Document,
     auxiliary_update: Option<bson::Document>,
     expected_ids: Option<(&str, &str)>,
 ) -> AppResult<bool> {
+    // An auxiliary-only change must still write the provider even if its
+    // millisecond timestamp already equals this update's timestamp.
+    update.insert("$inc", doc! {"channel_observation_version": 1_i64});
     let db = super::transaction_service::durable_database(db);
     let context = (
         &db,
@@ -799,30 +1014,56 @@ async fn write_composite_provider(
             if let Some((provider_id, _)) = expected_ids {
                 provider_filter.insert("_id", provider_id);
             }
-            let result = db
-                .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
-                .update_one(provider_filter, update.clone())
-                .session(&mut *session)
-                .await?;
+            let result = signing::update_in_session(
+                db,
+                session,
+                crate::models::provider_config::COLLECTION_NAME,
+                provider_filter,
+                update.clone(),
+                false,
+            )
+            .await?;
             let stored = db.collection::<PlatformCredential>(COLLECTION_NAME);
+            let enrolled = result
+                .as_ref()
+                .filter(|row| row.contains_key(signing::SIGNING_PREPARATION_FIELD));
+            let previous_auxiliary = if enrolled.is_some() {
+                db.collection::<Document>(COLLECTION_NAME)
+                    .find_one(doc! {"provider":provider})
+                    .projection(doc! {"_id":1})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+            } else {
+                false
+            };
             if let Some(auxiliary) = auxiliary {
-                if result.matched_count != 1 {
+                if result.is_none() {
                     return Ok(false);
                 }
                 let mut auxiliary_filter = doc! {"provider":provider};
                 if let Some((_, auxiliary_id)) = expected_ids {
                     auxiliary_filter.insert("_id", auxiliary_id);
                 }
-                stored
-                    .update_one(auxiliary_filter, auxiliary.clone())
-                    .upsert(true)
-                    .session(&mut *session)
-                    .await?;
+                signing::update_in_session(
+                    db,
+                    session,
+                    COLLECTION_NAME,
+                    auxiliary_filter,
+                    auxiliary.clone(),
+                    true,
+                )
+                .await?;
             } else {
                 stored
                     .delete_one(doc! {"provider":provider})
                     .session(&mut *session)
                     .await?;
+            }
+            if let Some(provider_row) = enrolled
+                && previous_auxiliary != auxiliary.is_some()
+            {
+                signing::auxiliary_membership_changed(db, session, provider_row).await?;
             }
             Ok(true)
         })

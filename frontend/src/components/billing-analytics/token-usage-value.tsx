@@ -83,7 +83,7 @@ export function TokenUsageValue({
                       key={detail.label}
                       className="flex justify-between gap-6"
                     >
-                      <dt className="text-muted-foreground">{detail.label}</dt>
+                      <dt className="text-muted-foreground">{translateUi(detail.label)}</dt>
                       <dd className="tabular-nums">{number(detail.value)}</dd>
                     </div>
                   ))}
@@ -91,7 +91,7 @@ export function TokenUsageValue({
               </>
             )}
             <p className="text-13 text-muted-foreground">{translateUi("Image and voice tokens are included in the total when reported.")}{details.length === 0 &&
-                " No separate image or voice breakdown was recorded for this selection."}
+                <> {translateUi("No separate image or voice breakdown was recorded for this selection.")}</>}
             </p>
             {(usage.cached_tokens > 0 || usage.cache_creation_tokens > 0) && (
               <p className="text-13 text-muted-foreground">{translateUi("Cache read ")}{number(usage.cached_tokens)}{translateUi(" · cache write")}{" "}

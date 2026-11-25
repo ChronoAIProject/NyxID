@@ -70,8 +70,9 @@ export function AssistantMentionInput({
   accessibilityLabel,
   generation = 0,
   style,
+  expandedContent,
   renderActions,
-  compactWhenIdle = false,
+  compactWhenIdle = true,
 }: {
   value: string;
   onChangeText: (value: string) => void;
@@ -81,12 +82,13 @@ export function AssistantMentionInput({
   accessibilityLabel: string;
   generation?: number | string;
   style?: StyleProp<TextStyle>;
+  expandedContent?: ReactNode;
   /** Put composer controls below the text so multiline drafts use its full width. */
   renderActions?: (
     mentionAction: ReactNode,
     layout: ComposerActionsLayout,
   ) => ReactNode;
-  /** Phones: an unfocused, empty composer collapses to one row (+ field mic send). */
+  /** An unfocused composer with only whitespace collapses to one row on every window. */
   compactWhenIdle?: boolean;
 }) {
   const railIndicator = useRailScrollIndicator();
@@ -316,6 +318,7 @@ export function AssistantMentionInput({
           </ScrollView>
         </View>
       ) : null}
+      {!compact ? expandedContent : null}
       <View
         testID="chat-composer-input-frame"
         style={[
@@ -409,8 +412,10 @@ export function AssistantMentionInput({
               minHeight: composerInputMinHeight(fontScale),
             },
             style,
-            // iOS sizes a multiline input to its text; a measured height pins it at one line.
-            Platform.OS === "ios"
+            // Idle whitespace stays to one line on both native platforms.
+            compact
+              ? { height: composerInputMinHeight(fontScale), maxHeight: composerInputMinHeight(fontScale) }
+              : Platform.OS === "ios"
               ? {
                   height: showPlaceholder
                     ? composerInputMinHeight(fontScale)

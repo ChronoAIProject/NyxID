@@ -7,9 +7,7 @@ import { useRef, useState } from "react";
 import {
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,6 +15,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 import {
   Check,
@@ -26,6 +25,7 @@ import {
   X,
 } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { KeyboardViewport } from "../../components/workspace/KeyboardViewport";
 import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
@@ -189,6 +189,8 @@ export function AgentPermissionsSheet({
     guest_access: { ...value.guest_access },
   }));
   const [query, setQuery] = useState("");
+  const { fontScale } = useWindowDimensions();
+  const [compactSearch, setCompactSearch] = useState(false);
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [guestService, setGuestService] = useState<ServiceOption>();
   const [saving, setSaving] = useState(false);
@@ -208,7 +210,7 @@ export function AgentPermissionsSheet({
   const search = query.trim().toLocaleLowerCase();
   const filtered = rows.filter(
     (row) =>
-      (!selectedOnly || draft.services.includes(row.value)) &&
+      (compactSearch || !selectedOnly || draft.services.includes(row.value)) &&
       `${row.label} ${row.detail ?? ""} ${row.value}`
         .toLocaleLowerCase()
         .includes(search),
@@ -292,6 +294,12 @@ export function AgentPermissionsSheet({
           )}
         </Label>
       )}
+    </View>
+  );
+
+  const listHeader = !compactSearch || connectionsLoading || connectionsError ? (
+    <View>
+      {!compactSearch && header}
       {connectionsLoading && (
         <SkeletonRows rows={3} accessibilityLabel={translateApp("Loading services")}
         />
@@ -311,7 +319,7 @@ export function AgentPermissionsSheet({
         />
       )}
     </View>
-  );
+  ) : null;
 
   return (
     <Modal
@@ -324,9 +332,12 @@ export function AgentPermissionsSheet({
     >
       <SafeAreaProvider>
         <SafeAreaView style={[styles.fill, { backgroundColor: colors.bg }]}>
-          <KeyboardAvoidingView
-            style={styles.fill}
-            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          <KeyboardViewport
+            onViewportChange={(frame) =>
+              // Preserve two usable result rows after the fixed controls.
+              // Tall windows keep their ordinary filters and save footer.
+              setCompactSearch(Boolean(frame && frame.height < 420 * Math.max(1, fontScale)))
+            }
           >
             <View style={[styles.header, { borderColor: colors.border }]}>
               {guestService ? (
@@ -439,21 +450,27 @@ export function AgentPermissionsSheet({
                   >
                     <Search size={18} color={colors.textMuted} />
                     <TextInput
-                      accessibilityLabel={translateApp(
-                        "Search service permissions",
-                      )}
-                      placeholder={translateApp("Search services")}
+                      accessibilityLabel={compactSearch && selectedOnly
+                        ? translateApp("Search all services")
+                        : translateApp("Search service permissions")}
+                      placeholder={compactSearch && selectedOnly
+                        ? translateApp("Search all services")
+                        : translateApp("Search services")}
                       placeholderTextColor={colors.textMuted}
                       value={query}
                       onChangeText={setQuery}
                       autoCapitalize="none"
                       autoCorrect={false}
+                      returnKeyType="done"
+                      onSubmitEditing={() => Keyboard.dismiss()}
                       editable={!saving}
                       style={[
                         styles.searchInput,
                         { color: colors.textPrimary },
                       ]}
                     />
+                    {compactSearch && selectedOnly &&
+                      <Label muted>{translateApp("All services")}</Label>}
                     {!!query && (
                       <Pressable
                         accessibilityRole="button"
@@ -468,7 +485,7 @@ export function AgentPermissionsSheet({
                       </Pressable>
                     )}
                   </View>
-                  <View accessibilityRole="tablist" style={styles.tabs}>
+                  {!compactSearch && <View accessibilityRole="tablist" style={styles.tabs}>
                     {[false, true].map((only) => (
                       <Pressable
                         key={String(only)}
@@ -504,26 +521,24 @@ export function AgentPermissionsSheet({
                         </Label>
                       </Pressable>
                     ))}
-                  </View>
+                  </View>}
                 </View>
                 <FlatList
                   style={styles.fill}
                   data={filtered}
                   keyExtractor={(item) => item.value}
                   keyboardShouldPersistTaps="handled"
-                  keyboardDismissMode="on-drag"
+                  keyboardDismissMode={compactSearch ? "none" : "on-drag"}
                   contentContainerStyle={styles.list}
-                  ListHeaderComponent={header}
+                  ListHeaderComponent={listHeader}
                   ListEmptyComponent={
-                    // While connections load, the header's skeleton rows
-                    // stand in for the list.
-                    !search && !selectedOnly && connectionsLoading ? null : (
+                    connectionsLoading || connectionsError ? null : (
                       <Label muted>
                         {search
                           ? translateApp(
                               "No matching services. Try another name or service ID.",
                             )
-                          : selectedOnly
+                          : selectedOnly && !compactSearch
                             ? translateApp(
                                 "No services selected. Choose services from All.",
                               )
@@ -650,7 +665,7 @@ export function AgentPermissionsSheet({
                 />
               </>
             )}
-            <View
+            {(!compactSearch || guestService) && <View
               style={[
                 styles.footer,
                 { backgroundColor: colors.bg, borderColor: colors.border },
@@ -685,8 +700,8 @@ export function AgentPermissionsSheet({
                   onPress={() => void save()}
                 />
               )}
-            </View>
-          </KeyboardAvoidingView>
+            </View>}
+          </KeyboardViewport>
         </SafeAreaView>
       </SafeAreaProvider>
     </Modal>
@@ -694,7 +709,7 @@ export function AgentPermissionsSheet({
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
+  fill: { flex: 1, minHeight: 0 },
   flex: { flex: 1, minWidth: 0 },
   header: {
     flexDirection: "row",

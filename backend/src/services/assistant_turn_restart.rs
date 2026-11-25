@@ -9,13 +9,162 @@ use uuid::Uuid;
 use super::assistant_nyxagent::WorkerFence;
 use crate::{
     errors::AppResult,
-    models::assistant_conversation::{AssistantConversation, COLLECTION_NAME},
+    models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME, ChannelOrigin, ChannelTurnContext,
+        ChatRestartSource, RestartSource, TeamRestartSource, TurnOrigin,
+    },
 };
 
 pub(crate) enum Loss<'a> {
     Shutdown(&'a str),
     Stale(DateTime<Utc>),
     Expiry(DateTime<Utc>),
+}
+
+fn personal_origin(origin: &ChannelOrigin) -> bool {
+    origin.org_execution.is_none() && origin.thread.is_none()
+}
+
+fn owner_context(context: &ChannelTurnContext) -> bool {
+    context.org_origin.is_none()
+        && !context.guest
+        && !context.followed
+        && context.conversation_kind == "private"
+        && context.original_message
+        && context.sender_kind == crate::models::channel_thread::ThreadSenderKind::Human
+}
+
+pub(crate) fn chat_source(
+    row: &AssistantConversation,
+    start: &super::assistant_nyxagent::TurnStart,
+) -> Option<ChatRestartSource> {
+    if !super::security_readiness_service::chat_restart_enrollment_ready() {
+        return None;
+    }
+    let turn = row.active_turn.as_ref()?;
+    if row.group_id.is_some()
+        || row.group_request_id.is_some()
+        || row
+            .agent_owner_id
+            .as_ref()
+            .is_some_and(|owner| owner != &row.user_id)
+        || turn.automation_work.is_some()
+        || turn.trigger_run_id.is_some()
+        || start.org_access.is_some()
+        || !turn.events.iter().all(|event| {
+            event.automation_work.is_none()
+                && event.channel_contexts.iter().all(owner_context)
+                && event.reply_to.iter().all(personal_origin)
+                && event.source_event_ids.iter().all(|id| {
+                    event
+                        .channel_contexts
+                        .iter()
+                        .any(|context| &context.source_event_id == id)
+                })
+        })
+    {
+        return None;
+    }
+    match turn.origin {
+        TurnOrigin::Channel
+            if start.owner_instruction_source
+                == Some(
+                    super::assistant_nyxagent::OwnerInstructionSource::VerifiedPrivateChannel,
+                ) =>
+        {
+            let context = turn
+                .channel_context
+                .as_ref()
+                .filter(|context| owner_context(context))?;
+            let event_id = turn
+                .channel_event_id
+                .as_ref()
+                .filter(|id| **id == context.source_event_id)?;
+            let origin = turn.asked_from.as_ref().filter(|origin| {
+                personal_origin(origin)
+                    && origin.nyxbot_channel_id == context.channel_id
+                    && origin
+                        .native_event_id
+                        .as_ref()
+                        .is_none_or(|id| id == event_id)
+            })?;
+            Some(ChatRestartSource::PrivateChannel {
+                event_id: event_id.clone(),
+                origin: origin.clone(),
+            })
+        }
+        TurnOrigin::Event
+            if !row.is_subagent()
+                && row.channel.is_none()
+                && !turn.events.is_empty()
+                && row.reply_channel.as_ref().is_none_or(personal_origin) =>
+        {
+            Some(ChatRestartSource::Wake {
+                report_to: turn.report_to.clone(),
+                reply_channel: row.reply_channel.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn source_matches(row: &AssistantConversation) -> bool {
+    let Some(turn) = &row.active_turn else {
+        return false;
+    };
+    let Some(source) = &turn.restart_admission else {
+        return false;
+    };
+    if source.version == 4 {
+        return source.source == RestartSource::FirstPartyOwner
+            && source.team_source.is_none()
+            && source
+                .event_ids
+                .iter()
+                .eq(turn.events.iter().map(|event| &event.id))
+            && match source.chat_source.as_deref() {
+                Some(ChatRestartSource::PersonalManager { origin }) => {
+                    turn.platform_origin.as_ref() == Some(origin.as_ref())
+                        && row.platform_thread.as_ref() == Some(&origin.thread)
+                }
+                Some(ChatRestartSource::PrivateChannel { event_id, origin }) => {
+                    turn.origin == TurnOrigin::Channel
+                        && turn.asked_from.as_ref() == Some(origin)
+                        && turn.channel_event_id.as_ref() == Some(event_id)
+                }
+                Some(ChatRestartSource::Wake { report_to, .. }) => {
+                    turn.origin == TurnOrigin::Event && turn.report_to == *report_to
+                }
+                None => false,
+            };
+    }
+    match (source.version, &source.team_source) {
+        (1 | 2, None) => true,
+        (3, Some(team))
+            if source.source == RestartSource::FirstPartyOwner
+                && turn.automation_work.is_none()
+                && turn.trigger_run_id.is_none() =>
+        {
+            match team {
+                TeamRestartSource::Assignment { report_to } => {
+                    turn.origin == TurnOrigin::Orchestrator
+                        && row.is_subagent()
+                        && row.group_id.is_none()
+                        && turn.report_to.as_ref() == Some(report_to)
+                }
+                TeamRestartSource::GroupMember {
+                    group_id,
+                    upper_seq,
+                } => {
+                    turn.origin == TurnOrigin::Group
+                        && turn.group_reply_in_settlement
+                        && row.group_id.as_ref() == Some(group_id)
+                        && row.group_seen_seq == *upper_seq
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn awaiting_reply(row: &AssistantConversation, turn_id: &str) -> bool {
@@ -94,7 +243,7 @@ fn offer_change(
     ) else {
         return Ok(None);
     };
-    if !matches!(source.version, 1 | 2) || source.reattach.is_none() || turn.stop_requested {
+    if !source_matches(row) || source.reattach.is_none() || turn.stop_requested {
         return Ok(None);
     }
     let Some(next_epoch) = previous.epoch.checked_add(1) else {
@@ -295,11 +444,76 @@ pub(crate) async fn claim_capacity(
     let Some(offer) = &turn.restart_offer else {
         return Ok(None);
     };
-    if offer.claimed_by.is_some() || offer.from_worker == survivor.id {
+    if offer.claimed_by.is_some() || offer.from_worker == survivor.id || !source_matches(offered) {
         return Ok(None);
     }
     let mut filter = WorkerFence::capture(offered)?.filter();
-    filter.extend(doc!{"active_turn.restart_admission.version":{"$in":[1,2]}, "active_turn.restart_offer.from_worker":&offer.from_worker,
+    let source = turn.restart_admission.as_deref().expect("validated source");
+    if let Some(chat) = &source.chat_source {
+        let encode = |error: bson::ser::Error| crate::errors::AppError::Internal(error.to_string());
+        if let ChatRestartSource::PersonalManager { origin } = chat.as_ref() {
+            filter.insert(
+                "active_turn.platform_origin",
+                bson::to_bson(origin).map_err(encode)?,
+            );
+            filter.insert(
+                "platform_thread",
+                bson::to_bson(&origin.thread).map_err(encode)?,
+            );
+        }
+        filter.insert(
+            "active_turn.restart_admission.chat_source",
+            bson::to_bson(chat).map_err(encode)?,
+        );
+        filter.insert(
+            "active_turn.origin",
+            bson::to_bson(&turn.origin).map_err(encode)?,
+        );
+        filter.insert("$expr", doc!{"$eq":[{"$map":{"input":"$active_turn.events","as":"event","in":"$$event.id"}},{"$literal":&source.event_ids}]});
+        filter.insert(
+            "active_turn.report_to",
+            bson::to_bson(&turn.report_to).map_err(encode)?,
+        );
+        filter.insert(
+            "active_turn.asked_from",
+            bson::to_bson(&turn.asked_from).map_err(encode)?,
+        );
+        filter.insert(
+            "active_turn.channel_event_id",
+            bson::to_bson(&turn.channel_event_id).map_err(encode)?,
+        );
+        filter.insert("agent_id", &source.agent_id);
+        filter.insert("model", &source.model);
+        if !source.credential_ended {
+            filter.insert("credential_api_key_id", &source.credential_id);
+        }
+    }
+    filter.insert(
+        "active_turn.restart_admission.team_source",
+        bson::to_bson(&source.team_source)
+            .map_err(|err| crate::errors::AppError::Internal(err.to_string()))?,
+    );
+    if let Some(team) = &source.team_source {
+        filter.insert("agent_id", &source.agent_id);
+        filter.insert("model", &source.model);
+        if !source.credential_ended {
+            filter.insert("credential_api_key_id", &source.credential_id);
+        }
+        match team {
+            TeamRestartSource::Assignment { report_to } => {
+                filter.insert("active_turn.report_to", report_to);
+            }
+            TeamRestartSource::GroupMember {
+                group_id,
+                upper_seq,
+            } => {
+                filter.insert("group_id", group_id);
+                filter.insert("group_seen_seq", *upper_seq);
+                filter.insert("active_turn.group_reply_in_settlement", true);
+            }
+        }
+    }
+    filter.extend(doc!{"active_turn.restart_admission.version":source.version, "active_turn.restart_offer.from_worker":&offer.from_worker,
         "active_turn.restart_offer.claimed_by":null, "active_turn.stop_requested":false,
         "active_turn.restart_offer.due_at":{"$lte":bson::DateTime::now()}});
     let mut fields = doc! {"active_turn.restart_offer.claimed_by": &survivor.id,
@@ -345,7 +559,7 @@ pub(crate) async fn claim_capacity(
 pub(crate) async fn due(db: &Database, worker: &str) -> AppResult<Vec<AssistantConversation>> {
     use futures::TryStreamExt;
     Ok(db.collection::<AssistantConversation>(COLLECTION_NAME).find(doc! {
-        "active_turn.restart_admission.version":{"$in":[1,2]}, "active_turn.restart_offer.due_at":{"$type":"date","$lte":bson::DateTime::now()},
+        "active_turn.restart_admission.version":{"$in":[1,2,3,4]}, "active_turn.restart_offer.due_at":{"$type":"date","$lte":bson::DateTime::now()},
         "active_turn.restart_offer.claimed_by":null,"active_turn.restart_offer.from_worker":{"$ne":worker}, "active_turn.stop_requested":false
     }).sort(doc!{"active_turn.restart_offer.due_at":1,"_id":1}).limit(32).await?.try_collect().await?)
 }

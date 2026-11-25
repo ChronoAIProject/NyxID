@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { rememberBillingCheckout } from "@/lib/billing-checkout-return";
 import { useAuthStore } from "@/stores/auth-store";
+import { isBillingAvailable } from "@/types/api";
 import { BillingBill } from "@/components/billing/billing-bill";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import {
@@ -161,7 +162,7 @@ function BillingContent({
   const { tab, period } = search;
   const [topUpOpen, setTopUpOpen] = useState(false);
   const walletQuery = useBillingWallet(ownerId);
-  const actorId = useAuthStore((state) => state.user?.id);
+  const user = useAuthStore((state) => state.user);
   const usageQuery = useBillingUsage(period, undefined, ownerId);
   const catalogQuery = useCatalog({ includeAll: true });
   const provisionWallet = useProvisionBillingWallet();
@@ -184,9 +185,13 @@ function BillingContent({
     ownerId && wallet && !wallet.lago_subscription_id,
   );
   const billingCapability = usageQuery.data?.billing;
-  const billingReady = Boolean(
-    billingCapability?.charging_enabled && billingCapability?.lago_configured,
-  );
+  // /users/me already checks charging, Lago and personal rollout. An available
+  // personal wallet can use that answer while usage history is slow or offline.
+  const usageDenied = usageQuery.error instanceof ApiError &&
+    (usageQuery.error.status === 401 || usageQuery.error.status === 403);
+  const billingReady = !usageDenied && (billingCapability
+    ? billingCapability.charging_enabled && billingCapability.lago_configured
+    : !ownerId && walletQuery.isSuccess && Boolean(wallet) && isBillingAvailable(user));
 
   // Automatic replace cleanup preserves `action`, so filter cleanup that
   // settles before the wallet cannot swallow the deep link. A user-initiated
@@ -248,7 +253,7 @@ function BillingContent({
   ]);
   const topUpReady = Boolean(wallet) && billingReady && !needsSubscription;
   const topUpSettled =
-    !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
+    !walletQuery.isLoading && (topUpReady || !usageQuery.isLoading || !wallet);
   // `action=topup` opens Add credits once the wallet can take a top-up (else
   // it just lands on the Billing tab), then leaves the URL so refresh or Back
   // never reopens it.
@@ -282,7 +287,7 @@ function BillingContent({
         amount_credits: amountCredits,
         idempotency_key: crypto.randomUUID(),
       });
-      rememberBillingCheckout(actorId, ownerId, presentation);
+      rememberBillingCheckout(user?.id, ownerId, presentation);
       openExternal(checkout.checkout_url);
     } catch (error) {
       toast.error(translateErrorMessage(errorMessage(error, "Failed to create top-up checkout")));
@@ -336,7 +341,7 @@ function BillingContent({
           </div>
         )}
         <TabsContent value="billing" className="mt-6 space-y-6">
-          {usageQuery.isError && (
+          {usageQuery.isError && !billingReady && (
             <ErrorBanner
               message={translateUi("Billing availability could not be verified. Retry to enable wallet actions.")}
               onRetry={() => void usageQuery.refetch()}

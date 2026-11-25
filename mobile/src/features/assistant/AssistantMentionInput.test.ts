@@ -647,6 +647,7 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
   view.harness.unmount();
   const optedOut = setup({
     value: "",
+    compactWhenIdle: false,
     renderActions: (mention: Element, layout: any) => {
       layouts.push(layout);
       return { type: "Toolbar", props: { children: [mention] } };
@@ -655,7 +656,35 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
   assert.equal(
     layouts.at(-1).compact,
     false,
-    "wide/persistent layouts never collapse",
+    "an explicit active-layout override can keep two rows",
   );
   optedOut.harness.unmount();
 });
+
+for (const platform of ["ios", "android"] as const) {
+  test(`${platform}: idle row expands on focus and preserves meaningful drafts and native input`, () => {
+    let compact = false;
+    const view = setup(
+      {
+        value: " ",
+        compactWhenIdle: true,
+        renderActions: (_mention: Element, layout: { compact: boolean }) => {
+          compact = layout.compact;
+          return { type: "Toolbar", props: {} };
+        },
+      },
+      platform,
+    );
+    const key = view.input().key;
+    assert.equal(compact, true);
+    view.focus();
+    assert.equal(compact, false);
+    view.input().props.onChangeText("meaningful draft");
+    view.input().props.onBlur();
+    view.harness.render();
+    assert.equal(compact, false);
+    assert.equal(view.props.value, "meaningful draft");
+    assert.equal(view.input().key, key);
+    view.harness.unmount();
+  });
+}

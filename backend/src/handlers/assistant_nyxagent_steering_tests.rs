@@ -135,6 +135,97 @@ async fn value(response: Response) -> Value {
 }
 
 #[tokio::test]
+async fn assistant_steer_owner_controls_under_personal_approval_policies() {
+    use crate::{mw::auth::AuthMethod, services::approval_policy::GlobalApprovalMode};
+    use tower::ServiceExt;
+    for mode in [GlobalApprovalMode::WritesOnly, GlobalApprovalMode::All] {
+        let fixture = fixture(200, "", true).await;
+        let row = running(&fixture).await;
+        if let Some(required) = mode.stored() {
+            crate::test_utils::set_test_approval_preference(&fixture.state.db, OWNER, required)
+                .await;
+        }
+        assert_eq!(
+            crate::services::approval_service::user_approval_mode(&fixture.state.db, OWNER)
+                .await
+                .unwrap(),
+            mode
+        );
+        let token = crate::crypto::jwt::generate_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(OWNER).unwrap(),
+            "openid profile",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, router) = crate::routes::build_router();
+        let bearer = router
+            .with_state(fixture.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/assistant/nyxagent/conversations/{}/steer",
+                        row.id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(request(&row, "bearer", "Guidance").into_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for response in [bearer, submit(&fixture, &row, "browser", "Guidance").await] {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(value(response).await["outcome"], "applied");
+        }
+        assert_eq!(fixture.calls.lock().await.len(), 2);
+        assert_eq!(fixture.capability_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .state
+                .db
+                .collection::<bson::Document>("approval_requests")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        engine::finish_turn(
+            &fixture.state.db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &TurnResult {
+                text: "Done".into(),
+                session_id: Some(SESSION.into()),
+                response_id: Some(RESPONSE.into()),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut bearer = test_auth_user(OWNER);
+        bearer.auth_method = AuthMethod::AccessToken;
+        let ended = steer(
+            State(fixture.state.clone()),
+            bearer,
+            Path(row.id.clone()),
+            request(&row, "ended", "Guidance"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value(ended).await["error"], "no_active_turn");
+        assert_eq!(fixture.calls.lock().await.len(), 2);
+    }
+}
+
+#[tokio::test]
 async fn assistant_steer_accepted_uses_thread_key_and_marks_transcript() {
     let f = fixture(200, "", true).await;
     let row = running(&f).await;
@@ -363,8 +454,48 @@ async fn assistant_steer_stop_and_stale_heartbeat_refuse_without_dispatch() {
 
 #[tokio::test]
 async fn assistant_steer_requires_first_party_owner_and_web_turn() {
+    use crate::mw::auth::AuthMethod;
+    use base64::Engine;
+    use tower::ServiceExt;
     let f = fixture(200, "", true).await;
     let row = running(&f).await;
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(f.state.clone());
+    for (kind, credential) in [
+        ("api_key", "nyxid_ag_test-key".to_owned()),
+        (
+            "delegated",
+            format!(
+                "header.{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"delegated":true}"#)
+            ),
+        ),
+        (
+            "relay",
+            format!(
+                "header.{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"relay":true}"#)
+            ),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/assistant/nyxagent/conversations/{}/steer",
+                        row.id
+                    ))
+                    .header("authorization", format!("Bearer {credential}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(value(response).await["details"]["credential_type"], kind);
+    }
     let mut auth = test_auth_user(OWNER);
     auth.api_key_id = Some("key".into());
     assert!(
@@ -389,16 +520,19 @@ async fn assistant_steer_requires_first_party_owner_and_web_turn() {
         .await
         .is_err_and(|error| error.is_forbidden())
     );
+    let mut outsider = test_auth_user("22345678-1234-4123-8123-123456789012");
+    outsider.auth_method = AuthMethod::AccessToken;
     assert!(matches!(
         steer(
             State(f.state.clone()),
-            test_auth_user("22345678-1234-4123-8123-123456789012"),
+            outsider,
             Path(row.id.clone()),
             request(&row, "other", "Guidance")
         )
         .await,
         Err(AppError::NotFound(_))
     ));
+    assert_eq!(f.capability_calls.load(Ordering::SeqCst), 0);
     for change in [
         doc! {"guest_turn":true},
         doc! {"guest_turn":false,"group_id":"group"},

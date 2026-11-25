@@ -34,6 +34,11 @@ vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ isPending: false, error: null, refetch: vi.fn(), data: availableBots }),
 }));
 
+import type { OrgAccess } from "@/schemas/org-agent-access";
+
+let people: { user_id: string; display_name: string; role: string; revoked_at: string | null }[];
+let policy: OrgAccess;
+const person = "00000000-0000-4000-8000-000000000001";
 let availableBots: Record<string, unknown>[];
 const at = "2026-09-28T00:00:00Z";
 let agent: Record<string, unknown>;
@@ -83,16 +88,23 @@ beforeEach(() => {
   });
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-    const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+    const path = new URL(input instanceof Request ? input.url : String(input), window.location.origin).pathname;
     const fixtures: Record<string, unknown> = {
       "/api/v1/nodes": { nodes: [] },
       "/api/v1/saved-logins": [],
       "/api/v1/triggers": { triggers: [] },
+      "/api/v1/orgs/team/members": { members: [...people,
+        { user_id: person, membership_id: "membership", display_name: "Blair", role: "member", revoked_at: null },
+        { user_id: "viewer", display_name: "Viewer", role: "viewer", revoked_at: null },
+        { user_id: "former", display_name: "Former", role: "admin", revoked_at: at },
+      ] },
       "/api/v1/orgs": { orgs: [] },
     };
     if (!(path in fixtures)) throw new Error(`Unexpected account read: ${path}`);
     return new Response(JSON.stringify(fixtures[path]));
   }));
+  people = [];
+  policy = { maintainers: null, users: null, revision: 1, authoring_available: true };
   writes = [];
   availableBots = [];
   readinessReads = 0;
@@ -107,6 +119,14 @@ beforeEach(() => {
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
     if (method !== "GET") writes.push({ method, endpoint, body });
     const id = String(agent.id);
+    if (endpoint === `/assistant/nyxagent/agents/${id}/org-access`) {
+      if (method === "PUT") {
+        const next = body as Pick<OrgAccess, "maintainers" | "users"> & { expected_revision: number };
+        if (next.expected_revision !== policy.revision) return new Response(JSON.stringify({ error: "conflict", message: "Policy changed" }), { status: 409 });
+        policy = { ...policy, maintainers: next.maintainers, users: next.users, revision: policy.revision + 1 };
+      }
+      return new Response(JSON.stringify(policy));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/org-guest-grants`) {
       return new Response(JSON.stringify({ ready: true, pending: false, review: "none", bots: [], services: [] }));
     }
@@ -424,7 +444,7 @@ it("shows an organization viewer a read-only profile without shared memory or li
   renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   expect(
-    await within(sheet).findByText(/Maintained by Admins and Members/),
+    await within(sheet).findByText("You can view this specialist's profile."),
   ).toBeVisible();
   expect(within(sheet).getByLabelText("Role", { selector: "input,textarea" })).toBeDisabled();
   expect(
@@ -1453,4 +1473,86 @@ it("a rejected grant save exits Saving and preserves the selected draft and serv
   expect(screen.queryByText("Saving…")).not.toBeInTheDocument();
   expect(screen.getByRole("region", {name:"Unsaved changes"})).toBeInTheDocument();
   expect(within(screen.getByRole("form", {name:"Grants"})).getByRole("checkbox", {name:/Slack/})).toBeChecked();
+});
+
+it.each([
+  [true, false, "You can chat with this specialist. Its settings are read-only."],
+  [false, true, "You can maintain this specialist. Chat access is restricted."],
+  [false, false, "You can view this specialist's profile."],
+] as const)("renders independent org use %s and maintenance %s", async (can_use, can_maintain, copy) => {
+  agent = agentRow({ owner_kind: "org", owner_id: "team", can_use, can_maintain });
+  renderSheet();
+  expect(await screen.findByText(copy)).toBeVisible();
+  expect(screen.getByLabelText("Role", { selector: "textarea,input" })).toHaveProperty("disabled", !can_maintain);
+  expect(Boolean(screen.queryByRole("tab", { name: "Memory" }))).toBe(can_maintain);
+  expect(screen.queryByRole("region", { name: "Member access" })).not.toBeInTheDocument();
+});
+
+it("keeps legacy organization controls when projections are absent", async () => {
+  agent = agentRow({ owner_kind: "org", owner_id: "team" });
+  renderSheet();
+  expect(await screen.findByText(/Maintained by Admins and Members/)).toBeVisible();
+  expect(screen.getByLabelText("Role", { selector: "textarea,input" })).toBeEnabled();
+  expect(screen.queryByRole("region", { name: "Member access" })).not.toBeInTheDocument();
+});
+
+function govern() {
+  agent = agentRow({ owner_kind: "org", owner_id: "team", org_role: "admin", can_govern: true, can_maintain: false, can_use: false });
+  return renderSheet();
+}
+
+it("preserves both draft lists after a conflict until the admin reapplies and saves", async () => {
+  const { user } = govern();
+  const edit = async (field: string) => {
+    await user.click(await screen.findByRole("button", { name: new RegExp(field) }));
+    const selected = await screen.findByRole("radio", { name: "Selected people" });
+    await waitFor(() => expect(selected).toBeEnabled());
+    await user.click(selected);
+    expect(screen.queryByRole("checkbox", { name: /Viewer|Former/ })).not.toBeInTheDocument();
+  };
+  await edit("Who can chat");
+  await user.click(screen.getByRole("checkbox", { name: /Blair/ }));
+  await user.click(screen.getByRole("button", { name: "Member access" }));
+  await edit("Who can maintain");
+  await user.click(screen.getByRole("button", { name: "Member access" }));
+  expect(screen.getByRole("button", { name: /Who can maintain/ })).toHaveTextContent("Nobody");
+  policy = { ...policy, revision: 2, maintainers: [person] };
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  const reapply = await screen.findByRole("button", { name: "Reapply my draft" });
+  expect(writes).toHaveLength(1);
+  expect(screen.getByRole("region", { name: "Latest saved member access" })).toHaveTextContent("Blair");
+  await user.click(reapply);
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  await waitFor(() => expect(policy).toMatchObject({ revision: 3, maintainers: [], users: [person] }));
+  expect(writes.map((w) => w.body)).toEqual([1, 2].map((expected_revision) => ({ expected_revision, maintainers: [], users: [person] })));
+});
+
+it("shows the saved policy read-only and removes the open editor when governance is revoked", async () => {
+  policy = { ...policy, maintainers: [person], users: [], authoring_available: false };
+  const { user } = govern();
+  expect(await screen.findByText("Editing is unavailable", { exact: false })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: /Who can maintain/ }));
+  expect(await screen.findByRole("checkbox", { name: /Blair/ })).toBeChecked();
+  expect(screen.getByRole("radio", { name: "All eligible organization members" })).toBeDisabled();
+  agent = { ...agent, can_govern: false };
+  await act(() => client.invalidateQueries());
+  await waitFor(() => expect(screen.queryByRole("radio", { name: "Selected people" })).not.toBeInTheDocument());
+  expect(writes).toEqual([]);
+});
+
+it("allows 128 selected people and disables a 129th until someone is removed", async () => {
+  people = Array.from({ length: 128 }, (_, i) => ({
+    user_id: `af000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    display_name: `Person ${i}`, role: "member", revoked_at: null,
+  }));
+  policy = { ...policy, users: people.map((p) => p.user_id) };
+  const { user } = govern();
+  await user.click(await screen.findByRole("button", { name: /Who can chat/ }));
+  expect(await screen.findByRole("checkbox", { name: /Blair/ })).toBeDisabled();
+  await user.click(screen.getByRole("checkbox", { name: /^Person 0 / }));
+  expect(screen.getByRole("checkbox", { name: /Blair/ })).toBeEnabled();
+  await user.click(screen.getByRole("checkbox", { name: /Blair/ }));
+  expect(screen.getByRole("checkbox", { name: /^Person 0 / })).toBeDisabled();
 });

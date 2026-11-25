@@ -4,7 +4,10 @@ import { ThreadTitle } from "./thread-title";
 import { useContext, type ComponentProps, type ReactNode } from "react";
 import { MotionConfig, motion } from "motion/react";
 import { ChatHeaderAnimateContext, ChatHeaderCompactContext } from "./chat-header-context";
-import { PanelRightOpen } from "lucide-react";
+import { MessagesSquare, PanelRightOpen } from "lucide-react";
+import { ChannelPlatformGlyph } from "@/components/shared/channel-platform-glyph";
+import { channelSourceTitle } from "@/lib/assistant/channel-thread-presentation";
+import type { Conversation } from "@/types/assistant";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
@@ -54,7 +57,10 @@ export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind | "
 /** A thread that came from a chat app (Telegram, ...). */
 export function ChannelBadge({ platform }: { readonly platform: string }) {
   useUiTranslation();
-  return <Badge variant="secondary">{translateUi("via ")}{channelPlatformName(platform)}</Badge>;
+  return <Badge variant="secondary" className="shrink-0 gap-1.5 whitespace-nowrap">
+    <ChannelPlatformGlyph platform={platform === "telegram-new" ? "telegram" : platform} className="size-3.5 shrink-0" />
+    <span>{translateUi("via ")}{channelPlatformName(platform)}</span>
+  </Badge>;
 }
 
 export function ThreadPanels({ children }: { readonly children: ReactNode }) {
@@ -94,12 +100,12 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
         data-compact={compact}
         style={{ borderRadius: 12 }}
         className={cn(
-          "flex flex-wrap items-center",
+          "flex flex-wrap",
           compact
             // 12px from the top and from the column's edge: level with the
             // machine card's top and mirroring its inset across the divider.
-            ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
-            : "gap-2",
+            ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] items-center gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
+            : "items-start gap-3",
         )}
       >
         {children}
@@ -126,14 +132,17 @@ export function ThreadHeader({
   agentId,
   destroyed,
   channelPlatform,
+  sourceChannel,
   onOpenDetails,
   controls,
   title,
+  displayTitle,
   titleKey,
   onRenameTitle,
 }: {
   /** The thread's title, shown above the agent in the expanded header. */
   readonly title?: string;
+  readonly displayTitle?: string;
   /** Resets an open rename when another thread is shown. */
   readonly titleKey?: string;
   /** Makes the title editable in place. */
@@ -149,23 +158,31 @@ export function ThreadHeader({
   readonly destroyed: boolean;
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
+  readonly sourceChannel?: Conversation["channel"];
   readonly onOpenDetails?: () => void;
   /** Additional thread controls. */
   readonly controls?: ReactNode;
 }) {
   useUiTranslation();
   const compact = useContext(ChatHeaderCompactContext);
+  const platform = channelPlatform ?? sourceChannel?.platform;
+  const channelBadge = !loading && platform ? (
+    <ChannelBadge platform={platform} />
+  ) : null;
+  const channelContext = sourceChannel && !sourceChannel.thread_id
+    ? [...new Set([sourceChannel.bot_label?.trim(), channelSourceTitle(sourceChannel)].filter(Boolean))].join(" · ")
+    : null;
   return (
     <div className="space-y-2">
       {/* The thread's title is the page heading, on a row of its own above
-          the agent it talks to; the pill the header becomes on scroll stays
-          name-only. */}
+          the agent it talks to; the pill the header becomes on scroll keeps
+          the agent name and channel. */}
       {title && !compact ? (
         <div className="flex min-w-0 items-center">
           {onRenameTitle ? (
-            <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
+            <ThreadTitle key={titleKey} title={title} displayTitle={displayTitle} onRename={onRenameTitle} heading />
           ) : (
-            <h1 title={title} className="truncate type-card-title text-foreground">{title}</h1>
+            <h1 title={title} className="truncate type-card-title text-foreground">{displayTitle ?? title}</h1>
           )}
         </div>
       ) : null}
@@ -179,7 +196,10 @@ export function ThreadHeader({
         </HeaderItem>
         <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
           {compact ? (
-            <h2 className="truncate type-secondary-strong text-foreground">{name}</h2>
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="truncate type-secondary-strong text-foreground">{name}</h2>
+              {channelBadge}
+            </div>
           ) : (
             // The name line is as tall as the controls so both share one top
             // line; the @handle sits under it.
@@ -188,10 +208,11 @@ export function ThreadHeader({
                 <h2 className="truncate type-card-title text-foreground">{name}</h2>
                 <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
                   {loading ? null : <AgentKindBadge kind={kind} />}
-                  {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
+                  {channelBadge}
                 </span>
               </div>
               {handle ? <p className="max-w-full text-13 text-text-tertiary [overflow-wrap:anywhere]">{handle}</p> : null}
+              {channelContext ? <p className="max-w-full type-secondary text-text-tertiary [overflow-wrap:anywhere]">{channelContext}</p> : null}
             </div>
           )}
         </HeaderItem>
@@ -216,6 +237,14 @@ export function ThreadHeader({
           </HeaderItem>
         ) : null}
       </HeaderBar>
+      {sourceChannel?.thread_id && !compact ? (
+        <div data-channel-thread-context="" className="flex items-start gap-2 rounded-lg border border-hairline px-3 py-2 type-secondary text-text-tertiary">
+          <MessagesSquare aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{translateUi("{{agent}}’s conversation for a thread in {{chat}} on {{platform}}.", {
+            agent: name, chat: channelSourceTitle(sourceChannel), platform: channelPlatformName(sourceChannel.platform),
+          })}</span>
+        </div>
+      ) : null}
       {destroyed ? (
         <p
           role="status"

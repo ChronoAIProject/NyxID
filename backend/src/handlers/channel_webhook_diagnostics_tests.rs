@@ -57,6 +57,7 @@ async fn rejections(state: &AppState, key: &str) -> i64 {
 #[tokio::test]
 async fn only_authenticated_deliveries_write_bot_diagnostics() {
     let (state, adapter, server, owner, connection) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     credentials(&state, &adapter, &owner).await;
     let bot = insert_bot(&state, &owner, &connection).await;
     let body = dm(&bot.id, "700");
@@ -493,6 +494,7 @@ async fn x_2043_both_official_encrypted_shapes_are_metadata_only_and_notice_is_b
     use crate::models::channel_bot::{ChannelBot, XChannelEvent};
     use serde_json::json;
     let (state, adapter, server, owner, connection) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     credentials(&state, &adapter, &owner).await;
     let mut bot = insert_bot(&state, &owner, &connection).await;
     bot.webhook_registered = true;
@@ -586,6 +588,7 @@ async fn x_2043_both_official_encrypted_shapes_are_metadata_only_and_notice_is_b
 #[tokio::test]
 async fn x_2043_callback_failure_duplicate_and_owner_fence_are_visible_without_replay() {
     let (state, adapter, server, owner, connection) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     credentials(&state, &adapter, &owner).await;
     let mut bot = insert_bot(&state, &owner, &connection).await;
     bot.webhook_registered = true;
@@ -774,6 +777,7 @@ async fn x_2043_disabled_and_native_authority_refusals_are_bound_to_the_signed_b
 #[tokio::test]
 async fn x_2043_route_key_and_storage_refusals_never_dispatch_content() {
     let (state, adapter, server, owner, connection) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     credentials(&state, &adapter, &owner).await;
     let bot = insert_bot(&state, &owner, &connection).await;
     state

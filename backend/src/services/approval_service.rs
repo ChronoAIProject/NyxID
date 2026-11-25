@@ -315,6 +315,14 @@ pub async fn evaluate_and_check_with_options(
         return Ok(ApprovalOutcome::Denied);
     }
 
+    if resolution.required
+        && !resolution.from_org_policy
+        && requester_type == Some("access_token")
+        && super::assistant_steering::personal_control(actor_user_id, descriptor)
+    {
+        return Ok(ApprovalOutcome::Allowed { required: false });
+    }
+
     super::assistant_model_observer::exempt_personal_requirement(
         actor_user_id,
         service_id,
@@ -600,6 +608,8 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub(super) connected_request_id: Option<String>,
+    pub(super) connected_deadline: Option<chrono::DateTime<Utc>>,
     pub approval: ApprovalOptions,
     pub assistant_group: Option<crate::models::approval_request::GroupApprovalBinding>,
     pub operation_summary: String,
@@ -614,6 +624,8 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            connected_request_id: None,
+            connected_deadline: None,
             approval: ApprovalOptions::default(),
             assistant_group: None,
             operation_summary: descriptor.operation_summary(),
@@ -623,6 +635,15 @@ impl ApprovalRequestOperation {
             verb: Some(descriptor.verb.as_str().to_string()),
             grant_scope,
             exact_service: None,
+        }
+    }
+
+    pub(crate) fn apply_connected_budget(&mut self, timeout_secs: u32) {
+        if let Some(deadline) = connected_budget_deadline(timeout_secs) {
+            self.connected_deadline = Some(
+                self.connected_deadline
+                    .map_or(deadline, |existing| existing.min(deadline)),
+            );
         }
     }
 
@@ -676,6 +697,13 @@ pub async fn create_approval_request(
                 from_org_policy,
             )
         });
+    // An explicit wait budget must not shorten another caller's grant prompt.
+    if approval_mode == ApprovalMode::Grant
+        && CONNECTED_WAIT_BUDGET.try_with(|_| ()).is_ok()
+        && let Some(deadline) = operation.connected_deadline
+    {
+        idempotency_key = format!("{idempotency_key}:until:{}", deadline.timestamp_millis());
+    }
     if let Some(group) = &operation.assistant_group {
         // A card from another chain or private thread can never be coalesced.
         idempotency_key = format!(
@@ -731,15 +759,20 @@ pub async fn create_approval_request(
             return Ok(existing);
         }
 
-        let now = Utc::now();
-        let expires_at = now + Duration::seconds(i64::from(timeout_secs));
+        let now = approval_now();
+        let expires_at = operation
+            .connected_deadline
+            .unwrap_or_else(|| now + Duration::seconds(i64::from(timeout_secs)));
 
         let request = ApprovalRequest {
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
             assistant_group: operation.assistant_group.clone(),
-            id: uuid::Uuid::new_v4().to_string(),
+            id: operation
+                .connected_request_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
             service_name: service_name.to_string(),
@@ -773,17 +806,17 @@ pub async fn create_approval_request(
             created_at: now,
         };
 
-        match collection.insert_one(&request).await {
+        match super::erasure_admission::insert_owned(db, REQUESTS, user_id, &request).await {
             Ok(_) => {
                 inserted_request = Some(request);
                 break;
             }
-            Err(e) if is_duplicate_key_error(&e) => {
+            Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
                 // Concurrent insert race: another request inserted/processed first.
                 // Retry once to read the pending row or create a new row if no longer pending.
                 continue;
             }
-            Err(e) => return Err(AppError::DatabaseError(e)),
+            Err(error) => return Err(error),
         }
     }
 
@@ -795,6 +828,42 @@ pub async fn create_approval_request(
         }
     })?;
 
+    let notify = || {
+        notify_service_approval(
+            db,
+            config,
+            http_client,
+            fcm_auth,
+            apns_auth,
+            &notify_user_ids,
+            &request,
+        )
+    };
+    let updated = if let Some(deadline) = operation.connected_deadline {
+        let remaining = (deadline - approval_now()).to_std().unwrap_or_default();
+        if remaining.is_zero() {
+            None
+        } else {
+            tokio::time::timeout(remaining, notify())
+                .await
+                .unwrap_or(Ok(None))?
+        }
+    } else {
+        notify().await?
+    };
+    Ok(updated.unwrap_or(request))
+}
+
+async fn notify_service_approval(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    notify_user_ids: &[String],
+    request: &ApprovalRequest,
+) -> AppResult<Option<ApprovalRequest>> {
+    let collection = db.collection::<ApprovalRequest>(REQUESTS);
     // Fan out notifications to every recipient. The first recipient with a
     // configured channel "wins" the telegram_chat_id / telegram_message_id
     // slots on the request (so the existing edit-on-decision flow works for
@@ -830,7 +899,7 @@ pub async fn create_approval_request(
     let mut delivered_to_anyone = false;
     let mut last_err: Option<AppError> = None;
 
-    for recipient in &notify_user_ids {
+    for recipient in notify_user_ids {
         match notification_service::send_approval_notification(
             db,
             config,
@@ -838,7 +907,7 @@ pub async fn create_approval_request(
             fcm_auth,
             apns_auth,
             recipient,
-            &request,
+            request,
             org_name.as_deref(),
         )
         .await
@@ -877,7 +946,7 @@ pub async fn create_approval_request(
                 "Approval notification failed for all recipients"
             );
         }
-        return Ok(request);
+        return Ok(None);
     }
 
     let channel_name = all_channels.join(",");
@@ -892,12 +961,7 @@ pub async fn create_approval_request(
         .update_one(doc! { "_id": &request.id }, update)
         .await?;
 
-    let updated = collection
-        .find_one(doc! { "_id": &request.id })
-        .await?
-        .unwrap_or(request);
-
-    Ok(updated)
+    Ok(collection.find_one(doc! {"_id": &request.id}).await?)
 }
 
 fn same_exact_service_authority(
@@ -1017,10 +1081,7 @@ pub async fn create_tool_approval_request(
         created_at: now,
     };
 
-    collection
-        .insert_one(&request)
-        .await
-        .map_err(AppError::DatabaseError)?;
+    super::erasure_admission::insert_owned(db, REQUESTS, user_id, &request).await?;
 
     // Send notification through existing pipeline. Tool approvals are
     // always personal (see `from_org_policy: false` above), so no org
@@ -1187,7 +1248,7 @@ pub(crate) async fn process_decision_with_access(
     } else {
         None
     };
-    let now = Utc::now();
+    let now = approval_now();
     let mut update = doc! {
         "status": if approved { "approved" } else { "rejected" },
         "decided_at": bson::DateTime::from_chrono(now),
@@ -1234,7 +1295,9 @@ pub(crate) async fn process_decision_with_access(
         }
         DecisionOutcome::Unmatched => {
             let existing = get_request(db, &current.id).await?;
-            if existing.status == "expired" {
+            if existing.status == "expired"
+                || (existing.status == "pending" && existing.expires_at <= approval_now())
+            {
                 return Err(AppError::Forbidden("Approval request expired".into()));
             }
             if is_idempotent_replay(
@@ -1343,12 +1406,15 @@ impl DecisionMutation {
                 .await?
                 .ok_or_else(|| AppError::NotFound("Approval request not found".into()))?;
             runtime::fence_decision(db, &row, &binding.actor_user_id, session).await?;
-            filter.insert("expires_at", doc! {"$gt":bson::DateTime::now()});
             Some(row)
         } else {
             None
         };
         let requests = db.collection::<ApprovalRequest>(REQUESTS);
+        filter.insert(
+            "expires_at",
+            doc! {"$gt":bson::DateTime::from_chrono(approval_now())},
+        );
         let Some(updated) = requests
             .find_one_and_update(filter, doc! {"$set":self.update.clone()})
             .return_document(ReturnDocument::After)
@@ -1768,6 +1834,189 @@ fn retain_requests_with_ids(
         .collect()
 }
 
+pub(crate) struct WaitBudget {
+    pub received_at: chrono::DateTime<Utc>,
+    pub seconds: u32,
+}
+
+pub(crate) fn connected_budget_deadline(timeout_secs: u32) -> Option<chrono::DateTime<Utc>> {
+    CONNECTED_WAIT_BUDGET
+        .try_with(|budget| {
+            budget.received_at + Duration::seconds(i64::from(budget.seconds.min(timeout_secs)))
+        })
+        .ok()
+}
+
+tokio::task_local! {
+    pub(crate) static CONNECTED_WAIT_BUDGET: WaitBudget;
+    pub(crate) static CALLBACK_INGRESS: chrono::DateTime<Utc>;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static APPROVAL_CLOCK: tokio::sync::watch::Receiver<chrono::DateTime<Utc>>;
+}
+
+fn approval_now() -> chrono::DateTime<Utc> {
+    #[cfg(test)]
+    if let Ok(now) = APPROVAL_CLOCK.try_with(|clock| *clock.borrow()) {
+        return now;
+    }
+    Utc::now()
+}
+
+async fn wait_until_expiry(expires_at: chrono::DateTime<Utc>) {
+    #[cfg(test)]
+    if let Ok(mut clock) = APPROVAL_CLOCK.try_with(Clone::clone) {
+        clock
+            .wait_for(|now| *now >= expires_at)
+            .await
+            .expect("approval fixture owns the clock");
+        return;
+    }
+    let remaining = (expires_at - Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(remaining).await;
+}
+
+const NYXBOT_CONNECTED_WRITE_SECS: u32 = 80;
+
+/// A per-request HTTP/MCP card has exactly one caller. Arm before insertion:
+/// cancellation can drop the handler while publishing or notifying the owner.
+/// Grant cards can have several waiters and have their own decision lifetime.
+pub struct ConnectedWait {
+    db: Database,
+    occurrence: Option<String>,
+}
+
+impl ConnectedWait {
+    pub fn new(
+        db: &Database,
+        mode: &ApprovalMode,
+        operation: &mut ApprovalRequestOperation,
+    ) -> Self {
+        let occurrence =
+            (*mode == ApprovalMode::PerRequest).then(|| uuid::Uuid::new_v4().to_string());
+        operation.connected_request_id.clone_from(&occurrence);
+        Self {
+            db: db.clone(),
+            occurrence,
+        }
+    }
+
+    pub(crate) async fn for_service(
+        db: &Database,
+        mode: &ApprovalMode,
+        operation: &mut ApprovalRequestOperation,
+        descriptor: &OperationDescriptor,
+        chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+        timeout_secs: u32,
+    ) -> AppResult<Self> {
+        use super::operation_descriptor::Protocol;
+        use crate::models::{assistant_conversation, service_approval_config::ApprovalVerb};
+        if *mode == ApprovalMode::PerRequest
+            && matches!(descriptor.protocol, Protocol::Http | Protocol::Mcp)
+            && matches!(
+                descriptor.verb,
+                ApprovalVerb::Write | ApprovalVerb::Destructive
+            )
+            && let Ok(ingress) = CALLBACK_INGRESS.try_with(|at| *at)
+            && let Some(chat) = chat.filter(|c| {
+                c.is_orchestrator()
+                    && c.turn_live
+                    && !c.guest
+                    && !c.execution_voice_task
+                    && !c.invocation_controlled
+                    && !c.platform_thread
+            })
+            && let Some(turn) = &chat.turn_id
+        {
+            // A thread key also serves triggers and background events. Match the
+            // exact user-addressed turn. Older turns omit origin and decode as User.
+            let interactive = db
+                .collection::<Document>(assistant_conversation::COLLECTION_NAME)
+                .find_one(
+                    doc! {"_id": &chat.conversation_id, "credential_api_key_id": &chat.api_key_id,
+                    "active_turn.turn_id": turn, "active_turn.stop_requested": {"$ne": true},
+                    "active_turn.origin": {"$in": [null, "user", "channel", "group"]},
+                    "active_turn.trigger_run_id": null, "active_turn.automation_work": null,
+                    "automation_thread": {"$ne": true}},
+                )
+                .projection(doc! {"_id": 1})
+                .await?
+                .is_some();
+            if interactive {
+                operation.connected_deadline = Some(
+                    ingress
+                        + Duration::seconds(i64::from(
+                            timeout_secs.min(NYXBOT_CONNECTED_WRITE_SECS),
+                        )),
+                );
+            }
+        }
+        operation.apply_connected_budget(timeout_secs);
+        Ok(Self::new(db, mode, operation))
+    }
+
+    pub async fn wait(
+        mut self,
+        request: &ApprovalRequest,
+        cancellation: &tokio_util::sync::CancellationToken,
+        timeout_secs: u32,
+    ) -> AppResult<()> {
+        let result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(AppError::ClientDisconnected),
+            () = wait_until_expiry(request.expires_at) => Err(AppError::Forbidden(
+                if connected_budget_deadline(timeout_secs).is_some() { "Approval request timed out" } else { "Approval request expired" }.into()
+            )),
+            result = poll_for_decision(&self.db, &request.id, timeout_secs) => result,
+        };
+        if result.is_err()
+            && let Some(id) = self.occurrence.as_deref()
+        {
+            expire_connected(&self.db, id).await?;
+        }
+        self.occurrence = None;
+        result
+    }
+}
+
+async fn expire_connected(db: &Database, id: &str) -> AppResult<bool> {
+    // Only the unique waiter can reach dispatch, and this guard is still
+    // armed. An approval that raced its cancellation is also unsent.
+    let updated = db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .update_one(
+            doc! {"_id": id, "status":{"$in":["pending","approved"]}, "approval_mode":"per_request",
+            "exact_service":null, "execution_proposal":null},
+            doc! {"$set":{"status":"expired"}, "$min":{"expires_at":bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(updated.matched_count == 1)
+}
+
+impl Drop for ConnectedWait {
+    fn drop(&mut self) {
+        let Some(id) = self.occurrence.take() else {
+            return;
+        };
+        let db = self.db.clone();
+        crate::services::shutdown::process().spawn_cleanup(async move {
+            // An insert already sent to Mongo may finish after the future drops.
+            for _ in 0..3 {
+                match expire_connected(&db, &id).await {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(_) => {
+                        tracing::warn!(request_id=%id, "Failed to expire disconnected approval")
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        });
+    }
+}
+
 /// Block until an approval decision is made or the timeout expires.
 /// Returns Ok(()) if approved, Err if rejected/expired/timeout.
 pub async fn wait_for_decision(
@@ -1775,8 +2024,21 @@ pub async fn wait_for_decision(
     request_id: &str,
     timeout_secs: u32,
 ) -> AppResult<()> {
+    let poll = poll_for_decision(db, request_id, timeout_secs);
+    if let Some(deadline) = connected_budget_deadline(timeout_secs) {
+        tokio::select! {
+            biased;
+            () = wait_until_expiry(deadline) => Err(AppError::Forbidden("Approval request timed out".into())),
+            result = poll => result,
+        }
+    } else {
+        poll.await
+    }
+}
+
+async fn poll_for_decision(db: &Database, request_id: &str, timeout_secs: u32) -> AppResult<()> {
     let poll_interval = std::time::Duration::from_millis(1000);
-    let deadline = Utc::now() + Duration::seconds(i64::from(timeout_secs));
+    let deadline = approval_now() + Duration::seconds(i64::from(timeout_secs));
 
     loop {
         tokio::time::sleep(poll_interval).await;
@@ -1795,10 +2057,10 @@ pub async fn wait_for_decision(
                 return Err(AppError::Forbidden("Approval request expired".to_string()));
             }
             "pending" => {
-                if Utc::now() >= request.expires_at {
+                if approval_now() >= request.expires_at {
                     return Err(AppError::Forbidden("Approval request expired".into()));
                 }
-                if Utc::now() >= deadline {
+                if approval_now() >= deadline {
                     return Err(AppError::Forbidden(
                         "Approval request timed out".to_string(),
                     ));
@@ -1834,18 +2096,34 @@ pub fn map_wait_for_decision_error(
 /// Model-facing outcome of a proxy approval wait. A returned identifier is
 /// not evidence of a still-pending card or a dispatched operation.
 pub fn wait_failure_result(error: AppError, request_id: &str, frontend: &str) -> serde_json::Value {
-    let (code, status, message) = match &error {
-        AppError::Forbidden(reason) if reason == "Approval request expired" => (
+    let reason = match &error {
+        AppError::Forbidden(reason) => reason.as_str(),
+        _ => "",
+    };
+    wait_failure_details(
+        reason,
+        request_id,
+        &super::assistant_links::AssistantPage::Approvals.url(frontend),
+    )
+}
+
+pub(crate) fn wait_failure_details(
+    reason: &str,
+    request_id: &str,
+    review_url: &str,
+) -> serde_json::Value {
+    let (code, status, message) = match reason {
+        "Approval request expired" => (
             "approval_expired",
             "expired",
             "The approval request expired. Nothing was sent by this call. Ask the owner before requesting approval again.",
         ),
-        AppError::Forbidden(reason) if reason == "Approval request timed out" => (
+        "Approval request timed out" => (
             "approval_wait_timed_out",
             "unavailable",
             "This call stopped waiting for approval and sent nothing. Check the request in Approvals before requesting another; do not claim a card is still waiting.",
         ),
-        AppError::Forbidden(reason) if reason == "Approval request was rejected" => (
+        "Approval request was rejected" => (
             "approval_denied",
             "rejected",
             "The approval request was denied. Nothing was sent by this call. Do not request it again unless the owner asks.",
@@ -1857,8 +2135,7 @@ pub fn wait_failure_result(error: AppError, request_id: &str, frontend: &str) ->
         ),
     };
     serde_json::json!({"error":code,"code":code,"status":status,"request_id":request_id,
-        "message":message,"instructions":message,
-        "review_url":super::assistant_links::AssistantPage::Approvals.url(frontend)})
+        "message":message,"instructions":message,"review_url":review_url})
 }
 
 /// Listing-scope descriptor for one admin org branch on the
@@ -2952,6 +3229,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_wait_2705_only_interactive_nyxbot_service_writes_use_callback_deadline() {
+        use crate::services::{
+            assistant_authority_tests::orchestrator_fixture, operation_descriptor,
+        };
+        let f = orchestrator_fixture("nyxbot_deadline_scope").await;
+        let now = Utc::now();
+        let http = operation_descriptor::build_http_descriptor("POST", "/items", None);
+        let read = operation_descriptor::build_http_descriptor("GET", "/items", None);
+        let ssh = operation_descriptor::build_ssh_descriptor(
+            operation_descriptor::SshOperationKind::Exec,
+            None,
+        );
+        let mut specialist = f.chat.clone();
+        specialist.role = crate::models::assistant_conversation::AgentRole::Subagent;
+        let deadline = |mode: ApprovalMode, descriptor: OperationDescriptor, chat| {
+            let db = &f.state.db;
+            async move {
+                let mut operation = ApprovalRequestOperation::from_descriptor(&descriptor, None);
+                let mut waiter =
+                    ConnectedWait::for_service(db, &mode, &mut operation, &descriptor, chat, 300)
+                        .await
+                        .unwrap();
+                // This policy check created no row to clean up.
+                waiter.occurrence = None;
+                operation.connected_deadline
+            }
+        };
+        CALLBACK_INGRESS
+            .scope(now, async {
+                assert_eq!(
+                    deadline(ApprovalMode::PerRequest, http.clone(), Some(&f.chat)).await,
+                    Some(now + Duration::seconds(80))
+                );
+                assert_eq!(
+                    deadline(ApprovalMode::PerRequest, http.clone(), None).await,
+                    None
+                );
+                assert_eq!(
+                    deadline(ApprovalMode::Grant, http.clone(), Some(&f.chat)).await,
+                    None
+                );
+                assert_eq!(
+                    deadline(ApprovalMode::PerRequest, read, Some(&f.chat)).await,
+                    None
+                );
+                assert_eq!(
+                    deadline(ApprovalMode::PerRequest, ssh, Some(&f.chat)).await,
+                    None
+                );
+                assert_eq!(
+                    deadline(ApprovalMode::PerRequest, http.clone(), Some(&specialist)).await,
+                    None
+                );
+                f.state
+                    .db
+                    .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &f.row.id},
+                        doc! {"$set": {"active_turn.origin": "trigger"}},
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    deadline(ApprovalMode::PerRequest, http, Some(&f.chat)).await,
+                    None
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_grant_requests_share_a_prompt_unless_the_caller_sets_a_budget() {
+        let db = crate::test_utils::connect_test_database("approval_grant_wait_budget")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let create = |deadline| {
+            let mut operation = ApprovalRequestOperation::from_descriptor(&test_operation(), None);
+            operation.connected_deadline = Some(deadline);
+            create_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "test-service",
+                "Test service",
+                "test-service",
+                "api_key",
+                "agent",
+                None,
+                operation,
+                ApprovalMode::Grant,
+                300,
+                vec![],
+                false,
+            )
+        };
+
+        let ingress = Utc::now();
+        let deadline = ingress + Duration::seconds(i64::from(NYXBOT_CONNECTED_WRITE_SECS));
+        let shared = create(deadline).await.unwrap();
+        let later = create(deadline + Duration::seconds(1)).await.unwrap();
+        assert_eq!(later.id, shared.id);
+        assert_eq!(later.status, "pending");
+        assert_eq!(
+            shared.idempotency_key,
+            compute_idempotency_key(&owner, "test-service", "api_key", "agent")
+        );
+
+        let budget = WaitBudget {
+            received_at: ingress,
+            seconds: NYXBOT_CONNECTED_WRITE_SECS,
+        };
+        let budgeted = CONNECTED_WAIT_BUDGET
+            .scope(budget, create(deadline))
+            .await
+            .unwrap();
+        assert_ne!(budgeted.id, shared.id);
+        assert_eq!(budgeted.status, "pending");
+    }
+
+    #[tokio::test]
     async fn noninteractive_callers_refuse_new_service_and_tool_requests_before_side_effects() {
         let db = crate::test_utils::connect_test_database("approval_no_request_writers")
             .await
@@ -3040,6 +3442,92 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn new_approval_requests_respect_account_erasure_at_persistence() {
+        use crate::models::user::UserType;
+        use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
+        let db = connect_transaction_test_database("approval_erasure_admission").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+
+        let service_request = |requester| {
+            create_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "test-service",
+                "Test service",
+                "test-service",
+                "api_key",
+                requester,
+                None,
+                ApprovalRequestOperation::from_descriptor(&test_operation(), None),
+                ApprovalMode::PerRequest,
+                300,
+                vec![owner.clone()],
+                false,
+            )
+        };
+        let tool_request = |requester| {
+            create_tool_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "test_tool",
+                None,
+                None,
+                false,
+                "api_key",
+                requester,
+                None,
+                ApprovalOptions::default(),
+            )
+        };
+        assert_eq!(
+            service_request("before-erasure").await.unwrap().status,
+            "pending"
+        );
+        assert_eq!(
+            tool_request("before-erasure").await.unwrap().status,
+            "pending"
+        );
+        super::super::personal_erasure_service::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        let filter = doc! {"user_id": &owner};
+        let requests = db.collection::<Document>(REQUESTS);
+        let channels = db.collection::<Document>(CHANNELS);
+        let before = requests.count_documents(filter.clone()).await.unwrap();
+        channels.delete_many(filter.clone()).await.unwrap();
+
+        assert!(matches!(
+            service_request("after-erasure").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            tool_request("after-erasure").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            requests.count_documents(filter.clone()).await.unwrap(),
+            before
+        );
+        assert_eq!(channels.count_documents(filter).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -4151,7 +4639,8 @@ mod tests {
             ("pending", "pending", false),
             ("lazy-expired", "pending", true),
             ("denied", "rejected", false),
-            ("allowed", "approved", false),
+            ("allowed", "approved", true),
+            ("expired", "expired", true),
         ] {
             let mut row = make_request(id, status);
             row.user_id = f.owner.clone();
@@ -4171,19 +4660,22 @@ mod tests {
             .insert_many(rows)
             .await
             .unwrap();
-        let history =
-            crate::services::assistant_nyxagent::approval_history(&f.state.db, &f.owner, &key.id)
-                .await
-                .unwrap();
-        assert_eq!(history.len(), 4);
-        assert_eq!(
-            history
-                .iter()
-                .find(|r| r.id == "lazy-expired")
-                .unwrap()
-                .status,
-            "expired"
-        );
+        let history = crate::services::assistant_nyxagent::approval_history(
+            &f.state.db,
+            &f.owner,
+            &key.id,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.len(), 5);
+        for (id, status) in [
+            ("lazy-expired", "pending"),
+            ("allowed", "approved"),
+            ("expired", "expired"),
+        ] {
+            assert_eq!(history.iter().find(|r| r.id == id).unwrap().status, status);
+        }
         assert!(
             history
                 .iter()

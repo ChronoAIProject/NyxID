@@ -287,12 +287,7 @@ async fn assert_restored_admin_roundtrip(
         );
         return;
     }
-    let restored_key = state
-        .encryption_keys
-        .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
-        .await
-        .unwrap();
-    let restored_key = String::from_utf8(restored_key.to_vec()).unwrap();
+    let restored_key = decrypt_agent_key(state, live).await.unwrap().unwrap();
     if let Some(binding_id) = live.binding_id.as_deref() {
         let ensured = super::put_conversation(
             State(state.clone()),
@@ -567,12 +562,7 @@ async fn org_restore_gateway_telegram_rebuild_uses_creator_bearer_and_new_route(
             .unwrap(),
         0
     );
-    let restored_key = state
-        .encryption_keys
-        .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
-        .await
-        .unwrap();
-    let restored_key = String::from_utf8(restored_key.to_vec()).unwrap();
+    let restored_key = decrypt_agent_key(&state, &live).await.unwrap().unwrap();
     let binding_id = live
         .binding_id
         .as_deref()
@@ -2514,6 +2504,7 @@ async fn org_restore_transport_choice_covers_telegram_discord_and_lark_gateway_o
 fn org_restore_health_states_have_no_owner_action_and_truthful_wait_text() {
     use crate::services::channel_bot_health::{HealthFacts, codes};
     let facts = |failure_reason| HealthFacts {
+        answer_delivery: None,
         org_guest_billing: None,
         platform: "telegram",
         status: "failed",
@@ -2525,6 +2516,7 @@ fn org_restore_health_states_have_no_owner_action_and_truthful_wait_text() {
         subscription_registered: None,
         backoff_active: false,
         gateway: true,
+        gateway_not_received: None,
         discord_intake: None,
     };
     for (code, expected) in [
@@ -2880,12 +2872,7 @@ async fn org_restore_guest_defaults_preserves_on_without_wallet_and_reports_bill
         .0;
         assert_eq!(health.nyxbot_status.as_deref(), Some("active"));
         assert_eq!(health.recommended_action, "enable_billing");
-        let key = state
-            .encryption_keys
-            .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
-        let key = String::from_utf8(key.to_vec()).unwrap();
+        let key = decrypt_agent_key(&state, &live).await.unwrap().unwrap();
         assert_eq!(
             super::put_conversation(
                 State(state.clone()),

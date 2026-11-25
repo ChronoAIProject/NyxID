@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { requestBinaryJson, requestJson } from "./http";
+import type { RequestOptions } from "./authenticatedTransport";
+import { ApiError } from "./ApiError";
+import { isAttachmentBindRefusal } from "../../features/assistant/assistantTurnRequest";
+import { localizedError } from "../../i18n/localizedError";
 import {
   attachmentSchema,
   conversationIdSchema,
@@ -54,11 +58,29 @@ export const assistantUploadsApi = {
   async remove(
     scope: AssistantUploadScope,
     attachmentId: string,
-    signal?: AbortSignal,
+    options?: Pick<RequestOptions, "expectedAccountId" | "authorityGuard" | "signal">,
   ): Promise<void> {
-    await requestJson(assistantAttachmentPath(scope, attachmentId), {
-      method: "DELETE",
-      signal,
-    });
+    try {
+      await withAttachmentUploadDeadline(
+        (signal) => requestJson(assistantAttachmentPath(scope, attachmentId), {
+          method: "DELETE",
+          ...options,
+          signal,
+        }),
+        options?.signal,
+        15_000,
+        () => localizedError("The attachment could not be removed. Try again."),
+      );
+    } catch (cause) {
+      // A pending-only DELETE cannot remove an attachment already bound to a
+      // message. Its scoped 404 also covers a deleted or no longer visible chat.
+      if (isAttachmentBindRefusal(cause)) return;
+      if (cause instanceof ApiError && cause.hasErrorEnvelope &&
+          cause.statusCode === 404 && cause.errorKey === "not_found" &&
+          cause.errorCode === 1003 && cause.message ===
+            (scope.kind === "groups" ? "Not found: Group not found" : "Not found: Conversation not found"))
+        return;
+      throw cause;
+    }
   },
 };

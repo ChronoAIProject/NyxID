@@ -1,4 +1,7 @@
 mod pool_monitor;
+mod session_cursor;
+
+pub(crate) use session_cursor::{next_document, read_documents};
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -406,14 +409,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
-    db.collection::<Document>("assistant_attachments")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"parent_attachment_id": 1, "chunk_index": 1})
-                .options(IndexOptions::builder().unique(true).sparse(true).build())
-                .build(),
-        )
-        .await?;
+    crate::services::assistant_upload_service::pdf_vision::ensure_indexes(db).await?;
     Box::pin(crate::services::assistant_upload_retention::ensure_indexes(
         db,
     ))
@@ -3024,6 +3020,15 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    // Shared signing migrations traverse all dependent bots, including inactive ones.
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"credential_source":1,"_id":1})
+                .build(),
+        )
+        .await?;
+
     // Bounded Discord Gateway keyset discovery, additive for mixed replicas.
     channel_bots
         .create_index(
@@ -3345,6 +3350,14 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "org_user_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    org_invites
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"org_user_id":1, "created_by":1, "redeemed_at":1, "expires_at":1})
                 .build(),
         )
         .await?;
@@ -6556,6 +6569,7 @@ mod tests {
             is_active: true,
             created_by: "system".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

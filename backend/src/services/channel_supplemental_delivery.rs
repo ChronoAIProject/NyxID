@@ -2,13 +2,13 @@
 use bson::{Document, doc};
 use chrono::{DateTime, Utc};
 use mongodb::Database;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     errors::AppResult,
     models::{
-        assistant_conversation::{AssistantConversation, ChannelOrigin, TurnOrigin},
+        assistant_conversation::{ChannelOrigin, TurnOrigin},
         channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
         nyxbot_channel::{
             EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel, NyxbotEvent, NyxbotThread,
@@ -124,35 +124,130 @@ pub enum Source {
     Missing,
 }
 
-pub async fn source(
-    db: &Database,
-    row: &AssistantConversation,
-    origin: &ChannelOrigin,
-) -> AppResult<Source> {
-    let Some(turn) = &row.active_turn else {
-        return Ok(Source::Unbound);
-    };
-    let mut ids = Vec::new();
-    let mut expected =
-        turn.origin == TurnOrigin::Channel && turn.asked_from.as_ref() == Some(origin);
-    if let Some(id) = &turn.channel_event_id {
-        ids.push(id.clone());
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ResultSource {
+    pub turn_id: String,
+    pub event_id: Option<String>,
+    ids: Vec<String>,
+    expected: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SavedDestination {
+    pub origin: ChannelOrigin,
+    pub source: ResultSource,
+    pub additional: bool,
+}
+
+pub(crate) fn managed_source(
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> Option<&crate::models::assistant_conversation::ChatRestartSource> {
+    turn.restart_admission
+        .as_deref()
+        .and_then(|admission| admission.chat_source.as_deref())
+        .or_else(|| {
+            turn.execution_attempt
+                .as_ref()?
+                .foreground_delivery
+                .as_deref()
+        })
+        .filter(|source| {
+            !matches!(
+                source,
+                crate::models::assistant_conversation::ChatRestartSource::PersonalManager { .. }
+            )
+        })
+}
+
+pub(crate) fn saved_destinations(
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    source: &crate::models::assistant_conversation::ChatRestartSource,
+    failed: bool,
+) -> Vec<SavedDestination> {
+    use crate::models::assistant_conversation::ChatRestartSource;
+    if turn
+        .execution_task
+        .as_ref()
+        .and_then(|task| task.channel_source.as_ref())
+        .is_some_and(|source| source.original_turn_id != turn.turn_id)
+    {
+        return Vec::new();
     }
-    for event in &turn.events {
-        if event.reply_to.iter().any(|candidate| candidate == origin)
-            && !event.source_event_ids.is_empty()
+    let primary = match source {
+        ChatRestartSource::Wake { reply_channel, .. }
+            if !failed
+                && turn
+                    .events
+                    .iter()
+                    .all(|event| event.source_event_ids.is_empty()) =>
         {
-            expected = true;
-            ids.extend(event.source_event_ids.iter().cloned());
+            reply_channel.as_ref()
+        }
+        _ => None,
+    };
+    primary
+        .into_iter()
+        .map(|origin| (origin, false))
+        .chain(
+            turn.also_deliver
+                .iter()
+                .filter(|origin| Some(*origin) != primary)
+                .map(|origin| (origin, true)),
+        )
+        .filter(|(origin, _)| {
+            origin.org_execution.is_none() && origin.thread.is_none() && !row.guest_turn
+        })
+        .map(|(origin, additional)| SavedDestination {
+            origin: origin.clone(),
+            source: ResultSource::capture(turn, origin),
+            additional,
+        })
+        .collect()
+}
+
+impl ResultSource {
+    pub(crate) fn capture(
+        turn: &crate::models::assistant_conversation::ActiveTurn,
+        origin: &ChannelOrigin,
+    ) -> Self {
+        let asked_here = turn.asked_from.as_ref() == Some(origin);
+        let mut ids: Vec<_> = turn.channel_event_id.iter().cloned().collect();
+        let mut expected = turn.origin == TurnOrigin::Channel && asked_here;
+        for event in &turn.events {
+            if event.reply_to.contains(origin) && !event.source_event_ids.is_empty() {
+                expected = true;
+                ids.extend(event.source_event_ids.iter().cloned());
+            }
+        }
+        Self {
+            turn_id: turn.turn_id.clone(),
+            event_id: origin
+                .native_event_id
+                .clone()
+                .or_else(|| asked_here.then(|| turn.channel_event_id.clone()).flatten()),
+            ids,
+            expected,
         }
     }
+}
+
+pub(crate) async fn source_for(
+    db: &Database,
+    conversation: &str,
+    origin: &ChannelOrigin,
+    binding: Option<&ResultSource>,
+) -> AppResult<Source> {
+    let Some(binding) = binding else {
+        return Ok(Source::Unbound);
+    };
     // IDs come from admission, never from the thread's current event reference.
-    for id in ids {
+    for id in &binding.ids {
         if let Some(event) = db
             .collection::<NyxbotEvent>(EVENTS)
             .find_one(doc! {
                 "_id":id,"channel_id":&origin.nyxbot_channel_id,
-                "conversation_id":&row.id,"turn_id":&turn.turn_id,
+                "conversation_id":conversation,"turn_id":&binding.turn_id,
                 "delivery.origin.partition":&origin.partition,
             })
             .await?
@@ -160,7 +255,7 @@ pub async fn source(
             return Ok(Source::Event(Box::new(event)));
         }
     }
-    Ok(if expected {
+    Ok(if binding.expected {
         Source::Missing
     } else {
         Source::Unbound
@@ -276,6 +371,12 @@ fn result_destination(origin: &ChannelOrigin) -> String {
     hash.update(encoded);
     format!("{:x}", hash.finalize())
 }
+
+pub(crate) fn saved_key(turn: &str, origin: &ChannelOrigin) -> String {
+    format!("saved-result:{turn}:{}", result_destination(origin))
+}
+
+tokio::task_local! {pub(crate) static SAVED_RELAY_KEY: String;}
 
 /// A possibly committed claim never authorizes dispatch. This marker has no retry path.
 pub async fn claim_result(

@@ -104,7 +104,7 @@ async fn accepted_queued_sources_mint_original_targets_without_a_turn_or_budget(
             .decrypt(d.target_ciphertext.as_ref().unwrap())
             .await
             .unwrap();
-        assert!(String::from_utf8(plain).unwrap().contains(target));
+        assert!(std::str::from_utf8(&plain).unwrap().contains(target));
     }
     assert!(sends(&f).await.is_empty());
     let mut queued = row(&f).await;
@@ -1389,6 +1389,7 @@ fn verified_context(
     event: &NyxbotEvent,
 ) -> crate::models::assistant_conversation::ChannelTurnContext {
     crate::models::assistant_conversation::ChannelTurnContext {
+        text_completeness: None,
         org_origin: None,
         source_event_id: event.id.clone(),
         channel_id: channel.id.clone(),

@@ -973,7 +973,6 @@
   "{{count}} requests_one": "{{count}} 個請求",
   "{{count}} requests_other": "{{count}} 個請求",
   "{{count}} selected + all platform services": "已選 {{count}} 個 + 所有平台服務",
-  "{{count}} service": "{{count}} 個服務",
   "{{count}} services": "{{count}} 個服務",
   "{{displayName}} {{roleLabel}} message": "{{displayName}} {{roleLabel}} 訊息",
   "{{display_name}} setup": "{{display_name}} 設定",

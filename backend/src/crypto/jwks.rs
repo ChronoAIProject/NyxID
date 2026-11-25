@@ -222,7 +222,7 @@ impl JwksCache {
         }
 
         let response = self.http_client.get(jwks_uri).send().await.map_err(|e| {
-            tracing::error!(uri = %jwks_uri, error = %e, "JWKS fetch failed");
+            tracing::error!(uri = %crate::services::url_validation::url_host_for_logs(jwks_uri), error = %e.without_url(), "JWKS fetch failed");
             AppError::ExternalTokenInvalid("Failed to fetch provider signing keys".to_string())
         })?;
 
@@ -235,7 +235,7 @@ impl JwksCache {
         );
 
         let jwks: JwksResponse = response.json().await.map_err(|e| {
-            tracing::error!(uri = %jwks_uri, error = %e, "JWKS JSON parse failed");
+            tracing::error!(uri = %crate::services::url_validation::url_host_for_logs(jwks_uri), error = %e.without_url(), "JWKS JSON parse failed");
             AppError::ExternalTokenInvalid("Failed to parse provider signing keys".to_string())
         })?;
 

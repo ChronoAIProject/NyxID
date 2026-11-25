@@ -88,10 +88,15 @@ export async function refreshAccessToken(
   config: NyxIdPluginConfig,
   refreshToken: string,
 ): Promise<OAuthTokenSet> {
+  requireOAuthClient(config);
   const body = new URLSearchParams({
     grant_type: "refresh_token",
+    client_id: config.clientId,
     refresh_token: refreshToken,
   });
+  if (config.clientSecret) {
+    body.set("client_secret", config.clientSecret);
+  }
 
   return (await tokenRequest(fetchImpl, config, body)) as OAuthTokenSet;
 }

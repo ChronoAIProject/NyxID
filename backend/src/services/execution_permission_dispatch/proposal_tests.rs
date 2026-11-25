@@ -1693,9 +1693,22 @@ async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
         doc! {"_id":&request.id},
         doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
     ).await.unwrap();
+    let capture = super::migration_tests::Capture::default();
     for _ in 0..2 {
-        let (status, _) = write_call(&f).await;
+        let (status, _) = tracing::instrument::WithSubscriber::with_subscriber(
+            write_call(&f),
+            capture.subscriber(),
+        )
+        .await;
         assert_ne!(status, StatusCode::OK);
+    }
+    {
+        let events = capture.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        for event in events.iter() {
+            assert_eq!(event["decision"], "hard_denial");
+            assert_eq!(event["cause"], "proposal_not_live");
+        }
     }
     assert_eq!(count(&f, "approval_requests").await, 1);
     assert!(f.server.received_requests().await.unwrap().is_empty());
@@ -1737,3 +1750,6 @@ async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
+
+#[path = "proposal_record_tests.rs"]
+mod mixed_records;

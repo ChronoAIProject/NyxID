@@ -4,7 +4,7 @@ export function sessionDeviceLabel(userAgent?: string | null): string {
   const ua = userAgent?.trim() ?? "";
   if (!ua) return translateApp("Unknown device");
   if (/nyxid[-_ ]?cli/i.test(ua)) return "NyxID CLI";
-  if (/^NyxIDWatch\//i.test(ua)) return "NyxID on Apple Watch";
+  if (/^NyxIDWatch\//i.test(ua)) return translateApp("NyxID on Apple Watch");
   const device = /iPad/.test(ua)
     ? "iPad"
     : /iPhone|iOS/.test(ua)

@@ -45,6 +45,7 @@ fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson()
         artifact: Metadata::default(),
         chat_delivery: None,
         image_input: None,
+        pdf: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,

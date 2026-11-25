@@ -24,11 +24,12 @@ import type {
 const CLICK_THROTTLE_MS = 750;
 const URGENT_THRESHOLD_MS = 5 * 60_000;
 
-function remainingLabel(translateUi: typeof translate, remainingMs: number): string {
+function remainingLabel(translateUi: typeof translate, remainingMs: number, perRequest: boolean): string {
   // NaN when the server didn't send a parseable expiry (e.g. an older
   // backend without expires_at on the listing) — omit the countdown.
   if (Number.isNaN(remainingMs)) return "";
-  if (remainingMs <= 0) return translateUi("expired");
+  if (remainingMs <= 0) return translateUi("Waiting for the server");
+  if (perRequest) return translateUi("Approve within {{seconds}} seconds", { seconds: Math.ceil(remainingMs / 1000) });
   return translateUi("expires in {{minutes}} min", { minutes: Math.max(1, Math.ceil(remainingMs / 60_000)) });
 }
 
@@ -142,7 +143,7 @@ function DecidedCard({ block, onRequestAgain, disabled }: { readonly block: Appr
       <p className="mt-2 text-14 text-muted-foreground">
         {approvalBody(block, translateUi)}
       </p>
-      {decision !== "approved" && (
+      {(decision === "denied" || (decision === "expired" && block.approval_mode === "per_request")) && (
         <p className="mt-1.5 text-13 text-text-tertiary">{translateUi("Nothing was sent.")}</p>
       )}
       {decision === "expired" && onRequestAgain && (
@@ -196,10 +197,23 @@ function LegacyApprovalCard({
   const [now, setNow] = useState(Date.now());
   const lastClick = useRef(Number.NEGATIVE_INFINITY);
 
+  const deadline = Date.parse(block.expires_at);
+  const perRequest = block.approval_mode === "per_request";
+  const pending = block.decision === null && !block.decision_submission && now < deadline;
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!pending) return;
+    const interval = perRequest ? 1000 : 30_000;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(() => {
+        const current = Date.now();
+        setNow(current);
+        if (current < deadline) schedule();
+      }, Math.min(interval, Math.max(0, deadline - Date.now())));
+    };
+    schedule();
+    return () => clearTimeout(timer);
+  }, [pending, perRequest, deadline]);
 
   async function decide(approved: boolean) {
     const clickedAt = Date.now();
@@ -227,9 +241,9 @@ function LegacyApprovalCard({
     }
   }
 
-  if (block.decision !== null || (!block.decision_submission && Date.parse(block.expires_at) <= now)) {
+  if (block.decision !== null) {
     return <div className="space-y-2">
-      <DecidedCard block={{ ...block, decision: block.decision ?? "expired" }} onRequestAgain={onRequestAgain} disabled={disabled} />
+      <DecidedCard block={block} onRequestAgain={onRequestAgain} disabled={disabled} />
       {reviewPath ? <a className="type-row-title underline" href={reviewPath}>{translateUi("Open Approvals")}</a> : null}
     </div>;
   }
@@ -262,7 +276,7 @@ function LegacyApprovalCard({
             }`}
           >
             <Clock3 className="h-3 w-3" />
-            {remainingLabel(translateUi, remainingMs)}
+            {remainingLabel(translateUi, remainingMs, perRequest)}
           </span>
         </div>
       </div>
@@ -285,7 +299,7 @@ function LegacyApprovalCard({
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
         <button
           type="button"
-          disabled={busy || disabled}
+          disabled={busy || disabled || expired}
           onClick={() => void decide(true)}
           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-success/40 bg-success/15 px-3 type-row-title text-success transition-colors hover:bg-success/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
@@ -296,7 +310,7 @@ function LegacyApprovalCard({
           )}{translateUi("Approve and send")}</button>
         <button
           type="button"
-          disabled={busy || disabled}
+          disabled={busy || disabled || expired}
           onClick={() => void decide(false)}
           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/15 px-3 type-row-title text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
@@ -305,7 +319,7 @@ function LegacyApprovalCard({
           ) : (
             <X className="h-3 w-3 light:text-destructive" />
           )}{translateUi("Deny")}</button>
-        <span className="ml-auto text-12 text-muted-foreground">{translateUi("Nothing is sent until you decide.")}</span>
+        {!expired && <span className="ml-auto text-12 text-muted-foreground">{translateUi("Nothing is sent until you decide.")}</span>}
       </div>
     </section>
   );

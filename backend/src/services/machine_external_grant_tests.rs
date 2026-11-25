@@ -2595,6 +2595,7 @@ async fn source_outbox_actual_client_security_update_preserves_unrelated_client_
         &f.db,
         &client,
         AdminUpdateClient {
+            management_designation: None,
             client_name: Some("Display only"),
             redirect_uris: None,
             allowed_scopes: None,
@@ -2611,6 +2612,7 @@ async fn source_outbox_actual_client_security_update_preserves_unrelated_client_
         &f.db,
         &client,
         AdminUpdateClient {
+            management_designation: None,
             client_name: None,
             redirect_uris: None,
             allowed_scopes: None,

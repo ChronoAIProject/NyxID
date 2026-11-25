@@ -93,6 +93,35 @@ describe("NotificationsScreen paging through pages the server filtered empty", (
     mockRerender = undefined;
   });
 
+  it("searches older pages when the current rows do not match and stops once it finds a match", async () => {
+    mockFeed = { pages: [page([mockRow], "p2")], hasNextPage: true, fetching: false };
+    await render(<NotificationsScreen navigation={navigation} route={route} />);
+    expect(mockFetches).toEqual([]);
+    await fireEvent.changeText(screen.getByLabelText("Search notifications"), "bookings");
+    expect(mockFetches).toEqual(["all"]);
+    expect(screen.getByLabelText("Looking for matching notifications")).toBeTruthy();
+    const matching = { ...mockRow, id: "older", title: "Bookings verified" };
+    await serverReplies({ pages: [page([mockRow], "p2"), page([matching], "p3")], hasNextPage: true, fetching: false });
+    expect(screen.getByText("Bookings verified")).toBeTruthy();
+    expect(screen.queryByText("Support chat")).toBeNull();
+    expect(mockFetches).toEqual(["all"]);
+    await fireEvent.press(screen.getByRole("button", { name: "Search older notifications" }));
+    expect(mockFetches).toEqual(["all", "all"]);
+  });
+
+  it("does not call a partial search empty or loop on a repeated cursor, and offers another page explicitly", async () => {
+    mockFeed = { pages: [page([mockRow], "same")], hasNextPage: true, fetching: false };
+    await render(<NotificationsScreen navigation={navigation} route={route} />);
+    await fireEvent.changeText(screen.getByLabelText("Search notifications"), "unmatched");
+    expect(mockFetches).toEqual(["all"]);
+    await serverReplies({ pages: [page([mockRow], "same"), page([], "same")], hasNextPage: true, fetching: false });
+    expect(mockFetches).toEqual(["all"]);
+    expect(screen.queryByText("No matching notifications.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Search older notifications" })).toBeTruthy();
+    await serverReplies({ pages: [page([mockRow], "same"), page([], null)], hasNextPage: false, fetching: false });
+    expect(screen.getByText("No matching notifications.")).toBeTruthy();
+  });
+
   it("keeps fetching past an empty first page with a cursor and shows the row it finds, never the final empty copy", async () => {
     mockFeed = { pages: [page([], "p2")], hasNextPage: true, fetching: false };
     await render(<NotificationsScreen navigation={navigation} route={route} />);

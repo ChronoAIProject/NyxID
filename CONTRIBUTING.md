@@ -89,6 +89,18 @@ curl http://localhost:3001/health
 5. **Commit** using [conventional commit messages](#commit-messages)
 6. **Push** your branch and open a pull request against `dev`
 
+### Continuing work in another tab
+
+Git worktrees share commits and fetched branches. Each worktree has its own
+checked-out files, including uncommitted edits. When handing off a change that
+has been tested, commit the files that produced that result, push the branch,
+and include its remote branch and commit in the handoff.
+
+For a follow-up to an open PR, fetch the PR branch and start the new worktree
+at its latest commit. After the PR lands, start follow-ups from the updated
+`origin/dev`. Check the diff against the handoff commit before testing so the
+review covers just the intended addition.
+
 ### Branch Naming
 
 | Prefix      | Use Case                        |
@@ -363,8 +375,9 @@ Include:
 
 Open feature and fix PRs against `dev`. Two required checks protect both branches.
 **CI Pipeline** collects the correctness jobs. **Main Merge Guard** accepts any
-head into `dev`. For PRs into `main`, it accepts this repository's `dev` branch
-or a dated release branch whose head commit is in `dev`'s history.
+head into `dev`. For PRs into `main`, it accepts this repository's `dev` branch,
+a dated release branch on `dev`'s history, or a hotfix from current `main`
+that carries no unreleased `dev` commits. See [Releasing to production](docs/DEPLOYMENT.md#releasing-to-production).
 GitHub runs the guard from the repository's default branch on `pull_request_target`,
 including when a PR changes its base branch.
 

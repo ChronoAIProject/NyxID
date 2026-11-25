@@ -82,12 +82,14 @@ pub async fn record_callback_failure(
     db: &mongodb::Database,
     message: &ChannelMessage,
     http_status: Option<u16>,
+    error: &crate::errors::AppError,
 ) -> AppResult<()> {
     db.collection::<Document>(collection(message))
         .update_one(
             doc! {"_id": &message.id, "user_id": &message.user_id},
             doc! {"$set": {"callback_status": "failed",
             "callback_http_status": http_status.map(i32::from),
+            "callback_failure_reason": super::channel_relay_service::destination_refused(error).then_some(super::webhook_delivery_service::DESTINATION_REFUSED),
             "updated_at": bson::DateTime::now()}},
         )
         .await?;

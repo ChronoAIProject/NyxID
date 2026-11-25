@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use zeroize::Zeroizing;
 // axum-extra's Form/Query decode repeated keys (`resource=a&resource=b`,
 // `allowed_service_ids=...`) into Vec fields via serde_html_form; axum's
 // built-in serde_urlencoded extractors reject them (#1115).
@@ -40,7 +41,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_
 
 // --- Request / Response types ---
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AuthorizeQuery {
     #[serde(default)]
     pub response_type: String,
@@ -80,7 +81,7 @@ pub struct AuthorizeQuery {
     pub consent_request_fence: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ConsentDecisionForm {
     pub response_type: String,
     pub client_id: String,
@@ -129,7 +130,7 @@ fn default_allow_all_services_form() -> bool {
     false
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AuthorizeResponse {
     pub redirect_url: String,
 }
@@ -137,14 +138,14 @@ pub struct AuthorizeResponse {
 #[derive(Deserialize)]
 pub struct TokenRequest {
     pub grant_type: String,
-    pub code: Option<String>,
+    pub code: Option<Zeroizing<String>>,
     pub redirect_uri: Option<String>,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub code_verifier: Option<String>,
-    pub refresh_token: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
+    pub code_verifier: Option<Zeroizing<String>>,
+    pub refresh_token: Option<Zeroizing<String>>,
     /// RFC 8693 Token Exchange: the user's access token
-    pub subject_token: Option<String>,
+    pub subject_token: Option<Zeroizing<String>>,
     /// RFC 8693 Token Exchange: must be "urn:ietf:params:oauth:token-type:access_token"
     pub subject_token_type: Option<String>,
     /// Requested scope (used by token exchange)
@@ -207,10 +208,10 @@ pub struct UserinfoResponse {
 
 #[derive(Deserialize)]
 pub struct IntrospectRequest {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     /// Catalog service whose registered confidential client verifies an agent key.
     pub service_id: Option<String>,
     #[serde(flatten)]
@@ -252,19 +253,19 @@ pub struct IntrospectResponse {
 
 #[derive(Deserialize)]
 pub struct RevokeRequest {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
 }
 
 #[derive(Deserialize)]
 pub struct GetBindingQuery {
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct GetBindingResponse {
     pub binding_id: String,
     pub client_id: String,
@@ -280,7 +281,7 @@ pub struct GetBindingResponse {
 #[derive(Deserialize)]
 pub struct ListBindingsByExternalSubjectQuery {
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
@@ -307,7 +308,7 @@ pub struct ListBindingsResponse {
 pub struct PushedAuthorizationRequestForm {
     pub response_type: String,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     pub redirect_uri: String,
     pub scope: Option<String>,
     pub state: Option<String>,
@@ -329,7 +330,7 @@ pub struct PushedAuthorizationRequestForm {
     pub requested_service_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct PushedAuthorizationRequestResponse {
     pub request_uri: String,
     pub expires_in: i64,
@@ -430,7 +431,9 @@ fn oauth_error_response(err: AppError) -> Response {
     response
 }
 
-fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
+fn parse_basic_client_credentials(
+    headers: &HeaderMap,
+) -> AppResult<Option<(String, Zeroizing<String>)>> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Ok(None);
     };
@@ -444,10 +447,11 @@ fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(Stri
         return Ok(None);
     };
 
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(encoded.trim())
+    let mut decoded = Zeroizing::new(Vec::new());
+    base64::engine::general_purpose::STANDARD
+        .decode_vec(encoded.trim(), &mut decoded)
         .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
-    let decoded = String::from_utf8(decoded)
+    let decoded = std::str::from_utf8(&decoded)
         .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
     let (client_id, client_secret) = decoded
         .split_once(':')
@@ -456,18 +460,20 @@ fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(Stri
     let client_id = urlencoding::decode(client_id)
         .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
         .into_owned();
-    let client_secret = urlencoding::decode(client_secret)
-        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
-        .into_owned();
+    let client_secret = match urlencoding::decode_binary(client_secret.as_bytes()) {
+        std::borrow::Cow::Borrowed(_) => Zeroizing::new(client_secret.to_owned()),
+        std::borrow::Cow::Owned(bytes) => crate::crypto::guarded_utf8(Zeroizing::new(bytes))
+            .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?,
+    };
 
     Ok(Some((client_id, client_secret)))
 }
 
 fn client_credentials_from_basic_or_params(
-    basic: Option<(String, String)>,
+    basic: Option<(String, Zeroizing<String>)>,
     client_id: Option<String>,
-    client_secret: Option<String>,
-) -> Option<(String, Option<String>)> {
+    client_secret: Option<Zeroizing<String>>,
+) -> Option<(String, Option<Zeroizing<String>>)> {
     match (basic, client_id, client_secret) {
         (Some((id, _)), Some(query_id), _) if query_id != id => None,
         (Some((id, secret)), _, _) => Some((id, Some(secret))),
@@ -561,34 +567,27 @@ fn intersect_service_ids(left: &[String], right: &[String]) -> Vec<String> {
     out
 }
 
-fn consent_requires_prompt(
+async fn consent_requires_prompt(
+    db: &mongodb::Database,
+    client: &crate::models::oauth_client::OauthClient,
+    redirect_uri: &str,
     consent: Option<&Consent>,
     resolved_resources: Option<&oauth_resource_service::ResolvedOAuthResources>,
-) -> bool {
+) -> AppResult<bool> {
     let Some(grant) = consent else {
-        return true;
+        return Ok(true);
     };
-
-    if grant.allowed_service_ids.is_none() && !grant.allow_all_services {
-        return true;
+    if !grant.allow_all_services {
+        let Some(allowed) = grant.allowed_service_ids.as_ref() else {
+            return Ok(true);
+        };
+        if resolved_resources
+            .is_some_and(|resources| resources.service_ids.iter().any(|id| !allowed.contains(id)))
+        {
+            return Ok(true);
+        }
     }
-
-    if grant.allow_all_services {
-        return false;
-    }
-
-    let Some(resolved) = resolved_resources else {
-        return false;
-    };
-    let Some(consented_ids) = grant.allowed_service_ids.as_ref() else {
-        return true;
-    };
-
-    !resolved.service_ids.iter().all(|service_id| {
-        consented_ids
-            .iter()
-            .any(|consented_id| consented_id == service_id)
-    })
+    oauth_service::reviewed_redirect_requires_prompt(db, client, redirect_uri, grant).await
 }
 
 async fn resolve_binding_grant_review(
@@ -1034,6 +1033,7 @@ async fn authorize_decision_inner(
         }
     };
 
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
     let consent_request = form
         .consent_request
@@ -1085,7 +1085,6 @@ async fn authorize_decision_inner(
     }
 
     let machine = if validated_scope.split_whitespace().any(|s| s == "machine") {
-        super::login_client_context::require_first_party_human(&auth_user)?;
         params
             .machine_approval_request_id
             .clone()
@@ -1130,12 +1129,17 @@ async fn authorize_decision_inner(
             Ok(approved) => approved,
             Err(error) => return Ok(incremental_error_callback(&params, &error)),
         };
+        let consent = incremental_consent_service::validate_current(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &approved,
+            params.binding_grant_id.as_deref(),
+            external_subject.as_ref(),
+        )
+        .await?;
         params.incremental_consent = Some(approved);
-        // The code below uses the approved binding-specific grant. This value
-        // supplies the existing API's ordinary consent argument only.
-        let consent =
-            consent_service::check_consent(&state.db, &user_id_str, &params.client_id, "").await?;
-        consent.ok_or_else(consent_service::grant_changed)?
+        consent
     } else {
         let consent_allowed_service_ids = if form.allow_all_services {
             None
@@ -1178,6 +1182,10 @@ async fn authorize_decision_inner(
         .await?
     };
 
+    if client.client_type == "public" {
+        consent_service::record_reviewed_redirect(&state.db, &consent, &params.redirect_uri)
+            .await?;
+    }
     let code = issue_authorization_code(
         &state,
         &auth_user,
@@ -1262,21 +1270,15 @@ async fn authorize_inner(
     is_browser_mode: bool,
     external_subject: Option<&ExternalSubjectRef>,
 ) -> Result<Response, AppError> {
+    if let Some(auth) = opt_auth.0.as_ref() {
+        super::login_client_context::require_first_party_human(auth)?;
+    }
     let mut normalized_params = params.clone();
     if normalized_params.include_granted_scopes {
         normalized_params.service_access_mode = Some(ServiceAccessMode::Incremental);
     }
     let params = &normalized_params;
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
-    if validated_scope
-        .split_whitespace()
-        .any(|scope| scope == "machine")
-        && let Some(auth) = opt_auth.0.as_ref()
-    {
-        // A saved human grant does not let another credential mint OAuth
-        // Machine authority through the silent authorization shortcut.
-        super::login_client_context::require_first_party_human(auth)?;
-    }
     if !is_browser_mode && params.service_access_mode.is_some() {
         return Err(AppError::BadRequest(
             "Incremental consent requires a browser review".to_string(),
@@ -1354,8 +1356,15 @@ async fn authorize_inner(
                 .await?
                     || params.service_access_mode.is_some()
                     || binding_grant.is_some()
-                    || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
-                    || force_consent;
+                    || force_consent
+                    || consent_requires_prompt(
+                        &state.db,
+                        &client,
+                        &params.redirect_uri,
+                        consent.as_ref(),
+                        resolved_resources.as_ref(),
+                    )
+                    .await?;
 
                 if needs_consent {
                     // prompt=none + needs consent → error, not redirect
@@ -1452,8 +1461,15 @@ async fn authorize_inner(
         .await?
             || params.service_access_mode.is_some()
             || binding_grant.is_some()
-            || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
             || force_consent
+            || consent_requires_prompt(
+                &state.db,
+                &client,
+                &params.redirect_uri,
+                consent.as_ref(),
+                resolved_resources.as_ref(),
+            )
+            .await?
         {
             let mut default_service_hints =
                 resolve_app_default_service_hints(state, &client, &user_id_str).await?;
@@ -2199,12 +2215,7 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
     code_service_access: Option<(bool, Vec<String>)>,
 ) -> AppResult<String> {
-    if validated_scope
-        .split_whitespace()
-        .any(|scope| scope == "machine")
-    {
-        super::login_client_context::require_first_party_human(auth_user)?;
-    }
+    super::login_client_context::require_first_party_human(auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
     let protected_consent =
         Some(consent_service::ensure_issuance_reference(&state.db, consent).await?);
@@ -2362,21 +2373,20 @@ pub async fn pushed_authorization_request(
     Form(body): Form<PushedAuthorizationRequestForm>,
 ) -> AppResult<(StatusCode, Json<PushedAuthorizationRequestResponse>)> {
     let basic = parse_basic_client_credentials(&headers)?;
-    let (client_id, client_secret) =
-        match (basic, body.client_id.clone(), body.client_secret.clone()) {
-            (Some((id, _)), Some(form_id), _) if form_id != id => {
-                return Err(AppError::BadRequest(
-                    "client_id does not match authenticated client".to_string(),
-                ));
-            }
-            (Some((id, secret)), _, _) => (id, secret),
-            (None, Some(id), Some(secret)) => (id, secret),
-            _ => {
-                return Err(AppError::Unauthorized(
-                    "Missing client credentials".to_string(),
-                ));
-            }
-        };
+    let (client_id, client_secret) = match (basic, body.client_id, body.client_secret) {
+        (Some((id, _)), Some(form_id), _) if form_id != id => {
+            return Err(AppError::BadRequest(
+                "client_id does not match authenticated client".to_string(),
+            ));
+        }
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => {
+            return Err(AppError::Unauthorized(
+                "Missing client credentials".to_string(),
+            ));
+        }
+    };
 
     oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret)).await?;
     let client = oauth_service::validate_client(&state.db, &client_id, &body.redirect_uri).await?;
@@ -2545,8 +2555,8 @@ async fn token_inner(
                 code,
                 client_id_str,
                 redirect_uri,
-                body.code_verifier.as_deref(),
-                body.client_secret.as_deref(),
+                body.code_verifier.as_ref().map(|s| s.as_str()),
+                body.client_secret.as_ref().map(|s| s.as_str()),
                 Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
                 non_empty_resources(&body.resource),
                 dpop_jkt,
@@ -2735,13 +2745,31 @@ async fn token_inner(
                 AppError::BadRequest("Missing refresh_token parameter".to_string())
             })?;
 
-            let tokens = crate::services::token_service::refresh_tokens(
+            use crate::services::token_service::RefreshClient;
+            let basic = parse_basic_client_credentials(headers);
+            let credentials = match (
+                &basic,
+                body.client_id.as_deref(),
+                body.client_secret.as_ref().map(|s| s.as_str()),
+            ) {
+                (Err(_), _, _) => RefreshClient::Invalid("invalid_basic"),
+                (Ok(Some(_)), _, Some(_)) => RefreshClient::Invalid("ambiguous_credentials"),
+                (Ok(Some((id, _))), Some(form), _) if id != form => {
+                    RefreshClient::Invalid("conflicting_client_ids")
+                }
+                (Ok(Some((id, secret))), _, _) => RefreshClient::Identified(id, Some(secret)),
+                (Ok(None), Some(id), secret) => RefreshClient::Identified(id, secret),
+                (Ok(None), None, Some(_)) => RefreshClient::Invalid("missing_client_id"),
+                (Ok(None), None, None) => RefreshClient::Unidentified,
+            };
+            let tokens = crate::services::token_service::refresh_tokens_for_client(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
                 refresh,
                 Some(&state.mcp_sessions),
                 non_empty_resources(&body.resource),
+                credentials,
             )
             .await
             .map_err(refresh_token_grant_error)?;
@@ -2779,11 +2807,12 @@ async fn token_inner(
                         .map(|(client_id, _)| client_id.as_str())
                 })
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
-            let client_secret_for_auth = body.client_secret.as_deref().or_else(|| {
-                basic_client_credentials
-                    .as_ref()
-                    .map(|(_, client_secret)| client_secret.as_str())
-            });
+            let client_secret_for_auth =
+                body.client_secret.as_ref().map(|s| s.as_str()).or_else(|| {
+                    basic_client_credentials
+                        .as_ref()
+                        .map(|(_, client_secret)| client_secret.as_str())
+                });
             let subject_token = body
                 .subject_token
                 .as_deref()
@@ -2854,7 +2883,8 @@ async fn token_inner(
                 // Existing: Delegated token exchange (NyxID access token -> delegated token)
                 let client_secret = body
                     .client_secret
-                    .as_deref()
+                    .as_ref()
+                    .map(|s| s.as_str())
                     .or(client_secret_for_auth)
                     .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
@@ -3003,7 +3033,8 @@ async fn token_inner(
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
             let client_secret = body
                 .client_secret
-                .as_deref()
+                .as_ref()
+                .map(|s| s.as_str())
                 .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
             let result = service_account_service::authenticate_client_credentials(
@@ -3182,7 +3213,7 @@ pub async fn introspect(
     let client = match oauth_service::authenticate_client(
         &state.db,
         caller_client_id,
-        body.client_secret.as_deref(),
+        body.client_secret.as_ref().map(|s| s.as_str()),
     )
     .await
     {
@@ -3443,13 +3474,12 @@ pub async fn list_bindings_by_external_subject(
         })
     };
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
-    let (client_id, client_secret) =
-        match (basic, query.client_id.clone(), query.client_secret.clone()) {
-            (Some((id, _)), Some(query_id), _) if query_id != id => return Ok(empty()),
-            (Some((id, secret)), _, _) => (id, secret),
-            (None, Some(id), Some(secret)) => (id, secret),
-            _ => return Ok(empty()),
-        };
+    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
+        (Some((id, _)), Some(query_id), _) if query_id != id => return Ok(empty()),
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => return Ok(empty()),
+    };
 
     if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
         .await
@@ -3519,9 +3549,13 @@ pub async fn get_binding(
         None => return Err(not_found()),
     };
 
-    if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
-        .await
-        .is_err()
+    if oauth_service::authenticate_client(
+        &state.db,
+        &client_id,
+        client_secret.as_ref().map(|s| s.as_str()),
+    )
+    .await
+    .is_err()
     {
         return Err(not_found());
     }
@@ -3567,9 +3601,13 @@ pub async fn delete_binding(
         None => return Ok(StatusCode::NO_CONTENT),
     };
 
-    if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
-        .await
-        .is_err()
+    if oauth_service::authenticate_client(
+        &state.db,
+        &client_id,
+        client_secret.as_ref().map(|s| s.as_str()),
+    )
+    .await
+    .is_err()
     {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -3599,18 +3637,19 @@ pub async fn revoke(
     // Authenticate the calling client (RFC 7009 requirement).
     // Per the spec, always return 200 even if authentication fails.
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
-    let (caller_client_id, client_secret) = match client_credentials_from_basic_or_params(
-        basic,
-        body.client_id.clone(),
-        body.client_secret.clone(),
-    ) {
-        Some((id, secret)) if !id.is_empty() => (id, secret),
-        _ => return Ok(StatusCode::OK),
-    };
+    let (caller_client_id, client_secret) =
+        match client_credentials_from_basic_or_params(basic, body.client_id, body.client_secret) {
+            Some((id, secret)) if !id.is_empty() => (id, secret),
+            _ => return Ok(StatusCode::OK),
+        };
 
-    if oauth_service::authenticate_client(&state.db, &caller_client_id, client_secret.as_deref())
-        .await
-        .is_err()
+    if oauth_service::authenticate_client(
+        &state.db,
+        &caller_client_id,
+        client_secret.as_ref().map(|s| s.as_str()),
+    )
+    .await
+    .is_err()
     {
         return Ok(StatusCode::OK);
     }
@@ -4177,7 +4216,7 @@ mod wire_decoding_tests {
             .await
             .expect("scalar-only token request must decode");
         assert_eq!(body.grant_type, "authorization_code");
-        assert_eq!(body.code.as_deref(), Some("abc"));
+        assert_eq!(body.code.as_ref().map(|code| code.as_str()), Some("abc"));
         assert!(body.resource.is_empty());
     }
 
@@ -4440,11 +4479,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -4610,6 +4651,7 @@ mod tests {
             .insert_one(Consent {
                 revision: None,
                 write_version: None,
+                reviewed_redirect_hash: None,
                 issuance_fence: None,
                 id: Uuid::new_v4().to_string(),
                 user_id: user_id.to_string(),
@@ -4801,7 +4843,7 @@ mod tests {
 
         insert_person_user(&db, &user_id).await;
         insert_public_client(&db, client_id, "openid").await;
-        consent_service::grant_consent_with_services(
+        let consent = consent_service::grant_consent_with_services(
             &db,
             &user_id,
             client_id,
@@ -4836,6 +4878,9 @@ mod tests {
             resource: Vec::new(),
         };
 
+        consent_service::record_reviewed_redirect(&db, &consent, &params.redirect_uri)
+            .await
+            .unwrap();
         let _response = authorize_inner(
             &state,
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
@@ -4854,6 +4899,95 @@ mod tests {
             .expect("authorization code exists");
         assert!(!stored.allow_all_services);
         assert_eq!(stored.allowed_service_ids, allowed_service_ids);
+    }
+
+    #[tokio::test]
+    async fn public_repeat_authorization_reviews_a_different_registered_redirect() {
+        let db = connect_test_database("oauth_repeat_redirect")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4().to_string();
+        let client = "review-client";
+        insert_person_user(&db, &user).await;
+        insert_public_client(&db, client, "openid").await;
+        let consent =
+            consent_service::grant_consent_with_services(&db, &user, client, "openid", None)
+                .await
+                .unwrap();
+        db.collection::<Consent>(CONSENTS).update_one(
+            doc! {"_id": consent.id},
+            doc! {"$set": {"reviewed_redirect_hash": crate::crypto::token::hash_token("http://localhost/callback")}},
+        ).await.unwrap();
+        let params: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "response_type":"code", "client_id":client, "redirect_uri":"https://app.example/callback",
+            "scope":"openid", "code_challenge":"challenge", "code_challenge_method":"S256"
+        })).unwrap();
+        use tracing::instrument::WithSubscriber;
+        let (file, subscriber) = oauth_service::observations::capture();
+        let response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user))),
+            &params,
+            true,
+            None,
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+        assert!(
+            response.headers()[axum::http::header::LOCATION]
+                .to_str()
+                .unwrap()
+                .starts_with("https://app.example/callback?")
+        );
+        let log = std::fs::read_to_string(file.path()).unwrap();
+        let line = log
+            .lines()
+            .find(|line| line.contains("oauth_redirect_policy_observation"))
+            .unwrap();
+        for field in [
+            "reviewed_redirect_changed",
+            "review-client",
+            "public",
+            "https",
+            "path_matched=true",
+        ] {
+            assert!(line.contains(field));
+        }
+        assert!(!line.contains("app.example") && !line.contains("/callback"));
+        use crate::services::feature_flag_service as flags;
+        flags::set_platform_override(
+            &db,
+            flags::OAUTH_EXACT_REDIRECTS_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            "test",
+        )
+        .await
+        .unwrap();
+        let response = authorize_inner(
+            &state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user))),
+            &params,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            response.headers()[axum::http::header::LOCATION]
+                .to_str()
+                .unwrap()
+                .contains("/oauth-consent?")
+        );
+        assert_eq!(
+            db.collection::<AuthorizationCode>(AUTH_CODES)
+                .count_documents(doc! {"client_id": client})
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -4946,7 +5080,7 @@ mod tests {
 
         insert_person_user(&db, &user_id).await;
         insert_public_client(&db, client_id, "openid").await;
-        consent_service::grant_consent_with_services(
+        let consent = consent_service::grant_consent_with_services(
             &db,
             &user_id,
             client_id,
@@ -4981,6 +5115,9 @@ mod tests {
             resource: vec![resource_uri("svc-a")],
         };
 
+        consent_service::record_reviewed_redirect(&db, &consent, &params.redirect_uri)
+            .await
+            .unwrap();
         let response = authorize_inner(
             &state,
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
@@ -5216,9 +5353,10 @@ mod tests {
 
         insert_person_user(&db, &user_id).await;
         insert_public_client(&db, client_id, "openid").await;
-        consent_service::grant_consent_with_services(&db, &user_id, client_id, "openid", None)
-            .await
-            .expect("grant explicit unrestricted consent");
+        let consent =
+            consent_service::grant_consent_with_services(&db, &user_id, client_id, "openid", None)
+                .await
+                .expect("grant explicit unrestricted consent");
 
         let params = AuthorizeQuery {
             service_access_mode: None,
@@ -5245,6 +5383,9 @@ mod tests {
             resource: Vec::new(),
         };
 
+        consent_service::record_reviewed_redirect(&db, &consent, &params.redirect_uri)
+            .await
+            .unwrap();
         let _response = authorize_inner(
             &state,
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
@@ -5277,9 +5418,10 @@ mod tests {
 
         insert_person_user(&db, &user_id).await;
         insert_public_client(&db, client_id, "openid").await;
-        consent_service::grant_consent_with_services(&db, &user_id, client_id, "openid", None)
-            .await
-            .expect("grant explicit unrestricted consent");
+        let consent =
+            consent_service::grant_consent_with_services(&db, &user_id, client_id, "openid", None)
+                .await
+                .expect("grant explicit unrestricted consent");
 
         let params = AuthorizeQuery {
             service_access_mode: None,
@@ -5306,6 +5448,9 @@ mod tests {
             resource: vec![resource_uri("svc-a")],
         };
 
+        consent_service::record_reviewed_redirect(&db, &consent, &params.redirect_uri)
+            .await
+            .unwrap();
         let response = authorize_inner(
             &state,
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
@@ -5928,7 +6073,7 @@ mod tests {
             &HeaderMap::new(),
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code.to_string()),
+                code: Some(code.to_string().into()),
                 redirect_uri: Some("http://localhost/callback".to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
@@ -5982,10 +6127,10 @@ mod tests {
                 grant_type: "refresh_token".to_string(),
                 code: None,
                 redirect_uri: None,
-                client_id: None,
+                client_id: Some(client_id.into()),
                 client_secret: None,
                 code_verifier: None,
-                refresh_token: Some(refresh_token),
+                refresh_token: Some(refresh_token.into()),
                 subject_token: None,
                 subject_token_type: None,
                 scope: None,
@@ -6012,10 +6157,10 @@ mod tests {
                 grant_type: "refresh_token".to_string(),
                 code: None,
                 redirect_uri: None,
-                client_id: None,
+                client_id: Some(client_id.into()),
                 client_secret: None,
                 code_verifier: None,
-                refresh_token: Some(rotated_refresh_token),
+                refresh_token: Some(rotated_refresh_token.into()),
                 subject_token: None,
                 subject_token_type: None,
                 scope: None,
@@ -6044,7 +6189,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some(binding_id),
+                subject_token: Some(binding_id.into()),
                 subject_token_type: Some(
                     oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
                 ),
@@ -6198,11 +6343,11 @@ mod tests {
             &HeaderMap::new(),
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code),
+                code: Some(code.into()),
                 redirect_uri: Some(redirect_uri.to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
-                code_verifier: Some(verifier.to_string()),
+                code_verifier: Some(verifier.to_string().into()),
                 refresh_token: None,
                 subject_token: None,
                 subject_token_type: None,
@@ -6235,7 +6380,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some(binding_id),
+                subject_token: Some(binding_id.into()),
                 subject_token_type: Some(
                     oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
                 ),
@@ -6288,7 +6433,7 @@ mod tests {
             &HeaderMap::new(),
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code.to_string()),
+                code: Some(code.to_string().into()),
                 redirect_uri: Some("http://localhost/callback".to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
@@ -6357,7 +6502,7 @@ mod tests {
             &headers,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code.to_string()),
+                code: Some(code.to_string().into()),
                 redirect_uri: Some("http://localhost/callback".to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
@@ -6473,7 +6618,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some(raw_binding_id),
+                subject_token: Some(raw_binding_id.into()),
                 subject_token_type: Some(
                     oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
                 ),
@@ -6610,7 +6755,7 @@ mod tests {
         );
         let (client_id, client_secret) = parse_basic_client_credentials(&headers).unwrap().unwrap();
         assert_eq!(client_id, "my_client");
-        assert_eq!(client_secret, "my_secret");
+        assert_eq!(client_secret.as_str(), "my_secret");
     }
 
     #[test]
@@ -6626,14 +6771,14 @@ mod tests {
 
     #[test]
     fn client_credentials_from_basic_or_params_prefers_basic() {
-        let basic = Some(("basic_id".to_string(), "basic_secret".to_string()));
+        let basic = Some(("basic_id".to_string(), "basic_secret".to_string().into()));
         let result = client_credentials_from_basic_or_params(basic, None, None);
         assert_eq!(result.unwrap().0, "basic_id");
     }
 
     #[test]
     fn client_credentials_from_basic_or_params_rejects_conflicting_ids() {
-        let basic = Some(("basic_id".to_string(), "basic_secret".to_string()));
+        let basic = Some(("basic_id".to_string(), "basic_secret".to_string().into()));
         let result =
             client_credentials_from_basic_or_params(basic, Some("different_id".to_string()), None);
         assert!(result.is_none());
@@ -6644,11 +6789,11 @@ mod tests {
         let result = client_credentials_from_basic_or_params(
             None,
             Some("form_id".to_string()),
-            Some("form_secret".to_string()),
+            Some("form_secret".to_string().into()),
         );
         let (id, secret) = result.unwrap();
         assert_eq!(id, "form_id");
-        assert_eq!(secret.unwrap(), "form_secret");
+        assert_eq!(secret.unwrap().as_str(), "form_secret");
     }
 
     #[test]
@@ -6733,7 +6878,7 @@ mod tests {
             client_id: None,
             client_secret: None,
             code_verifier: None,
-            refresh_token: Some(refresh_token.to_string()),
+            refresh_token: Some(refresh_token.to_string().into()),
             subject_token: None,
             subject_token_type: None,
             scope: None,
@@ -6746,12 +6891,18 @@ mod tests {
         }
     }
 
-    async fn refresh_grant_error(state: &AppState, refresh_token: &str) -> (StatusCode, String) {
+    async fn refresh_grant_error(
+        state: &AppState,
+        refresh_token: &str,
+        client_id: &str,
+    ) -> (StatusCode, String) {
+        let mut request = refresh_grant_request(refresh_token);
+        request.client_id = Some(client_id.into());
         let response = token(
             State(state.clone()),
             TelemetryContext::default(),
             HeaderMap::new(),
-            Form(refresh_grant_request(refresh_token)),
+            Form(request),
         )
         .await;
         let status = response.status();
@@ -6802,7 +6953,7 @@ mod tests {
 
         // Malformed.
         assert_eq!(
-            refresh_grant_error(&state, "not-a-jwt").await,
+            refresh_grant_error(&state, "not-a-jwt", &client_id).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
 
@@ -6812,7 +6963,7 @@ mod tests {
         let (expired, _) = jwt::generate_refresh_token(&state.jwt_keys, &expired_config, &user)
             .expect("mint expired refresh token");
         assert_eq!(
-            refresh_grant_error(&state, &expired).await,
+            refresh_grant_error(&state, &expired, &client_id).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
 
@@ -6820,7 +6971,7 @@ mod tests {
         let (unknown, _) = jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
             .expect("mint refresh token");
         assert_eq!(
-            refresh_grant_error(&state, &unknown).await,
+            refresh_grant_error(&state, &unknown, &client_id).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
 
@@ -6835,7 +6986,7 @@ mod tests {
             .await
             .expect("insert revoked");
         assert_eq!(
-            refresh_grant_error(&state, &revoked).await,
+            refresh_grant_error(&state, &revoked, &client_id).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
 
@@ -6851,7 +7002,7 @@ mod tests {
             .await
             .expect("insert rotated");
         assert_eq!(
-            refresh_grant_error(&state, &stale).await,
+            refresh_grant_error(&state, &stale, &client_id).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
 
@@ -6866,7 +7017,7 @@ mod tests {
             .await
             .expect("insert legacy");
         assert_eq!(
-            refresh_grant_error(&state, &unbound).await,
+            refresh_grant_error(&state, &unbound, &client_id).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
         let unchanged = refresh_tokens
@@ -6880,6 +7031,339 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confidential_refresh_requires_authentication_before_grant_validation() {
+        let db = connect_test_database("oauth_refresh_client_auth")
+            .await
+            .unwrap();
+        use crate::services::feature_flag_service as flags;
+        flags::set_platform_override(
+            &db,
+            flags::OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            "test",
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4();
+        let client = "confidential";
+        insert_public_client(&db, client, "openid").await;
+        db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
+            doc! {"_id": client},
+            doc! {"$set":{"client_type":"confidential","client_secret_hash":crate::crypto::token::hash_token("test-secret")}},
+        ).await.unwrap();
+        let (refresh, jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user).unwrap();
+        let mut row = stored_refresh_token(&jti, client, &user.to_string());
+        row.revoked = true;
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(row)
+            .await
+            .unwrap();
+        let tele = TelemetryContext::default();
+        let headers = HeaderMap::new();
+        for secret in [None, Some("different")] {
+            let mut request = refresh_grant_request(&refresh);
+            request.client_id = Some(client.into());
+            request.client_secret = secret.map(|s| Zeroizing::new(s.to_owned()));
+            assert!(matches!(
+                Box::pin(token_inner(&state, &tele, &headers, request)).await,
+                Err(AppError::AuthenticationFailed(_))
+            ));
+        }
+        for basic in [false, true] {
+            let mut request = refresh_grant_request(&refresh);
+            let mut headers = HeaderMap::new();
+            if basic {
+                let value = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{client}:test-secret"));
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Basic {value}").parse().unwrap(),
+                );
+            } else {
+                request.client_id = Some(client.into());
+                request.client_secret = Some("test-secret".to_owned().into());
+            }
+            assert!(matches!(
+                Box::pin(token_inner(&state, &tele, &headers, request)).await,
+                Err(AppError::ExternalTokenInvalid(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_client_rollout_observes_legacy_requests_and_enforces_the_live_flag() {
+        use crate::services::feature_flag_service as flags;
+        use tracing::instrument::WithSubscriber;
+        let db = connect_test_database("oauth_refresh_client_rollout")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4().to_string();
+        insert_person_user(&db, &user).await;
+        let tele = TelemetryContext::default();
+        for kind in ["public", "confidential"] {
+            let client = format!("rollout-{kind}");
+            insert_public_client(&db, &client, "openid").await;
+            if kind == "confidential" {
+                db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(doc!{"_id": &client},
+                    doc!{"$set":{"client_type":kind,"client_secret_hash":crate::crypto::token::hash_token("configured-secret")}}).await.unwrap();
+            }
+            let grant = consent_service::grant_consent(&db, &user, &client, "openid")
+                .await
+                .unwrap();
+            let reference = consent_service::ensure_issuance_reference(&db, &grant)
+                .await
+                .unwrap();
+            let issued = oauth_service::issue_oauth_refresh_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &client,
+                &user,
+                "openid",
+                &[],
+                &[],
+                true,
+                Some(&reference),
+            )
+            .await
+            .unwrap();
+            let mut refresh = issued.refresh_token;
+            let (file, subscriber) = oauth_service::observations::capture();
+            async {
+                for _ in 0..2 {
+                    for reason in [
+                        "missing_client_id",
+                        "client_id_mismatch",
+                        "ambiguous_credentials",
+                        "invalid_basic",
+                        "missing_client_secret",
+                        "invalid_client_secret",
+                    ] {
+                        if kind == "public" && reason.ends_with("_secret") {
+                            continue;
+                        }
+                        let mut headers = HeaderMap::new();
+                        let mut request = refresh_grant_request(&refresh);
+                        match reason {
+                            "client_id_mismatch" => {
+                                request.client_id = Some("untrusted-input".into())
+                            }
+                            "ambiguous_credentials" => {
+                                request.client_secret = Some("private-form".to_owned().into());
+                                headers
+                                    .insert(header::AUTHORIZATION, "Basic YTpi".parse().unwrap());
+                            }
+                            "invalid_basic" => {
+                                headers.insert(header::AUTHORIZATION, "Basic ?".parse().unwrap());
+                            }
+                            "missing_client_secret" => request.client_id = Some(client.clone()),
+                            "invalid_client_secret" => {
+                                request.client_id = Some(client.clone());
+                                request.client_secret = Some("private-form".to_owned().into());
+                            }
+                            _ => {}
+                        }
+                        let tokens = Box::pin(token_inner(&state, &tele, &headers, request))
+                            .await
+                            .unwrap();
+                        refresh = tokens.0.refresh_token.unwrap();
+                    }
+                }
+            }
+            .with_subscriber(subscriber)
+            .await;
+            let log = std::fs::read_to_string(file.path()).unwrap();
+            let lines: Vec<_> = log
+                .lines()
+                .filter(|l| l.contains("oauth_refresh_client_auth_observation"))
+                .collect();
+            assert_eq!(lines.len(), if kind == "public" { 4 } else { 6 });
+            for line in lines {
+                assert!(line.contains(&client) && line.contains(kind) && line.contains("count=1"));
+                for private in ["untrusted-input", "private-form", "YTpi", &user, &refresh] {
+                    assert!(!line.contains(private));
+                }
+            }
+            flags::set_platform_override(
+                &db,
+                flags::OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+                &flags::FlagTarget::Global,
+                true,
+                "test",
+            )
+            .await
+            .unwrap();
+            let headers = HeaderMap::new();
+            let missing = Box::pin(token_inner(
+                &state,
+                &tele,
+                &headers,
+                refresh_grant_request(&refresh),
+            ))
+            .await;
+            assert!(matches!(missing, Err(AppError::AuthenticationFailed(_))));
+            let mut wrong = refresh_grant_request(&refresh);
+            wrong.client_id = Some("untrusted-input".into());
+            assert!(matches!(
+                Box::pin(token_inner(&state, &tele, &headers, wrong)).await,
+                Err(AppError::ExternalTokenInvalid(_))
+            ));
+            let mut valid = refresh_grant_request(&refresh);
+            valid.client_id = Some(client.clone());
+            if kind == "confidential" {
+                valid.client_secret = Some("configured-secret".to_owned().into());
+            }
+            let renewed = Box::pin(token_inner(&state, &tele, &headers, valid))
+                .await
+                .unwrap();
+            assert!(renewed.0.refresh_token.is_some());
+            flags::set_platform_override(
+                &db,
+                flags::OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+                &flags::FlagTarget::Global,
+                false,
+                "test",
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_public_refreshes_return_the_same_successor() {
+        let db = connect_test_database("oauth_parallel_refresh")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4().to_string();
+        let client = "parallel-client";
+        insert_person_user(&db, &user).await;
+        insert_public_client(&db, client, "openid").await;
+        let consent =
+            consent_service::grant_consent_with_services(&db, &user, client, "openid", None)
+                .await
+                .unwrap();
+        let reference = consent_service::ensure_issuance_reference(&db, &consent)
+            .await
+            .unwrap();
+        let issued = oauth_service::issue_oauth_refresh_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            client,
+            &user,
+            "openid",
+            &[],
+            &[],
+            true,
+            Some(&reference),
+        )
+        .await
+        .unwrap();
+        let headers = HeaderMap::new();
+        let tele = TelemetryContext::default();
+        let renew = || {
+            let mut request = refresh_grant_request(&issued.refresh_token);
+            request.client_id = Some(client.into());
+            token_inner(&state, &tele, &headers, request)
+        };
+        let (first, second) = tokio::join!(Box::pin(renew()), Box::pin(renew()));
+        let successor = first.unwrap().0.refresh_token.unwrap();
+        assert!(second.unwrap().0.refresh_token.as_deref() == Some(successor.as_str()));
+        let rows = db.collection::<RefreshToken>(REFRESH_TOKENS);
+        assert_eq!(
+            rows.count_documents(doc! {"client_id":client,"revoked":false})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_after_grace_retires_only_its_successors() {
+        let db = connect_test_database("oauth_refresh_family").await.unwrap();
+        use crate::services::feature_flag_service as flags;
+        flags::set_platform_override(
+            &db,
+            flags::OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            "test",
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        let user = Uuid::new_v4();
+        let client = "family-client";
+        insert_public_client(&db, client, "openid").await;
+        let rows = db.collection::<RefreshToken>(REFRESH_TOKENS);
+        let (refresh, jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user).unwrap();
+        let mut parent = stored_refresh_token(&jti, client, &user.to_string());
+        let child = stored_refresh_token("child", client, &user.to_string());
+        let sibling = stored_refresh_token("independent", client, &user.to_string());
+        parent.revoked = true;
+        parent.replaced_by = Some(child.id.clone());
+        parent.revoked_at = Some(Utc::now() - Duration::minutes(3));
+        rows.insert_many([&parent, &child, &sibling]).await.unwrap();
+        let tele = TelemetryContext::default();
+        let headers = HeaderMap::new();
+        for (supplied_id, expected_error) in [
+            (None, "invalid_client"),
+            (Some("independent-client"), "invalid_grant"),
+        ] {
+            let mut request = refresh_grant_request(&refresh);
+            request.client_id = supplied_id.map(str::to_owned);
+            let outcome = Box::pin(token_inner(&state, &tele, &headers, request)).await;
+            assert!(
+                matches!(outcome, Err(ref error) if error.oauth_error_code() == expected_error)
+            );
+            assert!(
+                !rows
+                    .find_one(doc! {"_id": &child.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked
+            );
+        }
+        flags::set_platform_override(
+            &db,
+            flags::OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            false,
+            "test",
+        )
+        .await
+        .unwrap();
+        let mut request = refresh_grant_request(&refresh);
+        request.client_id = Some(client.into());
+        assert!(matches!(
+            Box::pin(token_inner(&state, &tele, &headers, request)).await,
+            Err(AppError::ExternalTokenInvalid(_))
+        ));
+        assert!(
+            rows.find_one(doc! {"_id": child.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        assert!(
+            !rows
+                .find_one(doc! {"_id": sibling.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+    }
+
+    #[tokio::test]
     async fn refresh_grant_reports_deactivated_client_as_invalid_client() {
         let Some(db) = connect_test_database("oauth_refresh_inactive_client").await else {
             return;
@@ -6888,18 +7372,15 @@ mod tests {
         let user = Uuid::new_v4();
         let (refresh, jti) = jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
             .expect("mint refresh token");
+        let client_id = Uuid::new_v4().to_string();
         // No active `oauth_clients` row exists for this client id.
         db.collection::<RefreshToken>(REFRESH_TOKENS)
-            .insert_one(stored_refresh_token(
-                &jti,
-                &Uuid::new_v4().to_string(),
-                &user.to_string(),
-            ))
+            .insert_one(stored_refresh_token(&jti, &client_id, &user.to_string()))
             .await
             .expect("insert refresh token");
 
         assert_eq!(
-            refresh_grant_error(&state, &refresh).await,
+            refresh_grant_error(&state, &refresh, &client_id).await,
             (StatusCode::UNAUTHORIZED, "invalid_client".to_string())
         );
     }
@@ -6965,11 +7446,13 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -7060,7 +7543,7 @@ mod tests {
                 code: None,
                 redirect_uri: None,
                 client_id: None,
-                client_secret: Some("some-secret".to_string()),
+                client_secret: Some("some-secret".to_string().into()),
                 code_verifier: None,
                 refresh_token: None,
                 subject_token: None,
@@ -7167,7 +7650,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some("some-token".to_string()),
+                subject_token: Some("some-token".to_string().into()),
                 subject_token_type: Some("urn:unknown:type".to_string()),
                 scope: None,
                 provider: None,
@@ -7387,11 +7870,13 @@ mod tests {
                 unmatched_catalog.slug.clone(),
             ],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),
@@ -7513,7 +7998,15 @@ mod tests {
 #[path = "oauth_registration_tests.rs"]
 mod registration_tests;
 
-crate::errors::redacted_debug!(TokenRequest, TokenResponse);
+crate::errors::redacted_debug!(
+    TokenRequest,
+    TokenResponse,
+    GetBindingResponse,
+    AuthorizeQuery,
+    ConsentDecisionForm,
+    AuthorizeResponse,
+    PushedAuthorizationRequestResponse
+);
 
 impl std::fmt::Debug for IntrospectRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -7550,6 +8043,89 @@ impl std::fmt::Debug for PushedAuthorizationRequestForm {
 #[cfg(test)]
 mod credential_debug_tests {
     use super::*;
+    #[test]
+    fn binding_response_debug_redacts_the_issued_id_and_preserves_json() {
+        let sentinel = "bnd_test-distinctive-binding-728a";
+        let response = GetBindingResponse {
+            binding_id: sentinel.to_owned(),
+            client_id: "test-client".into(),
+            nyx_subject: "test-subject".into(),
+            external_subject_ref: None,
+            scopes: vec![],
+            created_at: "2026-01-01T00:00:00Z".into(),
+            last_used_at: None,
+            revoked: false,
+        };
+        assert!(!format!("{response:?}").contains(sentinel));
+        assert!(!format!("{response:#?}").contains(sentinel));
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["binding_id"],
+            sentinel
+        );
+    }
+
+    #[test]
+    fn authorization_debug_redacts_codes_and_one_time_handles() {
+        let marker = "test-sensitive-handle-429";
+        let query: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "client_id": "fixture", "request_uri": marker,
+        }))
+        .unwrap();
+        let consent: ConsentDecisionForm = serde_json::from_value(serde_json::json!({
+            "response_type": "code", "client_id": "fixture", "redirect_uri": "https://client.test",
+            "decision": "allow", "consent_request": marker,
+        }))
+        .unwrap();
+        let redirect = AuthorizeResponse {
+            redirect_url: format!("https://client.test/?code={marker}"),
+        };
+        let pushed = PushedAuthorizationRequestResponse {
+            request_uri: marker.to_owned(),
+            expires_in: 60,
+        };
+        for value in [&query as &dyn std::fmt::Debug, &consent, &redirect, &pushed] {
+            assert!(!format!("{value:?}").contains(marker));
+            assert!(!format!("{value:#?}").contains(marker));
+        }
+        assert_eq!(
+            serde_json::to_value(&redirect).unwrap()["redirect_url"],
+            redirect.redirect_url
+        );
+        assert_eq!(
+            serde_json::to_value(&pushed).unwrap()["request_uri"],
+            marker
+        );
+    }
+
+    #[test]
+    fn basic_and_form_secrets_keep_their_exact_value_and_errors() {
+        let marker = "dummy+secret:421";
+        let mut headers = HeaderMap::new();
+        let mut set_basic = |value: &str| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(value);
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Basic {encoded}").parse().unwrap(),
+            );
+            parse_basic_client_credentials(&headers)
+        };
+        let (client, secret) = set_basic("client:dummy%2Bsecret%3A421").unwrap().unwrap();
+        let secret: Zeroizing<String> = secret;
+        assert_eq!(client, "client");
+        assert_eq!(secret.as_str(), marker);
+        let invalid = set_basic("client:dummy+secret:421%FF").unwrap_err();
+        assert!(
+            matches!(&invalid, AppError::Unauthorized(message) if message == "Invalid client credentials")
+        );
+        assert!(!format!("{invalid} {invalid:?}").contains(marker));
+
+        let form: RevokeRequest = serde_urlencoded::from_str(
+            "token=t&client_id=client&client_secret=dummy%2Bsecret%3A421",
+        )
+        .unwrap();
+        assert_eq!(form.client_secret.unwrap().as_str(), marker);
+    }
+
     #[test]
     fn introspection_and_revocation_debug_redact_bearer_and_client_secrets() {
         let secret = "distinctive-oauth-diagnostic-secret-28a4";

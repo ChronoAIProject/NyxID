@@ -276,7 +276,7 @@ async fn gateway_reask_transport_matrix_confirms_one_identical_platform_message(
             assert!(outcomes(&f).await.is_empty());
             assert_eq!(provider(&f).await, "started");
             let advice = health(&f).await;
-            assert_eq!(advice.action, "none");
+            assert_eq!(advice.action, "gateway");
             assert!(advice.text.contains("still trying"));
             assert!(!advice.text.contains("accepted"));
             due(&f).await;
@@ -318,7 +318,7 @@ async fn gateway_reask_transport_matrix_expires_with_truthful_health_and_lookup(
             assert_eq!(wait_row(&f).await.get_bool("pending"), Ok(false));
             server.assert_one_message(2);
             let advice = health(&f).await;
-            assert_eq!(advice.action, "none");
+            assert_eq!(advice.action, "gateway");
             assert!(!advice.text.contains("accepted"));
             assert!(!advice.text.contains("still trying"));
             assert!(advice.text.contains("before checking stopped"));
@@ -651,10 +651,10 @@ async fn gateway_reask_connect_failure_admits_only_on_first_arriving_request() {
 #[tokio::test]
 async fn gateway_reask_local_request_and_decryption_errors_are_not_transport_failures() {
     Box::pin(async {
-        for broken_target in [true, false] {
-            let f = prepared(&format!("reask_local_error_{broken_target}")).await;
+        for failure in ["target", "header", "channel_binding"] {
+            let f = prepared(&format!("reask_local_error_{failure}")).await;
             let server = gateway(&f, vec![CONFIRMED]).await;
-            if broken_target {
+            if failure == "target" {
                 patch(
                     &f,
                     doc! {"delivery.target_ciphertext":bson::Binary {
@@ -662,6 +662,12 @@ async fn gateway_reask_local_request_and_decryption_errors_are_not_transport_fai
                     }},
                 )
                 .await;
+            } else if failure == "channel_binding" {
+                let ciphertext = channel_key::seal(&f.state.encryption_keys, "other-channel", &f.channel.user_id,
+                    f.channel.agent_api_key_id.as_deref().unwrap(), "fixture-bearer").await.unwrap();
+                f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},
+                    doc! {"$set":{channel_key::FIELD:bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext},
+                    channel_key::VERSION_PATH:3}}).await.unwrap();
             } else {
                 let key = f
                     .state

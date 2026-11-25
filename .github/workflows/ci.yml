@@ -241,6 +241,8 @@ jobs:
               - '.config/nextest.toml'
             frontend:
               - 'frontend/**'
+              # Frontend cross-app tests load real mobile screens and controls.
+              - 'mobile/src/**'
               - 'shared/**'
               - '.node-version'
             mobile:
@@ -1222,8 +1224,24 @@ jobs:
       # --no-report implies --no-clean. Cached executables from older source
       # revisions otherwise contribute stale, uncovered mappings to `report`.
       # Keep dependency artifacts, but rebuild workspace coverage objects.
+      # rust-cache restores llvm-cov-target without cargo's CACHEDIR.TAG, and
+      # cargo refuses to clean a target directory without one. cargo-llvm-cov
+      # reports that refusal only as a warning, so recreate the tag and fail
+      # the step if the clean still does not run.
       - name: Clear stale workspace coverage objects
-        run: cargo llvm-cov clean --workspace
+        run: |
+          dir=target/llvm-cov-target
+          if [ -d "$dir" ] && [ ! -f "$dir/CACHEDIR.TAG" ]; then
+            printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' \
+              '# This file is a cache directory tag created by cargo.' \
+              '# For information about cache directory tags see https://bford.info/cachedir/' \
+              > "$dir/CACHEDIR.TAG"
+          fi
+          cargo llvm-cov clean --workspace 2>&1 | tee "$RUNNER_TEMP/llvm-cov-clean.log"
+          if grep -q "didn't exit successfully" "$RUNNER_TEMP/llvm-cov-clean.log"; then
+            echo "::error::cargo llvm-cov clean did not remove stale coverage objects"
+            exit 1
+          fi
       - name: Build head coverage with incremental retry
         run: >-
           python3 .github/scripts/retry_incremental.py

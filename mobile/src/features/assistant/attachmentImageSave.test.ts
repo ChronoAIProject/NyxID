@@ -31,6 +31,7 @@ const text = (root: Element): string =>
     .join(" ");
 function setup(platform = "ios", expired = false, image = true, processCache?: typeof Cache) {
   const calls: { kind: string; args: unknown[] }[] = [];
+  let dimensions = { width: 390, height: 844, fontScale: 1 };
   let state = "active";
   let epoch = 1;
   let focused = true;
@@ -101,6 +102,7 @@ function setup(platform = "ios", expired = false, image = true, processCache?: t
       ...Object.fromEntries(
         ["View", "Pressable", "Image", "ActivityIndicator"].map((n) => [n, n]),
       ),
+      useWindowDimensions: () => dimensions,
       findNodeHandle: () => 42,
       Platform: { OS: platform },
       StyleSheet: { create: (s: unknown) => s },
@@ -180,6 +182,7 @@ function setup(platform = "ios", expired = false, image = true, processCache?: t
   );
   return {
     harness,
+    resize: (fontScale: number) => { dimensions = { ...dimensions, fontScale }; harness.render(); },
     cache,
     calls,
     save,
@@ -715,7 +718,7 @@ test("document-only attachment row keeps the filename column at intrinsic width"
   );
   assert.ok(metadata);
   assert.ok([metadata.props.children].flat(Infinity).includes(size));
-  const style = metadata.props.style as {
+  const style = flatStyle(metadata.props.style) as {
     flex?: number;
     flexGrow?: number;
     flexShrink?: number;
@@ -737,11 +740,11 @@ test("non-image full-row Open feedback is 0.8 when pressed and 0.5 when unavaila
   const env = setup("ios", false, false);
   const row = () => env.nodes().find((node) => node.type === "Pressable")!;
   const opacity = (pressed: boolean) =>
-    (
+    flatStyle((
       row().props.style as (state: {
         pressed: boolean;
       }) => { opacity?: number }[]
-    )({ pressed })[1]!.opacity;
+    )({ pressed })).opacity;
   assert.equal(opacity(false), 1);
   assert.equal(opacity(true), 0.8);
   const loading = deferred<Uint8Array>();
@@ -760,6 +763,22 @@ test("non-image full-row Open feedback is 0.8 when pressed and 0.5 when unavaila
   const style = target.props.style as (state: {
     pressed: boolean;
   }) => { opacity?: number }[];
-  assert.equal(style({ pressed: true })[1]!.opacity, 0.5);
+  assert.equal(flatStyle(style({ pressed: true })).opacity, 0.5);
   unavailable.harness.unmount();
+});
+
+function flatStyle(style: any): Record<string, any> { return Object.assign({}, ...[style].flat(Infinity).filter(Boolean)); }
+test("large text moves sent attachment actions below metadata without squeezing the filename", async () => {
+  const x = setup("android");
+  await x.harness.settle();
+  x.resize(2);
+  const filename = x.nodes().find(n => n.type === "Label" && n.props.children === "Photo")!;
+  assert.equal(filename.props.numberOfLines, undefined);
+  const metadata = x.nodes().find(n => n.type === "View" && Array.isArray(n.props.style) && n.props.style[0]?.flexGrow === 1)!;
+  assert.equal(flatStyle(metadata.props.style).flexGrow, 0);
+  const action = x.nodes().find(n => n.props.accessibilityLabel === "Save image")!;
+  const style = flatStyle((action.props.style as Function)({ pressed: false }));
+  assert.equal(style.alignSelf, "flex-end");
+  assert.equal(style.flexShrink, 0);
+  x.harness.unmount();
 });

@@ -14,6 +14,7 @@ function loadCard(
   name: "HistoryCard" | "ChallengeCard",
   openedUrls: string[] = [],
   getFrontendUrl = () => "https://app.example.test",
+  dimensions = { width: 390, height: 844, fontScale: 1 },
 ) {
   const filename = fileURLToPath(new URL(`./${name}.tsx`, import.meta.url));
   const output = ts.transpileModule(readFileSync(filename, "utf8"), {
@@ -41,6 +42,7 @@ function loadCard(
     "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
       Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
+      useWindowDimensions: () => dimensions,
       Pressable: "Pressable",
       Text: "Text",
       View: "View",
@@ -350,4 +352,13 @@ test("approval and activity cards retain base native paragraph identity", () => 
     assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/, name);
     assert.doesNotMatch(source, /[^a-zA-Z]height: \d/, `${name}: no fixed row height`);
   }
+});
+
+test("large-text history keeps its outcome inside the wide body below the summary", () => {
+  const C = loadCard("HistoryCard", [], undefined, { width: 390, height: 844, fontScale: 2 });
+  const tree = C({ item: { ...request, status: "EXPIRED" } });
+  const body = elements(tree).find(n => n.type === "View" && n.props.style?.flex === 1)!;
+  assert.ok(textContent(body).includes("Expired"));
+  const title = elements(body).find(n => n.props.children === request.title)!;
+  assert.equal(title.props.numberOfLines, undefined);
 });

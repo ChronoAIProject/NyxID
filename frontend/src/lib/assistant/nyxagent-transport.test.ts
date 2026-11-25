@@ -739,6 +739,12 @@ describe("NyxAgent server-backed transport", () => {
     });
     expect(completed.messages[0]).toBe(settled);
     expect(completed.messages[1]!.blocks[0]!.text).toBe("Answer!");
+    const reset = applyDirectTurnEvent(completed, {
+      event: "block.completed", cursor: 6, block_id: "b", block: { type: "text", block_id: "b", text: "" },
+    });
+    expect(reset.messages[1]!.blocks[0]!.text).toBe("");
+    const retry = applyDirectTurnEvent(reset, { event: "block.delta", cursor: 7, block_id: "b", text: "Retry" });
+    expect(retry.messages[1]!.blocks[0]!.text).toBe("Retry");
   });
 
   it("marks messages the user wrote in a chat app with its platform", async () => {
@@ -1790,6 +1796,26 @@ it("does not restore an active turn from a history request older than settlement
   await old;
   expect(transport.getActiveTurnId(id)).toBeUndefined();
   expect(transport.session(id).messages.at(-1)?.content).toBe("Answer 界");
+});
+
+it("restores committed memory recovery evidence from settled history", async () => {
+  const recovery = { failed_activity_id: "20b44753-5c6e-4f19-8931-64c775d64cd4", part: 1, total: 2, committed: true };
+  const activity = { id: "saved-part", label: "nyxid__remember", status: "completed", started_at: start, ended_at: reset };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page, messages: [page.messages[0], { ...page.messages[1], activities: [
+      { ...activity, memory_recovery: recovery },
+      { ...activity, id: "legacy" },
+      { ...activity, id: "future", memory_recovery: { ...recovery, committed: "future" } },
+    ] }] });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const tools = transport.session(id).messages.at(-1)?.toolCalls;
+  expect(tools).toHaveLength(3);
+  expect(tools?.[0]?.memoryRecovery).toEqual(recovery);
+  expect(tools?.[1]?.memoryRecovery).toBeUndefined();
+  expect(tools?.[2]?.memoryRecovery).toBeUndefined();
 });
 
 it.each([null, undefined])("parses backend failures with status %s through active polling, settlement and reload", async (status) => {

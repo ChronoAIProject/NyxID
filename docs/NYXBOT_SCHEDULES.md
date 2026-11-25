@@ -184,6 +184,11 @@ execute the task again. A transport error, timeout or uncertain crash does not
 authorize retry. Expiry/exhaustion is a visible actionable failure. Delivery waits
 retain ordinary overlap behavior; they do not clear live executions.
 
+When Skip suppresses an occurrence, run history can include `blocking_run_id`
+for the run that occupied the same automation at the overlap check. In
+Automations, open that run to see its current status and any available
+thread or Cancel action. A legacy skip can have no recorded blocking run.
+
 Fields are additive and old unclaimed rows can use this settlement. Legacy
 claimed sends remain non-replayable and receive an uncertainty notice on new
 workers. Old workers retain the `result_claimed` guard, preventing duplicate
@@ -234,7 +239,12 @@ enabling the flag; old servers reject the additive notification settings.
     plain words ("every weekday at 8:00 Singapore time, starting tomorrow").
   - `nyxid__list_schedules`, `nyxid__update_schedule` (including pause and
     resume) and `nyxid__delete_schedule`. Listing and updating also expose
-    assistant webhook automations and their confirmation policy.
+    assistant webhook automations and their confirmation policy. The list returns
+    full records newest first, 20 per page by default (1–50). Use `enabled` or
+    `agent_id` to filter. If a page has a `ref`, concatenate its `content` with
+    each part from `nyxid__read_tool_result(ref, part=next_part)` in the same
+    turn. Pass the assembled page's `next_cursor` as `cursor` with the same
+    filters until `next_cursor` is null.
   - `nyxid__run_schedule_now`: run once now, to test.
 - **Webhook triggers to agents.** Creating one needs its inbound secret shown
   exactly once. Secrets never pass through chat, so NyxBot hands out a

@@ -187,7 +187,7 @@ pub(crate) async fn decide_personal_reply_in_session(
                     } else {
                         "Do not execute or retry the denied action; explain what was skipped."
                     },
-                    acks::DECISION_NARRATION
+                    acks::decision_narration(allowed)
                 ),
                 None,
             ),

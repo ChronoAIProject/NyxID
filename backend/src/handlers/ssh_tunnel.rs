@@ -493,20 +493,28 @@ async fn handle_ssh_socket(
         let _ = socket.close().await;
         return;
     }
-    let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
     let mut tcp_stream = match tokio::time::timeout(
         Duration::from_secs(state.config.ssh_connect_timeout_secs),
-        tokio::net::TcpStream::connect(&connect_target),
+        async {
+            let peers =
+                ssh_service::resolve_direct_ssh_target(&ssh_service.host, ssh_service.port).await?;
+            tokio::net::TcpStream::connect(peers.as_slice()).await
+        },
     )
     .await
     {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             tracing::warn!(service_id = %service_id, error = %error, "SSH tunnel connect failed");
+            let (code, reason) = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                (1008, "SSH destination is not permitted")
+            } else {
+                (1011, "Failed to connect downstream SSH target")
+            };
             let _ = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1011,
-                    reason: "Failed to connect downstream SSH target".into(),
+                    code,
+                    reason: reason.into(),
                 })))
                 .await;
 
@@ -1398,6 +1406,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -1737,6 +1746,7 @@ mod tests {
             is_active: true,
             created_by: created_by.to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

@@ -410,13 +410,14 @@ pub async fn callback(
     })?;
 
     // Fetch user profile
-    let profile =
+    let fetched =
         social_auth_service::fetch_user_profile(provider, &access_token, &state.http_client)
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "Social auth profile fetch failed");
                 redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
+    let profile = fetched.profile;
 
     // Read the invite code from the cookie set at SSO initiation. When the
     // flag is enabled, reserve a valid code so concurrent requests cannot
@@ -585,6 +586,7 @@ pub async fn callback(
         user: &user,
         provider: provider.as_str(),
         redirect_target: &redirect_target,
+        signup_has_name: was_newly_created.then_some(fetched.has_provider_name),
         ip,
         ua,
         tele_social: &tele_social,
@@ -914,6 +916,12 @@ pub async fn apple_callback(
         user: &user,
         provider: "apple",
         redirect_target: &redirect_target,
+        signup_has_name: was_newly_created.then(|| {
+            profile
+                .display_name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+        }),
         ip,
         ua,
         tele_social: &tele_social,
@@ -928,6 +936,7 @@ struct SocialSignIn<'a> {
     user: &'a crate::models::user::User,
     provider: &'a str,
     redirect_target: &'a SocialRedirectTarget,
+    signup_has_name: Option<bool>,
     ip: Option<String>,
     ua: Option<String>,
     tele_social: &'a TelemetryContext,
@@ -941,6 +950,7 @@ async fn finish_social_sign_in(
         user,
         provider,
         redirect_target,
+        signup_has_name,
         ip,
         ua,
         tele_social,
@@ -1006,6 +1016,7 @@ async fn finish_social_sign_in(
                 redirect_target,
                 provider,
                 &user.id,
+                signup_has_name,
                 secure,
                 domain,
             )
@@ -1056,8 +1067,13 @@ async fn finish_social_sign_in(
                 )
                 .await
                 .map_err(failed)?;
-                let location =
-                    build_success_redirect_url(redirect_target, provider, &user.id, Some(&tokens));
+                let location = build_success_redirect_url(
+                    redirect_target,
+                    provider,
+                    &user.id,
+                    Some(&tokens),
+                    signup_has_name,
+                );
                 (tokens.session_id, location)
             };
 
@@ -1142,6 +1158,7 @@ fn build_web_auth_redirect(
     target: &SocialRedirectTarget,
     provider: &str,
     user_id: &str,
+    signup_has_name: Option<bool>,
     secure: bool,
     domain: Option<&str>,
 ) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
@@ -1151,7 +1168,7 @@ fn build_web_auth_redirect(
         .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?;
     append_social_cleanup_cookies(&mut headers, target, secure, domain)?;
 
-    let redirect_url = build_success_redirect_url(target, provider, user_id, None);
+    let redirect_url = build_success_redirect_url(target, provider, user_id, None, signup_has_name);
     headers.insert(
         header::LOCATION,
         redirect_url
@@ -1323,12 +1340,57 @@ fn resolve_redirect_target(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ContinueSignupQuery {
+    pub return_to: String,
+}
+
+/// Recheck cross-origin continuations against this deployment's API and frontend aliases.
+pub async fn continue_signup(
+    State(state): State<AppState>,
+    Query(query): Query<ContinueSignupQuery>,
+) -> AppResult<axum::response::Redirect> {
+    if !state.config.trusted_return_to(&query.return_to) {
+        return Err(AppError::ValidationError("Invalid return URL".into()));
+    }
+    Ok(axum::response::Redirect::to(&query.return_to))
+}
+
 fn build_success_redirect_url(
     target: &SocialRedirectTarget,
     provider: &str,
     user_id: &str,
     tokens: Option<&token_service::IssuedTokens>,
+    signup_has_name: Option<bool>,
 ) -> String {
+    // The release image builds with Rust 1.93, which has no `if let` match guards.
+    if let (
+        SocialRedirectTarget::Web {
+            frontend_url,
+            return_to,
+        },
+        Some(has_name),
+    ) = (target, signup_has_name)
+    {
+        let mode = if has_name { "provider" } else { "empty" };
+        let mut location = format!(
+            "{}/register?confirm_name={mode}",
+            frontend_url.trim_end_matches('/')
+        );
+        if let Some(return_to) = return_to {
+            location.push_str("&return_to=");
+            if return_to.starts_with(&format!("{}/", frontend_url.trim_end_matches('/'))) {
+                location.push_str(&urlencoding::encode(return_to));
+            } else {
+                let resume = format!(
+                    "/api/v1/auth/social/continue?return_to={}",
+                    urlencoding::encode(return_to)
+                );
+                location.push_str(&urlencoding::encode(&resume));
+            }
+        }
+        return location;
+    }
     match target {
         SocialRedirectTarget::Web {
             frontend_url,
@@ -1685,6 +1747,68 @@ mod tests {
     use super::*;
     use bson::doc;
 
+    #[test]
+    fn only_new_web_signups_receive_the_name_step_with_their_original_destination() {
+        let frontend = "https://app.example.test/";
+        let local = "https://app.example.test/oauth/authorize?state=a%2Bb#section";
+        let alias = "https://alias.example.test/oauth/authorize?state=a%2Bb#section";
+        for return_to in [None, Some(local), Some(alias)] {
+            let target = SocialRedirectTarget::Web {
+                frontend_url: frontend.into(),
+                return_to: return_to.map(str::to_owned),
+            };
+            for (has_name, mode) in [(true, "provider"), (false, "empty")] {
+                let signup =
+                    build_success_redirect_url(&target, "github", "user", None, Some(has_name));
+                let url = url::Url::parse(&signup).unwrap();
+                assert_eq!(
+                    url.origin().ascii_serialization(),
+                    "https://app.example.test"
+                );
+                assert_eq!(url.path(), "/register");
+                let mut query = url.query_pairs();
+                assert_eq!(query.next(), Some(("confirm_name".into(), mode.into())));
+                let resume = match return_to {
+                    Some(dst) if dst == alias => Some(format!(
+                        "/api/v1/auth/social/continue?return_to={}",
+                        urlencoding::encode(dst)
+                    )),
+                    other => other.map(str::to_owned),
+                };
+                assert_eq!(
+                    query.next(),
+                    resume.map(|dst| ("return_to".into(), dst.into()))
+                );
+                assert_eq!(query.next(), None);
+            }
+            assert_eq!(
+                build_success_redirect_url(&target, "github", "user", None, None),
+                return_to.unwrap_or(frontend)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn signup_continuation_accepts_only_configured_return_urls() {
+        let db = crate::test_utils::connect_transaction_test_database("social_name_continue").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let allowed = format!(
+            "{}/oauth/authorize?state=a%2Bb",
+            state.config.base_url.trim_end_matches('/')
+        );
+        let follow = |return_to| {
+            continue_signup(
+                State(state.clone()),
+                Query(ContinueSignupQuery { return_to }),
+            )
+        };
+        use axum::response::IntoResponse;
+        let response = follow(allowed.clone()).await.unwrap().into_response();
+        assert_eq!(response.headers()[header::LOCATION], allowed);
+        assert!(follow("https://foreign.example/".into()).await.is_err());
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn returning_social_browser_and_mobile_logins_load_scheduled_credits() {
         use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
@@ -1718,6 +1842,7 @@ mod tests {
                 user: &user,
                 provider: "github",
                 redirect_target: &target,
+                signup_has_name: None,
                 ip: None,
                 ua: None,
                 tele_social: &tele,
@@ -1775,6 +1900,7 @@ mod tests {
                 user: &outcome.user,
                 provider: "google",
                 redirect_target: &target,
+                signup_has_name: outcome.was_newly_created.then_some(false),
                 ip: None,
                 ua: None,
                 tele_social: &tele,
@@ -1829,6 +1955,7 @@ mod tests {
                 user: &user,
                 provider,
                 redirect_target: &mobile,
+                signup_has_name: None,
                 ip: None,
                 ua: None,
                 tele_social: &tele,
@@ -1847,6 +1974,7 @@ mod tests {
                 user: &user,
                 provider,
                 redirect_target: &web,
+                signup_has_name: None,
                 ip: None,
                 ua: None,
                 tele_social: &tele,
@@ -1880,6 +2008,7 @@ mod tests {
                 user: &user,
                 provider: "apple",
                 redirect_target: &mobile,
+                signup_has_name: None,
                 ip: None,
                 ua: None,
                 tele_social: &tele,

@@ -76,6 +76,7 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
+  ActivityPage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -116,7 +117,6 @@ import {
   PrivacyPage,
   TermsPage,
   DataDeletionPage,
-  NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
@@ -185,12 +185,16 @@ const rootRoute = createRootRoute({
 const authLayout = createRoute({
   id: "auth",
   getParentRoute: () => rootRoute,
-  beforeLoad: () => {
-    const { isAuthenticated, isLoading } = useAuthStore.getState();
+  beforeLoad: ({ location }) => {
+    const { isAuthenticated, isLoading, user } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
-      const returnTo = new URLSearchParams(window.location.search).get(
-        "return_to",
-      );
+      const params = new URLSearchParams(location.searchStr);
+      const confirmation = params.get("confirm_name");
+      if (
+        location.pathname === "/register" && user?.social_provider &&
+        (confirmation === "provider" || confirmation === "empty")
+      ) return;
+      const returnTo = params.get("return_to");
       const trusted = resolveTrustedAuthReturnTo(returnTo ?? undefined);
       if (trusted) {
         window.location.assign(trusted);
@@ -223,6 +227,12 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const activityRoute = createRoute({
+  path: "/activity",
+  getParentRoute: () => rootRoute,
+  component: ActivityPage,
+});
+
 const nyxbotOnboardingRoute = createRoute({
   path: "/nyxbot/onboarding",
   getParentRoute: () => rootRoute,
@@ -236,7 +246,10 @@ const registerRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string; code?: string; confirm_name?: "provider" | "empty" } => ({
+    ...(search.confirm_name === "provider" || search.confirm_name === "empty"
+      ? { confirm_name: search.confirm_name }
+      : {}),
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
       : {}),
@@ -823,7 +836,9 @@ const designSystemRoute = createRoute({
 const notificationSettingsRoute = createRoute({
   path: "/approvals/settings",
   getParentRoute: () => dashboardLayout,
-  component: NotificationSettingsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings", search: { tab: "notifications" }, replace: true });
+  },
 });
 
 const approvalHistoryRoute = createRoute({
@@ -1312,6 +1327,7 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  activityRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,

@@ -422,6 +422,41 @@ storage. Component and browser tests cover live switching, shared state, draft
 preservation, navigation, persistence, and narrow mobile layouts. Browser tests
 use the existing HTTP fixture boundary and do not call a live backend or model.
 
+### Web and mobile audit for issue #2722
+
+In the table below each owner is the source/catalog area responsible for new copy.
+The Web copy guard scans Studio source for literal UI strings and checks catalog keys,
+placeholders and script. The mobile guard scans production screens, components,
+accessibility labels and alerts. The table identifies the additional component and
+data checks used for dynamic copy that a source scan cannot see.
+
+| Area and owner | Surfaces checked | Findings and verification |
+| --- | --- | --- |
+| Authentication and services · Web auth / Mobile auth, services | Sign-in, registration, device authorization, OAuth error and provider connection | The OAuth page now translates its generic title and missing-message fallback. Tests check an unknown provider detail and raw error code, device-login states and provider selection. Registration is covered by the source and catalog checks. |
+| First run and Home · Assistant onboarding / Mobile onboarding | Step labels and progress, capability lists, topic choices, replay and Home recommendations | Tests switch an open intro, validate every replay variant and check the server's recommendation text and connected-account follow-ups in both Chinese scripts. Unknown server strings and provider names remain display data. |
+| Chat and approvals · Assistant chat, approvals and agents | Authored skill cards, decision receipts and approval cards | Component tests exercise the app language, a chat-specific card language and authored data. The localized onboarding fixture retains its Markdown, action IDs and example key name. |
+| Connections and automations · Services, dashboard and automations | Trigger creation and rotation, developer-app webhook credentials, automation secrets, managed WhatsApp setup, `/keys` connection ordering | Tests check the one-time credential dialog, copy button, asynchronous feedback, OAuth provider selection and WhatsApp setup states. Ordering tests cover translated drag-and-drop screen-reader instructions, all announcements and sortable handle roles, including language changes. Connection labels and values copied to the clipboard retain their original bytes. |
+| Machines, plugins and teams · Nodes, assistant agents / Mobile machines, plugins, agents | Machine capability labels, plugin/connector lists, specialists and group permissions | Source and catalog checks cover field labels and empty states. Mobile component tests exercise plugin navigation and permission text in the selected language. |
+| Account, security and preferences · Settings / Mobile account, display, notifications | Password review, device sessions, appearance, notifications, accessibility and voice | Tests exercise switching language during password review, notification announcements and Apple Watch session labels. Settings tests exercise display, notification and voice controls. |
+| Billing and usage · Billing / Mobile billing | Usage units, filters, charts, legends, modality details, empty state and admin analytics panel ordering | Tests cover funding chart lane labels and accessible names (including empty funding), plural-aware explorer group counts for every dimension, quantity-chart screen-reader text for unrecorded values, metric labels, image/voice breakdown, date and unit formatting, and mobile usage metric names. Admin analytics tests cover translated drag-and-drop screen-reader instructions, all announcements and sortable handle roles, including language changes; panel titles remain user data. |
+| Credential management · Credentials | Key history action in the confirmation toast | The action label uses the app language. Its target key remains the original identifier. |
+
+Reproduce the source checks from the repository root:
+
+```sh
+node frontend/scripts/check-i18n.mjs
+pnpm --dir mobile exec tsx --test src/i18n/i18nCoverage.test.ts src/i18n/ws2LocaleCompleteness.test.ts
+pnpm --dir mobile exec tsx --test src/features/onboarding/onboardingCopy.test.ts
+```
+
+The shared onboarding catalogs cover fixed first-party phrases from the Rust
+recommendation and topic tables, including prompts submitted by clicking a
+recommendation. Localize the Markdown source before splitting it into animation
+frames. Chat drafts, user names, model output, third-party error details and
+provider identifiers follow the data boundaries above. Production device and
+assistive-technology walkthroughs can use the surface list to record the route,
+app language and visible or spoken phrase.
+
 ## Local sample preview
 
 Start the opt-in Vite preview from the repository root:

@@ -377,7 +377,7 @@ async fn stuck_request_inventory_pins_history_across_cursor_batches() {
             .unwrap()
             .unwrap();
     let mut rows = Vec::new();
-    for i in 0..600 {
+    for i in 0..inventory::PAGE_ROWS {
         let mut row = raw.clone();
         row.insert("_id", format!("cursor-{i}"));
         row.insert("transaction_id", format!("cursor-{i}"));
@@ -406,13 +406,14 @@ async fn stuck_request_inventory_pins_history_across_cursor_batches() {
     .await
     .unwrap();
     let result = result.unwrap();
+    let total = inventory::PAGE_ROWS + 1;
     assert_eq!(result.len(), 1, "{result:?}");
     assert!(
         result[0]
             .technical_details
             .as_ref()
             .unwrap()
-            .contains("rows=601 distinct_requests=601"),
+            .contains(&format!("rows={total} distinct_requests={total}")),
         "{}",
         result[0].technical_details.as_ref().unwrap()
     );
@@ -499,6 +500,35 @@ async fn stuck_request_inventory_failure_reasons_are_metadata_only() {
         d[0].technical_details.as_ref().unwrap()
     );
     f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stuck_request_inventory_can_cancel_pending_cursor_read() {
+    let db = crate::test_utils::connect_transaction_test_database("inventory_cancel").await;
+    let collection = db.collection::<Document>(METERS);
+    collection
+        .insert_one(doc! {"_id":"retained"})
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    // An empty first batch forces the reader into getMore before it can yield
+    // a row. Cancel at that point, as the inventory deadline does under load.
+    let mut cursor = collection
+        .aggregate(vec![doc! {"$limit":1}])
+        .batch_size(0)
+        .session(&mut session)
+        .await
+        .unwrap();
+    {
+        let next = next_document(&mut cursor, &mut session);
+        tokio::pin!(next);
+        assert!(futures::poll!(next.as_mut()).is_pending());
+    }
+    drop(cursor);
+    session.abort_transaction().await.unwrap();
+    assert_eq!(collection.count_documents(doc! {}).await.unwrap(), 1);
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]

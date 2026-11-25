@@ -1009,7 +1009,7 @@ pub async fn sweep_invalid_sources(
             let mut cursor = db.collection::<MachineExternalGrant>(COLLECTION_NAME)
                 .find(filter).sort(doc! {"_id":1}).limit(limit)
                 .session(&mut *session).await?;
-            let grants: Vec<MachineExternalGrant> = cursor.stream(&mut *session).try_collect().await?;
+            let grants: Vec<MachineExternalGrant> = crate::db::read_documents(&mut cursor, session).await?;
             let mut _invalidated = 0;
             for grant in &grants {
                 match validate_grant_source(&db, grant, session).await {

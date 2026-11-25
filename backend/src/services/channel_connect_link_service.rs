@@ -146,7 +146,7 @@ pub async fn create(
         let url = webhook_delivery_service::validate_webhook_url(url, "webhook_url").await?;
         let secret = Zeroizing::new(format!("nyx_bwh_{}", generate_random_token()));
         let key_id = webhook_delivery_service::generate_signing_key_id();
-        let encrypted = super::record_field_service::encrypt(
+        let encrypted = crate::crypto::record_field::encrypt(
             keys,
             LINKS,
             &id,
@@ -216,6 +216,7 @@ fn build_link(
         event_id: None,
         event_data: None,
         delivery_status: None,
+        delivery_failure_reason: None,
         delivery_attempts: 0,
         delivery_after: None,
     };
@@ -755,20 +756,16 @@ pub async fn dispatch(
                 )
                 .await
         }
-        Some(Receiver::Direct { url, .. }) => {
-            async {
-                let client = super::channel_media_service::media_client(url, None, None)
-                    .await
-                    .map_err(|_| delivery_failure("destination_unavailable"))?;
-                deliver_direct(&client, keys, &link).await
-            }
-            .await
-        }
+        Some(Receiver::Direct { .. }) => deliver_direct(keys, &link).await,
         None => Ok(()),
     };
     let status = if result.is_ok() {
         "delivered"
-    } else if link.delivery_attempts >= MAX_CYCLES {
+    } else if link.delivery_attempts >= MAX_CYCLES
+        || result
+            .as_ref()
+            .is_err_and(|f| f.reason == webhook_delivery_service::DESTINATION_REFUSED)
+    {
         "abandoned"
     } else {
         "pending"
@@ -776,7 +773,7 @@ pub async fn dispatch(
     db.collection::<Link>(LINKS)
         .update_one(
             doc! {"_id": id, "event_id": event_id, "delivery_attempts": link.delivery_attempts},
-            doc! {"$set": {"delivery_status": status}},
+            doc! {"$set": {"delivery_status": status, "delivery_failure_reason": result.as_ref().err().map(|f| f.reason)}},
         )
         .await?;
     if let Err(failure) = result {
@@ -835,7 +832,7 @@ async fn receiver_secret(keys: &EncryptionKeys, link: &Link) -> AppResult<Zeroiz
     else {
         return Err(invalid_receiver());
     };
-    let secret = super::record_field_service::decrypt(
+    let secret = crate::crypto::record_field::decrypt(
         keys,
         LINKS,
         &link.id,
@@ -863,7 +860,7 @@ pub(crate) async fn verify_current_receiver_snapshot(
     else {
         return Ok(());
     };
-    super::record_field_service::verify_current(
+    crate::crypto::record_field::verify_current(
         keys,
         LINKS,
         &link.id,
@@ -896,7 +893,7 @@ pub(crate) async fn migrate_receiver_snapshot(
         return Ok(false);
     }
     let secret = receiver_secret(keys, &link).await?;
-    let encrypted = super::record_field_service::encrypt(
+    let encrypted = crate::crypto::record_field::encrypt(
         keys,
         LINKS,
         &link.id,
@@ -938,7 +935,6 @@ pub(crate) async fn migrate_receiver_snapshot(
 }
 
 async fn deliver_direct(
-    client: &reqwest::Client,
     keys: &EncryptionKeys,
     link: &Link,
 ) -> Result<(), webhook_delivery_service::DeliveryFailure> {
@@ -963,7 +959,6 @@ async fn deliver_direct(
         return Err(delivery_failure("body_too_large"));
     }
     webhook_delivery_service::deliver_signed_body(
-        client,
         url,
         &secret,
         &event_type,
@@ -1217,7 +1212,7 @@ mod tests {
             .await
             .unwrap();
         let keys = std::sync::Arc::new(test_encryption_keys());
-        let dispatcher = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys.clone());
+        let dispatcher = DeveloperWebhookDispatcher::new(keys.clone());
         sweep(&db, &keys, &dispatcher).await.unwrap();
         let saved = get(&db, &expired.id).await.unwrap();
         assert_eq!(saved.status, LinkStatus::Expired);
@@ -1244,7 +1239,7 @@ mod tests {
             .await
             .unwrap();
         let terminal = cancel(&db, &c.link).await.unwrap();
-        let dispatcher = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys.clone());
+        let dispatcher = DeveloperWebhookDispatcher::new(keys.clone());
         let (a, b) = tokio::join!(
             dispatch(&db, &keys, &dispatcher, &c.link.id),
             dispatch(&db, &keys, &dispatcher, &c.link.id)
@@ -1257,7 +1252,11 @@ mod tests {
             dispatch(&db, &keys, &dispatcher, &c.link.id).await.unwrap();
         }
         let saved = get(&db, &c.link.id).await.unwrap();
-        assert_eq!(saved.delivery_attempts, MAX_CYCLES);
+        assert_eq!(saved.delivery_attempts, 1);
+        assert_eq!(
+            saved.delivery_failure_reason.as_deref(),
+            Some(webhook_delivery_service::DESTINATION_REFUSED)
+        );
         assert_eq!(saved.delivery_status.as_deref(), Some("abandoned"));
         assert_eq!(saved.event_id, terminal.event_id);
         assert_eq!(saved.event_data, terminal.event_data);
@@ -1442,7 +1441,7 @@ mod tests {
         else {
             unreachable!()
         };
-        *secret_encrypted = super::super::record_field_service::encrypt(
+        *secret_encrypted = crate::crypto::record_field::encrypt(
             &keys,
             LINKS,
             &link.id,
@@ -1476,6 +1475,8 @@ mod tests {
     async fn channel_link_direct_delivery_signs_stable_terminal_snapshot() {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
         let server = MockServer::start().await;
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(204))
             .expect(2)
@@ -1489,7 +1490,7 @@ mod tests {
         let mut terminal = cancel(&db, &c.link).await.unwrap();
         terminal.receiver = Some(Receiver::Direct {
             url: server.uri(),
-            secret_encrypted: super::super::record_field_service::encrypt(
+            secret_encrypted: crate::crypto::record_field::encrypt(
                 &keys,
                 LINKS,
                 &terminal.id,
@@ -1533,9 +1534,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        deliver_direct(&reqwest::Client::new(), &keys, &terminal)
-            .await
-            .unwrap();
+        deliver_direct(&keys, &terminal).await.unwrap();
         keys.set_contextual_record_writes(true);
         assert!(
             migrate_receiver_snapshot(&db, &keys, &legacy)
@@ -1572,15 +1571,11 @@ mod tests {
         let mut bound: Link = bson::from_document(current).unwrap();
         assert_eq!(bound.secret_context_versions.get(RECEIVER_SECRET), Some(&3));
         bound.user_id = Uuid::new_v4().to_string();
-        let error = deliver_direct(&reqwest::Client::new(), &keys, &bound)
-            .await
-            .unwrap_err();
+        let error = deliver_direct(&keys, &bound).await.unwrap_err();
         assert_eq!(error.reason, "secret_unavailable");
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         bound.user_id = terminal.user_id.clone();
-        deliver_direct(&reqwest::Client::new(), &keys, &bound)
-            .await
-            .unwrap();
+        deliver_direct(&keys, &bound).await.unwrap();
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests[0].body, requests[1].body);
         for request in requests {

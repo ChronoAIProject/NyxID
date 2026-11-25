@@ -722,12 +722,13 @@ pub(super) async fn publish_classified(
     reader: &impl OrnnReader,
     base: Option<&SkillPin>,
     bytes: Vec<u8>,
+    dispatch: skills::PublicationDispatch,
 ) -> PublishOutcome {
     let (method, path) = base.map_or_else(
         || (Method::POST, "/api/v1/skills".into()),
         |b| (Method::PUT, format!("/api/v1/skills/{}", b.skill_id)),
     );
-    match reader.classified(method, &path, bytes).await {
+    match reader.publish(method, &path, bytes, dispatch, false).await {
         OrnnOutcome::Ok(body) => {
             let id = serde_json::from_slice::<Value>(&body)
                 .ok()
@@ -784,8 +785,8 @@ pub(super) async fn publish_classified(
                 {
                     return PublishOutcome::VersionConflict { status };
                 }
-                OrnnCode::SkillNameExists if base.is_none() => {
-                    return PublishOutcome::VersionConflict { status };
+                OrnnCode::SkillNameExists if base.is_none() && status == 409 => {
+                    Some(FailureCode::OrnnNameTaken)
                 }
                 _ => None,
             };
@@ -846,8 +847,8 @@ pub(super) async fn reconcile(
         verify(reader, actor, p, id).await?;
         return Ok(id.into());
     }
-    // The unique server-generated name embeds the operation UUID. Ornn search
-    // indexes names, descriptions and tags, not arbitrary package metadata.
+    // Authored names can also occur in other packages' descriptions and tags.
+    // Keep the private search for older registries and existing proxy policies.
     let result = data(
         reader,
         &format!(
@@ -859,8 +860,35 @@ pub(super) async fn reconcile(
     let items = result["items"]
         .as_array()
         .ok_or(PublicationError::Ambiguous(None))?;
-    if items.len() > 20 || result["totalPages"].as_u64().is_some_and(|n| n > 1) {
+    if items.len() > 20 {
         return Err(PublicationError::Ambiguous(None));
+    }
+    if result["totalPages"].as_u64().is_some_and(|n| n > 1)
+        || !items.iter().any(|item| item["name"] == p.name)
+    {
+        // The GET by unique name also works while keyword search is catching
+        // up. It is only a locator. Verify the exact private package by GUID.
+        let locator = reader.version_by_name(&p.name, &p.version, false).await;
+        let bytes = match locator {
+            // Older registries and installations with a GUID-only policy
+            // may not provide this read. Absence never releases the fence.
+            OrnnOutcome::Response { status: 404, .. } => {
+                return Err(PublicationError::Ambiguous(Some(404)));
+            }
+            outcome => read_result(outcome)?,
+        };
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| malformed())?;
+        let meta = value.get("data").ok_or_else(malformed)?;
+        private_owner(meta, actor)?;
+        if text(meta, "name")? != p.name
+            || text(meta, "version")? != p.version
+            || text(meta, "skillHash")? != p.sha256
+        {
+            return Err(PublicationError::Integrity);
+        }
+        let id = text(meta, "guid")?;
+        verify(reader, actor, p, id).await?;
+        return Ok(id.into());
     }
     let mut ids = std::collections::BTreeSet::new();
     let mut mismatched = false;
@@ -1087,7 +1115,8 @@ mod tests {
             publish_classified(
                 &ClassifiedReader(OrnnCode::BreakingChangeWithoutMajorBump, 409),
                 Some(&base),
-                vec![]
+                vec![],
+                skills::PublicationDispatch::for_test()
             )
             .await,
             PublishOutcome::Refused {
@@ -1100,7 +1129,8 @@ mod tests {
             publish_classified(
                 &ClassifiedReader(OrnnCode::SkillVersionExists, 409),
                 Some(&base),
-                vec![]
+                vec![],
+                skills::PublicationDispatch::for_test()
             )
             .await,
             PublishOutcome::VersionConflict { status: 409 }
@@ -1109,7 +1139,8 @@ mod tests {
             publish_classified(
                 &ClassifiedReader(OrnnCode::VersionNotIncremented, 409),
                 Some(&base),
-                vec![]
+                vec![],
+                skills::PublicationDispatch::for_test()
             )
             .await,
             PublishOutcome::VersionConflict { status: 409 }
@@ -1118,7 +1149,8 @@ mod tests {
             publish_classified(
                 &ClassifiedReader(OrnnCode::Unknown, 400),
                 Some(&base),
-                vec![]
+                vec![],
+                skills::PublicationDispatch::for_test()
             )
             .await,
             PublishOutcome::Uncertain { status: Some(400) }
@@ -1127,13 +1159,20 @@ mod tests {
             publish_classified(
                 &ClassifiedReader(OrnnCode::Unknown, 503),
                 Some(&base),
-                vec![]
+                vec![],
+                skills::PublicationDispatch::for_test()
             )
             .await,
             PublishOutcome::Uncertain { status: Some(503) }
         ));
         assert!(matches!(
-            publish_classified(&TimedOutReader, Some(&base), vec![]).await,
+            publish_classified(
+                &TimedOutReader,
+                Some(&base),
+                vec![],
+                skills::PublicationDispatch::for_test()
+            )
+            .await,
             PublishOutcome::Uncertain { status: None }
         ));
     }

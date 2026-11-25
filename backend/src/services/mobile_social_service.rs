@@ -120,10 +120,13 @@ pub(crate) async fn issue_code(
         },
         expires_at: Utc::now() + Duration::seconds(60),
     };
-    db.collection::<MobileSocialDelivery>(MobileSocialDelivery::COLLECTION_NAME)
-        .insert_one(delivery)
-        .write_concern(WriteConcern::majority())
-        .await?;
+    super::erasure_admission::insert_owned(
+        db,
+        MobileSocialDelivery::COLLECTION_NAME,
+        user_id,
+        &delivery,
+    )
+    .await?;
     Ok(code)
 }
 
@@ -159,10 +162,9 @@ pub(crate) async fn redeem(
         "mobile-social-delivery-v1:{code_hash}:{challenge}:{}",
         row.user_id
     );
-    let payload = Zeroizing::new(
-        keys.decrypt_with_aad(&row.ciphertext.bytes, aad.as_bytes())
-            .await?,
-    );
+    let payload = keys
+        .decrypt_with_aad(&row.ciphertext.bytes, aad.as_bytes())
+        .await?;
     let pending: PendingDelivery = bson::from_slice(&payload)
         .map_err(|_| AppError::Internal("Invalid stored mobile sign-in response".into()))?;
     let mut claim_filter = filter;

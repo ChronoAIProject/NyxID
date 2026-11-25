@@ -209,7 +209,7 @@ export function DashboardPage() {
             label={translateUi("Approvals")}
             value={translateUi("Configure")}
             loading={false}
-            href="/approvals/settings"
+            href="/settings?tab=notifications"
           />
         </div>
 
@@ -834,7 +834,7 @@ function ApprovalsCard({
       <p className="text-14 text-muted-foreground">{translateUi("Approve AI agent access via Telegram or the NyxID mobile app.")}</p>
       <div className="flex flex-col gap-2">
         <Button asChild>
-          <Link to="/approvals/settings">
+          <Link to="/settings" search={{ tab: "notifications" }}>
             <ButtonIcon>
               <svg
                 className="h-3 w-3"

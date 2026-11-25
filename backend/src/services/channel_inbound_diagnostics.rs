@@ -1,4 +1,4 @@
-//! Bounded metadata for authenticated X ingress. Observation is not delivery.
+//! Bounded metadata for authenticated channel ingress. Observation is not delivery.
 use crate::models::channel_bot::{COLLECTION_NAME, ChannelBot};
 use bson::{Document, doc};
 
@@ -140,10 +140,50 @@ pub(crate) async fn checked<T, E>(
     result
 }
 
+pub(crate) async fn whatsapp_outcome(
+    db: &mongodb::Database,
+    bot_id: &str,
+    owner: &str,
+    outcome: Outcome,
+) {
+    let code = match outcome {
+        Outcome::NoRoute => "whatsapp_no_route",
+        Outcome::RouteUnavailable | Outcome::CallbackKeyUnavailable => "whatsapp_route_unavailable",
+        Outcome::AuthorityChanged => "whatsapp_authority_changed",
+        Outcome::AdmissionRefused => "whatsapp_admission_refused",
+        Outcome::CallbackRefused => "whatsapp_callback_refused",
+        Outcome::CallbackFailed => "whatsapp_callback_failed",
+        Outcome::StorageUnavailable
+        | Outcome::ReplyTokenUnavailable
+        | Outcome::ProcessingFailed => "whatsapp_processing_failed",
+        Outcome::Busy => "whatsapp_turn_busy",
+        Outcome::SenderRefused | Outcome::PolicyRefused | Outcome::OwnerAbsent => {
+            "whatsapp_policy_refused"
+        }
+        Outcome::EmptyContent => "whatsapp_content_unavailable",
+        Outcome::TurnStarted => "whatsapp_turn_started",
+        Outcome::Queued => "whatsapp_turn_queued",
+        _ => return,
+    };
+    if write_counter(db, bot_id, owner, code, true, None)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            bot_id,
+            code,
+            "WhatsApp inbound diagnostic write unavailable"
+        );
+    }
+}
+
 /// Persist the reason even when no ChannelMessage was admitted. Counts are
 /// bounded by the vocabulary, not event IDs. Existing workers preserve these
 /// additive paths. A lost diagnostic write is logged without database prose.
 pub(crate) async fn record(db: &mongodb::Database, bot: &ChannelBot, outcome: Outcome) {
+    if bot.platform == "whatsapp" {
+        return whatsapp_outcome(db, &bot.id, &bot.user_id, outcome).await;
+    }
     if bot.platform != "x" {
         return;
     }
@@ -221,6 +261,31 @@ async fn write_counter(
         .find_one_and_update(doc! {"_id":bot_id,"user_id":owner}, vec![doc! {"$set":set}])
         .projection(doc! {"diagnostics.inbound_outcomes":1})
         .await
+}
+
+/// Use the authenticated context of this inbound turn. Its org owns the bot.
+pub(crate) async fn org_guest_turn(
+    db: &mongodb::Database,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    code: &'static str,
+) {
+    let Some(source) = turn.channel_context.as_ref().filter(|source| source.guest) else {
+        return;
+    };
+    let Some(org) = source
+        .org_origin
+        .as_ref()
+        .and_then(|o| o.org_execution.as_ref())
+        .filter(|e| e.guest)
+    else {
+        return;
+    };
+    if write_counter(db, &source.channel_bot_id, &org.org_id, code, true, None)
+        .await
+        .is_err()
+    {
+        tracing::warn!(bot_id=%source.channel_bot_id, code, "Guest turn diagnostic write unavailable");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -301,6 +366,15 @@ pub(crate) async fn for_channel(
     row: &crate::models::nyxbot_channel::NyxbotChannel,
     outcome: Outcome,
 ) {
+    if row.platform == "whatsapp" {
+        return whatsapp_outcome(
+            db,
+            &row.channel_bot_id,
+            row.bot_owner_id.as_deref().unwrap_or(&row.user_id),
+            outcome,
+        )
+        .await;
+    }
     if row.platform != "x" {
         return;
     }
@@ -377,7 +451,11 @@ pub(crate) fn recommendation(code: &str) -> Option<super::channel_bot_health::Re
             "reconnect",
             "The X account connection could not be used. Check connection status and required permissions; reconnect if revoked, then Verify and send a new message.",
         ),
-        "x_route_missing" | "x_route_unavailable" | "x_callback_key_unavailable" => (
+        "whatsapp_no_route"
+        | "whatsapp_route_unavailable"
+        | "x_route_missing"
+        | "x_route_unavailable"
+        | "x_callback_key_unavailable" => (
             "verify",
             "No usable agent route was available for this inbound event. Check the linked agent, active route and its API key, then send a new message.",
         ),
@@ -389,11 +467,13 @@ pub(crate) fn recommendation(code: &str) -> Option<super::channel_bot_health::Re
             "verify",
             "Organization authority could not be checked. Retry with a new message once access/readiness is restored; no authority was bypassed.",
         ),
-        "x_callback_refused" => (
+        "whatsapp_callback_refused" | "x_callback_refused" => (
             "verify",
             "The linked receiver acknowledged the callback but refused to admit it. Check the message's callback disposition and the receiver's sender, chat and content policies before sending a new message.",
         ),
-        "x_callback_failed"
+        "whatsapp_processing_failed"
+        | "whatsapp_callback_failed"
+        | "x_callback_failed"
         | "x_processing_failed"
         | "x_reply_token_unavailable"
         | "x_storage_unavailable" => (
@@ -404,11 +484,18 @@ pub(crate) fn recommendation(code: &str) -> Option<super::channel_bot_health::Re
             "contact_admin",
             "An authenticated X event had an unsupported or invalid shape. An administrator should check the event type and integration version; do not share message bodies or credentials.",
         ),
+        "whatsapp_content_unavailable" => (
+            "none",
+            "NyxBot could not read this WhatsApp message. Send a new text message.",
+        ),
         "x_content_unavailable" => (
             "contact_admin",
             "The X event contained no readable message content. Send a text-only unencrypted DM if available, or use NyxID web. An empty event alone does not prove encryption.",
         ),
-        "x_chat_policy_refused" | "x_owner_absent" | "x_sender_refused" => (
+        "whatsapp_policy_refused"
+        | "x_chat_policy_refused"
+        | "x_owner_absent"
+        | "x_sender_refused" => (
             "verify",
             "The sender or chat policy did not admit this message. Verify the sender account with a fresh owner link and check who may talk to the bot. Display names are not proof of identity.",
         ),
@@ -416,11 +503,11 @@ pub(crate) fn recommendation(code: &str) -> Option<super::channel_bot_health::Re
             "verify",
             "This message exceeded the bot-message budget. Check who may talk to the bot and its automation activity before sending a new message.",
         ),
-        "x_turn_busy" => (
+        "whatsapp_turn_busy" | "x_turn_busy" => (
             "none",
             "This message was not accepted because the chat was busy. Send a new message after the current work finishes.",
         ),
-        "x_admission_refused" => (
+        "whatsapp_authority_changed" | "whatsapp_admission_refused" | "x_admission_refused" => (
             "verify",
             "This inbound event was already claimed or its live-owner admission fence refused it. Check activity and owner status before sending a new message; it was not dispatched again.",
         ),

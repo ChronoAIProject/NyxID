@@ -68,6 +68,7 @@ pub struct ActivityItem {
     pub content_availability: String,
     pub reply_supported: Option<bool>,
     pub callback_status: Option<String>,
+    pub callback_failure_reason: Option<String>,
     pub received_at: String,
     pub occurred_at: Option<String>,
 }
@@ -94,6 +95,7 @@ impl From<ChannelMessage> for ActivityItem {
                 .map_or("unknown", |value| value.content_availability.as_str())
                 .into(),
             reply_supported: activity.as_ref().map(|value| value.reply_supported),
+            callback_failure_reason: message.callback_failure_reason.clone(),
             callback_status: message.callback_status,
             received_at: message.created_at.to_rfc3339(),
             occurred_at: activity

@@ -227,6 +227,9 @@ fn parse_post(body: &Value, own_id: &str) -> AppResult<Vec<InboundMessage>> {
         .filter(|id| numeric_id(id))
         .ok_or_else(protocol_error)?;
     let mut normalized = post.clone();
+    if let Some(full_text) = post["note_tweet"]["text"].as_str() {
+        normalized["text"] = json!(full_text);
+    }
     normalized["sender_id"] = json!(author);
     normalized["dm_conversation_id"] = json!(conversation);
     let mut message =

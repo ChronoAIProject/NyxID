@@ -3080,6 +3080,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
             chat_delivery: Some(delivery),
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: Some(false),
             pages: None,
         });
@@ -3488,6 +3489,7 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
         "block",
         &mut String::new(),
         &mut None,
+        None,
     )
     .await
     .unwrap();
@@ -3521,7 +3523,8 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
             &mut events,
             "block",
             &mut String::new(),
-            &mut None
+            &mut None,
+            None,
         )
         .await
         .is_err()

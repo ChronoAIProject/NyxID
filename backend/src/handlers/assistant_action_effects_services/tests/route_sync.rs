@@ -38,7 +38,7 @@ impl Routes {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "route-sync".into();
         catalog.auth_method = "none".into();
-        catalog.base_url = "https://example.invalid".into();
+        catalog.base_url = "https://127.0.0.1".into();
         db.collection::<crate::models::downstream_service::DownstreamService>(CATALOG)
             .insert_one(&catalog)
             .await

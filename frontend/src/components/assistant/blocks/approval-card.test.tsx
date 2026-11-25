@@ -106,7 +106,39 @@ describe("ApprovalCard", () => {
     expect(screen.getByText("lark-bot")).toBeInTheDocument();
     expect(screen.getByText("nyxid_ag_...7f3d")).toBeInTheDocument();
     expect(screen.getByText("per-request approval")).toBeInTheDocument();
-    expect(screen.getByText(/expires in 14 min/)).toBeInTheDocument();
+    expect(screen.getByText("Approve within 840 seconds")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["zh-CN", "请在 10 秒内批准"],
+    ["zh-TW", "請在 10 秒內核准"],
+  ] as const)("renders the remaining seconds in %s", async (language, label) => {
+    await appI18n.loadLanguages(language);
+    render(
+      <CardLanguageContext.Provider value={language}>
+        <ApprovalCard block={{ ...approval(), expires_at: new Date(NOW + 10_000).toISOString() }} onDecide={vi.fn()} />
+      </CardLanguageContext.Provider>,
+    );
+    expect(screen.getByText(label)).toBeVisible();
+  });
+
+  it("disables decisions at the deadline and waits for the recorded decision", () => {
+    const decide = vi.fn();
+    const requestAgain = vi.fn();
+    const block = { ...approval(), expires_at: new Date(NOW + 80_000).toISOString() };
+    const { rerender } = render(<ApprovalCard block={block} onDecide={decide} onRequestAgain={requestAgain} />);
+    act(() => { vi.advanceTimersByTime(70_000); });
+    expect(screen.getByText("Approve within 10 seconds")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve and send" })).toBeEnabled();
+    act(() => { vi.advanceTimersByTime(15_000); });
+    expect(screen.queryByText("Request expired")).toBeNull();
+    expect(screen.queryByText("Nothing was sent.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve and send" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Ask for a new confirmation" })).toBeNull();
+    rerender(<ApprovalCard block={{ ...block, decision: "approved" }} onDecide={decide} />);
+    expect(screen.getByText("Approved")).toBeVisible();
+    expect(screen.queryByText("Nothing was sent.")).toBeNull();
+    expect(decide).not.toHaveBeenCalled();
   });
 
   it("keeps grant approvals purple and explains the broader approval", () => {
@@ -153,6 +185,7 @@ describe("ApprovalCard", () => {
       </TooltipProvider>,
     );
     expect(screen.getByText("Request cancelled")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing was sent.")).toBeNull();
     expect(
       screen.queryByRole("button", { name: /new confirmation/i }),
     ).not.toBeInTheDocument();
@@ -160,10 +193,10 @@ describe("ApprovalCard", () => {
 });
 
 
-it("2072 shows local expiry, a working review link and a real fresh-request action", () => {
+it("shows server-confirmed expiry, a working review link and a real fresh-request action", () => {
   const decide = vi.fn();
   const request = vi.fn();
-  render(<ApprovalCard block={{ ...approval(), expires_at: new Date(NOW + 1).toISOString() }} onDecide={decide} onRequestAgain={request} reviewPath="/assistant/approvals" />);
+  render(<ApprovalCard block={{ ...approval("expired"), expires_at: new Date(NOW + 1).toISOString() }} onDecide={decide} onRequestAgain={request} reviewPath="/assistant/approvals" />);
   act(() => { vi.advanceTimersByTime(30_000); });
   expect(screen.getByText("Request expired")).toBeVisible();
   expect(screen.queryByRole("button", { name: "Approve and send" })).toBeNull();

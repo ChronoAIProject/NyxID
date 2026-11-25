@@ -825,6 +825,9 @@ pub fn failure_reason(
     now: DateTime<Utc>,
 ) -> Option<Box<crate::models::assistant_message::TurnFailureReason>> {
     use crate::models::assistant_message::TurnFailureReason;
+    if error.code == "cancelled" {
+        return None;
+    }
     if is_policy_failure(error.code)
         && let Some(fact) = &turn.model_refusal
     {
@@ -838,11 +841,22 @@ pub fn failure_reason(
             model_route: None,
         }));
     }
-    if error.stage == "guest_setup" && error.code == "guest_model_route_required" {
-        return error
+    if error.stage == "guest_setup"
+        && error.code == "guest_model_route_required"
+        && let Some(reason) = error
             .metadata
             .as_ref()
-            .and_then(|m| m.failure_reason.clone());
+            .and_then(|m| m.failure_reason.clone())
+    {
+        return Some(reason);
+    }
+    if error.origin == engine::TurnErrorOrigin::NyxId && error.upstream_code.is_none() {
+        return Some(Box::new(TurnFailureReason::new(
+            "nyxid",
+            error.stage,
+            error.code,
+            error.http_status,
+        )));
     }
     let model_route = turn
         .model_route_diagnostic
@@ -882,17 +896,18 @@ pub fn failure_reason(
             nyxid_error_code: fact.error_code,
         }));
     }
-    error.upstream_code.as_ref().map(|code| {
-        Box::new(TurnFailureReason {
-            guest_setup_step: None,
-            model_route: model_route.clone(),
-            source: "nyxagent".into(),
-            stage: error.stage.into(),
-            code: code.to_string(),
-            http_status: error.http_status,
-            nyxid_error_code: None,
-        })
-    })
+    Some(Box::new(TurnFailureReason {
+        model_route,
+        ..TurnFailureReason::new(
+            "nyxagent",
+            error.stage,
+            error
+                .upstream_code
+                .as_deref()
+                .unwrap_or("unrecognized_failure"),
+            error.http_status,
+        )
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

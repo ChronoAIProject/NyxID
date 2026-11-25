@@ -995,7 +995,8 @@ async fn finalize_history_in_session(
             })
             .session(&mut *session)
             .await?;
-        let rows: Vec<BillingTopUpSession> = cursor.stream(&mut *session).try_collect().await?;
+        let rows: Vec<BillingTopUpSession> =
+            crate::db::read_documents(&mut cursor, session).await?;
         for row in rows {
             // Old operations lack history_applied. Their receipt
             // already identifies a history write completed before

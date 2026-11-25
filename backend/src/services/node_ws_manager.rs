@@ -1,5 +1,6 @@
 use crate::crypto::secret_json::SecretJson;
 use crate::models::default_request_header::SecretHeaders;
+use nyxid_service_adapters::SecretText;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -96,8 +97,8 @@ pub struct NodeProxyRequest {
     pub service_slug: String,
     pub base_url: String,
     pub method: String,
-    pub path: String,
-    pub query: Option<String>,
+    pub path: SecretText,
+    pub query: Option<SecretText>,
     pub headers: SecretHeaders,
     /// Raw bytes (serialized to base64 in WS message)
     #[serde(default, with = "optional_base64_bytes")]
@@ -284,8 +285,8 @@ pub struct NodeWsProxyRequest {
     pub session_id: String,
     pub service_slug: String,
     pub base_url: String,
-    pub path: String,
-    pub query: Option<String>,
+    pub path: SecretText,
+    pub query: Option<SecretText>,
     pub headers: SecretHeaders,
     pub ws_frame_injections: Vec<WsFrameInjection>,
 }
@@ -503,9 +504,10 @@ pub struct NodeWsManager {
     >,
     /// Proxy request timeout in seconds
     proxy_timeout_secs: u64,
-    /// Maximum concurrent WebSocket connections (authenticated + pending auth)
+    /// Maximum concurrent authenticated WebSocket connections
     max_connections: usize,
-    /// Reservations held from upgrade admission through socket teardown.
+    pending_handshakes: Arc<tokio::sync::Semaphore>,
+    /// Reservations held after authentication through socket teardown.
     connection_reservations: AtomicUsize,
     cancelled_proxy_requests: DashMap<String, std::time::Instant>,
     cluster_dispatch:
@@ -538,9 +540,9 @@ struct WsProxyRequest {
     service_slug: String,
     base_url: String,
     method: String,
-    path: String,
+    path: SecretText,
     #[serde(skip_serializing_if = "Option::is_none")]
-    query: Option<String>,
+    query: Option<SecretText>,
     headers: SecretJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
@@ -600,9 +602,9 @@ struct WsProxyOpen {
     session_id: String,
     service_slug: String,
     base_url: String,
-    path: String,
+    path: SecretText,
     #[serde(skip_serializing_if = "Option::is_none")]
-    query: Option<String>,
+    query: Option<SecretText>,
     headers: SecretJson,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ws_frame_injections: Vec<WsFrameInjection>,
@@ -1288,21 +1290,23 @@ pub fn compute_hmac_signature(
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    let body_b64 = body
-        .map(|b| {
+    let body_b64 = zeroize::Zeroizing::new(
+        body.map(|b| {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(b)
         })
-        .unwrap_or_default();
-
-    let message = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        timestamp,
-        nonce,
-        method,
-        path,
-        query.unwrap_or(""),
-        body_b64,
+        .unwrap_or_default(),
+    );
+    let message = SecretText::from(
+        [
+            timestamp,
+            nonce,
+            method,
+            path,
+            query.unwrap_or(""),
+            &body_b64,
+        ]
+        .join("\n"),
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -1319,25 +1323,27 @@ pub fn compute_http_v2_signature(
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let body = request
-        .body
-        .as_ref()
-        .map(|body| base64::engine::general_purpose::STANDARD.encode(body))
-        .unwrap_or_default();
-    let message = serde_json::json!([
+    let body = zeroize::Zeroizing::new(
+        request
+            .body
+            .as_ref()
+            .map(|body| base64::engine::general_purpose::STANDARD.encode(body))
+            .unwrap_or_default(),
+    );
+    let message = crate::crypto::secret_json::to_secret_string(&[
         "nyxid-node-http.v2",
         timestamp,
         nonce,
-        request.service_id,
-        request.service_slug,
+        &request.service_id,
+        &request.service_slug,
         request.target_id.as_deref().unwrap_or(""),
-        request.base_url,
-        request.method,
-        request.path,
+        &request.base_url,
+        &request.method,
+        request.path.as_str(),
         request.query.as_deref().unwrap_or(""),
-        body,
+        &body,
     ])
-    .to_string();
+    .expect("string fields serialize to JSON");
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
@@ -1644,6 +1650,7 @@ impl NodeWsManager {
             proxy_timeout_secs,
             max_connections,
             connection_reservations: AtomicUsize::new(0),
+            pending_handshakes: Arc::new(tokio::sync::Semaphore::new(32)),
             cancelled_proxy_requests: DashMap::new(),
             cluster_dispatch: std::sync::OnceLock::new(),
         }
@@ -1656,7 +1663,11 @@ impl NodeWsManager {
         let _ = self.cluster_dispatch.set(dispatch);
     }
 
-    /// Total sockets reserved before upgrade, including pending authentication.
+    pub fn try_reserve_handshake(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.pending_handshakes.clone().try_acquire_owned().ok()
+    }
+
+    /// Authenticated sockets that hold an established connection slot.
     pub fn total_connection_count(&self) -> usize {
         self.connection_reservations.load(Ordering::Acquire)
     }
@@ -1666,7 +1677,7 @@ impl NodeWsManager {
         self.max_connections
     }
 
-    /// Atomically reserve one per-replica socket slot before the HTTP upgrade.
+    /// Reserve an established slot after authentication succeeds.
     pub fn try_reserve_connection(self: &Arc<Self>) -> Option<NodeConnectionReservation> {
         let mut current = self.connection_reservations.load(Ordering::Acquire);
         loop {
@@ -2204,7 +2215,7 @@ impl NodeWsManager {
     /// buffered requests, a dispatched upload is never replayed on a fallback.
     pub(crate) async fn proxy_upload(
         self: &Arc<Self>,
-        request: nyxid_machine::Request,
+        request: nyxid_machine::Request<nyxid_service_adapters::secret_json::WireJson>,
         body: axum::body::Body,
         expected_connection_id: Option<&str>,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
@@ -2215,7 +2226,7 @@ impl NodeWsManager {
         let result: Result<ProxyResponseType, NodeProxyFailure> = async {
         use futures::StreamExt;
         let header_timeout = if request.operation == nyxid_machine::Operation::ProxyUpload
-            && request.parameters["git"] == true
+            && request.parameters.0["git"] == true
         {
             nyxid_machine::GIT_UPLOAD_TIMEOUT_SECS
         } else {
@@ -2246,22 +2257,27 @@ impl NodeWsManager {
                 AppError::MachineCapabilityDisabled,
             ));
         }
-        let mut value = serde_json::to_value(request).map_err(|_| {
+        let mut value = SecretJson(serde_json::to_value(&request).map_err(|_| {
             NodeProxyFailure::before_dispatch(AppError::Internal(
                 "Upload metadata encoding failed".into(),
             ))
-        })?;
+        })?);
         value["type"] = serde_json::json!(if value["version"] == 2 {
             "proxy_upload_v2"
         } else {
             "proxy_upload"
         });
+        let opening = crate::crypto::secret_json::to_secret_string(&value).map_err(|_| {
+            NodeProxyFailure::before_dispatch(AppError::Internal(
+                "Upload metadata encoding failed".into(),
+            ))
+        })?;
         let (response_tx, response_rx) = oneshot::channel();
         conn.pending
             .insert(request_id.clone(), PendingRequest::Awaiting(response_tx));
         let sender = conn.tx.clone();
         if sender
-            .try_send(NodeOutboundMessage::Text((value.to_string()).into()))
+            .try_send(NodeOutboundMessage::Text(opening))
             .is_err()
         {
             conn.pending.remove(&request_id);
@@ -4680,15 +4696,17 @@ pub fn compute_ws_proxy_hmac_signature(
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    let message = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        timestamp,
-        nonce,
-        session_id,
-        service_slug,
-        base_url,
-        path,
-        query.unwrap_or("")
+    let message = SecretText::from(
+        [
+            timestamp,
+            nonce,
+            session_id,
+            service_slug,
+            base_url,
+            path,
+            query.unwrap_or(""),
+        ]
+        .join("\n"),
     );
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
@@ -5032,7 +5050,7 @@ mod tests {
                     service_slug: "service".to_string(),
                     base_url: "https://example.test".to_string(),
                     method: "GET".to_string(),
-                    path: "/resource".to_string(),
+                    path: "/resource".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,
@@ -5071,7 +5089,7 @@ mod tests {
                     service_slug: "service".to_string(),
                     base_url: "https://example.test".to_string(),
                     method: "POST".to_string(),
-                    path: "/resource".to_string(),
+                    path: "/resource".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,
@@ -5118,7 +5136,7 @@ mod tests {
                     service_slug: "service".to_string(),
                     base_url: "https://example.test".to_string(),
                     method: "POST".to_string(),
-                    path: "/upload".to_string(),
+                    path: "/upload".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: Some(vec![0; 5]),
@@ -5156,7 +5174,7 @@ mod tests {
                     service_slug: "service".to_string(),
                     base_url: "https://example.test".to_string(),
                     method: "POST".to_string(),
-                    path: "/upload".to_string(),
+                    path: "/upload".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: Some(vec![0; LEGACY_NODE_PROXY_MAX_BODY_SIZE + 1]),
@@ -5621,7 +5639,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "GET".to_string(),
-                    path: "/stream".to_string(),
+                    path: "/stream".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,
@@ -5666,7 +5684,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "POST".to_string(),
-                    path: "/executions".to_string(),
+                    path: "/executions".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: Some(b"{}".to_vec()),
@@ -5697,7 +5715,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "POST".to_string(),
-                    path: "/executions".to_string(),
+                    path: "/executions".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: Some(b"{}".to_vec()),
@@ -5752,7 +5770,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "GET".to_string(),
-                    path: "/stream".to_string(),
+                    path: "/stream".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,
@@ -5820,7 +5838,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "GET".to_string(),
-                    path: "/models".to_string(),
+                    path: "/models".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,
@@ -5878,7 +5896,7 @@ mod tests {
                     service_slug: "demo".to_string(),
                     base_url: "https://api.example.com".to_string(),
                     method: "GET".to_string(),
-                    path: "/models".to_string(),
+                    path: "/models".into(),
                     query: None,
                     headers: (vec![]).into(),
                     body: None,

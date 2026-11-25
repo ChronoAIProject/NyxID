@@ -1522,6 +1522,7 @@ async fn create_key_inner(
             is_active: true,
             created_by: user_id.to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -5632,6 +5633,7 @@ mod tests {
             is_active: true,
             created_by: "system".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -5983,7 +5985,7 @@ mod tests {
                 &user_id,
                 &user_id,
                 None,
-                Some("https://api.example.com"),
+                Some("https://127.0.0.1"),
                 "secret-token",
                 "Race Service",
                 None,
@@ -6004,7 +6006,7 @@ mod tests {
                 &user_id,
                 &user_id,
                 None,
-                Some("https://api.example.com"),
+                Some("https://127.0.0.1"),
                 "secret-token",
                 "Race Service",
                 None,
@@ -6399,7 +6401,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret-token",
             "Custom Service",
             Some("custom-service"),
@@ -6603,7 +6605,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret-token",
             "Header Service",
             Some("header-service"),
@@ -9764,7 +9766,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth Service",
             Some("no-auth-svc"),
@@ -9832,7 +9834,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Cred",
             None,
@@ -10229,7 +10231,7 @@ mod tests {
             &user_id,
             &user_id,
             Some(&catalog.slug),
-            Some("https://custom.example.com/v2"),
+            Some("https://127.0.0.2/v2"),
             "secret",
             "Override EP",
             None,
@@ -10247,7 +10249,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.endpoint.url, "https://custom.example.com/v2");
+        assert_eq!(result.endpoint.url, "https://127.0.0.2/v2");
     }
 
     #[tokio::test]
@@ -10552,7 +10554,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "With Spec",
             Some("with-spec"),
@@ -10604,7 +10606,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Identity Svc",
             Some("identity-svc"),
@@ -10648,7 +10650,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-a.example.com"),
+            Some("https://127.0.0.1"),
             "secret-a",
             "Service A",
             Some("svc-a"),
@@ -10672,7 +10674,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-b.example.com"),
+            Some("https://127.0.0.2"),
             "secret-b",
             "Service B",
             Some("svc-b"),
@@ -10708,7 +10710,7 @@ mod tests {
         // Verify fields on one of them
         let svc_a = keys.iter().find(|k| k.slug == "svc-a").unwrap();
         assert_eq!(svc_a.label, "Service A");
-        assert_eq!(svc_a.endpoint_url, "https://api-a.example.com");
+        assert_eq!(svc_a.endpoint_url, "https://127.0.0.1");
         assert_eq!(svc_a.auth_method, "bearer");
         assert_eq!(svc_a.status, "active");
         assert!(svc_a.is_active);
@@ -10751,7 +10753,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "my-secret",
             "Get Test",
             Some("get-test"),
@@ -10776,7 +10778,7 @@ mod tests {
         assert_eq!(view.id, created.service.id);
         assert_eq!(view.slug, "get-test");
         assert_eq!(view.label, "Get Test");
-        assert_eq!(view.endpoint_url, "https://api.example.com");
+        assert_eq!(view.endpoint_url, "https://127.0.0.1");
         assert_eq!(view.auth_method, "bearer");
         assert_eq!(view.credential_type, "api_key");
         assert_eq!(view.status, "active");
@@ -10800,7 +10802,7 @@ mod tests {
             &user_a,
             &user_a,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "User A Svc",
             Some("user-a-svc"),
@@ -10903,7 +10905,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-a.example.com"),
+            Some("https://127.0.0.1"),
             "secret-a",
             "Keep",
             Some("keep-svc"),
@@ -10927,7 +10929,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-b.example.com"),
+            Some("https://127.0.0.2"),
             "secret-b",
             "Delete",
             Some("delete-svc"),
@@ -11202,7 +11204,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "old-secret",
             "Rotate Test",
             Some("rotate-test"),
@@ -11257,7 +11259,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "Upgrade Test",
             Some("upgrade-test"),
@@ -11416,7 +11418,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "Reject Test",
             Some("reject-test"),
@@ -11467,7 +11469,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "No Changes",
             Some("no-changes"),
@@ -11522,7 +11524,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Active Key",
             Some("active-key"),
@@ -11573,7 +11575,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth",
             Some("no-auth"),
@@ -11617,7 +11619,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth Reconcile",
             Some("noauth-reconcile"),
@@ -11661,7 +11663,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "my-secret",
             "Has Cred Reconcile",
             Some("hascred-reconcile"),
@@ -11888,7 +11890,7 @@ mod tests {
             &user_id,
             &user_id,
             Some("api-supabase"),
-            Some("https://demo.supabase.co"),
+            Some("https://127.0.0.1"),
             "sb_secret_test",
             "Personal Supabase",
             None,
@@ -11906,7 +11908,7 @@ mod tests {
         .await
         .expect("Supabase catalog connection should be created");
 
-        assert_eq!(result.endpoint.url, "https://demo.supabase.co/rest/v1");
+        assert_eq!(result.endpoint.url, "https://127.0.0.1/rest/v1");
         assert_eq!(result.service.auth_method, "header");
         assert_eq!(result.service.auth_key_name, "apikey");
         assert!(result.api_key.is_some());
@@ -12097,7 +12099,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Empty Cred",
             Some("empty-cred"),
@@ -12149,7 +12151,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret-key-value",
             "Query Auth Svc",
             Some("query-auth-svc"),
@@ -12188,7 +12190,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Query Empty Key",
             Some("query-empty-key"),
@@ -12227,7 +12229,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth Revoke",
             Some("noauth-revoke"),

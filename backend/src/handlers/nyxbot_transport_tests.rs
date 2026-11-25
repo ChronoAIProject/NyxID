@@ -247,6 +247,8 @@ async fn org_gateway_refusal_leaves_relay_route_keys_and_settings_unchanged() {
     assert_eq!(after.link_code_hash, before.link_code_hash);
     assert_eq!(after.link_code_expires_at, before.link_code_expires_at);
     assert!(after.pending_agent_api_key_id.is_none() && after.pending_route_api_key_id.is_none());
+    assert!(after.agent_key_ciphertext.is_none());
+    assert!(after.secret_context_versions.is_empty());
     assert!(after.gateway_fallback_at.is_some());
     assert_eq!(
         route(&state, &after).await.agent_api_key_id,
@@ -326,6 +328,7 @@ async fn flag_off_returns_personal_and_org_bots_after_their_active_answer() {
         assert_eq!(off.owner_sender_ids, before.owner_sender_ids);
         assert_eq!(off.private_chats, before.private_chats);
         assert!(off.agent_api_key_id.is_none() && off.agent_key_ciphertext.is_none());
+        assert!(off.secret_context_versions.is_empty());
         assert!(off.gateway_channel_id.is_none() && off.binding_id.is_none());
         let owner = org.as_deref().unwrap_or(OWNER);
         let route = route(&state, &off).await;
@@ -357,6 +360,7 @@ async fn direct_callback_redelivery_uses_the_current_key_after_a_transport_swap(
 
     let (mut state, _, agent) = setup("relay_key_swap").await;
     let first = MockServer::start().await;
+    let _first_origin = crate::services::resource_adapter::register_test_origin(&first.uri());
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(503))
         .expect(1)
@@ -402,7 +406,6 @@ async fn direct_callback_redelivery_uses_the_current_key_after_a_transport_swap(
         config: &state.config,
         jwt_keys: &state.jwt_keys,
         encryption_keys: &state.encryption_keys,
-        http: &state.http_client,
         rate_limiter: &state.per_channel_event_limiter,
     };
     let deliver = || {
@@ -489,12 +492,7 @@ async fn org_gateway_provider_endpoints_reject_live_admin_loss_before_any_delive
         // Initial connect must use the same ownership split as migration.
         let row = linked(&state, Some(&org), "lark").await;
         assert_eq!(row.transport, "gateway");
-        let raw = state
-            .encryption_keys
-            .decrypt(row.agent_key_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
-        let raw = String::from_utf8(raw.to_vec()).unwrap();
+        let raw = decrypt_agent_key(&state, &row).await.unwrap().unwrap();
         state
             .db
             .collection::<OrgMembership>(MEMBERSHIPS)
@@ -986,12 +984,7 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
             "accepted gateway ownership must retire the old relay resume cursor"
         );
         if !refused {
-            let raw = state
-                .encryption_keys
-                .decrypt(on.agent_key_ciphertext.as_ref().unwrap())
-                .await
-                .unwrap();
-            let raw = Zeroizing::new(String::from_utf8(raw.to_vec()).unwrap());
+            let raw = decrypt_agent_key(&state, &on).await.unwrap().unwrap();
             let ensured = put_conversation(
                 State(state.clone()),
                 Path((on.binding_id.clone().unwrap(), PARTITION.into())),
@@ -1495,4 +1488,67 @@ async fn discord_2323_create_503_recovers_record_and_relay_without_repeating_cre
     server.verify().await;
     agent.abort();
     state.db.drop().await.unwrap();
+}
+
+#[path = "nyxbot_mixed_channel_keys.rs"]
+mod mixed_keys;
+
+#[tokio::test]
+async fn gateway_release_and_channel_key_rewrap_preserve_the_winning_retirement() {
+    for migrate_first in [false, true] {
+        let (mut state, _, upstream) = setup("channel_key_retirement").await;
+        let org = add_org(&state).await;
+        state.config.contextual_record_writes = false;
+        state.encryption_keys = Arc::new(crate::crypto::aes::EncryptionKeys::from_config(
+            &state.config,
+        ));
+        let (_, gateway) = mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
+        set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
+        let row = Box::pin(linked(&state, Some(&org), "lark")).await;
+        assert_eq!(row.transport, "gateway");
+        let filter = doc! {"_id":&row.id};
+        let rows = state.db.collection::<bson::Document>(CHANNELS);
+        let source = rows.find_one(filter.clone()).await.unwrap().unwrap();
+        let keys = crate::test_utils::test_encryption_keys();
+        if migrate_first {
+            assert!(
+                channel_key::migrate(&state.db, &keys, &source)
+                    .await
+                    .unwrap()
+            );
+            let rebound = load_channel(&state, OWNER, &row.id).await.unwrap();
+            let opened = channel_key::open(&keys, &rebound).await.unwrap().unwrap();
+            assert_eq!(
+                sha256_hex(opened.as_bytes()),
+                key_service::get_api_key(
+                    &state.db,
+                    OWNER,
+                    row.agent_api_key_id.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .key_hash
+            );
+        }
+        Box::pin(disconnect(&state, OWNER, &row.id)).await.unwrap();
+        let retired = rows.find_one(filter.clone()).await.unwrap().unwrap();
+        assert_eq!(retired.get_str("status"), Ok("disconnected"));
+        assert!(!retired.contains_key(channel_key::FIELD));
+        assert!(
+            retired
+                .get_document("secret_context_versions")
+                .ok()
+                .is_none_or(|map| !map.contains_key(channel_key::FIELD))
+        );
+        assert!(
+            !channel_key::migrate(&state.db, &keys, &source)
+                .await
+                .unwrap()
+        );
+        assert!(retired == rows.find_one(filter).await.unwrap().unwrap());
+        inactive_key(&state, &org, &row.route_api_key_id).await;
+        inactive_key(&state, OWNER, row.agent_api_key_id.as_deref().unwrap()).await;
+        gateway.abort();
+        upstream.abort();
+    }
 }

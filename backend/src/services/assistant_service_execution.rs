@@ -1014,7 +1014,7 @@ fn execution_projection_digest(
         "auth_key_name": target.auth_key_name, "auth_scheme": target.service.auth_scheme,
         "custom_user_agent": target.service.custom_user_agent, "category": target.service.service_category,
         "requires_user_credential": target.service.requires_user_credential, "credential": credential.then(|| held_credential_fingerprint(target.credential.as_bytes())),
-        "catalog_headers": target.catalog_default_headers, "connection_headers": target.user_service_default_headers,
+        "catalog_headers": target.catalog_header_binding(std::convert::identity), "connection_headers": target.user_service_default_headers,
         "identity": [target.service.identity_propagation_mode.clone(), target.service.delegation_token_scope.clone()],
         "identity_fields": [target.service.identity_include_user_id, target.service.identity_include_email, target.service.identity_include_name,
             target.service.forward_access_token, target.service.inject_delegation_token],

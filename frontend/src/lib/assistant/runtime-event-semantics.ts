@@ -87,6 +87,12 @@ export type RuntimeToolCallInfo = {
   result?: string;
   error?: string;
   failure?: { readonly reason?: string; readonly kind: string; readonly status?: number } | null;
+  memoryRecovery?: {
+    readonly failed_activity_id: string;
+    readonly part: number;
+    readonly total: number;
+    readonly committed: boolean;
+  } | null;
 };
 
 export type RuntimeToolApprovalRequestInfo = {
