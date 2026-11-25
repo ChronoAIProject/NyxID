@@ -119,6 +119,8 @@
   "CMA resource status updated.": "CMA 资源状态已更新。",
   "CMA will resume the environment. Task continuation depends on each Agent’s state.": "CMA 将恢复该环境。任务能否继续取决于每个智能体的状态。",
   "CMA · Last active ": "CMA · 上次活动 ",
+  "Cancel a pending covered creation. CMA must confirm its terminal outcome before this account slot can be released.": "取消尚未完成且有创建凭证的操作。CMA 必须确认最终结果后才能释放此账户名额。",
+  "Cancel creation": "取消创建",
   "Cancel invitation": "取消邀请",
   "Changes apply everywhere this agent appears.": "更改会应用到此智能体出现的所有地方。",
   "Changes existing": "会更改现有内容",

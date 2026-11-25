@@ -27,6 +27,8 @@ pub(crate) enum Change {
     Associate(CmaSandbox),
     Release,
     ReleaseEmptyInventory(Vec<String>),
+    CoveredAbsent(Option<String>),
+    CoveredCreated(CmaSandbox, Option<String>),
     ConfirmRetirement(CmaSandbox),
 }
 
@@ -121,6 +123,44 @@ async fn commit_with_actor(
                     apply_creation_change(row, &mut next, &CreationChange::NoResource)?;
                     row.released_by_inventory = true;
                 }
+                Change::CoveredAbsent(operation) => {
+                    let row = creation.as_mut().ok_or_else(drift)?;
+                    if row.covered_key.is_none() || !current.occupies_account_slot
+                        || current.cma_sandbox_id.is_some() || row.cma_sandbox_id.is_some()
+                        || row.cma_agent_id.is_some() || row.submission_state == "confirmed"
+                        || row.operation_id.as_deref().is_some_and(|id| Some(id) != operation.as_deref())
+                        || current.operation_id.as_deref().is_some_and(|id| Some(id) != operation.as_deref())
+                    { return Err(drift()); }
+                    if let Some(operation) = operation { bind_id(&mut row.operation_id, operation)?; }
+                    sandboxes::apply_no_resource_confirmation(&mut next,row.sandbox_generation,&row.idempotency_key,&row.request_hash,Utc::now())?;
+                    row.submission_state = "confirmed_not_created".into();
+                    row.request_ciphertext = None;
+                    row.request_context_version = None;
+                    row.updated_at = Utc::now();
+                    row.revision = row.revision.checked_add(1).ok_or_else(drift)?;
+                    next.operation_id = row.operation_id.clone();
+                },
+                Change::CoveredCreated(remote, operation) => {
+                    let row = creation.as_mut().ok_or_else(drift)?;
+                    if row.covered_key.is_none() || !row.creates_sandbox || !current.occupies_account_slot
+                        || current.idempotency_key.as_deref() != Some(row.idempotency_key.as_str())
+                        || current.request_hash.as_deref() != Some(row.request_hash.as_str())
+                        || row.submission_state == "confirmed_not_created"
+                        || remote.owner_id.as_deref() != Some(current.user_id.as_str())
+                        || current.cma_sandbox_id.as_deref().is_some_and(|id| id != remote.id)
+                        || row.cma_sandbox_id.as_deref().is_some_and(|id| id != remote.id)
+                        || current.operation_id.as_deref().is_some_and(|id| Some(id) != operation.as_deref())
+                        || row.operation_id.as_deref().is_some_and(|id| Some(id) != operation.as_deref())
+                    { return Err(drift()); }
+                    if let Some(operation) = operation { bind_id(&mut row.operation_id, operation)?; }
+                    next = sandboxes::fold_created_observation(db, tx, &current, remote).await?;
+                    next.operation_id = row.operation_id.clone();
+                    if row.path == "/api/v1/sandboxes" || remote.state == SandboxObservationState::Retired {
+                        apply_creation_change(row,&mut next,&CreationChange::Confirm{sandbox_id:remote.id.clone(),agent_id:None})?;
+                    } else {
+                        apply_creation_change(row,&mut next,&CreationChange::Receipt(CreationReceipt::Sandbox(remote.id.clone())))?;
+                    }
+                },
                 Change::Release => {
                     let row = creation.as_mut().ok_or_else(drift)?;
                     if row.submission_state != "confirmed_not_created" || row.released_by_inventory || current.cma_sandbox_id.is_some() {
@@ -132,6 +172,7 @@ async fn commit_with_actor(
             let mut set = sandboxes::observation_set(&next)?;
             set.insert("retire_requested_at", next.retire_requested_at.map(bson::DateTime::from_chrono));
             set.insert("label", &next.label);
+            set.insert("operation_id", next.operation_id.clone());
             let saved = parents.find_one_and_update(sandboxes::observation_filter(&current), doc! {"$set":set,"$inc":{"agent_reference_version":1_i64}})
                 .return_document(ReturnDocument::After).session(&mut *tx).await?.ok_or_else(drift)?;
             if let (Some(expected), Some(next)) = (expected.as_ref(), creation.as_ref())
@@ -210,4 +251,133 @@ pub(crate) async fn recover_receipt(
         return Ok("creation_identity_not_observable_without_replay");
     }
     Ok("creation_confirmed")
+}
+
+/// Observe the immutable covered receipt before settling through both row revisions.
+pub(crate) async fn recover_covered(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    parent: &AssistantCmaSandbox,
+    creation: &AssistantCmaCreation,
+) -> AppResult<&'static str> {
+    use super::creation_outcome::Evidence;
+    require_parent(creation, parent)?;
+    if !parent.occupies_account_slot || !creation.creates_sandbox {
+        return Ok("unchanged");
+    }
+    let (change, reason) = match super::creation_outcome::lookup(gateway, creation).await? {
+        Evidence::Absent { operation } => (
+            Change::CoveredAbsent(operation),
+            "creation_confirmed_not_created",
+        ),
+        Evidence::Created { sandbox, operation } => {
+            let remote = super::super::assistant_cma_reservation_service::exact_sandbox(
+                gateway,
+                &parent.user_id,
+                &sandbox,
+            )
+            .await?;
+            if parent.cma_sandbox_id.as_deref() == Some(&sandbox)
+                && remote.state != SandboxObservationState::Retired
+            {
+                return recover_receipt(db, gateway, creation).await;
+            }
+            (
+                Change::CoveredCreated(remote, operation),
+                "creation_confirmed",
+            )
+        }
+        Evidence::Progress => return Ok("creation_in_progress"),
+        Evidence::Unknown => return Ok("creation_outcome_unknown"),
+    };
+    let expected_sandbox = match &change {
+        Change::CoveredCreated(remote, _) => Some(remote.id.clone()),
+        _ => None,
+    };
+    let expected_operation = match &change {
+        Change::CoveredCreated(_, operation) | Change::CoveredAbsent(operation) => {
+            operation.clone()
+        }
+        _ => None,
+    };
+    let result = commit_recovery(db,parent,Some(creation),change,serde_json::json!({
+        "reservation_id":parent.id,"owner_id":parent.user_id,"cma_service_id":parent.cma_service_id,
+        "generation":parent.generation,"action":"covered_creation_lookup","result":reason
+    })).await;
+    match result {
+        Ok(_) => Ok(reason),
+        Err(error) => {
+            // The transaction may have committed before its acknowledgement was lost.
+            let durable = super::super::transaction_service::durable_database(db);
+            let observed = sandboxes::get_owned(&durable, &parent.user_id, &parent.id).await?;
+            let saved = durable
+                .collection::<AssistantCmaCreation>(COLLECTION_NAME)
+                .find_one(creation_filter(creation))
+                .await?;
+            if observed.generation == parent.generation
+                && saved.as_ref().is_some_and(|row| {
+                    row.revision > creation.revision
+                        && row.operation_id == expected_operation
+                        && ((reason == "creation_confirmed_not_created"
+                            && row.submission_state == "confirmed_not_created"
+                            && !observed.occupies_account_slot)
+                            || (reason == "creation_confirmed"
+                                && row.cma_sandbox_id.is_some()
+                                && row.cma_sandbox_id == expected_sandbox
+                                && row.cma_sandbox_id == observed.cma_sandbox_id))
+                })
+            {
+                Ok(reason)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Explicit owner action. An uncertain cancellation never releases a reservation.
+pub(crate) async fn cancel_covered(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    owner: &str,
+    id: &str,
+    generation: i64,
+) -> AppResult<sandboxes::SandboxCommandDto> {
+    let db = &super::super::transaction_service::durable_database(db);
+    let parent = sandboxes::get_owned(db, owner, id).await?;
+    sandboxes::require_generation(&parent, generation)?;
+    let creation = creation_for_sandbox(db, &parent).await?.ok_or_else(drift)?;
+    require_parent(&creation, &parent)?;
+    if creation.covered_key.is_none() {
+        return Err(AppError::Conflict("This creation predates durable evidence; recover the original request or exact Sandbox retirement".into()));
+    }
+    if !parent.occupies_account_slot && creation.submission_state == "confirmed_not_created" {
+        return Ok(sandboxes::SandboxCommandDto {
+            sandbox: sandboxes::SandboxDto::from(&parent),
+            pending: false,
+        });
+    }
+    if parent.cma_sandbox_id.is_some()
+        || creation.cma_sandbox_id.is_some()
+        || creation.cma_agent_id.is_some()
+        || creation.path != "/api/v1/agents"
+    {
+        return Err(drift());
+    }
+    let operation = creation.operation_id.as_deref().ok_or_else(drift)?;
+    verify_creation(gateway, &creation).await?;
+    let result = gateway.cancel_creation(owner, operation).await;
+    // Even an uncertain HTTP reply may have committed cancellation. The lookup
+    // remains the authority, and both original revisions fence settlement.
+    let outcome = recover_covered(db, gateway, &parent, &creation).await;
+    let after = sandboxes::get_owned(db, owner, id).await?;
+    sandboxes::require_generation(&after, generation)?;
+    if after.occupies_account_slot {
+        result?;
+        outcome?;
+    }
+    Ok(sandboxes::SandboxCommandDto {
+        pending: after.occupies_account_slot,
+        sandbox: sandboxes::SandboxDto::from(&after),
+    })
 }

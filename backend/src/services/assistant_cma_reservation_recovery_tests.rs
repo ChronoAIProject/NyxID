@@ -634,3 +634,138 @@ async fn cma_recovery_associated_parent_still_finishes_submitted_agent_journal()
     all_gets(&f).await;
     f.db.drop().await.unwrap();
 }
+
+async fn covered_setup(route: &str, operation: Option<&str>) -> (Fixture, AssistantCmaCreation) {
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let mut f = Fixture::with_management(true).await;
+    f.config.cma_creation_outcome_epoch = Some("e".repeat(32));
+    let body = br#"{"name":"Covered fixture"}"#;
+    let permit = f.admit(&f.target, route, "covered-owner-key", body).await.unwrap();
+    let mut request = f.request(route, "covered-owner-key", body);
+    let creation = permit.creation.as_ref().unwrap();
+    let upstream = creation.covered_key.clone().unwrap();
+    assert_ne!(upstream, creation.idempotency_key);
+    permit.prepare_request(&mut request).await.unwrap();
+    assert_eq!(request.headers()["idempotency-key"], upstream.as_str());
+    let mut saved = f.saved(&creation.id).await;
+    if let Some(operation)=operation {
+        saved=change_creation(&f.db,&saved,CreationChange::Receipt(CreationReceipt::Lifecycle(operation.into()))).await.unwrap();
+    }
+    (f,saved)
+}
+async fn covered_reply(f: &Fixture, c: &AssistantCmaCreation, result: Value) {
+    Mock::given(method("POST")).and(path("/api/v1/sandbox-creation-outcomes/lookup"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(creation_outcome::fixture_response(c,result)))
+        .mount(&f.server).await;
+}
+fn absence(operation: Option<&str>, code: &str) -> Value {
+    json!({"kind":"refused","code":code,"operation_id":operation,"proof_id":"a".repeat(64)})
+}
+
+#[tokio::test]
+async fn covered_creation_without_response_id_settles_and_allows_a_new_key() {
+    let (f,c) = covered_setup("/api/v1/sandboxes",None).await;
+    let before=parent(&f,&c).await;
+    covered_reply(&f,&c,absence(None,"creation_expired")).await;
+    assert_eq!(recovery::recover_one(&f.db,&f.gateway(),&before).await.unwrap(),"creation_confirmed_not_created");
+    let after=parent(&f,&c).await;
+    assert!(!after.occupies_account_slot);
+    assert_eq!(f.saved(&c.id).await.submission_state,"confirmed_not_created");
+    assert!(f.admit(&f.target,"/api/v1/sandboxes","covered-owner-key",br#"{"name":"Covered fixture"}"#).await.is_err());
+    assert!(f.admit(&f.target,"/api/v1/sandboxes","fresh-owner-key",br#"{"name":"Fresh fixture"}"#).await.is_ok());
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn covered_cancellation_waits_for_terminal_evidence_and_replays_idempotently() {
+    let op="1".repeat(32);
+    let (f,c)=covered_setup("/api/v1/agents",Some(&op)).await;
+    let before=parent(&f,&c).await;
+    covered_reply(&f,&c,json!({"kind":"in_progress","operation_id":op})).await;
+    assert_eq!(recovery::recover_one(&f.db,&f.gateway(),&before).await.unwrap(),"creation_in_progress");
+    assert!(parent(&f,&c).await.occupies_account_slot);
+    f.server.reset().await;
+    Mock::given(method("POST")).and(path(format!("/api/v1/agent-lifecycle/{op}/cancel")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":op,"status":"failed"}))).mount(&f.server).await;
+    covered_reply(&f,&c,absence(Some(&op),"creation_cancelled")).await;
+    let gateway=f.gateway();
+    let result=reservation_admin::cancel_covered(&f.db,&gateway,&f.owner,&before.id,before.generation).await.unwrap();
+    assert!(!result.pending);
+    assert!(!parent(&f,&c).await.occupies_account_slot);
+    assert_eq!(f.saved(&c.id).await.operation_id.as_deref(),Some(op.as_str()));
+    let count=f.server.received_requests().await.unwrap().len();
+    assert!(!reservation_admin::cancel_covered(&f.db,&gateway,&f.owner,&before.id,before.generation).await.unwrap().pending);
+    assert_eq!(f.server.received_requests().await.unwrap().len(),count);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn covered_created_receipt_retains_live_slot_and_releases_exact_retired_association() {
+    for status in ["active","retired"] {
+        let (f,c)=covered_setup("/api/v1/sandboxes",None).await;
+        let before=parent(&f,&c).await;
+        covered_reply(&f,&c,json!({"kind":"created","sandbox_id":"sandbox_1","proof_id":"b".repeat(64)})).await;
+        Mock::given(method("GET")).and(path("/api/v1/sandboxes/sandbox_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"sandbox_1","owner":f.owner,"status":status}))).mount(&f.server).await;
+        recovery::recover_one(&f.db,&f.gateway(),&before).await.unwrap();
+        let after=parent(&f,&c).await;
+        assert_eq!(after.cma_sandbox_id.as_deref(),Some("sandbox_1"));
+        assert_eq!(after.occupies_account_slot,status!="retired");
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn covered_unknown_or_mismatched_reply_cannot_release() {
+    let (f,c)=covered_setup("/api/v1/sandboxes",None).await;
+    let before=parent(&f,&c).await;
+    covered_reply(&f,&c,json!({"kind":"unknown","reason":"recovery_required"})).await;
+    assert_eq!(recovery::recover_one(&f.db,&f.gateway(),&before).await.unwrap(),"creation_outcome_unknown");
+    f.server.reset().await;
+    let mut bad=creation_outcome::fixture_response(&c,absence(None,"creation_expired"));
+    bad["identity_digest"]=json!("0".repeat(64));
+    Mock::given(method("POST")).and(path("/api/v1/sandbox-creation-outcomes/lookup"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(bad)).mount(&f.server).await;
+    assert!(recovery::recover_one(&f.db,&f.gateway(),&before).await.is_err());
+    assert!(parent(&f,&c).await.occupies_account_slot);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn covered_recovery_two_replicas_and_stale_generations() {
+    let (f,c)=covered_setup("/api/v1/sandboxes",None).await;
+    let before=parent(&f,&c).await;
+    covered_reply(&f,&c,absence(None,"creation_expired")).await;
+    let left=f.gateway();let right=f.gateway();
+    let (a,b)=tokio::join!(recovery::recover_one(&f.db,&left,&before),recovery::recover_one(&f.db,&right,&before));
+    assert!(a.is_ok() || b.is_ok());
+    assert!(!parent(&f,&c).await.occupies_account_slot);
+    let count=f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc!{"event_type":"cma_sandbox_reservation_recovered"}).await.unwrap();
+    assert_eq!(count,1);
+    f.db.drop().await.unwrap();
+
+    for field in ["generation","agent_reference_version","submission_generation","revision"] {
+        let (f,c)=covered_setup("/api/v1/sandboxes",None).await;
+        let before=parent(&f,&c).await;
+        covered_reply(&f,&c,absence(None,"creation_expired")).await;
+        let (collection,id)=if field=="generation" || field=="agent_reference_version" {(PARENTS,&before.id)} else {(COLLECTION_NAME,&c.id)};
+        f.db.collection::<Document>(collection).update_one(doc!{"_id":id},doc!{"$inc":{field:1_i64}}).await.unwrap();
+        assert!(reservation_admin::recover_covered(&f.db,&f.gateway(),&before,&c).await.is_err());
+        assert!(parent(&f,&c).await.occupies_account_slot);
+        f.db.drop().await.unwrap();
+    }
+}
+
+// Drop the caller's acknowledgement after the exact two-row settlement. A
+// restarted observer with the old snapshot can positively read back the winner.
+#[tokio::test]
+async fn covered_recovery_readback_after_lost_settlement_acknowledgement() {
+    let (f,c)=covered_setup("/api/v1/sandboxes",None).await;
+    let before=parent(&f,&c).await;
+    reservation_admin::commit_recovery(&f.db,&before,Some(&c),reservation_admin::Change::CoveredAbsent(None),json!({"result":"terminal"})).await.unwrap();
+    covered_reply(&f,&c,absence(None,"creation_expired")).await;
+    assert_eq!(reservation_admin::recover_covered(&f.db,&f.gateway(),&before,&c).await.unwrap(),"creation_confirmed_not_created");
+    assert!(!parent(&f,&c).await.occupies_account_slot);
+    assert_eq!(f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc!{"event_type":"cma_sandbox_reservation_recovered"}).await.unwrap(),1);
+    f.db.drop().await.unwrap();
+}

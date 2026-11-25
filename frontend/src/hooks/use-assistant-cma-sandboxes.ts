@@ -121,7 +121,7 @@ interface LifecycleRequest {
 type SandboxCommandRequest = Omit<LifecycleRequest, "idempotencyKey"> &
   (
     | { command: "pause" | "revive"; idempotencyKey: string }
-    | { command: "recover_creation"; idempotencyKey?: never }
+    | { command: "recover_creation" | "cancel_creation"; idempotencyKey?: never }
   );
 export function useCmaSandboxCommand() {
   return useCmaMutation(
@@ -134,7 +134,7 @@ export function useCmaSandboxCommand() {
           method: "POST",
           body: { command, generation },
           headers:
-            command === "recover_creation"
+            (command === "recover_creation" || command === "cancel_creation")
               ? undefined
               : { "Idempotency-Key": idempotencyKey! },
           authorityGuard,

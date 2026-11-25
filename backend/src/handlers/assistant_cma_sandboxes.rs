@@ -33,6 +33,7 @@ pub enum Command {
     Pause,
     Revive,
     RecoverCreation,
+    CancelCreation,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +129,7 @@ pub async fn commands(
         Command::Pause => (Some(sandboxes::SandboxCommand::Pause), "pause"),
         Command::Revive => (Some(sandboxes::SandboxCommand::Revive), "revive"),
         Command::RecoverCreation => (None, "recover_creation"),
+        Command::CancelCreation => (None, "cancel_creation"),
     };
     let result = if let Some(command) = command {
         sandboxes::command(
@@ -138,6 +140,15 @@ pub async fn commands(
             body.generation,
             command,
             idempotency_key(&headers)?,
+        )
+        .await?
+    } else if matches!(body.command, Command::CancelCreation) {
+        crate::services::assistant_cma_admission::reservation_admin::cancel_covered(
+            &state.db,
+            &gateway,
+            &owner,
+            &id,
+            body.generation,
         )
         .await?
     } else {

@@ -45,7 +45,7 @@ import {
 } from "@/schemas/assistant-cma-sandbox";
 import { cn } from "@/lib/utils";
 
-type Action = "rename" | "pause" | "revive" | "retire" | "recover_creation";
+type Action = "rename" | "pause" | "revive" | "retire" | "recover_creation" | "cancel_creation";
 const statusLabels: Record<string, string> = {
   ready: "Running",
   provisioning: "Preparing",
@@ -319,6 +319,11 @@ export function CmaSandboxCard({
               <Button onClick={() => setAction("recover_creation")}>
                 <RefreshCw />{translateUi("Recover creation")}</Button>
             )}
+            {recoveryAvailable && (
+              <Button variant="outline" onClick={() => setAction("cancel_creation")}>
+                {translateUi("Cancel creation")}
+              </Button>
+            )}
             <Button
               disabled={!actionable || !["ready", "paused"].includes(status)}
               onClick={() =>
@@ -386,7 +391,9 @@ function SandboxActionDialog({
       ? "Rename environment"
       : action === "recover_creation"
         ? "Recover creation"
-        : action === "pause"
+        : action === "cancel_creation"
+          ? translateUi("Cancel creation")
+          : action === "pause"
           ? "Pause environment"
           : action === "revive"
             ? "Resume environment"
@@ -410,7 +417,7 @@ function SandboxActionDialog({
           idempotencyKey: key,
         };
         const result =
-          action === "recover_creation"
+          (action === "recover_creation" || action === "cancel_creation")
             ? await command.mutateAsync({
                 id: sandbox.id,
                 generation: sandbox.generation,
@@ -451,6 +458,8 @@ function SandboxActionDialog({
               ? translateUi("This is a local display name. The CMA resource ID stays the same.")
               : action === "recover_creation"
                 ? translateUi("Check or retry the original creation request. This allocation stays reserved until CMA confirms the result.")
+                : action === "cancel_creation"
+                  ? translateUi("Cancel a pending covered creation. CMA must confirm its terminal outcome before this account slot can be released.")
                 : action === "retire"
                   ? translateUi("Permanently remove this environment, all Agents, workspaces and files. Submitting retirement does not mean cleanup or billing has completed.")
                   : action === "pause"

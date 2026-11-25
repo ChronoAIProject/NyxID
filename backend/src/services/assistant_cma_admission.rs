@@ -336,7 +336,7 @@ fn same_request(
 fn creation_filter(row: &AssistantCmaCreation) -> bson::Document {
     let mut filter = doc! {"_id":&row.id,"user_id":&row.user_id,"cma_service_id":&row.cma_service_id,
     "deployment_fingerprint":&row.deployment_fingerprint,"method":&row.method,"path":&row.path,
-    "idempotency_key":&row.idempotency_key,"request_hash":&row.request_hash,
+    "idempotency_key":&row.idempotency_key,"request_hash":&row.request_hash,"covered_key":&row.covered_key,
         "sandbox_ref_id":&row.sandbox_ref_id,"sandbox_generation":row.sandbox_generation};
     filter.insert(
         "submission_generation",
@@ -417,7 +417,7 @@ async fn store_creation(
                 same_request(&previous, candidate)?;
                 if previous.submission_state == "confirmed_not_created" {
                     // Only publish the candidate envelope under the ID used to seal it.
-                    if candidate.id != previous.id {
+                    if candidate.id != previous.id || previous.covered_key.is_some() {
                         return Err(drift());
                     }
                     let mut next = previous.clone();
@@ -713,8 +713,10 @@ async fn change_creation(
     .await
 }
 
+#[path = "assistant_cma_creation_outcome.rs"]
+pub(super) mod creation_outcome;
 #[path = "assistant_cma_reservation_admission.rs"]
-pub(super) mod reservation_admin;
+pub(crate) mod reservation_admin;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn admit(
@@ -856,6 +858,13 @@ pub async fn admit(
             if previous.submission_state == "confirmed" {
                 return Err(completed());
             }
+            if previous.covered_key.is_some()
+                && previous.submission_state == "confirmed_not_created"
+            {
+                return Err(AppError::Conflict(
+                    "CMA creation has settled; use a new Idempotency-Key for a new creation".into(),
+                ));
+            }
         }
         Ok(())
     })();
@@ -929,6 +938,25 @@ pub async fn admit(
             Operation::WorkspaceAgent { id } => Some(id.clone()),
             _ => None,
         };
+        let covered_key = if let Some(previous) = &pending_creation {
+            previous.covered_key.clone()
+        } else if creates_sandbox {
+            config
+                .cma_creation_outcome_epoch
+                .as_deref()
+                .map(|epoch| {
+                    creation_outcome::new_key(
+                        epoch,
+                        owner,
+                        &deployment_fingerprint,
+                        path,
+                        &normalized.hash,
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let candidate = AssistantCmaCreation {
             id,
             user_id: owner.into(),
@@ -937,6 +965,7 @@ pub async fn admit(
             method: method.into(),
             path: path.into(),
             idempotency_key: permit.key.clone().ok_or_else(invalid)?,
+            covered_key,
             request_hash: normalized.hash,
             sandbox_ref_id: sandbox.id.clone(),
             sandbox_generation: sandbox.generation,
@@ -1266,6 +1295,20 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
         }
         Ok(())
     }
+    async fn prepare_request(&self, request: &mut reqwest::Request) -> AppResult<()> {
+        self.before_send(request).await?;
+        if let Some(key) = self
+            .creation
+            .as_ref()
+            .and_then(|row| row.covered_key.as_ref())
+        {
+            request.headers_mut().insert(
+                "idempotency-key",
+                reqwest::header::HeaderValue::from_str(key).map_err(|_| drift())?,
+            );
+        }
+        Ok(())
+    }
     async fn observe_response(&self, response: reqwest::Response) -> AppResult<reqwest::Response> {
         let observes_creation =
             self.creation.is_some() || self.path.starts_with("/api/v1/agent-lifecycle/");
@@ -1327,7 +1370,9 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                     {
                         return Err(error);
                     }
-                } else if let Some(change) = creation_refusal(creation, status.as_u16(), &value) {
+                } else if creation.covered_key.is_none()
+                    && let Some(change) = creation_refusal(creation, status.as_u16(), &value)
+                {
                     change_creation(&self.db, creation, change).await?;
                 }
             } else if status.is_success()
@@ -1549,6 +1594,17 @@ fn recover_occupied_sandbox<'a>(
         {
             return Ok(());
         }
+        if let Some(covered) = reservation_admin::creation_for_sandbox(db, &parent)
+            .await?
+            .filter(|row| row.covered_key.is_some())
+        {
+            reservation_admin::recover_covered(db, gateway, &parent, &covered).await?;
+            let current = sandboxes::get_owned(db, owner, &parent.id).await?;
+            if current.occupies_account_slot {
+                return Err(recovery_slot_occupied());
+            }
+            return Ok(());
+        }
         let recoverable = db
             .collection::<AssistantCmaCreation>(COLLECTION_NAME)
             .find_one(
@@ -1644,6 +1700,19 @@ async fn recover_creation_core(
         .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?;
     require_parent(&creation, &parent)?;
     verify_creation(gateway, &creation).await?;
+    if creation.covered_key.is_some()
+        && !matches!(
+            creation.submission_state.as_str(),
+            "confirmed" | "confirmed_not_created"
+        )
+    {
+        reservation_admin::recover_covered(db, gateway, &parent, &creation).await?;
+        let parent = sandboxes::get_owned(db, owner, id).await?;
+        return Ok(sandboxes::SandboxCommandDto {
+            pending: parent.occupies_account_slot && parent.cma_sandbox_id.is_none(),
+            sandbox: sandboxes::SandboxDto::from(&parent),
+        });
+    }
     if !matches!(
         creation.submission_state.as_str(),
         "confirmed" | "confirmed_not_created"
@@ -2002,6 +2071,7 @@ mod tests {
             method: "POST".into(),
             path: "/api/v1/agents".into(),
             idempotency_key: "original-key".into(),
+            covered_key: None,
             request_hash: "original-hash".into(),
             sandbox_ref_id: "slot".into(),
             sandbox_generation: 1,
