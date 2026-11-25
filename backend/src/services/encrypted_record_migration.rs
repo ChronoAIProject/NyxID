@@ -262,6 +262,7 @@ const REGISTRY: &[Entry] = &[
             "delivery.target_ciphertext",
             "event_context_ciphertext",
             "guest_setup_payload",
+            "response_reply.ciphertext",
         ],
     },
     Entry {
@@ -574,6 +575,9 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
+        Some(previous_labels::EVENT_REPLY_DRAFT_DIGEST) => {
+            project_labels(&row, previous_labels::event_reply_draft())?
+        }
         Some(digest) if previous_labels::META_DIGESTS.contains(&digest) => project_labels(
             &row,
             previous_labels::reconciled().chain(std::iter::once((

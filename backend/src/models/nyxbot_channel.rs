@@ -504,6 +504,8 @@ pub struct NyxbotEvent {
     pub custom_binding_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_context_version: Option<u8>,
     /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is
     /// accepted with its original source before it is bound to an execution turn.
     /// A proven no-turn human Busy attempt may be `retryable`, atomically
@@ -647,6 +649,8 @@ pub struct ChannelTurnDelivery {
     pub claim_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub target_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_context_version: Option<u8>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub target_expires_at: Option<DateTime<Utc>>,
 }

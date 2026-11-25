@@ -159,6 +159,7 @@ async fn accept(
         event_id: event_id.into(),
         relay_message_id: None,
         custom_binding_id: None,
+        event_context_version: None,
         event_context_ciphertext: Some(
             state
                 .encryption_keys
@@ -213,6 +214,7 @@ async fn accept(
         terminal: claim.is_none(),
         answer_delivery: None,
         revision: 0,
+        payload_context_version: None,
         payload_ciphertext: payload.seal(&state.encryption_keys).await?,
         created_at: now,
         expires_at: event.expires_at,
@@ -921,7 +923,7 @@ async fn send_update_impl(
             .event_context_ciphertext
             .as_ref()
             .ok_or_else(unavailable)?;
-        let context: Value = serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
+        let context: Value = serde_json::from_slice(&crate::services::nyxbot_event_record::event_context(&state.encryption_keys, &event, ciphertext).await?)
         .map_err(|_| unavailable())?;
         if !source::provider_context(row, &context) {
             return Err(unavailable());

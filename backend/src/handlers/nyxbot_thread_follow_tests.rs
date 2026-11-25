@@ -840,6 +840,7 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         stream_deadline: Utc::now(),
         checked_at: Utc::now(),
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     });
