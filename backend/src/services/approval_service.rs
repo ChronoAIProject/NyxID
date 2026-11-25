@@ -3042,7 +3042,7 @@ async fn fence_rule_memberships_in_session(
     if !new_ids.is_empty() {
         let count = keys
             .count_documents(
-                doc! {"_id": {"$in": new_ids}, "user_id": owner, "is_active": true,
+                doc! {"_id": {"$in": &new_ids}, "user_id": owner, "is_active": true,
                 "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]},
                 "$or": [{"expires_at": null}, {"expires_at": {"$gt": bson::DateTime::now()}}]},
             )
@@ -7644,6 +7644,7 @@ mod policy_durability_tests {
         Json,
         extract::{Path, Query, State},
     };
+    use uuid::Uuid;
 
     async fn fixture(name: &str) -> (crate::AppState, String, String) {
         let db = connect_transaction_test_database(name).await;
@@ -8034,6 +8035,9 @@ mod policy_durability_tests {
                 .iter()
                 .any(|rule| rule.api_key_ids.contains(&new_key))
         );
+        key_service::rotate_api_key(db, &state.encryption_keys, &owner, &new_key)
+            .await
+            .unwrap();
         let raw_carried = configs
             .find_one(doc! {"_id": &original.id})
             .await
@@ -8060,7 +8064,13 @@ mod policy_durability_tests {
             api_key_mutation_service::TransactionCollisionHook,
             key_service::{self, ApiKeyRotationOutcome},
         };
-        for (create, legacy) in [(true, false), (true, true), (false, false), (false, true)] {
+        for (create, legacy, omit_rules) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (false, true, false),
+            (false, true, true),
+        ] {
             let (state, owner, service) = fixture("policy_rotation_race").await;
             let db = &state.db;
             let predecessor = rotation_key(db, &owner).await;
@@ -8102,7 +8112,7 @@ mod policy_durability_tests {
                     "fixture",
                     Some(false),
                     None,
-                    Some(&rules),
+                    (!omit_rules).then_some(rules.as_slice()),
                     None,
                     test_config_audit(&owner),
                     ConfigWriteOptions {
@@ -8162,6 +8172,42 @@ mod policy_durability_tests {
             ));
             db.drop().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn rotation_does_not_change_organization_policy_rows() {
+        use super::super::key_service;
+        let (state, owner, service) = fixture("policy_org_rotation").await;
+        let db = &state.db;
+        let predecessor = rotation_key(db, &owner).await;
+        // Seed a deliberately invalid historic row. Even such an org row is
+        // outside the personal rule carry, and org authoring is still keyless.
+        db.collection::<Document>(USERS)
+            .update_one(doc! {"_id": &owner}, doc! {"$set": {"user_type": "org"}})
+            .await
+            .unwrap();
+        let configs = db.collection::<Document>(SERVICE_APPROVAL_CONFIGS);
+        let filter = doc! {"user_id": &owner, "service_id": &service};
+        configs
+            .update_one(
+                filter.clone(),
+                doc! {"$set": {"rules": [{"effect": "deny", "api_key_ids": [&predecessor]}]}},
+            )
+            .await
+            .unwrap();
+        let before = configs.find_one(filter.clone()).await.unwrap().unwrap();
+        key_service::rotate_api_key(db, &state.encryption_keys, &owner, &predecessor)
+            .await
+            .unwrap();
+        assert_eq!(configs.find_one(filter).await.unwrap().unwrap(), before);
+        assert_eq!(
+            db.collection::<Document>(crate::models::security_effect_intent::COLLECTION_NAME)
+                .count_documents(doc! {"event.event_type": "service_approval_config_key_rotated"})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
