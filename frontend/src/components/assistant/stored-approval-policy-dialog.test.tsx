@@ -200,3 +200,55 @@ it("keeps ordinary edits and removal but waits on new controls until the fleet r
     expectedRevision: "revision-1",
   });
 });
+
+const apiKeys = [{ id: "agent-a", name: "Agent A" }];
+
+it("keeps key selection unavailable while ordinary unkeyed edits can be saved", async () => {
+  state.ready = false;
+  const user = userEvent.setup();
+  render(
+    <StoredApprovalPolicyDialog config={config} apiKeys={apiKeys} onClose={vi.fn()} />,
+  );
+  for (const checkbox of screen.getAllByRole("checkbox", { name: "Agent A" })) {
+    expect(checkbox).toBeDisabled();
+  }
+  await user.click(screen.getByRole("button", { name: "Save Rules" }));
+  expect(state.save).toHaveBeenCalledWith(
+    expect.objectContaining({ rules: config.rules }),
+  );
+});
+
+it("keeps a stored keyed policy read-only until the fleet reports support", async () => {
+  state.ready = false;
+  const scoped = {
+    ...config,
+    rules: [{ ...config.rules[2]!, api_key_ids: ["agent-a", "deleted"] }],
+  };
+  render(
+    <StoredApprovalPolicyDialog config={scoped} apiKeys={apiKeys} onClose={vi.fn()} />,
+  );
+  expect(screen.getByRole("checkbox", { name: "Agent A" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Agent A" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Remove deleted key" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save Rules" })).toBeDisabled();
+  expect(state.save).not.toHaveBeenCalled();
+});
+
+it("preserves a scoped draft and disables save if readiness drops", async () => {
+  const user = userEvent.setup();
+  const close = vi.fn();
+  const dialog = () => (
+    <StoredApprovalPolicyDialog config={config} apiKeys={apiKeys} onClose={close} />
+  );
+  const { rerender } = render(dialog());
+  await user.click(screen.getAllByRole("checkbox", { name: "Agent A" })[2]!);
+  state.ready = false;
+  rerender(dialog());
+  expect(screen.getAllByRole("checkbox", { name: "Agent A" })[2]).toBeChecked();
+  expect(screen.getByRole("button", { name: "Save Rules" })).toBeDisabled();
+  expect(state.save).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+  state.ready = true;
+  rerender(dialog());
+  expect(screen.getByRole("button", { name: "Save Rules" })).toBeEnabled();
+});

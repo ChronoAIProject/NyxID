@@ -42,6 +42,7 @@ const effectLabels: Record<ApprovalEffect, string> = {
 interface ApprovalPolicyEditorProps {
   readonly exact?: boolean;
   readonly apiKeys?: readonly { readonly id: string; readonly name: string }[];
+  readonly keysEditable?: boolean;
   readonly onSaveExact?: (
     rules: readonly ApprovalRule[],
     defaultEffect: ApprovalEffect | null,
@@ -59,6 +60,7 @@ interface ApprovalPolicyEditorProps {
 export function ApprovalPolicyEditor({
   exact = false,
   apiKeys = [],
+  keysEditable = true,
   onSaveExact,
   approvalMode,
   defaultEffect,
@@ -73,6 +75,10 @@ export function ApprovalPolicyEditor({
     useState<ApprovalEffect | null>(
       exact ? defaultEffect : (defaultEffect ?? "auto_allow"),
     );
+  const canSave =
+    !disabled &&
+    (keysEditable ||
+      !draftRules.some((rule) => (rule.api_key_ids?.length ?? 0) > 0));
 
   function updateRule(index: number, update: Partial<ApprovalRule>) {
     setDraftRules((current) =>
@@ -145,6 +151,7 @@ export function ApprovalPolicyEditor({
         <Label htmlFor={defaultId}>{translateUi("Default")}</Label>
         <Select
           value={draftDefaultEffect ?? "legacy"}
+          disabled={exact && disabled}
           onValueChange={(value) =>
             setDraftDefaultEffect(
               value === "legacy" ? null : (value as ApprovalEffect),
@@ -236,7 +243,7 @@ export function ApprovalPolicyEditor({
                       <Button
                         key={id}
                         variant="outline"
-                        disabled={disabled}
+                        disabled={disabled || !keysEditable}
                         onClick={() => removeKey(index, id)}
                       >
                         {translateUi("Remove deleted key")}
@@ -248,6 +255,7 @@ export function ApprovalPolicyEditor({
                         checked={rule.api_key_ids?.includes(key.id) ?? false}
                         disabled={
                           disabled ||
+                          !keysEditable ||
                           (!rule.api_key_ids?.includes(key.id) &&
                             (rule.api_key_ids?.length ?? 0) >= 20)
                         }
@@ -328,6 +336,7 @@ export function ApprovalPolicyEditor({
               <div className="flex flex-wrap gap-2">
                 <Select
                   value={rule.effect}
+                  disabled={exact && disabled}
                   onValueChange={(value) =>
                     updateRule(index, { effect: value as ApprovalEffect })
                   }
@@ -346,6 +355,7 @@ export function ApprovalPolicyEditor({
                 {rule.effect === "require_approval" && (
                   <Select
                     value={rule.mode}
+                    disabled={exact && disabled}
                     onValueChange={(value) =>
                       updateRule(index, { mode: value as ApprovalMode })
                     }
@@ -384,12 +394,15 @@ export function ApprovalPolicyEditor({
         <Button
           variant="primary"
           className="h-8 text-14"
-          onClick={() =>
-            onSaveExact
-              ? onSaveExact(draftRules, draftDefaultEffect)
-              : onSave(draftRules, draftDefaultEffect ?? "auto_allow")
-          }
-          disabled={disabled}
+          onClick={() => {
+            if (!canSave) return;
+            if (onSaveExact) {
+              onSaveExact(draftRules, draftDefaultEffect);
+            } else {
+              onSave(draftRules, draftDefaultEffect ?? "auto_allow");
+            }
+          }}
+          disabled={!canSave}
         >
           {translateUi("Save Rules")}
         </Button>

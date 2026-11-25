@@ -525,6 +525,10 @@ function ProtectionSetupDialog({
   const others = initial ? withoutProtection(policy, initial.keyIds) : policy;
   const nextPolicy = withProtection(others, draft);
   const payload = buildPolicy(nextPolicy, actions);
+  const keyRulesReady =
+    rulesReady ||
+    (policy.keyed.length === 0 &&
+      !payload.rules.some((rule) => (rule.api_key_ids?.length ?? 0) > 0));
   const tooManyRules = payload.rules.length > MAX_PROTECTION_RULES;
   // Keys that already have their own protection for this service.
   const takenKeyIds = others.keyed.flatMap((entry) => entry.keyIds);
@@ -596,7 +600,7 @@ function ProtectionSetupDialog({
   }
 
   async function turnOn() {
-    if (!service || !safeEdit) return;
+    if (!service || !safeEdit || !keyRulesReady) return;
     setConfirmingOverride(false);
     try {
       await save.mutateAsync({
@@ -911,6 +915,7 @@ function ProtectionSetupDialog({
                                         <Checkbox
                                           checked={checked}
                                           disabled={
+                                            !rulesReady ||
                                             taken ||
                                             (!checked &&
                                               draft.keyIds.length >= 20)
@@ -1425,7 +1430,7 @@ function ProtectionSetupDialog({
             ) : (
               <Button
                 variant="primary"
-                disabled={busy || tooManyRules || !safeEdit}
+                disabled={busy || tooManyRules || !safeEdit || !keyRulesReady}
                 onClick={() =>
                   overridesGeneral ? setConfirmingOverride(true) : void turnOn()
                 }
@@ -1483,7 +1488,7 @@ function ProtectionSetupDialog({
             </Button>
             <Button
               variant="primary"
-              disabled={busy}
+              disabled={busy || !keyRulesReady}
               onClick={() => void turnOn()}
             >
               {editing ? translateUi("Save changes") : translateUi("Turn on")}

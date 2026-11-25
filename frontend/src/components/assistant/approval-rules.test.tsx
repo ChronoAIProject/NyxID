@@ -162,3 +162,21 @@ it("keeps basic protections available while the fleet cannot confirm key-limited
     screen.getByRole("button", { name: "Set up a protection" }),
   ).toBeEnabled();
 });
+
+it("pauses a guided key protection when readiness drops before confirmation", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<ApprovalRules />);
+  await user.click(screen.getByRole("button", { name: "Set up a protection" }));
+  await user.click(screen.getByRole("radio", { name: /Weather/ }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("radio", { name: /Specific agent keys/ }));
+  await user.click(screen.getByRole("checkbox", { name: /Agent A/ }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("button", { name: "Turn on" }));
+  fixture.ready = false;
+  rerender(<ApprovalRules />);
+  expect(screen.getAllByRole("button", { name: "Turn on" }).at(-1)).toBeDisabled();
+  expect(fixture.save).not.toHaveBeenCalled();
+});

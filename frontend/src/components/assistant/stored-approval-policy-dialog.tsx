@@ -58,6 +58,10 @@ export function StoredApprovalPolicyDialog({
   // per-protection controls wait for every server to support them.
   const rulesReady =
     capabilities.data?.personal_rules === true && !capabilities.error;
+  const hasStoredKeyRules = config.rules.some(
+    (rule) => (rule.api_key_ids?.length ?? 0) > 0,
+  );
+  const storedRulesLocked = !rulesReady && hasStoredKeyRules;
   const ready = Boolean(config.revision);
   const busy = save.isPending || remove.isPending;
   const validDays =
@@ -68,7 +72,15 @@ export function StoredApprovalPolicyDialog({
     rules: readonly ApprovalRule[],
     fallback: ApprovalEffect | null,
   ) {
-    if (!ready || !validDays) return;
+    if (
+      !ready ||
+      !validDays ||
+      (!rulesReady &&
+        (hasStoredKeyRules ||
+          rules.some((rule) => (rule.api_key_ids?.length ?? 0) > 0)))
+    ) {
+      return;
+    }
     try {
       await save.mutateAsync({
         serviceId: config.service_id,
@@ -115,7 +127,7 @@ export function StoredApprovalPolicyDialog({
           {!rulesReady && (
             <p className="type-secondary text-text-tertiary">
               {translateUi(
-                "Turning a protection off and setting its own approval days become available after every server supports approval rules. Reload to check again.",
+                "Key-limited rules, turning a protection off, and setting its own approval days become available after every server supports approval rules. Reload to check again.",
               )}
             </p>
           )}
@@ -131,14 +143,14 @@ export function StoredApprovalPolicyDialog({
             {translateUi("Legacy approval required")}
             <Switch
               checked={required}
-              disabled={busy || !ready}
+              disabled={busy || !ready || storedRulesLocked}
               onCheckedChange={setRequired}
             />
           </Label>
           <Label htmlFor={`${id}-mode`}>{translateUi("Approval mode")}</Label>
           <Select
             value={mode}
-            disabled={busy || !ready}
+            disabled={busy || !ready || storedRulesLocked}
             onValueChange={(value) => setMode(value as ApprovalMode)}
           >
             <SelectTrigger id={`${id}-mode`}>
@@ -171,7 +183,7 @@ export function StoredApprovalPolicyDialog({
               "Leave empty to use the account default. Existing remembered approvals keep their expiry.",
             )}
           </p>
-          {config.rules.some((rule) => (rule.api_key_ids?.length ?? 0) > 0) && (
+          {hasStoredKeyRules && (
             <p className="type-secondary text-text-tertiary">
               {translateUi(
                 "The live assistant turn's own stateless model call keeps its existing approval exemption.",
@@ -184,7 +196,8 @@ export function StoredApprovalPolicyDialog({
             defaultEffect={config.default_effect}
             rules={config.rules}
             apiKeys={apiKeys}
-            disabled={busy || !ready || !validDays}
+            keysEditable={rulesReady}
+            disabled={busy || !ready || !validDays || storedRulesLocked}
             onSave={() => undefined}
             onSaveExact={(rules, fallback) => {
               void persist(rules, fallback);
