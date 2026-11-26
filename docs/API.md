@@ -815,7 +815,7 @@ Legacy first-party tokens without `sid` retain their existing compatibility beha
 
 #### POST /api/v1/auth/verify-email
 
-Verify a user's email address using the token sent during registration.
+Verify a user's email address by redeeming a one-time registration token. Newly issued tokens expire after 24 hours. Each source IP may attempt verification five times per minute.
 
 **Auth:** None
 
@@ -891,7 +891,7 @@ curl -X POST http://localhost:3001/api/v1/auth/forgot-password \
 
 #### POST /api/v1/auth/reset-password
 
-Reset a user's password using a valid reset token.
+Reset a user's password using a valid reset token. Each source IP may attempt redemption five times per minute, with a separate limit from email verification.
 
 **Auth:** None
 

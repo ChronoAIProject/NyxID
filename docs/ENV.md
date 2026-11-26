@@ -996,6 +996,16 @@ each active privileged user, and exercise the assessed administration paths
 before setting `enforce`. Check audit events across the fleet before cutover.
 
 
+### Legacy email verification cutoff
+
+New email verification tokens expire after 24 hours. An optional RFC 3339
+`AUTH_VERIFICATION_LEGACY_CUTOFF_AT` timestamp sets the end of redemption
+for legacy verification tokens without an expiration. An empty value keeps
+those tokens redeemable. Confirm that affected users have a verification or
+operator-assisted recovery path before setting the cutoff. Password reset and
+email verification use separate five-per-minute source IP limits with the
+existing `TRUSTED_PROXY_IPS` configuration.
+
 ## Crash diagnostics
 
 See [CRASH_REPORTING.md](CRASH_REPORTING.md) for owner acceptance, project

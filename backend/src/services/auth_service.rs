@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -212,6 +212,7 @@ pub async fn register_user(
         } else {
             Some(verification_token_hash)
         },
+        email_verification_expires_at: (!auto_verify_email).then_some(now + Duration::hours(24)),
         password_reset_token: None,
         password_reset_expires_at: None,
         is_active: true,
@@ -313,32 +314,43 @@ pub async fn authenticate_user(
 /// Verify a user's email with the verification token.
 ///
 /// Hashes the incoming token and compares against stored hash.
-pub async fn verify_email(db: &mongodb::Database, token: &str) -> AppResult<String> {
+pub async fn verify_email(
+    db: &mongodb::Database,
+    token: &str,
+    legacy_cutoff: Option<DateTime<Utc>>,
+) -> AppResult<String> {
     let token_hash = hash_token(token);
-
-    let user = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "email_verification_token": &token_hash })
-        .await?
-        .ok_or_else(|| AppError::BadRequest("Invalid or expired verification token".to_string()))?;
-
-    ensure_person_user(&user)?;
-
-    if user.email_verified {
-        return Err(AppError::BadRequest("Email already verified".to_string()));
+    let mut legacy = doc! { "email_verification_expires_at": null };
+    if let Some(cutoff) = legacy_cutoff {
+        legacy.insert(
+            "$expr",
+            doc! { "$lt": ["$$NOW", bson::DateTime::from_chrono(cutoff)] },
+        );
     }
-
-    let now = Utc::now();
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$set": {
-                "email_verified": true,
-                "email_verification_token": null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
+    let user = super::transaction_service::durable_database(db)
+        .collection::<User>(USERS)
+        .find_one_and_update(
+            doc! {
+                "email_verification_token": &token_hash,
+                "email_verified": false,
+                "platform_personal_deleting": { "$ne": true },
+                "$and": [
+                    { "$or": [{ "user_type": "person" }, { "user_type": { "$exists": false } }] },
+                    { "$or": [
+                        { "email_verification_expires_at": { "$type": "date" },
+                          "$expr": { "$gt": ["$email_verification_expires_at", "$$NOW"] } },
+                        legacy,
+                    ] },
+                ],
+            },
+            doc! {
+                "$set": { "email_verified": true, "email_verification_token": null },
+                "$unset": { "email_verification_expires_at": "" },
+                "$currentDate": { "updated_at": true },
+            },
         )
-        .await?;
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Invalid or expired verification token".into()))?;
 
     tracing::info!(user_id = %user.id, "Email verified");
 
@@ -596,6 +608,7 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: true,
@@ -923,7 +936,7 @@ mod tests {
             return;
         };
 
-        let err = verify_email(&db, "invalid-token-value")
+        let err = verify_email(&db, "invalid-token-value", None)
             .await
             .expect_err("invalid token");
         assert!(matches!(err, AppError::BadRequest(_)));
@@ -943,14 +956,72 @@ mod tests {
             .await
             .expect("register");
 
-        verify_email(&db, &reg.email_verification_token)
+        verify_email(&db, &reg.email_verification_token, None)
             .await
             .expect("first verify");
 
-        let err = verify_email(&db, &reg.email_verification_token)
+        let err = verify_email(&db, &reg.email_verification_token, None)
             .await
             .expect_err("already verified");
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_email_enforces_fresh_expiry_and_legacy_cutoff_atomically() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("email_verification_expiry").await;
+        role_service::seed_system_roles(&db).await.unwrap();
+        let reg = register_user(
+            &db,
+            "verify-expiry@example.test",
+            "password123",
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let users = db.collection::<User>(USERS);
+        let filter = doc! { "_id": &reg.user_id };
+        let saved = users.find_one(filter.clone()).await.unwrap().unwrap();
+        assert_eq!(
+            saved.email_verification_expires_at.unwrap() - saved.created_at,
+            Duration::hours(24),
+        );
+
+        let past = Utc::now() - Duration::minutes(1);
+        users
+            .update_one(
+                filter.clone(),
+                doc! { "$set": {
+                    "email_verification_expires_at": bson::DateTime::from_chrono(past),
+                }},
+            )
+            .await
+            .unwrap();
+        assert!(
+            verify_email(&db, &reg.email_verification_token, None)
+                .await
+                .is_err()
+        );
+
+        users
+            .update_one(
+                filter,
+                doc! { "$unset": { "email_verification_expires_at": "" } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            verify_email(&db, &reg.email_verification_token, Some(past))
+                .await
+                .is_err()
+        );
+        let (a, b) = tokio::join!(
+            verify_email(&db, &reg.email_verification_token, None),
+            verify_email(&db, &reg.email_verification_token, None),
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
     }
 
     #[tokio::test]
@@ -968,7 +1039,7 @@ mod tests {
             .expect("register");
         assert!(reg.actually_created);
 
-        let user_id = verify_email(&db, &reg.email_verification_token)
+        let user_id = verify_email(&db, &reg.email_verification_token, None)
             .await
             .expect("verify");
         assert_eq!(user_id, reg.user_id);
