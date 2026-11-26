@@ -64,6 +64,7 @@ enum Adapter {
     ReattachWindow,
     ApprovalProposal,
     Setup,
+    NativeReplyHandle,
     AgentLogin,
     NodeDevice,
     AuthDevice,
@@ -304,7 +305,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "platform_native_reply_handles",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NativeReplyHandle,
         fields: &["ciphertext"],
     },
     Entry {
@@ -582,6 +583,7 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
         Some(
             previous_labels::EVENT_REPLY_DIGEST
             | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::NATIVE_REPLY_BASE_DIGEST
             | previous_labels::NODE_DEVICE_BASE_DIGEST
             | previous_labels::DEVICE_BASE_DIGEST,
         ) => project_labels(
@@ -855,6 +857,12 @@ async fn verify(
         Adapter::NodeDevice => {
             Box::pin(super::device_code_service::record::verify(keys, row)).await
         }
+        Adapter::NativeReplyHandle => {
+            Box::pin(super::platform_native_reply_service::record::verify(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::verify_current_snapshot(keys, row).await
         }
@@ -1034,6 +1042,12 @@ async fn migrate(
         Adapter::NodeDevice => {
             Box::pin(super::device_code_service::record::migrate(db, keys, row)).await
         }
+        Adapter::NativeReplyHandle => {
+            Box::pin(super::platform_native_reply_service::record::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::migrate_snapshot(db, keys, row).await
         }
@@ -1148,6 +1162,9 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
             }
             Some(super::device_code_service::record::ISSUANCE_MISSING) => {
                 super::device_code_service::record::ISSUANCE_MISSING
+            }
+            Some(super::platform_native_reply_service::record::RECEIPT_MISSING) => {
+                super::platform_native_reply_service::record::RECEIPT_MISSING
             }
             Some("adapter_not_implemented") => "adapter_not_implemented",
             Some("authentication_binding_or_lifecycle_unresolved") => {
@@ -1538,6 +1555,24 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
             {
                 unresolved += 1;
                 Some(super::device_code_service::record::ISSUANCE_MISSING)
+            }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::NativeReplyHandle)
+                    && reason == super::platform_native_reply_service::record::RECEIPT_MISSING =>
+            {
+                if db
+                    .collection::<Document>(entry.collection)
+                    .find_one(doc! {"_id": id})
+                    .projection(doc! {"_id":1})
+                    .await?
+                    .is_none()
+                {
+                    verified_winner = None;
+                    None
+                } else {
+                    unresolved += 1;
+                    Some(super::platform_native_reply_service::record::RECEIPT_MISSING)
+                }
             }
             Err(_) => {
                 unresolved += 1;

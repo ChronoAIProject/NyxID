@@ -54,6 +54,8 @@ def main():
                         help="exchange both session protocols and their v2 Agent Key grant")
     parser.add_argument("--node-device", action="store_true",
                         help="exchange personal and organization node deliveries through signed polling")
+    parser.add_argument("--native-handle", action="store_true",
+                        help="exchange Discord receipts and reply handles through claimed sends")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -91,11 +93,13 @@ def main():
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
 
-        if args.auth_device or args.node_device:
+        if args.auth_device or args.node_device or args.native_handle:
             base_reject = "legacy-claim-error" if args.node_device else "reject"
             migration = ("services::device_code_service::mixed_delivery::migrate_signed_deliveries_from_the_base_writer"
                          if args.node_device else
                          "services::auth_device_service::mixed_delivery::migrate_retained_device_deliveries")
+            if args.native_handle:
+                migration = "services::platform_native_reply_service::tests::mixed::rewrap_captured_reply_handle"
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                 run(writer, "write", "compatible")
                 run(reader, "read", "compatible")
