@@ -139,6 +139,11 @@ pub mod developer_webhook_service;
 pub mod device_code_service;
 pub mod dpop_jti_cache;
 pub mod durable_operation_grant_service;
+#[allow(
+    dead_code,
+    reason = "Census capture ships before the family observers and admin runner"
+)]
+pub mod encrypted_record_census;
 pub mod encrypted_record_migration;
 pub(crate) mod erasure_admission;
 pub mod event_dedup_cache;
