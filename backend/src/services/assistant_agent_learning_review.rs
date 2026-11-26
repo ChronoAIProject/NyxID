@@ -1459,6 +1459,14 @@ async fn defer_publication_error<T>(
     match code {
         Code::VersionConflict => Err(AppError::Conflict("version_conflict".into())),
         Code::PublishUncertain => Err(publication::ambiguous(error.status().or(fallback_status))),
+        Code::VerifyFailed | Code::OrnnUnavailable if row.source == ProposalSource::Authored => {
+            let diagnostic =
+                crate::errors::skill_publication::SkillPublicationFailure::registry_unavailable(
+                    code.as_str(),
+                    error.status(),
+                );
+            Err(diagnostic.map_or_else(|| error.into_app_error(), AppError::from))
+        }
         _ => Err(error.into_app_error()),
     }
 }
@@ -1804,6 +1812,7 @@ impl OrnnReader for UnavailableReader {
 pub(crate) struct BindingFailure {
     pub(crate) code: Option<publication::FailureCode>,
     pub(crate) rules: Vec<String>,
+    pub(crate) upstream_status: Option<u16>,
     pub(crate) error: AppError,
 }
 
@@ -1812,6 +1821,7 @@ impl From<AppError> for BindingFailure {
         Self {
             code: None,
             rules: Vec::new(),
+            upstream_status: None,
             error,
         }
     }
@@ -1829,6 +1839,7 @@ impl BindingFailure {
         Self {
             code: Some(error.failure_code(PublicationStage::BaseVerify)),
             rules: error.rules(),
+            upstream_status: error.status(),
             error: error.into_app_error(),
         }
     }
@@ -1894,6 +1905,7 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
         return Err(BindingFailure {
             code: Some(publication::FailureCode::BaseChanged),
             rules: Vec::new(),
+            upstream_status: None,
             error: AppError::Conflict("base_skill_changed".into()),
         });
     }
@@ -2290,7 +2302,9 @@ pub async fn approve(
     binding: &Value,
     reader: &impl OrnnReader,
 ) -> AppResult<Value> {
-    approve_core(state, chat, agent_id, id, Some(card), binding, reader).await
+    approve_core(state, chat, agent_id, id, Some(card), binding, reader)
+        .await
+        .map_err(AppError::with_legacy_skill_registry_error)
 }
 
 /// Server-initiated publication uses the chat owner's identity and the same

@@ -1821,3 +1821,17 @@ it.each([false, true])("shows recovery for an unconfirmed skill save (reviewed %
   expect(screen.getByText("Skill save unconfirmed")).toBeVisible();
   expect(screen.getByText(/Check Ornn or use Check again/)).toBeVisible();
 });
+
+it.each([
+  ["source_skill_unavailable", "Source skill unavailable", /Retry the draft/],
+  ["ornn_unavailable", "Skill publication unavailable", /Ornn is unavailable\. Try again later/],
+  ["verify_failed", "Skill verification failed", /Check the existing version in Ornn/],
+] as const)("shows safe recovery for %s", (reason, label, recovery) => {
+  render(<ChatMessageBubble message={{ ...BASE, toolCalls: [{
+    id: "skill", name: "nyxid__draft_agent_skill", status: "error", startedAt: 1,
+    failure: { kind: "tool_error", reason, status: 503 },
+  }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /Turn details:/ }));
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.getByText(recovery)).toBeVisible();
+});

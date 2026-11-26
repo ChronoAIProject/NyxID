@@ -436,11 +436,18 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
             let skillDetail: string | undefined;
             if (skillReason === "publication_ambiguous") {
               skillDetail = translateUi("NyxID could not confirm the save and will not repeat it. Check Ornn or use Check again on the review card if you have one.");
+            } else if (skillReason === "source_skill_unavailable") {
+              skillDetail = translateUi("Ornn could not provide the source skill. Retry the draft when Ornn is available.");
+            } else if (skillReason === "verify_failed") {
+              skillDetail = translateUi("NyxID could not verify the saved version or attach it. Check the existing version in Ornn.");
             } else if (skillReason?.startsWith("ornn_")) {
               skillDetail = translateUi(publicationFailureText(skillReason, "publication_failed", "authored"));
             }
             let label = decision ? translateUi(decision.label) : describeToolActivity(tool.name || tool.id, tool.status);
             if (skillReason === "publication_ambiguous") label = translateUi("Skill save unconfirmed");
+            else if (skillReason === "source_skill_unavailable") label = translateUi("Source skill unavailable");
+            else if (skillReason === "ornn_unavailable") label = translateUi("Skill publication unavailable");
+            else if (skillReason === "verify_failed") label = translateUi("Skill verification failed");
             else if (part?.committed) label = describeToolActivity(tool.name, "done");
             else if (memoryUnconfirmed) label = translateUi("Memory save unconfirmed");
             else if (status === "skipped") label = toolFailureCopy(tool.failure, tool.name);

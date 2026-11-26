@@ -5136,7 +5136,13 @@ fn native_team_tool_result(
         let status = details["upstream_status"]
             .as_u64()
             .and_then(|n| u16::try_from(n).ok());
-        if let Some(failure) = code.and_then(|code| code.save_failure(status)) {
+        let failure = code.and_then(|code| code.save_failure(status)).or_else(|| {
+            crate::errors::skill_publication::SkillPublicationFailure::registry_unavailable(
+                details["reason"].as_str()?,
+                status,
+            )
+        });
+        if let Some(failure) = failure {
             response.extensions_mut().insert(failure.activity());
         }
     }

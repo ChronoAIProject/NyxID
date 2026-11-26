@@ -1992,7 +1992,12 @@ async fn validator_read_status_replaces_previous_attempt_status() {
         .expect(0)
         .mount(&server)
         .await;
-    assert!(finish(&f, card.clone(), true).await.is_err());
+    let error = finish(&f, card.clone(), true).await.unwrap_err();
+    assert!(matches!(&error, AppError::Conflict(message) if message == "ornn_unavailable"));
+    assert_eq!(error.status_code(), http::StatusCode::CONFLICT);
+    let response = error.response_body();
+    assert_eq!(response.error_code, 1004);
+    assert!(response.details.is_none());
     let failed = f
         .state
         .db

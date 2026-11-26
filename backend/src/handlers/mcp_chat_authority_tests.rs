@@ -9331,3 +9331,164 @@ async fn unconfirmed_skill_save_review_card() {
     ))
     .await;
 }
+
+#[tokio::test]
+async fn authored_skill_registry_5xx_reports_the_failed_step() {
+    Box::pin(async {
+        use crate::models::{
+            assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS},
+            assistant_settings::AccessMode,
+            catalog_skill_revision::SkillReference,
+        };
+        use crate::services::{
+            assistant_nyxagent, assistant_settings_service,
+            assistant_skill_authoring::tests::{fixture, input, setup_ornn},
+        };
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        const PRIVATE: &str = "private-storage-host/bucket/verification";
+        for (reason, recovery, write_count) in [
+            ("source_skill_unavailable", "retry_later", 0),
+            ("ornn_unavailable", "retry_later", 0),
+            ("verify_failed", "check", 1),
+        ] {
+            let f = fixture("mcp_authored_skill_registry_5xx").await;
+            assistant_settings_service::update(
+                &f.state.db,
+                &f.owner,
+                assistant_settings_service::Update {
+                    access_mode: Some(AccessMode::Autopilot),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let server = setup_ornn(&f).await;
+            let registry_failure =
+                ResponseTemplate::new(503).set_body_json(json!({"detail":PRIVATE}));
+            let skill_id = uuid::Uuid::new_v4().to_string();
+            let mut args = input(&f.chat.agent_id);
+            if reason == "source_skill_unavailable" {
+                let pin = SkillReference {
+                    source: "ornn".into(),
+                    skill_id: skill_id.clone(),
+                    name: "weekly-review".into(),
+                    version: "1.0".into(),
+                    sha256: "a".repeat(64),
+                    dependencies: vec![],
+                    disabled: false,
+                };
+                f.state
+                    .db
+                    .collection::<bson::Document>(AGENTS)
+                    .update_one(
+                        doc! {"_id":&f.chat.agent_id},
+                        doc! {"$set":{"skills":bson::to_bson(&[pin]).unwrap()}},
+                    )
+                    .await
+                    .unwrap();
+                args["base_skill"] = json!({"skill_id":skill_id,"version":"1.0"});
+            }
+            Mock::given(method("POST"))
+                .and(path("/api/v1/skill-format/validate"))
+                .respond_with(if reason == "ornn_unavailable" {
+                    registry_failure.clone()
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}}))
+                })
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/skills"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":skill_id}})),
+                )
+                .expect(write_count)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/skills/{skill_id}")))
+                .respond_with(registry_failure)
+                .expect(u64::from(reason != "ornn_unavailable"))
+                .mount(&server)
+                .await;
+            let auth = authenticate(&f).await;
+            let error = result(
+                call(&f, &auth, "nyxid__draft_agent_skill", args.clone()).await,
+                true,
+            )
+            .await;
+            assert_eq!(error["error"], "conflict", "{error}");
+            assert_eq!(error["error_code"], 1004);
+            assert_eq!(
+                error["details"],
+                json!({
+                    "reason":reason, "recovery":recovery, "upstream_status":503
+                })
+            );
+            assert!(
+                error["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("setup is incomplete")
+            );
+            let activity = assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .active_turn
+                .unwrap()
+                .activities
+                .pop()
+                .unwrap();
+            assert_eq!(activity.status, "error");
+            assert!(activity.decision.is_none());
+            let serialized_activity = serde_json::to_string(&activity).unwrap();
+            let failure = activity.failure.unwrap();
+            assert_eq!(failure.reason.as_deref(), Some(reason));
+            assert_eq!(failure.status, Some(503));
+            for forbidden in [
+                PRIVATE,
+                args["skill_md"].as_str().unwrap(),
+                args["files"][0]["content"].as_str().unwrap(),
+            ] {
+                assert!(!error.to_string().contains(forbidden));
+                assert!(!serialized_activity.contains(forbidden));
+            }
+            let agent = f
+                .state
+                .db
+                .collection::<AssistantAgent>(AGENTS)
+                .find_one(doc! {"_id":&f.chat.agent_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                agent.skills.len(),
+                usize::from(reason == "source_skill_unavailable")
+            );
+            let proposal = f
+                .state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+                )
+                .find_one(doc! {"agent_id":&f.chat.agent_id})
+                .await
+                .unwrap()
+                .unwrap();
+            if reason == "source_skill_unavailable" {
+                assert!(proposal.get_document("publication").is_err());
+            } else {
+                assert_eq!(proposal.get_str("failure_code").unwrap(), reason);
+                let publication = proposal.get_document("publication").unwrap();
+                assert_eq!(publication.get_bool("started").unwrap(), write_count == 1);
+            }
+            server.verify().await;
+            f.state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
