@@ -9,8 +9,11 @@ use crate::redaction::RedactedLen;
 mod approve;
 mod initiate;
 mod lockout;
+#[cfg(test)]
+mod mixed_delivery;
 mod onboard;
 mod poll;
+pub(super) mod record;
 mod rotation;
 
 pub use approve::approve;
@@ -359,6 +362,7 @@ mod tests {
             approved_org_id: None,
             issued_api_key_id: None,
             issued_node_id: None,
+            delivery_context_version: None,
             delivery_api_key_encrypted: None,
             delivery_refresh_token_encrypted: None,
             refresh_token_hash: None,

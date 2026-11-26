@@ -281,3 +281,6 @@ pub(super) const EVENT_WRITERS_DIGEST: &str =
 
 pub(super) const DEVICE_BASE_DIGEST: &str =
     "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513";
+
+pub(super) const NODE_DEVICE_BASE_DIGEST: &str =
+    "90d8a86835621035aac28bbb0e064ef45c90b76e3572949f4c41917c5ed9323a";

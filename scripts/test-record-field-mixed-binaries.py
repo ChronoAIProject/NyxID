@@ -52,6 +52,8 @@ def main():
                         help="migrate and exchange retained approvals with the dual-reader base")
     parser.add_argument("--auth-device", action="store_true",
                         help="exchange both session protocols and their v2 Agent Key grant")
+    parser.add_argument("--node-device", action="store_true",
+                        help="exchange personal and organization node deliveries through signed polling")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -89,7 +91,11 @@ def main():
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
 
-        if args.auth_device:
+        if args.auth_device or args.node_device:
+            base_reject = "legacy-claim-error" if args.node_device else "reject"
+            migration = ("services::device_code_service::mixed_delivery::migrate_signed_deliveries_from_the_base_writer"
+                         if args.node_device else
+                         "services::auth_device_service::mixed_delivery::migrate_retained_device_deliveries")
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                 run(writer, "write", "compatible")
                 run(reader, "read", "compatible")
@@ -98,16 +104,21 @@ def main():
             run("candidate", "read", "base-on", writes=True)
             run("base", "write", "retained")
             run("candidate", "migrate", "retained", writes=True,
-                test="services::auth_device_service::mixed_delivery::migrate_retained_device_deliveries")
-            run("base", "reject", "retained")
+                test=migration)
+            run("base", base_reject, "retained")
             run("candidate", "read", "retained", legacy=False)
             run("candidate", "write", "activated", writes=True)
-            run("base", "reject", "activated")
+            run("base", base_reject, "activated")
             run("candidate", "read", "activated", writes=True, legacy=False)
             run("candidate", "write", "before-rollback", writes=True)
             run("candidate", "read", "before-rollback", legacy=False)
             run("candidate", "write", "rollback")
             run("base", "read", "rollback")
+            if args.node_device:
+                run("candidate", "write", "old-claim", writes=True)
+                run("base", "legacy-claim-error-save", "old-claim")
+                run("candidate", "migrate-terminal", "old-claim", writes=True,
+                    test="services::device_code_service::mixed_delivery::legacy_terminal_marker_clears_without_reissuing")
             registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
             for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
                 run(writer, "registry-write", "generation", writes=True, test=registry)

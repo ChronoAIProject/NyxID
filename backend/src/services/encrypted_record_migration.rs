@@ -65,6 +65,7 @@ enum Adapter {
     ApprovalProposal,
     Setup,
     AgentLogin,
+    NodeDevice,
     AuthDevice,
     // These are implementation blockers until their service-owned decoders and
     // actual writers are converted. They may not be waived by operator input.
@@ -222,7 +223,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "device_codes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NodeDevice,
         fields: &[
             "delivery_api_key_encrypted",
             "delivery_refresh_token_encrypted",
@@ -581,6 +582,7 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
         Some(
             previous_labels::EVENT_REPLY_DIGEST
             | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::NODE_DEVICE_BASE_DIGEST
             | previous_labels::DEVICE_BASE_DIGEST,
         ) => project_labels(
             &row,
@@ -850,6 +852,9 @@ async fn verify(
             ))
             .await
         }
+        Adapter::NodeDevice => {
+            Box::pin(super::device_code_service::record::verify(keys, row)).await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::verify_current_snapshot(keys, row).await
         }
@@ -1026,6 +1031,9 @@ async fn migrate(
             ))
             .await
         }
+        Adapter::NodeDevice => {
+            Box::pin(super::device_code_service::record::migrate(db, keys, row)).await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::migrate_snapshot(db, keys, row).await
         }
@@ -1137,6 +1145,9 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
         let category = match row.get_str("category").ok() {
             Some(super::auth_device_service::record::ISSUANCE_MISSING) => {
                 super::auth_device_service::record::ISSUANCE_MISSING
+            }
+            Some(super::device_code_service::record::ISSUANCE_MISSING) => {
+                super::device_code_service::record::ISSUANCE_MISSING
             }
             Some("adapter_not_implemented") => "adapter_not_implemented",
             Some("authentication_binding_or_lifecycle_unresolved") => {
@@ -1520,6 +1531,13 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
             {
                 unresolved += 1;
                 Some(super::auth_device_service::record::ISSUANCE_MISSING)
+            }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::NodeDevice)
+                    && reason == super::device_code_service::record::ISSUANCE_MISSING =>
+            {
+                unresolved += 1;
+                Some(super::device_code_service::record::ISSUANCE_MISSING)
             }
             Err(_) => {
                 unresolved += 1;
