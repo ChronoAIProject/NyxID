@@ -457,26 +457,6 @@ binaries before downgrade. Cap-free spend and all legacy settings remain retaine
 old code may refuse above-cap admissions or changed digests. Never reset spend or
 silently regenerate legacy authority to make rollback permissive.
 
-## Billing usage receipt continuity
-
-`billing:usage-receipts-v1` gates observational comparison only. The lease holder
-checks its durable activation and retained generation heartbeat rows once per
-comparison pass; the heartbeat itself adds no command. An unsupported capability
-or unknown protocol observed since the interval began resets its generation,
-even if that process stopped between checks. A new interval starts only when
-activation exists and no unsupported generation is live. Heartbeat rows expire
-after seven days, so a successful-check gap of six days also resets the interval,
-with a one-day safety margin. Short deployment gaps do not reset it. Failed or
-unreadable checks compare nothing and leave the interval unchanged.
-
-Only provider periods beginning strictly after this interval may be compared.
-Rollback to an observed build without capture invalidates the overlapping period;
-roll-forward must establish a new interval, even when activation survives. A failed
-look is not evidence of rollback. Initial heartbeat publication precedes workers
-and HTTP serving. The observation-floor limitations above still apply to invisible
-pre-protocol builds. No lease checkpoint, manual activation or provider total can
-certify missing history. Delivery, admission and money are unaffected.
-
 ## Personal approval rules
 
 `approvals:personal-rules-v1` advertises key-aware personal readers, exact policy
@@ -505,3 +485,23 @@ those fields or carry personal rule membership through Agent Key rotation, even
 though updated replicas detect its missing capability. Disable
 new authoring and drain all readers before any coordinated rollback that removes
 or converts the new policy data. No rollout tool mutates policy or connections.
+
+## Billing usage receipt continuity
+
+`billing:usage-receipts-v1` gates observational comparison only. The lease holder
+checks its durable activation and retained generation heartbeat rows once per
+comparison pass; the heartbeat itself adds no command. An unsupported capability
+or unknown protocol observed since the interval began resets its generation,
+even if that process stopped between checks. A new interval starts only when
+activation exists and no unsupported generation is live. Heartbeat rows expire
+after seven days, so a successful-check gap of six days also resets the interval,
+with a one-day safety margin. Short deployment gaps do not reset it. Failed or
+unreadable checks compare nothing and leave the interval unchanged.
+
+Only provider periods beginning strictly after this interval may be compared.
+Rollback to an observed build without capture invalidates the overlapping period;
+roll-forward must establish a new interval, even when activation survives. A failed
+look is not evidence of rollback. Initial heartbeat publication precedes workers
+and HTTP serving. The observation-floor limitations above still apply to invisible
+pre-protocol builds. No lease checkpoint, manual activation or provider total can
+certify missing history. Delivery, admission and money are unaffected.
