@@ -160,6 +160,26 @@ import type { User } from "./types/api";
 const initialAuth = useAuthStore.getState();
 afterEach(() => useAuthStore.setState(initialAuth));
 
+it.each([false, true])("keeps the approval inbox behind account login (authenticated=%s)", async (authenticated) => {
+  const route = Object.values(router.routesById).find((r) => r.fullPath === "/assistant/approvals");
+  if (!route?.options.beforeLoad) throw new Error("approval inbox is not registered");
+  const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
+  vi.stubEnv("DEV", false);
+  useAuthStore.setState({ isAuthenticated: authenticated, isLoading: false });
+  try {
+    expect(isPublicPath(route.fullPath)).toBe(false);
+    await route.options.beforeLoad({ location: { pathname: route.fullPath, searchStr: "" } } as never);
+    if (authenticated) {
+      expect(assign).not.toHaveBeenCalled();
+    } else {
+      expect(assign).toHaveBeenCalledExactlyOnceWith(`/login?return_to=${encodeURIComponent(`${window.location.origin}/assistant/approvals`)}`);
+    }
+  } finally {
+    assign.mockRestore();
+    vi.unstubAllEnvs();
+  }
+});
+
 const catalogUser: User = {
   id: "catalog-user",
   email: "catalog@example.test",

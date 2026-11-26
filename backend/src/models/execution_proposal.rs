@@ -126,7 +126,15 @@ impl std::fmt::Debug for Review {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct ConnectedObservation {
+    pub sequence: i64,
+    pub digest: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProposalV2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_observation: Option<ConnectedObservation>,
     #[serde(default)]
     pub background_allowed: bool,
     #[serde(default, with = "super::bson_datetime::optional")]

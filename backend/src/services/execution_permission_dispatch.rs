@@ -41,6 +41,7 @@ pub(crate) struct RequestContext {
     machine: OnceLock<Arc<machine::Admission>>,
     ingress: OnceLock<crate::models::execution_proposal::PreparedAdapter>,
     idempotency: OnceLock<String>,
+    connected_operation: OnceLock<String>,
     async_requested: std::sync::atomic::AtomicBool,
     cancellation: OnceLock<tokio_util::sync::CancellationToken>,
     connected_resume: OnceLock<Arc<proposals::Resume>>,
@@ -313,6 +314,7 @@ impl RequestContext {
             operation_id: Uuid::new_v4().to_string(),
             ingress: OnceLock::new(),
             idempotency: OnceLock::new(),
+            connected_operation: OnceLock::new(),
             async_requested: std::sync::atomic::AtomicBool::new(false),
             cancellation: OnceLock::new(),
             connected_resume: OnceLock::new(),
@@ -696,12 +698,16 @@ pub(crate) fn prepare<'a>(
     effect: Effect<'a>,
 ) -> futures::future::BoxFuture<'a, AppResult<Option<Arc<Permit>>>> {
     Box::pin(diagnostics::observe(context, async move {
+        proposals::v2::connected::bind(state, context, chat).await?;
         let Some(context) = context else {
             return Ok(None);
         };
         let db = &state.db;
         let keys = &state.encryption_keys;
         if !context.admit_candidate(db, chat).await? {
+            if context.connected_operation.get().is_some() {
+                return Err(refused());
+            }
             return Ok(None);
         }
         if let Some(native) = &context.native {
@@ -1118,6 +1124,9 @@ pub(crate) fn prepare<'a>(
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));
         }
+        if context.connected_operation.get().is_some() && !effect.floors.is_empty() {
+            return Err(refused());
+        }
         let _ = context.decision.set(Resolution::Gap);
         Ok(None)
     }))
@@ -1172,6 +1181,7 @@ impl Permit {
                 operation_id: self.operation_id.clone(),
                 ingress: OnceLock::new(),
                 idempotency: OnceLock::new(),
+                connected_operation: OnceLock::new(),
                 async_requested: std::sync::atomic::AtomicBool::new(false),
                 cancellation: OnceLock::new(),
                 connected_resume: OnceLock::new(),

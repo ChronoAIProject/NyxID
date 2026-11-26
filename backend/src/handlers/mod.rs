@@ -64,6 +64,7 @@ pub mod channel_whatsapp_native;
 pub mod cli_pairings;
 pub mod codex_connection;
 pub mod connect_links;
+pub mod connected_approvals;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;

@@ -309,6 +309,15 @@ it.each(["methods", "password MFA", "social MFA", "phone resume"])(
   },
 );
 
+it("returns app login to the approval inbox without making an approval decision", async () => {
+  const target = `${window.location.origin}/assistant/approvals`;
+  await open("/login", target);
+  await startAppLogin();
+  await confirmProfile();
+  await waitFor(() => expect(assign).toHaveBeenCalledExactlyOnceWith(target));
+  expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/approvals/"))).toHaveLength(0);
+});
+
 it.each([
   undefined,
   "//evil.example/assistant",

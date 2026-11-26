@@ -173,6 +173,7 @@ pub const CAPABILITIES: &[&str] = &[
     "permissions:execution-authoring-v1",
     super::execution_permission_enrollment::READINESS,
     "permissions:execution-authoring-v2",
+    super::execution_permission_dispatch::proposals::v2::connected::READINESS,
     super::execution_permission_dispatch::machine::READINESS,
     super::execution_permission_dispatch::proposals::v3::READINESS,
     super::execution_permission_channel::READINESS,

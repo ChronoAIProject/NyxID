@@ -4,6 +4,7 @@ use crate::models::execution_proposal::{
     ExecutionResult, PreparedAdapter, ProposalSource, ProposalV2, RetainedEffect,
 };
 pub(crate) mod blocking;
+pub(crate) mod connected;
 mod decision;
 mod delivery;
 mod readback;
@@ -317,6 +318,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         })
         .collect::<AppResult<Vec<_>>>()?;
     let p = ProposalV2 {
+        connected_observation: None,
         background_allowed,
         waiter_until: (!background_allowed).then_some(end),
         source,

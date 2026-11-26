@@ -115,6 +115,14 @@ pub(super) fn locator(
     context: &RequestContext,
     chat: Option<&acks::ChatAuthority>,
 ) -> AppResult<String> {
+    if let Some(key) = context.connected_operation.get() {
+        return connected::locator(
+            &context.actor,
+            &context.principal,
+            context.source_credential.get().map(String::as_str),
+            key,
+        );
+    }
     if let Some(machine) = context.machine.get() {
         return fingerprint(
             &json!({"version":2,"actor":context.actor,"principal":context.principal,"key":chat.map(|c|&c.api_key_id),"machine":machine.binding,"occurrence":context.idempotency.get().unwrap_or(&context.operation_id)}),

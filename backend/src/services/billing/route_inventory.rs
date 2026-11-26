@@ -265,6 +265,23 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::connected_approvals::capability",
+        route: "/api/v1/approvals/connected-operations/capability",
+        policy: BillingRoutePolicy::Exempt(
+            "approval capability observation; no downstream request",
+        ),
+    },
+    BillingRouteSpec {
+        handler: "handlers::connected_approvals::observe",
+        route: "/api/v1/approvals/connected-operations/{operation_key}/status",
+        policy: BillingRoutePolicy::Exempt("approval observation; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::connected_approvals::cancel",
+        route: "/api/v1/approvals/connected-operations/{operation_key}/cancel",
+        policy: BillingRoutePolicy::Exempt("approval retirement; no downstream request"),
+    },
+    BillingRouteSpec {
         handler: "handlers::exact_service_approvals::create_request",
         route: "/api/v1/approvals/exact-service/requests",
         policy: BillingRoutePolicy::Exempt("approval control plane; no downstream request"),
