@@ -33,6 +33,8 @@ import { AgentDetailsSheet } from "./nyxbot-agent-details";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
 import { NewGroupDialog } from "./nyxbot-group-forms";
 import { NyxAgentGroupPage } from "./nyxbot-group-view";
+import { OrgGuestConversationPage } from "./org-guest-conversation-page";
+import { orgGuestConversationId } from "@/schemas/org-guest-conversation";
 import { VoiceCaptionText } from "./voice-captions";
 import {
   mergeVoiceCaptions,
@@ -609,6 +611,9 @@ export function NyxAgentAssistantChatPage() {
   });
   if (search.g) {
     return <NyxAgentGroupPage key={search.g} groupId={search.g} mock={Boolean(search.mock)} />;
+  }
+  if (!search.draft && search.c && orgGuestConversationId.test(search.c)) {
+    return <OrgGuestConversationPage key={search.c} id={search.c} />;
   }
   return <NyxAgentThreadPage />;
 }

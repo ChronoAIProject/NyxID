@@ -29,6 +29,7 @@ export function conversationChannelCounts(conversations: readonly Conversation[]
 
 /** Display-only: persisted titles and platform routing identities never change. */
 export function conversationDisplayTitle(conversation: Conversation): string {
+  if (conversation.read_only) return conversation.title;
   if (!conversation.channel?.thread_id) {
     return conversation.channel?.chat_title?.trim() || conversation.title;
   }
