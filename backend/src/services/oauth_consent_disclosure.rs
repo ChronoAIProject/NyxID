@@ -599,5 +599,21 @@ mod tests {
         let unknown = row(&corrupt_link);
         assert_eq!(unknown.credential_kind, CredentialKind::Unknown);
         assert!(unknown.upstream_scopes.is_none());
+
+        for status in ["revoked", "failed"] {
+            db.collection::<Document>(user_api_key::COLLECTION_NAME)
+                .update_one(
+                    doc! { "_id": &oauth_key },
+                    doc! { "$set": { "status": status } },
+                )
+                .await
+                .unwrap();
+            let rows = list(&db, &actor, std::slice::from_ref(&oauth_id))
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].credential_kind, CredentialKind::OAuth);
+            assert!(rows[0].upstream_scopes.is_none());
+        }
     }
 }

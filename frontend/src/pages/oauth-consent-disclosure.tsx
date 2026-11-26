@@ -65,12 +65,10 @@ function credentialKind(kind?: ServiceConsentDisclosure["credential_kind"]) {
 export function ServiceConsentDetails({
   disclosure,
   orgName,
-  compact = false,
   id,
 }: {
   readonly disclosure?: ServiceConsentDisclosure;
   readonly orgName: string | null;
-  readonly compact?: boolean;
   readonly id?: string;
 }) {
   useUiTranslation();
@@ -109,7 +107,7 @@ export function ServiceConsentDetails({
                     {translateUi("Sensitive")}
                   </Badge>
                 )}
-                {!compact && scope.known && <p>{scope.description}</p>}
+                {scope.known && <p>{scope.description}</p>}
               </li>
             ))}
           </ul>
@@ -153,11 +151,30 @@ export function ServiceConsentDetails({
   );
 }
 
+export type ConsentInventoryState = "loading" | "failed" | "ready";
+
+function unavailableServiceLabel(state: ConsentInventoryState) {
+  if (state === "loading") return translateUi("Loading services...");
+  if (state === "failed")
+    return translateUi("Service details could not be loaded.");
+  return translateUi("Service details unavailable");
+}
+
+export function ConsentUnavailableService({
+  state,
+}: {
+  readonly state: ConsentInventoryState;
+}) {
+  useUiTranslation();
+  return unavailableServiceLabel(state);
+}
+
 export function ConsentServiceSummary({
   id,
   access,
   services,
   disclosures,
+  inventoryState,
   provenance,
   retained,
   retainedAll = false,
@@ -166,15 +183,18 @@ export function ConsentServiceSummary({
   readonly access: ServiceAccess;
   readonly services: ReadonlyMap<string, ConsentSummaryService>;
   readonly disclosures: ReadonlyMap<string, ServiceConsentDisclosure>;
+  readonly inventoryState: ConsentInventoryState;
   readonly provenance: (id: string) => readonly ConsentProvenance[];
   readonly retained?: readonly string[];
   readonly retainedAll?: boolean;
 }) {
   useUiTranslation();
+  const includedIds = access.allow_all_services
+    ? [...services.keys()]
+    : access.allowed_service_ids;
+  const unavailable = unavailableServiceLabel(inventoryState);
   const retainedNames = retained?.map(
-    (serviceId) =>
-      services.get(serviceId)?.name ??
-      translateUi("Service details unavailable"),
+    (serviceId) => services.get(serviceId)?.name ?? unavailable,
   );
   return (
     <div
@@ -200,9 +220,12 @@ export function ConsentServiceSummary({
           )}
         </p>
       )}
-      {!access.allow_all_services && access.allowed_service_ids.length > 0 && (
+      {access.allow_all_services && inventoryState !== "ready" && (
+        <p>{unavailable}</p>
+      )}
+      {includedIds.length > 0 && (
         <ul className="space-y-2">
-          {access.allowed_service_ids.map((serviceId) => {
+          {includedIds.map((serviceId) => {
             const service = services.get(serviceId);
             const labels = provenance(serviceId);
             return (
@@ -210,9 +233,7 @@ export function ConsentServiceSummary({
                 key={serviceId}
                 className="break-words rounded-md bg-overlay px-3 py-2"
               >
-                <p className="font-medium">
-                  {service?.name ?? translateUi("Service details unavailable")}
-                </p>
+                <p className="font-medium">{service?.name ?? unavailable}</p>
                 {service?.secondary && (
                   <p className="text-13 text-muted-foreground">
                     {service.secondary}
@@ -231,7 +252,6 @@ export function ConsentServiceSummary({
                   <ServiceConsentDetails
                     disclosure={disclosures.get(serviceId)}
                     orgName={service.orgName}
-                    compact
                   />
                 )}
               </li>
@@ -299,12 +319,15 @@ export function ConsentDuration({
       <div className="mt-2 space-y-2 text-14 text-muted-foreground">
         {disclosure && (
           <p>
-            {translateUi("Standard access tokens last {{duration}}.", {
-              duration: tokenDuration(
-                disclosure.access_token_ttl_secs,
-                language,
-              ),
-            })}
+            {translateUi(
+              "The configured lifetime for standard access tokens is {{duration}}.",
+              {
+                duration: tokenDuration(
+                  disclosure.access_token_ttl_secs,
+                  language,
+                ),
+              },
+            )}
           </p>
         )}
         {offline && (
@@ -327,20 +350,22 @@ export function ConsentDuration({
                 "Lets the app hold a durable NyxID credential that can act as you.",
               )}
             </span>
-            {disclosure?.broker_access_token_ttl_secs && (
-              <>
-                {" "}
-                {translateUi("Broker access tokens last {{duration}}.", {
-                  duration: tokenDuration(
-                    disclosure.broker_access_token_ttl_secs,
-                    language,
-                  ),
-                })}
-              </>
+          </p>
+        )}
+        {disclosure?.broker_access_token_ttl_secs && (
+          <p>
+            {translateUi(
+              "The configured lifetime for broker access tokens is {{duration}}. This applies to apps using the broker token flow.",
+              {
+                duration: tokenDuration(
+                  disclosure.broker_access_token_ttl_secs,
+                  language,
+                ),
+              },
             )}
           </p>
         )}
-        {disclosure && (!broker || offline) && (
+        {disclosure && (
           <p>
             {translateUi(
               "When issued, each refresh token lasts {{duration}}. The app may keep access by refreshing before expiry.",

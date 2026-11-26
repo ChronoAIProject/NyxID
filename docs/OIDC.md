@@ -244,10 +244,10 @@ revocation of the entire token family.
 
 The consent screen presents identity and OAuth permissions, access duration
 and revocation, and service access separately. The final service summary uses
-the same service selection as the submitted decision. It distinguishes an
-explicit selection from All services, which includes future connections, and
-shows already authorized or retained access when existing authorization data
-is available. Ordinary approval preserves the stored grant and issues authority
+the same service selection as the submitted decision. All services lists the
+currently included connections and includes future connections. The summary
+shows retained access when existing authorization data is available.
+Ordinary approval preserves the stored grant and issues authority
 for the approved request. Incremental review lists newly requested permissions,
 including long-lived and durable broker access. Incremental approval carries
 forward the existing grant and adds the approved services.
@@ -256,8 +256,9 @@ Service disclosures describe the connected credential and known catalog
 operations. They do not narrow full service access or replace credential,
 resource, or approval checks. Unavailable details fall back to full-access
 copy without blocking approval. Revoking app access in Authorized Applications
-requires the app to obtain consent again. Token duration describes a single
-issued token, while refresh rotation can keep the app connected.
+requires the app to obtain consent again. The screen lists the configured
+standard and broker token lifetimes. The app's token flow determines which
+applies. Refresh rotation can keep the app connected.
 
 See [the disclosure API](API.md#post-apiv1user-servicesconsent-disclosure)
 for field and availability details.

@@ -189,6 +189,7 @@ mod tests {
         for (method, client) in [
             (AuthMethod::ApiKey, None),
             (AuthMethod::Delegated, None),
+            (AuthMethod::Relay, None),
             (AuthMethod::ServiceAccount, None),
             (AuthMethod::AccessToken, Some("oauth-app".to_owned())),
         ] {
@@ -235,5 +236,56 @@ mod tests {
         assert_eq!(payload["access_token_ttl_secs"], 1200);
         assert_eq!(payload["refresh_token_ttl_secs"], 86400);
         assert_eq!(payload["services"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn consent_disclosure_is_mounted_on_the_public_api_router() {
+        use crate::{
+            models::user::{self, User, UserType},
+            services::token_service,
+        };
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        let Some(db) = test_utils::connect_test_database("oauth_consent_disclosure_route").await
+        else {
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+        db.collection::<User>(user::COLLECTION_NAME)
+            .insert_one(test_utils::test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+        let session = token_service::create_session(&db, &actor, None, None)
+            .await
+            .unwrap();
+        let state = test_utils::test_app_state(db);
+        let (public, _) = crate::routes::build_router_with_state(state.clone());
+        let app = public.with_state(state);
+        for cookie in [None, Some(format!("nyx_session={}", session.session_token))] {
+            let mut request = Request::post("/api/v1/user-services/consent-disclosure")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(cookie) = cookie.as_ref() {
+                request = request.header(header::COOKIE, cookie.as_str());
+            }
+            let response = Box::pin(
+                app.clone()
+                    .oneshot(request.body(Body::from(r#"{"service_ids":[]}"#)).unwrap()),
+            )
+            .await
+            .unwrap();
+            if cookie.is_some() {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response.headers()[header::CACHE_CONTROL],
+                    "private, no-store"
+                );
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
     }
 }

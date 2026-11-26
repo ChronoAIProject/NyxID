@@ -10,7 +10,7 @@ import {
 } from "@/lib/agent-grant";
 import { cn } from "@/lib/utils";
 import type { ServiceConsentDisclosure } from "@/schemas/oauth-consent";
-import { ConsentSelectionLabel, ServiceConsentDetails, type ConsentProvenance } from "./oauth-consent-disclosure";
+import { ConsentSelectionLabel, ConsentUnavailableService, ServiceConsentDetails, type ConsentInventoryState, type ConsentProvenance } from "./oauth-consent-disclosure";
 
 const LEVEL_OPTIONS: readonly { value: AccessLevel; label: string }[] = [
   { value: "off", get label() { return translateUi("Off"); } },
@@ -99,7 +99,7 @@ function LevelControl({
 export interface ServiceAccessTableProps {
   readonly clientName: string;
   readonly rows: readonly AccessServiceRow[];
-  readonly loading: boolean;
+  readonly inventoryState: ConsentInventoryState;
   readonly defaultLevel: AccessLevel;
   readonly onDefaultLevelChange: (level: AccessLevel) => void;
   readonly overrides: Readonly<Record<string, AccessLevel>>;
@@ -113,7 +113,7 @@ export interface ServiceAccessTableProps {
 export function ServiceAccessTable({
   clientName,
   rows,
-  loading,
+  inventoryState,
   defaultLevel,
   onDefaultLevelChange,
   overrides,
@@ -188,8 +188,10 @@ export function ServiceAccessTable({
           tabIndex={0}
           className="h-75 max-h-[20dvh] min-h-25 divide-y divide-border/60 overflow-y-auto overscroll-contain border-t border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
         >
-          {loading ? (
-            <p className="px-3 py-2.5 text-14 text-muted-foreground">{translateUi("Loading services...")}</p>
+          {inventoryState !== "ready" ? (
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">
+              <ConsentUnavailableService state={inventoryState} />
+            </p>
           ) : rows.length === 0 ? (
             <p className="px-3 py-2.5 text-14 text-muted-foreground">{translateUi("No services connected yet. New ones follow the setting above.")}</p>
           ) : visibleRows.length === 0 ? (

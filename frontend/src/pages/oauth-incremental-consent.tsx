@@ -17,7 +17,7 @@ import { OAUTH_SCOPE_META } from "@/lib/constants";
 import type { UserServiceResponse } from "@/schemas/keys";
 import type { IncrementalConsentRequest } from "@/schemas/oauth-consent";
 import { useAuthStore } from "@/stores/auth-store";
-import { ConsentDuration, ConsentServiceSummary, ServiceConsentDetails, type ConsentProvenance } from "./oauth-consent-disclosure";
+import { ConsentDuration, ConsentServiceSummary, ServiceConsentDetails, ConsentUnavailableService, type ConsentProvenance } from "./oauth-consent-disclosure";
 
 function organizationName(service: UserServiceResponse): string | null {
   const source = service.credential_source;
@@ -102,6 +102,7 @@ export function OAuthIncrementalConsentPage({
     orgName: organizationName(service),
   }]));
   const summaryId = "oauth-incremental-submitted-service-access";
+  const inventoryState = isError ? "failed" : isLoading ? "loading" : "ready";
   const approvedScopes = snapshot?.scopes.split(/\s+/) ?? [];
   const offline = approvedScopes.includes("offline_access");
   const broker = approvedScopes.includes("urn:nyxid:scope:broker_binding");
@@ -112,7 +113,7 @@ export function OAuthIncrementalConsentPage({
       .split(/\s+/)
       .filter((scope) => scope && !currentScopes.includes(scope) && (scope !== "machine" || machineSelectionRequired)) ?? [];
   function selectionProvenance(id: string): ConsentProvenance[] {
-    if (currentIds.includes(id)) return ["retained"];
+    if (submittedAccess.allow_all_services || currentIds.includes(id)) return ["retained"];
     return [requiredAdditions.includes(id) ? "required" : "selected"];
   }
 
@@ -149,7 +150,7 @@ export function OAuthIncrementalConsentPage({
     if (!service) {
       return (
         <div key={id} className="py-3.5 text-14 text-muted-foreground">
-          {translateUi("Service details unavailable")}
+          <ConsentUnavailableService state={inventoryState} />
         </div>
       );
     }
@@ -510,6 +511,7 @@ export function OAuthIncrementalConsentPage({
                     access={submittedAccess}
                     services={summaryInventory}
                     disclosures={disclosures}
+                    inventoryState={inventoryState}
                     provenance={selectionProvenance}
                     retainedAll={submittedAccess.allow_all_services}
                   />

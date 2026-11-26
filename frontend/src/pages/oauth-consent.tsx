@@ -58,6 +58,7 @@ import {
   ConsentSelectionLabel,
   ConsentServiceSummary,
   ServiceConsentDetails,
+  ConsentUnavailableService,
   type ConsentProvenance,
 } from "./oauth-consent-disclosure";
 
@@ -310,7 +311,7 @@ function StandardConsentPage({
   useUiTranslation();
   useApplyTheme();
   const user = useAuthStore((state) => state.user);
-  const { data: userServices, isLoading: userServicesLoading } =
+  const { data: userServices, isLoading: userServicesLoading, isError: userServicesError } =
     useUserServices(!preview);
   // The consent page renders once per authorize redirect; capture every
   // repeated query value in one immutable snapshot so downstream memos keep
@@ -478,10 +479,6 @@ function StandardConsentPage({
           secondary: service ? serviceSecondaryText(service) : "",
           description: service?.catalog_service_description?.trim() || "",
           orgName: service ? serviceOrgName(service) : null,
-          requiredByApp:
-            preselectServiceIds.includes(id) ||
-            resourceSelectedServiceIds.includes(id) ||
-            requiredServiceIds.includes(id),
           currentlyAuthorized:
             currentBindingAllowsAllServices ||
             currentBindingServiceIds.includes(id),
@@ -493,9 +490,6 @@ function StandardConsentPage({
       }),
     [
       effectiveSelectedServiceIds,
-      preselectServiceIds,
-      requiredServiceIds,
-      resourceSelectedServiceIds,
       selectableServices,
       bindingReview,
       currentBindingAllowsAllServices,
@@ -537,6 +531,11 @@ function StandardConsentPage({
   const existingAll = bindingReview ? currentBindingAllowsAllServices : existingAccess?.allow_all_services === true;
   const approvedIds = new Set(submittedAccess.allowed_service_ids);
   const summaryId = "oauth-submitted-service-access";
+  const inventoryState = !preview && userServicesError
+    ? "failed"
+    : !preview && userServicesLoading
+      ? "loading"
+      : "ready";
 
   function selectionProvenance(id: string): ConsentProvenance[] {
     const labels: ConsentProvenance[] = [];
@@ -710,7 +709,7 @@ function StandardConsentPage({
           <ServiceAccessTable
             clientName={clientName}
             rows={accessRows}
-            loading={!preview && userServicesLoading}
+            inventoryState={inventoryState}
             defaultLevel={defaultLevel}
             onDefaultLevelChange={changeDefaultLevel}
             overrides={levelOverrides}
@@ -765,7 +764,7 @@ function StandardConsentPage({
                       >
                         <div className="min-w-0">
                           <p className="break-words type-card-title text-foreground">
-                            {item.primary ?? translateUi("Service details unavailable")}
+                            {item.primary ?? <ConsentUnavailableService state={inventoryState} />}
                           </p>
                           {item.description && (
                             <p
@@ -788,13 +787,10 @@ function StandardConsentPage({
                           {item.currentlyAuthorized && bindingReview && (
                             <Badge variant="secondary" className="text-12">{translateUi("Authorized now")}</Badge>
                           )}
-                          {item.requiredByApp && (
-                            <Badge variant="secondary" className="text-12">{translateUi("Required by app")}</Badge>
-                          )}
                           {item.newlySelected && (
                             <Badge variant="accent" className="text-12">{translateUi("New")}</Badge>
                           )}
-                          {selectionProvenance(item.id).filter((label) => label !== "required" && !(bindingReview && label === "already")).map((label) => (
+                          {selectionProvenance(item.id).filter((label) => !(bindingReview && label === "already")).map((label) => (
                             <Badge key={label} variant="secondary" className="text-12"><ConsentSelectionLabel provenance={label} /></Badge>
                           ))}
                         </div>
@@ -890,13 +886,7 @@ function StandardConsentPage({
                                         className="text-12"
                                       >{translateUi("Authorized now")}</Badge>
                                     )}
-                                  {requiredByApp && (
-                                    <Badge
-                                      variant="secondary"
-                                      className="text-12"
-                                    >{translateUi("Required by app")}</Badge>
-                                  )}
-                                  {selectionProvenance(service.id).filter((label) => label !== "required" && !(bindingReview && label === "already")).map((label) => (
+                                  {selectionProvenance(service.id).filter((label) => !(bindingReview && label === "already")).map((label) => (
                                     <Badge key={label} variant="secondary" className="text-12"><ConsentSelectionLabel provenance={label} /></Badge>
                                   ))}
                                   {bindingReview &&
@@ -921,7 +911,11 @@ function StandardConsentPage({
                           );
                         })
                       ) : (
-                        <p className="py-3.5 text-14 text-muted-foreground">{translateUi("No active services are available.")}</p>
+                        <p className="py-3.5 text-14 text-muted-foreground">
+                          {inventoryState === "failed"
+                            ? <ConsentUnavailableService state={inventoryState} />
+                            : translateUi("No active services are available.")}
+                        </p>
                       )}
                     </ServiceScrollList>
                   )}
@@ -1058,6 +1052,7 @@ function StandardConsentPage({
           access={submittedAccess}
           services={summaryInventory}
           disclosures={disclosures}
+          inventoryState={inventoryState}
           provenance={selectionProvenance}
           retainedAll={!bindingReview && existingAll}
           retained={bindingReview || submittedAccess.allow_all_services

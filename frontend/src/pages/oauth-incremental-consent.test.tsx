@@ -303,7 +303,7 @@ describe("incremental consent", () => {
         screen.queryByText(/Services could not be loaded/),
       ).not.toBeInTheDocument();
       expect(
-        within(screen.getByRole("region", { name: "Already authorized services" })).getAllByText("Service details unavailable"),
+        within(screen.getByRole("region", { name: "Already authorized services" })).getAllByText(kind === "failed" ? "Service details could not be loaded." : "Loading services..."),
       ).toHaveLength(2);
     },
   );

@@ -44,6 +44,7 @@ const { state } = vi.hoisted(() => ({
           };
     }>,
     userServicesLoading: false,
+    userServicesError: false,
   },
 }));
 
@@ -51,6 +52,7 @@ vi.mock("@/hooks/use-user-services", () => ({
   useUserServices: () => ({
     data: state.userServices,
     isLoading: state.userServicesLoading,
+    isError: state.userServicesError,
   }),
 }));
 
@@ -153,6 +155,7 @@ beforeEach(() => {
     },
   ];
   state.userServicesLoading = false;
+  state.userServicesError = false;
 });
 
 afterEach(() => {
@@ -625,9 +628,9 @@ describe("OAuthConsentPage", () => {
 
     await user.click(screen.getByRole("switch", { name: "All services" }));
 
-    expect(screen.queryByText("My OpenAI")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /My OpenAI/ })).not.toBeInTheDocument();
     expect(screen.queryByText("Inactive")).not.toBeInTheDocument();
-    expect(screen.queryByText("Org Service")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Org Service/ })).not.toBeInTheDocument();
     expect(hiddenInput("allow_all_services")?.value).toBe("true");
   });
 
@@ -721,7 +724,7 @@ describe("OAuthConsentPage", () => {
     // Summary lists the resolved default with the app-required badge; the
     // hidden inputs already carry the grant without any user interaction.
     expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("My OpenAI")).toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Required by app")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Preselected by app")).toBeInTheDocument();
     expect(hiddenInput("allow_all_services")?.value).toBe("false");
     expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
       "svc-openai",
@@ -738,7 +741,7 @@ describe("OAuthConsentPage", () => {
     const appDefault = screen.getByRole("checkbox", { name: /My OpenAI/i });
     expect(appDefault).toBeChecked();
     expect(appDefault).toBeDisabled();
-    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Required by app")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Preselected by app")).toBeInTheDocument();
 
     await user.click(appDefault);
     expect(appDefault).toBeChecked();
@@ -908,7 +911,10 @@ const DISCLOSURE_FIXTURE = {
   ],
 };
 
-function stubConsentReads(payload: Response, existing?: string[]) {
+function stubConsentReads(payload: Response, existing?: string[], existingOptions?: {
+  allowAll?: boolean;
+  expiry?: string;
+}) {
   useAuthStore.setState({
     user: {
       id: "consent-reader",
@@ -925,13 +931,55 @@ function stubConsentReads(payload: Response, existing?: string[]) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     if (String(input).endsWith("/consent-disclosure")) return payload;
     if (String(input).endsWith("/authorization") && existing) {
-      return Response.json({ allow_all_services: false, allowed_service_ids: existing, expires_at: null });
+      return Response.json({
+        allow_all_services: existingOptions?.allowAll ?? false,
+        allowed_service_ids: existing,
+        expires_at: existingOptions?.expiry ?? null,
+      });
     }
     return Response.json({ error: "not_found" }, { status: 404 });
   });
 }
 
 describe("OAuth consent disclosure", () => {
+  it("distinguishes a failed inventory read from a successful miss", () => {
+    state.userServices = [];
+    state.userServicesError = true;
+    setSearch({ ...VALID, required_service_ids: ["unresolved-service-id"] });
+    render(<OAuthConsentPage />);
+    const summary = document.getElementById("oauth-submitted-service-access")!;
+    expect(summary).toHaveTextContent("Service details could not be loaded.");
+    expect(summary).not.toHaveTextContent("Deleted service");
+    expect(summary).not.toHaveTextContent("unresolved-service-id");
+  });
+
+  it("shows retained all-service access separately from zero submitted services", async () => {
+    stubConsentReads(Response.json(DISCLOSURE_FIXTURE), [], { allowAll: true });
+    setSearch({ ...VALID, scope: "openid proxy" });
+    render(<OAuthConsentPage />);
+    const allow = screen.getByRole("button", { name: "Allow access" });
+    const summary = within(document.getElementById(allow.getAttribute("aria-describedby")!)!);
+    expect(await summary.findByText("Previously authorized access to all services stays authorized.")).toBeVisible();
+    expect(summary.getByText("No services are included in this request.")).toBeVisible();
+    const decision = new FormData(allow.closest("form")!);
+    expect(decision.get("allow_all_services")).toBe("false");
+    expect(decision.getAll("allowed_service_ids")).toEqual([]);
+  });
+
+  it("does not describe expired consent as retained", async () => {
+    const reader = stubConsentReads(Response.json(DISCLOSURE_FIXTURE), ["svc-openai"], {
+      allowAll: true,
+      expiry: "2000-01-01T00:00:00Z",
+    });
+    setSearch({ ...VALID, scope: "openid proxy" });
+    render(<OAuthConsentPage />);
+    await screen.findByText(/configured lifetime for standard access tokens/);
+    expect(reader.mock.calls.some(([url]) => String(url).endsWith("/authorization"))).toBe(true);
+    const summary = document.getElementById("oauth-submitted-service-access")!;
+    expect(summary).toHaveTextContent("No services are included in this request.");
+    expect(summary).not.toHaveTextContent(/stay[s]? authorized/i);
+  });
+
   it("keeps unresolved service IDs in the submission without exposing them in the summary", () => {
     const unavailableId = "7d902937-fc5a-4117-93c2-51d994999069";
     setSearch({ ...VALID, required_service_ids: [unavailableId] });
@@ -968,7 +1016,8 @@ describe("OAuth consent disclosure", () => {
     expect(summary).toHaveTextContent("Org Service");
     expect(summary).toHaveTextContent("stay authorized from an earlier approval");
     expect(within(picker).getByText(/provider controls what this API key can do/)).toBeVisible();
-    expect(screen.getByText("Standard access tokens last 15 minutes.")).toBeVisible();
+    expect(screen.getByText("The configured lifetime for standard access tokens is 15 minutes.")).toBeVisible();
+    expect(screen.getByText(/configured lifetime for broker access tokens is 5 minutes/)).toBeVisible();
     expect(screen.getByText(/each refresh token lasts 7 days/)).toBeVisible();
     const batch = request.mock.calls.filter(([url]) => String(url).endsWith("/consent-disclosure"));
     expect(batch).toHaveLength(1);
@@ -989,6 +1038,9 @@ describe("OAuth consent disclosure", () => {
     const all = within(screen.getByRole("radiogroup", { name: "All services" }));
     await user.click(all.getByRole("radio", { name: "Allow" }));
     expect(summary).toHaveTextContent("All current and future services are included.");
+    expect(summary).toHaveTextContent("My OpenAI");
+    expect(summary).toHaveTextContent("Access to repositories.");
+    expect(summary).toHaveTextContent("Org Service");
     expect(new FormData(form).get("allow_all_services")).toBe("true");
     expect(new FormData(form).getAll("allowed_service_ids")).toEqual([]);
 
