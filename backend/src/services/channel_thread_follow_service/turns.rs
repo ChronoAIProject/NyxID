@@ -109,7 +109,6 @@ async fn validate_bound(
             db,
             &channel,
             &child,
-            &settings,
             origin,
             conversation,
             pending_guest,
@@ -266,7 +265,6 @@ async fn validate_hosted(
     db: &Database,
     channel: &NyxbotChannel,
     child: &NyxbotThread,
-    settings: &NyxbotThread,
     origin: &ChannelOrigin,
     conversation: &str,
     pending_guest: Option<&guest::GuestTurn>,
@@ -344,7 +342,7 @@ async fn validate_hosted(
                 child.platform_thread_id.as_deref(),
             )
         || assignment.followed_child_id.as_deref() != Some(child.id.as_str())
-        || assignment.settings_chat_id != settings.id
+        || child.follow.settings_chat_id.as_deref() != Some(assignment.settings_chat_id.as_str())
         || assignment.agent_id != b.agent_id
         || assignment.settings_generation != b.generation
         || assignment.channel_generation != b.channel_generation

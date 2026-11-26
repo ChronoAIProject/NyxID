@@ -264,11 +264,11 @@ async fn hosted_reply_delivery_custom_replay_rechecks_the_original_event() {
 
     let mut f = fixture("hosted_reply_custom_replay").await;
     let ordinary = f.event.conversation_id.clone();
-    let hosted = "nyxag-1234567890abcdef1234567890abcdef";
+    let hosted = || Some(format!("nyxag-{}", Uuid::new_v4().simple()));
     let events = f.state.db.collection::<NyxbotEvent>(EVENTS);
     for (conversation, replacement, expect_answer) in [
-        (Some(hosted.to_owned()), None, false),
-        (Some(hosted.to_owned()), ordinary.clone(), false),
+        (hosted(), None, false),
+        (hosted(), ordinary.clone(), false),
         (ordinary.clone(), None, true),
     ] {
         f.event.conversation_id = conversation;
