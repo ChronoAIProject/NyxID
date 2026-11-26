@@ -39,8 +39,8 @@ import { requireSocialProvider } from "./publicAuthConfig";
 import {
   parseSocialCallback,
   SOCIAL_CALLBACK_URL,
-  type SocialProvider,
 } from "./socialCallback";
+import { socialProviders, type SocialProvider } from "../../lib/auth/socialProviders";
 import { capture } from "../../lib/telemetry";
 import { getFrontendUrl } from "../../lib/env";
 import { useAuthTheme } from "./useAuthTheme";
@@ -534,37 +534,18 @@ export function AuthHomeScreen({ navigation }: Props) {
               </Pressable>
             </View>
           ) : null}
-          {loginConfig?.socialProviders.includes("google") ? (
-            <SocialAuthButton
-              label={translateApp("Continue with Google")}
-                provider="google"
-              disabled={isAnyPending}
-              loading={
-                isSocialAuthPending && pendingSocialProvider === "google"
-              }
-              onPress={() => void startSocialLogin("google")}
-            />
-          ) : null}
-          {loginConfig?.socialProviders.includes("github") ? (
-            <SocialAuthButton
-              label={translateApp("Continue with GitHub")}
-                provider="github"
-              disabled={isAnyPending}
-              loading={
-                isSocialAuthPending && pendingSocialProvider === "github"
-              }
-              onPress={() => void startSocialLogin("github")}
-            />
-          ) : null}
-          {loginConfig?.socialProviders.includes("apple") ? (
-            <SocialAuthButton
-              label={translateApp("Continue with Apple")}
-                provider="apple"
-              disabled={isAnyPending}
-              loading={isSocialAuthPending && pendingSocialProvider === "apple"}
-              onPress={() => void startSocialLogin("apple")}
-            />
-          ) : null}
+          {socialProviders
+            .filter(({ id }) => loginConfig?.socialProviders.includes(id))
+            .map(({ id, signInLabel }) => (
+              <SocialAuthButton
+                key={id}
+                label={translateApp(signInLabel)}
+                provider={id}
+                disabled={isAnyPending}
+                loading={isSocialAuthPending && pendingSocialProvider === id}
+                onPress={() => void startSocialLogin(id)}
+              />
+            ))}
 
             <>
               {loginConfig && loginConfig.socialProviders.length > 0 ? (

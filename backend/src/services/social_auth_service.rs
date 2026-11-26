@@ -17,7 +17,20 @@ pub enum SocialProvider {
     Apple,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum BrowserFlow {
+    Query,
+    FormPostWithNonce,
+}
+
 impl SocialProvider {
+    pub(crate) fn browser_flow(self) -> BrowserFlow {
+        match self {
+            Self::Google | Self::GitHub => BrowserFlow::Query,
+            Self::Apple => BrowserFlow::FormPostWithNonce,
+        }
+    }
+
     /// Parse from URL path segment. Returns None for unsupported providers.
     pub fn parse(s: &str) -> Option<Self> {
         match s {

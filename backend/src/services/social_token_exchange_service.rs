@@ -147,25 +147,45 @@ async fn exchange_social_token_inner(
         AppError::ExternalProviderNotConfigured("Unsupported or unconfigured provider".to_string())
     })?;
 
+    let profile = verify_subject(
+        social_provider,
+        subject_token_type,
+        subject_token,
+        jwks_cache,
+        config,
+        http_client,
+    )
+    .await?;
+
+    complete_verified_exchange(db, config, jwt_keys, client_id, social_provider, profile).await
+}
+
+/// Validate the provider's proof type before performing any provider I/O.
+async fn verify_subject(
+    social_provider: SocialProvider,
+    subject_token_type: &str,
+    subject_token: &str,
+    jwks_cache: &JwksCache,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+) -> AppResult<SocialProfile> {
     validate_subject_token_type(social_provider, subject_token_type)?;
 
     // Step 3: Verify external token and build SocialProfile
-    let profile = match social_provider {
-        SocialProvider::Google => verify_google_token(jwks_cache, config, subject_token).await?,
+    match social_provider {
+        SocialProvider::Google => verify_google_token(jwks_cache, config, subject_token).await,
         SocialProvider::GitHub => {
             verify_github_token_bound_to_app(config, http_client, subject_token).await?;
-            social_auth_service::fetch_user_profile(
+            Ok(social_auth_service::fetch_user_profile(
                 SocialProvider::GitHub,
                 subject_token,
                 http_client,
             )
             .await?
-            .profile
+            .profile)
         }
-        SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
-    };
-
-    complete_verified_exchange(db, config, jwt_keys, client_id, social_provider, profile).await
+        SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await,
+    }
 }
 
 /// Provider verification stays at the caller; all verified first factors cross
@@ -409,6 +429,7 @@ struct GitHubTokenCheckApp {
 
 #[cfg(test)]
 mod tests {
+    mod provider_paths;
     use super::*;
     use crate::crypto::token::hash_token;
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};

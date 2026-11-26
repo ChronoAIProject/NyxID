@@ -1,3 +1,4 @@
+import type { SocialProvider } from "../auth/socialProviders";
 import { ApiError } from "./ApiError";
 import { buildApiUrl } from "./baseUrl";
 import {
@@ -65,8 +66,6 @@ type RegisterWithPasswordResponse = {
   userId: string;
   message: string;
 };
-
-type SocialProvider = "google" | "github" | "apple";
 
 export const mobileApi = {
   previewAuthDevice: previewAuthDeviceRequest,

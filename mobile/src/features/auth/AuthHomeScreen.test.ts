@@ -9,6 +9,7 @@ import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 import type { PublicAuthConfig } from "./publicAuthConfig";
 import * as emailLogin from "./emailLogin";
+import * as socialProviders from "../../lib/auth/socialProviders";
 import * as publicAuthConfig from "./publicAuthConfig";
 import * as socialCallback from "./socialCallback";
 import { loadTestModule } from "../../lib/api/apiUrlTestHarness";
@@ -203,6 +204,7 @@ function setup({
     "../../lib/api/publicAuthApi": { getPublicAuthConfig: async () => config },
     "./publicAuthConfig": publicAuthConfig,
     "./socialCallback": socialCallback,
+    "../../lib/auth/socialProviders": socialProviders,
     "../../lib/telemetry": { capture: () => {} },
     "../../lib/env": { getFrontendUrl },
     "./useAuthTheme": { useAuthTheme: () => ({ colors }) },

@@ -1,5 +1,5 @@
 import { isMfaChallengeToken } from "../../lib/auth/mfaChallenge";
-export type SocialProvider = "google" | "github" | "apple";
+import { isSocialProvider, type SocialProvider } from "../../lib/auth/socialProviders";
 export const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
 type SocialCallback = {
   status: "success" | "error" | "mfa_required";
@@ -25,7 +25,7 @@ export function parseSocialCallback(url: string): SocialCallback | null {
     const statusRaw = parsed.searchParams.get("status") ?? fragmentParams.get("status");
     const providerRaw = parsed.searchParams.get("provider") ?? fragmentParams.get("provider");
     const provider: SocialProvider | undefined =
-      providerRaw === "google" || providerRaw === "github" || providerRaw === "apple"
+      isSocialProvider(providerRaw)
         ? providerRaw
         : undefined;
     if (statusRaw === "mfa_required") {
