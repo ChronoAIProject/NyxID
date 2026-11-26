@@ -38,6 +38,7 @@ import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
+import { useExistingOAuthConsent, useOAuthConsentDisclosure } from "@/hooks/use-oauth-consent-disclosure";
 import { cn } from "@/lib/utils";
 import {
   oauthConsentServiceAccessSchema,
@@ -52,6 +53,13 @@ import {
 } from "@/lib/agent-grant";
 import { ServiceAccessTable } from "./oauth-consent-access";
 import { OAuthIncrementalConsentPage } from "./oauth-incremental-consent";
+import {
+  ConsentDuration,
+  ConsentSelectionLabel,
+  ConsentServiceSummary,
+  ServiceConsentDetails,
+  type ConsentProvenance,
+} from "./oauth-consent-disclosure";
 
 // Paint the canvas because public pages leave a dark body anti-flash color.
 function ConsentShell({
@@ -391,13 +399,16 @@ function StandardConsentPage({
     !consentRequest;
 
   const scopes = scope.split(/\s+/).filter(Boolean);
-  // Agent apps get one profile row; `proxy` is shown as the service table.
+  // Keep the individual identity descriptions for non-agent apps.
   const identityScopes = agentAccess
-    ? scopes.filter((item) => IDENTITY_SCOPE_WORDS[item])
+    ? scopes.filter((item) => Object.hasOwn(IDENTITY_SCOPE_WORDS, item))
     : [];
   // Machine authority is reviewed separately in the optional selection below.
-  const listedScopes = scopes.filter((item) => item !== "machine" &&
-    (!agentAccess || (!IDENTITY_SCOPE_WORDS[item] && item !== "proxy")));
+  const listedScopes = scopes.filter((item) =>
+    !identityScopes.includes(item) &&
+    !["machine", "offline_access", "urn:nyxid:scope:broker_binding"].includes(item) &&
+    (!agentAccess || item !== "proxy"),
+  );
   const redirectHost = parseHost(redirectUri);
   const email = preview?.email ?? user?.email;
   const selectableServices = useMemo(
@@ -463,7 +474,7 @@ function StandardConsentPage({
         const service = selectableServices.find((item) => item.id === id);
         return {
           id,
-          primary: service ? serviceDisplayName(service) : id,
+          primary: service ? serviceDisplayName(service) : undefined,
           secondary: service ? serviceSecondaryText(service) : "",
           description: service?.catalog_service_description?.trim() || "",
           orgName: service ? serviceOrgName(service) : null,
@@ -512,6 +523,33 @@ function StandardConsentPage({
         allowed_service_ids: grant.serviceIds,
       }
     : serviceAccess;
+  const { data: disclosure } = useOAuthConsentDisclosure(
+    selectableServices.map((service) => service.id),
+    !preview && !missing && !userServicesLoading,
+  );
+  const { data: existingAccess } = useExistingOAuthConsent(
+    clientId,
+    !preview && !missing && !bindingReview,
+  );
+  const disclosures = new Map(disclosure?.services.map((item) => [item.service_id, item]));
+  const summaryInventory = new Map(accessRows.map((row) => [row.id, row]));
+  const existingIds = bindingReview ? currentBindingServiceIds : existingAccess?.allowed_service_ids ?? [];
+  const existingAll = bindingReview ? currentBindingAllowsAllServices : existingAccess?.allow_all_services === true;
+  const approvedIds = new Set(submittedAccess.allowed_service_ids);
+  const summaryId = "oauth-submitted-service-access";
+
+  function selectionProvenance(id: string): ConsentProvenance[] {
+    const labels: ConsentProvenance[] = [];
+    if (existingAll || existingIds.includes(id)) labels.push("already");
+    if (requiredServiceIds.includes(id) || resourceSelectedServiceIds.includes(id)) {
+      labels.push("required");
+    } else if (preselectServiceIds.includes(id) && (!agentAccess || !submittedAccess.allow_all_services)) {
+      labels.push("preselected");
+    } else if (!submittedAccess.allow_all_services && approvedIds.has(id) && labels.length === 0) {
+      labels.push("selected");
+    }
+    return labels;
+  }
 
   function changeDefaultLevel(level: AccessLevel) {
     setDefaultLevel(level);
@@ -601,7 +639,7 @@ function StandardConsentPage({
       <div
         className={cn(
           agentAccess &&
-            "lg:grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:grid-rows-[auto_auto_1fr] lg:gap-x-10",
+            "lg:grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:grid-rows-[auto_auto_auto_1fr] lg:gap-x-10",
         )}
       >
         <section
@@ -611,7 +649,7 @@ function StandardConsentPage({
           <h2
             id="oauth-permissions"
             className="type-card-title text-foreground"
-          >{translateUi("This will allow ")}{clientName}{translateUi(" to:")}</h2>
+          >{translateUi("Identity and app permissions")}</h2>
           <div className="mt-4 divide-y divide-border/60">
             {identityScopes.length > 0 && (
               <div className="flex items-start gap-3 py-3">
@@ -662,6 +700,12 @@ function StandardConsentPage({
           </div>
         </section>
 
+        <ConsentDuration
+          disclosure={disclosure}
+          offline={scopes.includes("offline_access")}
+          broker={scopes.includes("urn:nyxid:scope:broker_binding")}
+          className={cn("border-t border-border py-5", agentAccess && "lg:col-start-1 lg:row-start-2")}
+        />
         {agentAccess ? (
           <ServiceAccessTable
             clientName={clientName}
@@ -671,7 +715,9 @@ function StandardConsentPage({
             onDefaultLevelChange={changeDefaultLevel}
             overrides={levelOverrides}
             onLevelChange={changeServiceLevel}
-            className="lg:col-start-2 lg:row-span-3 lg:row-start-1 lg:border-t-0 lg:pt-0"
+            disclosures={disclosures}
+            provenance={selectionProvenance}
+            className="lg:col-start-2 lg:row-span-4 lg:row-start-1 lg:border-t-0 lg:pt-0"
           />
         ) : (
           <section
@@ -719,7 +765,7 @@ function StandardConsentPage({
                       >
                         <div className="min-w-0">
                           <p className="break-words type-card-title text-foreground">
-                            {item.primary}
+                            {item.primary ?? translateUi("Service details unavailable")}
                           </p>
                           {item.description && (
                             <p
@@ -734,13 +780,8 @@ function StandardConsentPage({
                               {item.secondary}
                             </p>
                           )}
-                          {item.orgName && (
-                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                              <Badge variant="secondary" className="text-12">{translateUi("Org")}</Badge>
-                              <span className="break-words text-13 text-muted-foreground">
-                                {item.orgName}
-                              </span>
-                            </div>
+                          {summaryInventory.has(item.id) && (
+                            <ServiceConsentDetails disclosure={disclosures.get(item.id)} orgName={item.orgName} />
                           )}
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-1 sm:justify-end">
@@ -753,6 +794,9 @@ function StandardConsentPage({
                           {item.newlySelected && (
                             <Badge variant="accent" className="text-12">{translateUi("New")}</Badge>
                           )}
+                          {selectionProvenance(item.id).filter((label) => label !== "required" && !(bindingReview && label === "already")).map((label) => (
+                            <Badge key={label} variant="secondary" className="text-12"><ConsentSelectionLabel provenance={label} /></Badge>
+                          ))}
                         </div>
                       </div>
                     ))}
@@ -797,6 +841,7 @@ function StandardConsentPage({
                             >
                               <Checkbox
                                 id={`oauth-service-${service.id}`}
+                                aria-describedby={`oauth-service-permissions-${service.id}`}
                                 checked={effectiveSelectedServiceIds.includes(
                                   service.id,
                                 )}
@@ -829,17 +874,11 @@ function StandardConsentPage({
                                     </FieldHelp>
                                   )}
                                 </Label>
-                                {orgName && (
-                                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                                    <Badge
-                                      variant="secondary"
-                                      className="text-12"
-                                    >{translateUi("Org")}</Badge>
-                                    <span className="break-words type-secondary text-muted-foreground">
-                                      {orgName}
-                                    </span>
-                                  </div>
-                                )}
+                                <ServiceConsentDetails
+                                  id={`oauth-service-permissions-${service.id}`}
+                                  disclosure={disclosures.get(service.id)}
+                                  orgName={orgName}
+                                />
                                 <div className="mt-1.5 flex flex-wrap gap-1">
                                   {bindingReview &&
                                     (currentBindingAllowsAllServices ||
@@ -857,6 +896,9 @@ function StandardConsentPage({
                                       className="text-12"
                                     >{translateUi("Required by app")}</Badge>
                                   )}
+                                  {selectionProvenance(service.id).filter((label) => label !== "required" && !(bindingReview && label === "already")).map((label) => (
+                                    <Badge key={label} variant="secondary" className="text-12"><ConsentSelectionLabel provenance={label} /></Badge>
+                                  ))}
                                   {bindingReview &&
                                     effectiveSelectedServiceIds.includes(
                                       service.id,
@@ -902,7 +944,7 @@ function StandardConsentPage({
           aria-labelledby="oauth-trust"
           className={cn(
             "border-t border-border py-5",
-            agentAccess && "lg:col-start-1 lg:row-start-2",
+            agentAccess && "lg:col-start-1 lg:row-start-3",
           )}
         >
           <div className="flex items-start gap-3">
@@ -916,7 +958,7 @@ function StandardConsentPage({
                 className="type-body-strong text-foreground"
               >{translateUi("Make sure you trust ")}{clientName}
               </h2>
-              <p className="mt-2 text-14 text-muted-foreground">{translateUi("This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.")}</p>
+              <p className="mt-2 text-14 text-muted-foreground">{translateUi("This app may receive the account information above and use the services you approve. Continue only if you trust it.")}</p>
             </div>
           </div>
         </section>
@@ -924,7 +966,7 @@ function StandardConsentPage({
         <details
           className={cn(
             "group border-t border-border py-4",
-            agentAccess && "lg:col-start-1 lg:row-start-3 lg:self-start",
+            agentAccess && "lg:col-start-1 lg:row-start-4 lg:self-start",
           )}
         >
           <summary className="flex cursor-pointer list-none items-center justify-between text-muted-foreground [&::-webkit-details-marker]:hidden">{translateUi("App details")}<ChevronDown
@@ -947,10 +989,7 @@ function StandardConsentPage({
         method="POST"
         action="/oauth/authorize/decision"
         onSubmit={preview ? (event) => event.preventDefault() : undefined}
-        className={cn(
-          "flex flex-col gap-2 border-t border-border pt-5",
-          agentAccess && "lg:flex-row-reverse lg:items-center lg:justify-start",
-        )}
+        className="flex flex-col gap-4 border-t border-border pt-5"
       >
         <input type="hidden" name="response_type" value={responseType} />
         <input type="hidden" name="client_id" value={clientId} />
@@ -1014,27 +1053,41 @@ function StandardConsentPage({
           />
         ))}
 
-        <Button
-          type="submit"
-          variant="primary"
-          name="decision"
-          value="allow"
-          disabled={Boolean(preview) || (machineScope && machineSelectionRequired && !preparedMachineRequest)}
-          className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
-        >
-          {bindingReview ? translateUi("Update access") : translateUi("Allow access")}
-          <ArrowRight className="ml-2 size-4" aria-hidden="true" />
-        </Button>
-        <Button
-          type="submit"
-          variant="ghost"
-          name="decision"
-          value="deny"
-          disabled={Boolean(preview)}
-          className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-28")}
-        >
-          {bindingReview ? translateUi("Cancel") : translateUi("Decline")}
-        </Button>
+        <ConsentServiceSummary
+          id={summaryId}
+          access={submittedAccess}
+          services={summaryInventory}
+          disclosures={disclosures}
+          provenance={selectionProvenance}
+          retainedAll={!bindingReview && existingAll}
+          retained={bindingReview || submittedAccess.allow_all_services
+            ? undefined
+            : existingIds.filter((id) => !approvedIds.has(id))}
+        />
+        <div className={cn("flex flex-col gap-2", agentAccess && "lg:flex-row-reverse lg:items-center lg:justify-start")}>
+          <Button
+            type="submit"
+            variant="primary"
+            name="decision"
+            value="allow"
+            aria-describedby={summaryId}
+            disabled={Boolean(preview) || (machineScope && machineSelectionRequired && !preparedMachineRequest)}
+            className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
+          >
+            {bindingReview ? translateUi("Update access") : translateUi("Allow access")}
+            <ArrowRight className="ml-2 size-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="submit"
+            variant="ghost"
+            name="decision"
+            value="deny"
+            disabled={Boolean(preview)}
+            className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-28")}
+          >
+            {bindingReview ? translateUi("Cancel") : translateUi("Decline")}
+          </Button>
+        </div>
       </form>
     </ConsentShell>
   );

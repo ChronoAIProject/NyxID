@@ -3867,6 +3867,29 @@ List user's service bindings.
 
 The integration contract guarantees `services[].id`, `services[].slug`, and `services[].is_active` across compatible `/api/v1` releases. Other fields are documented for current clients but may evolve additively; clients should ignore unknown fields.
 
+#### POST /api/v1/user-services/consent-disclosure
+
+Read consent display metadata for up to 100 exact user-service UUIDs in
+`{"service_ids":["…"]}`. An empty list returns only configured token lifetimes.
+Only first-party human sessions and access tokens qualify. Unknown, disabled,
+and non-executable services are omitted under the active user-service listing's
+visibility policy. The response is private and non-cacheable.
+
+`access_token_ttl_secs`, `broker_access_token_ttl_secs`, and
+`refresh_token_ttl_secs` report the NyxID OAuth lifetimes. Each `services` entry contains `service_id`,
+`credential_source` (personal or organization), and `credential_kind`. Only a
+linked OAuth credential's recorded scope string can populate `upstream_scopes`.
+Known entries include the curated label, description and sensitivity. Other
+entries retain the raw scope with `known: false` and unknown sensitivity. A
+null list means the permissions could not be determined or do not apply.
+
+`known_operations` counts active published catalog rows under `read`, `write`,
+`delete`, and `unclassified`. It is null when no published inventory is known.
+Explicit endpoint risk supplies read and write, and a classified write using
+HTTP DELETE counts as delete. The counts carry `limiting: false`. Capability
+values report positive catalog evidence or null for unknown. These fields are
+descriptive and approval never depends on the projection.
+
 #### PUT /api/v1/user-services/{id}
 
 Update auth config or node routing.

@@ -9,6 +9,8 @@ import {
   type AccessServiceRow,
 } from "@/lib/agent-grant";
 import { cn } from "@/lib/utils";
+import type { ServiceConsentDisclosure } from "@/schemas/oauth-consent";
+import { ConsentSelectionLabel, ServiceConsentDetails, type ConsentProvenance } from "./oauth-consent-disclosure";
 
 const LEVEL_OPTIONS: readonly { value: AccessLevel; label: string }[] = [
   { value: "off", get label() { return translateUi("Off"); } },
@@ -20,17 +22,20 @@ function LevelControl({
   value,
   onChange,
   offDisabled = false,
+  describedBy,
 }: {
   readonly label: string;
   readonly value: AccessLevel;
   readonly onChange: (level: AccessLevel) => void;
   readonly offDisabled?: boolean;
+  readonly describedBy?: string;
 }) {
   useUiTranslation();
   return (
     <div
       role="radiogroup"
       aria-label={label}
+      aria-describedby={describedBy}
       className="flex shrink-0 gap-0.5 rounded-lg border border-hairline p-0.5"
       onKeyDown={(event) => {
         const forward = event.key === "ArrowRight" || event.key === "ArrowDown";
@@ -99,6 +104,8 @@ export interface ServiceAccessTableProps {
   readonly onDefaultLevelChange: (level: AccessLevel) => void;
   readonly overrides: Readonly<Record<string, AccessLevel>>;
   readonly onLevelChange: (id: string, level: AccessLevel) => void;
+  readonly disclosures: ReadonlyMap<string, ServiceConsentDisclosure>;
+  readonly provenance: (id: string) => readonly ConsentProvenance[];
   readonly className?: string;
 }
 
@@ -111,6 +118,8 @@ export function ServiceAccessTable({
   onDefaultLevelChange,
   overrides,
   onLevelChange,
+  disclosures,
+  provenance,
   className,
 }: ServiceAccessTableProps) {
   useUiTranslation();
@@ -190,31 +199,32 @@ export function ServiceAccessTable({
             visibleRows.map((row) => (
               <div
                 key={row.id}
-                className="flex items-center justify-between gap-3 px-3 py-2"
+                className="flex flex-wrap items-start justify-between gap-3 px-3 py-2 sm:flex-nowrap"
               >
-                <div className="min-w-0">
+                <div className="min-w-0 grow">
                   <p
-                    className="truncate text-15 text-foreground"
-                    title={row.name}
+                    className="break-words text-15 text-foreground"
                   >
                     {row.name}
                   </p>
-                  {(row.orgName || row.requiredByApp || row.secondary) && (
-                    <p className="truncate text-13 text-text-tertiary">
-                      {[
-                        row.orgName && translateUi("Org · {{orgName}}", { orgName: row.orgName }),
-                        row.requiredByApp ? "Requested by app" : row.secondary,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </p>
+                  {row.secondary && (
+                    <p className="break-words text-13 text-text-tertiary">{row.secondary}</p>
                   )}
+                  {provenance(row.id).map((label) => (
+                    <p key={label} className="text-13 text-foreground"><ConsentSelectionLabel provenance={label} /></p>
+                  ))}
+                  <ServiceConsentDetails
+                    id={`oauth-service-permissions-${row.id}`}
+                    disclosure={disclosures.get(row.id)}
+                    orgName={row.orgName}
+                  />
                 </div>
                 <LevelControl
                   label={row.name}
                   value={rowLevel(row, defaultLevel, overrides)}
                   onChange={(level) => onLevelChange(row.id, level)}
                   offDisabled={row.requiredByApp}
+                  describedBy={`oauth-service-permissions-${row.id}`}
                 />
               </div>
             ))

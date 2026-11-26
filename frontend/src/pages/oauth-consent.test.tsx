@@ -1,6 +1,9 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
 import {
+  cleanup,
   fireEvent,
-  render,
+  render as renderTesting,
   screen,
   waitFor,
   within,
@@ -12,6 +15,12 @@ import { vi } from "vitest";
 import { OAuthConsentPage } from "./oauth-consent";
 import { OAuthConsentPreviewPage } from "./oauth-consent-preview";
 import { useAuthStore } from "@/stores/auth-store";
+
+function render(page: ReactElement) {
+  return renderTesting(
+    <QueryClientProvider client={new QueryClient()}>{page}</QueryClientProvider>,
+  );
+}
 
 const { state } = vi.hoisted(() => ({
   state: {
@@ -147,8 +156,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   window.history.pushState({}, "", "/");
   useAuthStore.setState({ user: null });
+  vi.restoreAllMocks();
 });
 
 describe("OAuthConsentPage", () => {
@@ -159,8 +170,9 @@ describe("OAuthConsentPage", () => {
     expect(
       screen.getByText("Preview · Decisions disabled"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Chrono Sandbox")).toBeInTheDocument();
-    expect(screen.getByText("Chrono LLM (public)")).toBeInTheDocument();
+    const serviceList = within(screen.getByRole("region", { name: "Service access list" }));
+    expect(serviceList.getByText("Chrono Sandbox")).toBeInTheDocument();
+    expect(serviceList.getByText("Chrono LLM (public)")).toBeInTheDocument();
     expect(screen.getByText(/Explore and test AI requests/)).toHaveClass(
       "line-clamp-2",
     );
@@ -236,12 +248,12 @@ describe("OAuthConsentPage", () => {
     expect(screen.getByText("Authenticate your identity")).toBeInTheDocument();
     expect(screen.getByText("Long-lived access")).toBeInTheDocument();
     const permissions = screen.getByRole("region", {
-      name: /This will allow/,
+      name: "Identity and app permissions",
     });
     const details = screen.getByText("App details").closest("details");
     expect(details).not.toBeNull();
     for (const scope of VALID.scope.split(" ")) {
-      expect(within(permissions).getByText(scope)).toBeVisible();
+      if (scope !== "offline_access") expect(within(permissions).getByText(scope)).toBeVisible();
       expect(details).toHaveTextContent(scope);
     }
   });
@@ -255,13 +267,13 @@ describe("OAuthConsentPage", () => {
     render(<OAuthConsentPage />);
 
     const permissions = screen.getByRole("region", {
-      name: /This will allow/,
+      name: "Identity and app permissions",
     });
     expect(within(permissions).getByText("Your NyxID profile")).toBeVisible();
     expect(
       within(permissions).getByText("openid profile email roles groups"),
     ).toBeVisible();
-    expect(within(permissions).getByText("offline_access")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "Duration and revocation" })).getByText("offline_access")).toBeVisible();
     expect(
       within(permissions).queryByText("Custom permission"),
     ).not.toBeInTheDocument();
@@ -445,7 +457,7 @@ describe("OAuthConsentPage", () => {
 
     expect(screen.getByText("Long-lived access")).toBeInTheDocument();
     const permissions = screen.getByRole("region", {
-      name: /This will allow/,
+      name: "Identity and app permissions",
     });
     expect(within(permissions).getByText("custom:thing")).toHaveClass(
       "font-mono",
@@ -607,8 +619,8 @@ describe("OAuthConsentPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Customize" }));
     expect(screen.getByText("My OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("Org Service")).toBeInTheDocument();
-    expect(screen.getByText("Acme Research")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Org Service")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Organization · Acme Research")).toBeInTheDocument();
     expect(screen.queryByText("Viewer Org Service")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "All services" }));
@@ -667,8 +679,7 @@ describe("OAuthConsentPage", () => {
     await user.click(screen.getByRole("button", { name: "Customize" }));
     await user.click(screen.getByRole("checkbox", { name: /Org Service/i }));
 
-    expect(screen.getByText("Acme Research")).toBeInTheDocument();
-    expect(screen.getByText("Org")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Organization · Acme Research")).toBeInTheDocument();
     expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
       "svc-org",
     ]);
@@ -682,8 +693,8 @@ describe("OAuthConsentPage", () => {
 
     render(<OAuthConsentPage />);
 
-    expect(screen.getByText("Org Service")).toBeInTheDocument();
-    expect(screen.getByText("Acme Research")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Org Service")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Organization · Acme Research")).toBeInTheDocument();
     expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
       "svc-org",
     ]);
@@ -709,8 +720,8 @@ describe("OAuthConsentPage", () => {
 
     // Summary lists the resolved default with the app-required badge; the
     // hidden inputs already carry the grant without any user interaction.
-    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("Required by app")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("My OpenAI")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Required by app")).toBeInTheDocument();
     expect(hiddenInput("allow_all_services")?.value).toBe("false");
     expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
       "svc-openai",
@@ -727,7 +738,7 @@ describe("OAuthConsentPage", () => {
     const appDefault = screen.getByRole("checkbox", { name: /My OpenAI/i });
     expect(appDefault).toBeChecked();
     expect(appDefault).toBeDisabled();
-    expect(screen.getByText("Required by app")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("Required by app")).toBeInTheDocument();
 
     await user.click(appDefault);
     expect(appDefault).toBeChecked();
@@ -784,7 +795,7 @@ describe("OAuthConsentPage", () => {
     render(<OAuthConsentPage />);
 
     expect(screen.getByText("Review Lark bot access")).toBeInTheDocument();
-    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Service access list" })).getByText("My OpenAI")).toBeInTheDocument();
     expect(screen.getByText("Authorized now")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Update access" }),
@@ -868,4 +879,159 @@ describe("OAuthConsentPage", () => {
       hiddenInputs("allowed_service_ids").map((input) => input.value),
     ).toEqual(["svc-openai"]);
   });
+});
+
+const DISCLOSURE_FIXTURE = {
+  access_token_ttl_secs: 900,
+  broker_access_token_ttl_secs: 300,
+  refresh_token_ttl_secs: 604800,
+  services: [
+    {
+      service_id: "svc-openai",
+      credential_source: { type: "personal" },
+      credential_kind: "oauth",
+      upstream_scopes: [
+        { scope: "repo", known: true, label: "Repository access", description: "Access to repositories.", sensitive: true },
+        { scope: "provider:custom", known: false, label: null, description: null, sensitive: null },
+      ],
+      known_operations: { read: 2, write: 3, delete: 1, unclassified: 4, limiting: false },
+      capabilities: { model_calls: true, binary_upload: null },
+    },
+    {
+      service_id: "svc-org",
+      credential_source: { type: "org", org_name: "Acme Research" },
+      credential_kind: "api_key",
+      upstream_scopes: null,
+      known_operations: null,
+      capabilities: { model_calls: null, binary_upload: null },
+    },
+  ],
+};
+
+function stubConsentReads(payload: Response, existing?: string[]) {
+  useAuthStore.setState({
+    user: {
+      id: "consent-reader",
+      email: "person@example.com",
+      display_name: null,
+      avatar_url: null,
+      email_verified: true,
+      mfa_enabled: false,
+      is_admin: false,
+      is_active: true,
+      created_at: "2026-01-01T00:00:00Z",
+    },
+  });
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input).endsWith("/consent-disclosure")) return payload;
+    if (String(input).endsWith("/authorization") && existing) {
+      return Response.json({ allow_all_services: false, allowed_service_ids: existing, expires_at: null });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  });
+}
+
+describe("OAuth consent disclosure", () => {
+  it("keeps unresolved service IDs in the submission without exposing them in the summary", () => {
+    const unavailableId = "7d902937-fc5a-4117-93c2-51d994999069";
+    setSearch({ ...VALID, required_service_ids: [unavailableId] });
+    render(<OAuthConsentPage />);
+    const allow = screen.getByRole("button", { name: "Allow access" });
+    expect(screen.getAllByText("Service details unavailable")).toHaveLength(2);
+    expect(screen.getByRole("main")).not.toHaveTextContent(unavailableId);
+    expect(new FormData(allow.closest("form")!).getAll("allowed_service_ids")).toEqual([unavailableId]);
+  });
+
+  it("uses one visible-service batch and synchronizes the summary with keyboard selection and the submitted form", async () => {
+    const user = userEvent.setup();
+    const request = stubConsentReads(Response.json(DISCLOSURE_FIXTURE), ["svc-org"]);
+    setSearch({
+      ...VALID,
+      scope: "openid offline_access proxy",
+      preselect_service_ids: ["svc-openai"],
+    });
+    render(<OAuthConsentPage />);
+    const allow = screen.getByRole("button", { name: "Allow access" });
+    const summary = document.getElementById(allow.getAttribute("aria-describedby")!)!;
+    const picker = screen.getByRole("region", { name: "Service permissions" });
+    expect(summary).toHaveAttribute("aria-live", "polite");
+    expect(picker).not.toContainElement(summary);
+    expect(summary.compareDocumentPosition(allow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    expect(await within(summary).findByText("Repository access")).toBeVisible();
+    expect(within(summary).getByText("Sensitive")).toBeVisible();
+    expect(within(summary).getByText("provider:custom")).toBeVisible();
+    expect(summary).toHaveTextContent("2 read, 3 write, 1 delete, and 4 unclassified");
+    expect(summary).toHaveTextContent("These counts do not limit access.");
+    expect(summary).toHaveTextContent("The app may send data to the model provider.");
+    expect(summary).toHaveTextContent("Preselected by app");
+    expect(summary).toHaveTextContent("Org Service");
+    expect(summary).toHaveTextContent("stay authorized from an earlier approval");
+    expect(within(picker).getByText(/provider controls what this API key can do/)).toBeVisible();
+    expect(screen.getByText("Standard access tokens last 15 minutes.")).toBeVisible();
+    expect(screen.getByText(/each refresh token lasts 7 days/)).toBeVisible();
+    const batch = request.mock.calls.filter(([url]) => String(url).endsWith("/consent-disclosure"));
+    expect(batch).toHaveLength(1);
+    expect(batch[0]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({ service_ids: ["svc-openai", "svc-org"] }),
+    });
+    const form = allow.closest("form")!;
+    expect(new FormData(form).getAll("allowed_service_ids")).toEqual(["svc-openai"]);
+
+    const org = within(screen.getByRole("radiogroup", { name: "Org Service" }));
+    org.getByRole("radio", { name: "Off" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(org.getByRole("radio", { name: "Allow" })).toHaveFocus();
+    expect(within(summary).getByText("Already authorized")).toBeVisible();
+    expect(new FormData(form).getAll("allowed_service_ids")).toEqual(["svc-openai", "svc-org"]);
+
+    const all = within(screen.getByRole("radiogroup", { name: "All services" }));
+    await user.click(all.getByRole("radio", { name: "Allow" }));
+    expect(summary).toHaveTextContent("All current and future services are included.");
+    expect(new FormData(form).get("allow_all_services")).toBe("true");
+    expect(new FormData(form).getAll("allowed_service_ids")).toEqual([]);
+
+    const openai = within(screen.getByRole("radiogroup", { name: "My OpenAI" }));
+    await user.click(openai.getByRole("radio", { name: "Off" }));
+    expect(summary).not.toHaveTextContent("My OpenAI");
+    expect(summary).not.toHaveTextContent("future services");
+    const decision = new FormData(form, allow);
+    expect(decision.get("allow_all_services")).toBe("false");
+    expect(decision.getAll("allowed_service_ids")).toEqual(["svc-org"]);
+    expect(decision.get("decision")).toBe("allow");
+    expect(decision.get("consent_request")).toBe(VALID.consent_request);
+    expect(decision.get("scope")).toBe("openid offline_access proxy");
+    expect(decision.get("code_challenge")).toBe(VALID.code_challenge);
+    expect(request.mock.calls.filter(([url]) => String(url).endsWith("/consent-disclosure"))).toHaveLength(1);
+  });
+
+  it.each(["404", "503", "legacy", "unknown"] as const)(
+    "keeps full access and permits approval when disclosure is %s",
+    async (kind) => {
+      const payload = kind === "404" || kind === "503"
+        ? Response.json({ error: "unavailable" }, { status: Number(kind) })
+        : kind === "legacy"
+          ? Response.json({ services: [{ id: "svc-openai" }] })
+          : Response.json({
+              ...DISCLOSURE_FIXTURE,
+              services: [{ ...DISCLOSURE_FIXTURE.services[0], credential_kind: "future_credential" }],
+            });
+      const reader = stubConsentReads(payload);
+      setSearch({ ...VALID, scope: "openid proxy", required_service_ids: ["svc-openai"] });
+      render(<OAuthConsentPage />);
+      await waitFor(() => expect(reader).toHaveBeenCalledWith(
+        "/api/v1/user-services/consent-disclosure",
+        expect.objectContaining({ method: "POST" }),
+      ));
+      const allow = screen.getByRole("button", { name: "Allow access" });
+      const summary = document.getElementById(allow.getAttribute("aria-describedby")!)!;
+      expect(allow).toBeEnabled();
+      expect(summary).toHaveTextContent("Full access to the services listed below.");
+      expect(summary).toHaveTextContent("Upstream permission details are unavailable.");
+      expect(summary).toHaveTextContent("Required by app");
+      expect(summary).not.toHaveTextContent("Repository access");
+      expect(new FormData(allow.closest("form")!).getAll("allowed_service_ids")).toEqual(["svc-openai"]);
+    },
+  );
 });

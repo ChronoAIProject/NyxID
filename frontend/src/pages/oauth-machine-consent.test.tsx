@@ -1,7 +1,15 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
+import { cleanup, render as renderTesting, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OAuthConsentPage } from "./oauth-consent";
+function render(page: ReactElement) {
+  return renderTesting(
+    <QueryClientProvider client={new QueryClient()}>{page}</QueryClientProvider>,
+  );
+}
+
 vi.mock("@/hooks/use-user-services", () => ({ useUserServices: () => ({ data: [], isLoading: false, isError: false }) }));
 vi.mock("@/components/shared/machine-grant-consent", () => ({ MachineGrantConsent: ({ onPrepared, onSelectionRequired }: { onPrepared: (token: string | null) => void; onSelectionRequired: (required: boolean) => void }) => <section><h2>Machine access fixture</h2><button onClick={() => { onSelectionRequired(true); onPrepared("prepared-one-time-token"); }}>Prepare fixture</button><button onClick={() => { onSelectionRequired(true); onPrepared(null); }}>Change fixture</button><button onClick={() => { onSelectionRequired(false); onPrepared(null); }}>Clear fixture</button></section> }));
 function open(incremental: boolean, misleadingScope = false) {
