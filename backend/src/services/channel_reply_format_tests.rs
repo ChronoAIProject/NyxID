@@ -431,7 +431,7 @@ fn channel_format_slack_payloads_and_fingerprints_remain_frozen() {
             assert_eq!(new[0].metadata.as_ref().unwrap()["nyxid_text_renderer"], 3);
             assert_eq!(
                 new[0].metadata.as_ref().unwrap()["mrkdwn"].as_bool(),
-                plain.then_some(false)
+                (plain || source == r"\*stars\*").then_some(false)
             );
         }
     }
@@ -455,51 +455,77 @@ fn channel_format_slack_payloads_and_fingerprints_remain_frozen() {
 
 #[test]
 fn slack_literals_preserve_styles_code_glyphs_and_destinations() {
-    for (source, expected) in [
-        (
-            r"\*stars\* \_under\_ \~\~strike\~\~",
-            "`*`stars`*` `_`under`_` `~~`strike`~~`",
-        ),
-        (
-            r"**bold \*literal\* tail** and _italics_ ~~strike~~",
-            "*bold* `*`*literal*`*` *tail* and _italics_ ~strike~",
-        ),
-        (
-            r"**bold \_literal\_ tail**",
-            "*bold* `_`*literal*`_` *tail*",
-        ),
-        (
-            r"中文🦉 မြန်မာ \*️⃣x\*️⃣ \*word\* *️⃣x*️⃣",
-            "中文🦉 မြန်မာ `*️⃣`x`*️⃣` `*`word`*` `*️⃣`x`*️⃣`",
-        ),
-        (
-            r"foo\_ab\_baz and foo\_\_bar\_\_baz",
-            "foo`_`ab`_`baz and foo`__`bar`__`baz",
-        ),
-        (
-            "\\*two\nlines\\* and **style**",
-            "`*`two\nlines`*` and *style*",
-        ),
-        (
-            r"literal \***bold** and **bold**\*",
-            "literal `*`*bold* and *bold*`*`",
-        ),
-        (r"\*`x`\*", "`*x*`"),
-        (
-            r"\*literal\* (https://example.test/a_*b*_~x~?z=1&y=2), and https://example.com/a*b*.",
-            "`*`literal`*` (https://example.test/a_*b*_~x~?z=1&amp;y=2), and https://example.com/a*b*.",
-        ),
-        (
-            r"\*literal\* _https://example.test/a*b_c~d?x=1&y=2_.",
-            "`*`literal`*` _<https://example.test/a*b_c~d?x=1&amp;y=2>_.",
-        ),
-        (
-            r"\*literal\* [guide](https://example.test/a*b_c~d?x=1&y=2).",
-            "`*`literal`*` <https://example.test/a*b_c~d?x=1&y=2|guide>.",
-        ),
+    use serde_json::json;
+    for (source, plain, style) in [
+        (r"**\*\***", "**", json!({"bold":true})),
+        (r"~~\~~~", "~", json!({"strike":true})),
+        (r"_\_\__", "__", json!({"italic":true})),
+        (r"\*x\*", "*x*", json!(null)),
+        (r"file\_name\_v2", "file_name_v2", json!(null)),
     ] {
-        assert_eq!(wire(source, "slack"), expected, "{source}");
+        let part = assistant_parts(source, "slack", "").remove(0);
+        assert_eq!(part.text.as_deref(), Some(plain));
+        let mut run = json!({"type":"text","text":plain});
+        if !style.is_null() {
+            run["style"] = style;
+        }
+        assert_eq!(
+            part.metadata.unwrap(),
+            json!({
+                "nyxid_text_renderer":3, "mrkdwn":false,
+                "blocks":[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[run]}]}]
+            })
+        );
     }
+}
+
+#[test]
+fn slack_rich_text_keeps_link_label_styles_and_code() {
+    use serde_json::json;
+    let source = "**bold \\*literal\\* [use `a_b` here](https://e.com/a) [`alone`](https://e.com/b)** [**bold** \\_cat\\_](https://e.com/x?y=1&z=2)";
+    let part = assistant_parts(source, "slack", "").remove(0);
+    assert_eq!(
+        part.text.as_deref(),
+        Some(
+            "bold *literal* use a_b here (https://e.com/a) alone bold _cat_ (https://e.com/x?y=1&amp;z=2)"
+        )
+    );
+    assert_eq!(
+        part.metadata.unwrap()["blocks"][0]["elements"][0]["elements"],
+        json!([
+            {"type":"text","text":"bold *literal* ","style":{"bold":true}},
+            {"type":"link","text":"use ","url":"https://e.com/a","style":{"bold":true}},
+            {"type":"text","text":"a_b","style":{"bold":true,"code":true}},
+            {"type":"link","text":" here","url":"https://e.com/a","style":{"bold":true}},
+            {"type":"text","text":" ","style":{"bold":true}},
+            {"type":"text","text":"alone","style":{"bold":true,"code":true}},
+            {"type":"text","text":" "},
+            {"type":"link","text":"bold","url":"https://e.com/x?y=1&z=2","style":{"bold":true}},
+            {"type":"link","text":" _cat_","url":"https://e.com/x?y=1&z=2"},
+        ])
+    );
+}
+
+#[test]
+fn slack_rich_text_keeps_preformatted_backticks_and_mention_like_text() {
+    use serde_json::json;
+    let source = "\\*outside\\* \\`backtick\\` <@U1> <!channel> @here :tada:\n\n```\n<body>&\n```";
+    let part = assistant_parts(source, "slack", "").remove(0);
+    assert_eq!(
+        part.text.as_deref(),
+        Some("*outside* `backtick` &lt;@U1&gt; &lt;!channel&gt; @here :tada:\n\n&lt;body&gt;&amp;")
+    );
+    assert_eq!(
+        part.metadata.unwrap()["blocks"],
+        json!([
+            {"type":"rich_text","elements":[
+                {"type":"rich_text_section","elements":[
+                    {"type":"text","text":"*outside* `backtick` <@U1> <!channel> @here :tada:\n\n"}
+                ]},
+                {"type":"rich_text_preformatted","elements":[{"type":"text","text":"<body>&"}]}
+            ]}
+        ])
+    );
 }
 
 #[test]
@@ -513,6 +539,10 @@ fn slack_literal_controls_keep_the_recorded_wire() {
         ),
         ("a `\\*code` and **bold**", "a ` \\*code ` and *bold*"),
         ("https://example.com/a*b*.", "https://example.com/a_b_."),
+        (
+            r"[\*x\*](https://e.com) https://e.com/a*b*",
+            "<https://e.com|*x*> https://e.com/a_b_",
+        ),
         (
             r"[\*literal\*](https://example.test/a*b_c~d?x=1&y=2).",
             "<https://example.test/a*b_c~d?x=1&y=2|*literal*>.",
@@ -538,42 +568,37 @@ fn slack_literal_controls_keep_the_recorded_wire() {
 
 #[test]
 fn slack_literal_url_protection_retains_commonmark_destinations_and_html() {
-    for (source, expected) in [
-        (
-            r"\*x\* https://example.com/my\_page\_name and https://example.com/a\*.",
-            "`*`x`*` https://example.com/my_page_name and https://example.com/a*.",
-        ),
-        (
-            r"Docs: https://example.com/a\_b\?x=1&y=2 \*note\*",
-            "Docs: https://example.com/a_b?x=1&amp;y=2 `*`note`*`",
-        ),
-        (
-            r#"\*x\* <a href="https://example.com/a">label</a>"#,
-            r#"`*`x`*` &lt;a href="https://example.com/a"&gt;label&lt;/a&gt;"#,
-        ),
-        (
-            "\\*x\\*\n\n<div>https://example.com/a</div>",
-            "`*`x`*`\n\n&lt;div&gt;https://example.com/a&lt;/div&gt;",
-        ),
-        (
-            r"\*x\* <https://example.com/a_b_?x=1&y=2> and <a@b.co>",
-            "`*`x`*` <https://example.com/a_b_?x=1&y=2|https://example.com/a_b_?x=1&amp;y=2> and <mailto:a@b.co|a@b.co>",
-        ),
-        (
-            r"\*x\* **<https://example.com/_b_>**",
-            "`*`x`*` <https://example.com/_b_|*https://example.com/_b_*>",
-        ),
-        (
-            r"\*x\* **<ftp://example.com/a>** and **[label](ftp://example.com/a)**",
-            "`*`x`*` *ftp://example.com/a* and *label (ftp://example.com/a)*",
-        ),
-        (
-            r"\*x\* **ftp://example.com/a**",
-            "`*`x`*` *ftp://example.com/a*",
-        ),
-    ] {
-        assert_eq!(wire(source, "slack"), expected, "{source}");
-    }
+    let source = r#"\*x\* https://example.com/my\_page\_name and <https://example.com/a_b_?x=1&y=2> <a@b.co> [tag](tg://example.com/a) [unsafe](javascript:alert(1)) <a href="https://example.com/html">label</a>"#;
+    let part = assistant_parts(source, "slack", "").remove(0);
+    assert_eq!(
+        part.text.as_deref(),
+        Some(
+            r#"*x* https://example.com/my_page_name and https://example.com/a_b_?x=1&amp;y=2 a@b.co (mailto:a@b.co) tag (tg://example.com/a) unsafe (javascript:alert(1)) &lt;a href="https://example.com/html"&gt;label&lt;/a&gt;"#
+        )
+    );
+    let metadata = part.metadata.unwrap();
+    let runs = metadata["blocks"][0]["elements"][0]["elements"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        runs.iter()
+            .filter_map(|run| run["url"].as_str())
+            .collect::<Vec<_>>(),
+        [
+            "https://example.com/my_page_name",
+            "https://example.com/a_b_?x=1&y=2",
+            "mailto:a@b.co"
+        ]
+    );
+    let display: String = runs.iter().filter_map(|run| run["text"].as_str()).collect();
+    assert_eq!(
+        display,
+        r#"*x* https://example.com/my_page_name and https://example.com/a_b_?x=1&y=2 a@b.co tag (tg://example.com/a) unsafe (javascript:alert(1)) <a href="https://example.com/html">label</a>"#
+    );
+    assert_eq!(
+        wire("\\*x\\*\n\n<div>https://example.com/a</div>", "slack"),
+        "*x*\n\n&lt;div&gt;https://example.com/a&lt;/div&gt;"
+    );
 }
 
 #[test]
@@ -587,18 +612,14 @@ fn slack_bare_url_terminators_keep_only_literal_backslashes() {
         (r"https://e.com/a\: next", "https://e.com/a: next"),
         (r"(https://e.com/a\) next", "(https://e.com/a) next"),
         (r"https://e.com/a\.", "https://e.com/a."),
-        (r"**https://e.com/a\.** next", "*<https://e.com/a>.* next"),
+        (r"**https://e.com/a\.** next", "https://e.com/a. next"),
         (r"https://e.com/a\\. next", r"https://e.com/a\. next"),
         (r"https://e.com/a\\\. next", r"https://e.com/a\. next"),
         (r"https://e.com/a\ next", r"https://e.com/a\ next"),
         (r"https://e.com/a\z next", r"https://e.com/a\z next"),
     ] {
         let input = format!(r"\*x\* {source}");
-        assert_eq!(
-            wire(&input, "slack"),
-            format!("`*`x`*` {expected}"),
-            "{input}"
-        );
+        assert_eq!(wire(&input, "slack"), format!("*x* {expected}"), "{input}");
     }
 }
 
@@ -610,7 +631,7 @@ fn slack_bare_urls_preserve_backslash_runs_and_hard_breaks() {
         let source = format!(r"\*x\* before{run}https://e.com/a*b* after");
         assert_eq!(
             wire(&source, "slack"),
-            format!("`*`x`*` before{literal}https://e.com/a*b* after"),
+            format!("*x* before{literal}https://e.com/a*b* after"),
             "{source:?}"
         );
 
@@ -619,7 +640,7 @@ fn slack_bare_urls_preserve_backslash_runs_and_hard_breaks() {
             let source = format!("\\*x\\* https://e.com/a{run}{newline}next");
             assert_eq!(
                 wire(&source, "slack"),
-                format!("`*`x`*` https://e.com/a{literal}\nnext"),
+                format!("*x* https://e.com/a{literal}\nnext"),
                 "{source:?}"
             );
         }
@@ -629,49 +650,75 @@ fn slack_bare_urls_preserve_backslash_runs_and_hard_breaks() {
         "\\*x\\* https://e.com/a\\ \r\nnext",
         "\\*x\\* https://e.com/a\\  \nnext",
     ] {
-        assert_eq!(wire(source, "slack"), "`*`x`*` https://e.com/a\\\nnext");
+        assert_eq!(wire(source, "slack"), "*x* https://e.com/a\\\nnext");
     }
 }
 
 #[test]
-fn slack_dense_escaped_styles_use_the_wire_budget_before_splitting() {
-    let source = r"**Note:** the \*starred\* option is _optional_ here, see docs. ".repeat(900);
-    let limit = TextLimit::for_platform("slack");
-    let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
+fn slack_rich_text_splits_without_losing_styles_or_reducing_text_only_capacity() {
+    let source = format!("**{}\\*{}**", "a".repeat(8_000), "b".repeat(4_500));
+    let parts = assistant_parts(&source, "slack", "");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(
+        parts[0].text.as_deref(),
+        Some(format!("*{}*", "a".repeat(8_000)).as_str())
+    );
+    assert_eq!(
+        parts[1].text.as_deref(),
+        Some(format!("*{}", "b".repeat(3_999)).as_str())
+    );
+    let blocks = &parts[1].metadata.as_ref().unwrap()["blocks"];
+    assert_eq!(
+        blocks[0]["elements"][0]["elements"][0]["style"],
+        serde_json::json!({"bold":true})
+    );
+    assert_eq!(
+        parts[2].text.as_deref(),
+        Some(format!("*{}*", "b".repeat(501)).as_str())
+    );
+
+    let dense = r"a \* **b** ".repeat(300);
+    let parts = assistant_parts(&dense, "slack", "");
     assert_eq!(parts.len(), 2);
-    let lengths: Vec<_> = parts
+    let display: String = parts
         .iter()
-        .map(|p| limit.measure(p.text.as_deref().unwrap()))
+        .map(|part| part.text.as_deref().unwrap())
         .collect();
-    assert!((39_900..=40_000).contains(&lengths[0]), "{lengths:?}");
-    assert!(lengths[1] <= limit.budget(), "{lengths:?}");
-    let output: String = parts.into_iter().filter_map(|part| part.text).collect();
-    assert_eq!(output.matches("`*`starred`*`").count(), 900);
-    assert_eq!(output.matches("*Note:*").count(), 900);
-    assert_eq!(output.matches("_optional_").count(), 900);
+    assert_eq!(display, "a * b ".repeat(300).trim_end());
+    for part in parts {
+        let sections = &part.metadata.unwrap()["blocks"][0]["elements"];
+        let count: usize = sections
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|section| section["elements"].as_array().unwrap().len())
+            .sum();
+        assert!(count <= 500);
+    }
 }
 
 #[test]
-fn slack_literal_parts_fit_the_scalar_budget_and_keep_keycaps_whole() {
-    let limit = TextLimit::for_platform("slack");
-    let source = format!(
-        "{}\\*️⃣x\\*️⃣ (https://example.test/a_*b*_~x~?x=1&y=2).",
-        "🦉".repeat(limit.budget() - 1)
-    );
+fn slack_rich_text_keeps_keycaps_whole_and_uses_the_existing_overflow_notice() {
+    let source = format!("\\*️⃣x\\*️⃣ {}", "界".repeat(4_000));
+    let parts = assistant_parts(&source, "slack", "");
+    assert_eq!(parts.len(), 2);
+    let wire: String = parts.into_iter().filter_map(|part| part.text).collect();
+    assert_eq!(wire, format!("*️⃣x*️⃣ {}", "界".repeat(4_000)));
+
+    let source = r"\* ".repeat(90_000);
     let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
     assert!(parts.len() > 1);
-    assert!(
-        parts
-            .iter()
-            .all(|part| limit.measure(part.text.as_deref().unwrap()) <= limit.budget())
-    );
-    let wire: String = parts.into_iter().filter_map(|part| part.text).collect();
+    assert!(parts.len() <= 64);
     assert_eq!(
-        wire,
-        format!(
-            "{}`*️⃣`x`*️⃣` (https://example.test/a_*b*_~x~?x=1&amp;y=2).",
-            "🦉".repeat(limit.budget() - 1)
-        )
+        parts.last().unwrap().metadata.as_ref().unwrap()["text_overflow"],
+        serde_json::Value::Null
+    );
+    let source = "a".repeat(40_000 * 65);
+    let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
+    assert_eq!(parts.len(), 64);
+    assert_eq!(
+        parts.last().unwrap().metadata.as_ref().unwrap()["text_overflow"],
+        true
     );
 }
 

@@ -340,16 +340,27 @@ label-plus-URL text. WhatsApp uses its native style markers and `label (URL)`;
 unsafe literal markers use the smallest code span. Colliding backticks that its
 documented code syntax cannot represent pass through unchanged. Formatting never
 adds a refusal; URLs exceeding one message retain the existing split behavior.
-New Slack assistant text plans use renderer v3. Outside code and masked link
-labels, CommonMark-escaped `*`, `_` and `~` runs use Slack inline code for
-their punctuation. Enclosed words retain their authored style. In affected
-messages, the parser preserves bare URL delimiters and star keycaps that would
-otherwise be consumed as CommonMark syntax. Authored autolinks use Slack's
-explicit link syntax for supported destinations. If parsed display text
-contains a literal backtick, Slack receives the whole reply in its existing
-plain-text mode (`mrkdwn: false`), with labeled destinations included as visible
-URLs. Raw Slack edits and upload captions use their existing adapter formats.
-Telegram continues to use its native entities.
+New Slack assistant text plans use renderer v3. A plan uses rich text when
+CommonMark-escaped `*`, `_` or `~` survives as display text outside code and
+link labels. In such a plan, each part containing an escaped delimiter or
+a literal backtick sends one `rich_text` block with at most 4,000 display
+scalars and 500 inline elements. Other parts use ordinary Slack text
+formatting. The block retains authored styles, preformatted code and
+supported HTTP, HTTPS and mailto links. Link labels retain their text and
+style. Inline code inside a label is a text run and surrounding label
+runs link to the authored destination. Unsupported destinations appear
+as visible text. Mention-like text remains literal.
+
+The block part also carries entity-escaped plain display text and
+`mrkdwn: false`. Masked destinations appear once in that fallback text
+and the fallback fits the ordinary 40,000-scalar budget. Under the same
+delivery claim, an HTTP 200 Slack response with `ok: false` and
+`invalid_blocks`, `invalid_blocks_format` or `msg_blocks_too_long` records
+`slack_formatting_fallback` and sends the same text once without the block.
+An uncertain response keeps the existing delivery fence. The fallback
+applies to journaled assistant text. Raw sends, edits and upload captions
+use their adapter contracts. For a plan without a surviving escape, literal
+backticks still select whole-reply plain-text mode.
 
 The journal pins the renderer version with its fingerprint and notice inputs.
 An absent version means v1, retained only to finish recorded plans. New workers

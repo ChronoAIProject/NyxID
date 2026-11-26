@@ -1,13 +1,13 @@
 //! Slack's text-only mrkdwn for NyxID-owned assistant plans.
-use super::{commonmark_text, render_markdown_impl, supported_link_target};
+use super::{commonmark_text, supported_link_target};
 use pulldown_cmark::{Event, Options, Parser, Tag};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::ops::Range;
 
 const STYLE: [&str; 3] = ["bold", "italic", "strikethrough"];
 
-pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
+pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     if !source
         .as_bytes()
         .windows(2)
@@ -173,7 +173,7 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
         }
     }
     marked.push_str(&source[next..]);
-    Some(commonmark_text(&marked, Some(&bare_starts)))
+    Some(commonmark_text(&marked, Some(&bare_starts), rich))
 }
 
 pub(super) fn escaped_delimiter(source: &str, at: usize, value: &str) -> Option<usize> {
@@ -227,10 +227,6 @@ pub(super) fn scalar_offset(text: &str, utf16: usize) -> usize {
 fn entity_range(entity: &Value) -> Range<usize> {
     let start = entity["offset"].as_u64().unwrap_or(0) as usize;
     start..start + entity["length"].as_u64().unwrap_or(0) as usize
-}
-
-fn span(kind: &str, range: Range<usize>) -> Value {
-    json!({"type":kind, "offset":range.start, "length":range.len()})
 }
 
 pub(super) fn style_edges(entities: &[Value]) -> HashSet<u64> {
@@ -291,85 +287,4 @@ pub(super) fn render_markers(
         result.push_str(&marker);
     }
     result
-}
-
-pub(super) fn render(text: &str, entities: &[Value]) -> String {
-    if !entities.iter().any(|e| e["type"] == "slack_literal") {
-        return render_markdown_impl(text, entities, "slack", true);
-    }
-    // Adjacent backticks would turn an inline escape into a different fence.
-    // Merge literal punctuation into adjoining inline code when applicable.
-    let mut code: Vec<_> = entities
-        .iter()
-        .filter(|e| matches!(e["type"].as_str(), Some("code" | "slack_literal")))
-        .map(|e| (entity_range(e), e["type"] == "slack_literal"))
-        .collect();
-    code.sort_by_key(|(range, _)| range.start);
-    let mut merged: Vec<(Range<usize>, bool)> = Vec::new();
-    for (range, literal) in code {
-        if let Some((last, has_literal)) = merged.last_mut()
-            && last.end == range.start
-            && (*has_literal || literal)
-        {
-            last.end = range.end;
-            *has_literal = true;
-        } else {
-            merged.push((range, literal));
-        }
-    }
-
-    let utf16_bytes: Vec<_> = text
-        .char_indices()
-        .flat_map(|(byte, ch)| std::iter::repeat_n(byte, ch.len_utf16()))
-        .chain(std::iter::once(text.len()))
-        .collect();
-    let mut rendered = Vec::new();
-    for entity in entities {
-        let kind = entity["type"].as_str().unwrap_or_default();
-        if matches!(kind, "code" | "slack_literal") {
-            continue;
-        }
-        let range = entity_range(entity);
-        if !STYLE.contains(&kind) {
-            rendered.push(entity.clone());
-            continue;
-        }
-        let first = merged.partition_point(|(code, _)| code.end <= range.start);
-        let overlapping = merged[first..]
-            .iter()
-            .take_while(|(code, _)| code.start < range.end)
-            .filter(|(_, literal)| *literal);
-        if overlapping.clone().next().is_none() {
-            rendered.push(entity.clone());
-            continue;
-        }
-        // Slack's code span disables style on the punctuation itself. Close
-        // and reopen the authored style around it so the remaining words keep it.
-        let mut start = range.start;
-        let mut push_style = |start, end| {
-            if start >= end {
-                return;
-            }
-            let local = &text[utf16_bytes[start]..utf16_bytes[end]];
-            let trimmed = local.trim();
-            let leading = local[..local.len() - local.trim_start().len()]
-                .encode_utf16()
-                .count();
-            if !trimmed.is_empty() {
-                let from = start + leading;
-                rendered.push(span(kind, from..from + trimmed.encode_utf16().count()));
-            }
-        };
-        for (code, _) in overlapping {
-            push_style(start, code.start);
-            start = code.end;
-        }
-        push_style(start, range.end);
-    }
-    rendered.extend(
-        merged
-            .into_iter()
-            .map(|(range, literal)| span(if literal { "slack_literal" } else { "code" }, range)),
-    );
-    render_markdown_impl(text, &rendered, "slack", true)
 }
