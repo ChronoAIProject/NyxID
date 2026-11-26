@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 48 implemented adapters
-and 2 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 49 implemented adapters
+and 1 Pending entry. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -56,7 +56,7 @@ A collection may use separate adapters for different fields.
 | `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs) | Implemented |
 | `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext` | [Event storage](../../backend/src/services/nyxbot_event_record.rs) | Implemented |
-| `mobile_social_deliveries` | `ciphertext` | — | Pending |
+| `mobile_social_deliveries` | `ciphertext` | [Mobile sign-in delivery](../../backend/src/services/mobile_social_service/record.rs) | Implemented |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
 | `oracle_login_profiles` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
@@ -150,10 +150,11 @@ person, personal or organization owner, issued key and node. A signed poll clear
 pair and its marker in one claim. Retained expired pairs use the same migration.
 [Node device delivery](../../backend/src/services/device_code_service/record.rs)
 
-### Production storage for Pending fields
-
-- Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
-  [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
+Mobile social sign-in binds its encrypted BSON response and prepared session rows to the
+delivery ID, user, code hash, PKCE challenge and field. Rewrap matches the exact
+stored row, including expiry. Redemption checks the database clock and installs the
+session in the transaction that consumes the code.
+[Mobile delivery](../../backend/src/services/mobile_social_service.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and
@@ -230,7 +231,7 @@ version-map validation and exact-source migration stay in services.
   the companion receipt even after expiry. Missing parents leave a blocked finding
   while the handle survives.
   [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
-- Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
+- Historical mobile sign-in delivery AAD authenticates the code hash, PKCE challenge and user.
   Execution proposals v1, v3 and v4 use `execution-proposal:v1:{id}`. V2 uses
   `execution-proposal:v2:{id}`. Each result appends `:result`.
   The assistant reattach window authenticates the serialized tuple of domain,
