@@ -182,6 +182,9 @@ pub struct AssistantAgent {
     /// A friendly name the user chose ("Luna"); `name` stays the @handle.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Cosmetic configuration; absent derives a client-side default.
+    #[serde(default)]
+    pub avatar: Option<super::assistant_avatar::Avatar>,
     /// Personality and tone the user asked for. Style only, never authority.
     #[serde(default)]
     pub persona: Option<String>,

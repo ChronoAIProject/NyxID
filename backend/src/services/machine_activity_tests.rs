@@ -885,3 +885,22 @@ async fn machine_names_batch_respects_node_read_acl_and_enriches_transcript_dtos
     assert!(!format!("{stored:?}").contains("Renamed computer"));
     f.state.db.drop().await.unwrap();
 }
+
+/// Agent rows read with the avatar projection serialize the client view;
+/// rows from before avatars existed serialize `null`.
+#[test]
+fn activity_agents_project_avatars() {
+    let row: ActivityAgent = mongodb::bson::from_document(mongodb::bson::doc! {
+        "_id": "a1", "name": "ops", "display_name": null, "kind": "specialist",
+        "avatar": {"template":"face-v1","choices":{"head":"tall","eyes":"visor","palette":"deep-ink"}},
+    })
+    .unwrap();
+    let value = serde_json::to_value(&row).unwrap();
+    assert_eq!(value["avatar"]["choices"]["eyes"], "visor");
+    assert_eq!(value["id"], "a1");
+    let legacy: ActivityAgent = mongodb::bson::from_document(
+        mongodb::bson::doc! {"_id": "a2", "name": "old", "display_name": null, "kind": "nyxbot"},
+    )
+    .unwrap();
+    assert!(serde_json::to_value(&legacy).unwrap()["avatar"].is_null());
+}

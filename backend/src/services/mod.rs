@@ -23,6 +23,7 @@ pub mod approval_service;
 pub mod approved_sign_in_policy;
 pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
+pub mod assistant_activity;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_cma_agent_service;
@@ -666,5 +667,6 @@ pub mod channel_meta_service;
 pub(crate) mod nyxbot_channel_connection_service;
 pub(crate) mod nyxbot_channel_setup_service;
 
+pub mod assistant_avatar_service;
 pub(crate) mod channel_meta_journal_erasure;
 pub mod channel_meta_management_service;

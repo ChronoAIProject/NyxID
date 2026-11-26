@@ -3925,7 +3925,7 @@ async fn notification_identities_use_live_agents_and_bound_crew_avatars() {
     db.collection::<Document>(AGENTS)
         .update_one(
             doc! {"_id": &agents[0].id},
-            doc! {"$set": {"display_name": "Researcher"}},
+            doc! {"$set": {"display_name": "Researcher", "avatar": {"template":"face-v1","choices":{"head":"wide","eyes":"visor","palette":"core-ocean"}}}},
         )
         .await
         .unwrap();
@@ -3976,6 +3976,15 @@ async fn notification_identities_use_live_agents_and_bound_crew_avatars() {
     assert_eq!(direct.actor.id.as_deref(), Some(agents[0].id.as_str()));
     assert_eq!(direct.actor.kind.as_deref(), Some("specialist"));
     assert_eq!(direct.actor.display_name.as_deref(), Some("Researcher"));
+    // The stored avatar rides along; agents without one omit it.
+    assert_eq!(
+        direct.actor.avatar.as_ref().map(|avatar| avatar
+            .choices
+            .get("head")
+            .map(String::as_str)
+            .unwrap_or("")),
+        Some("wide")
+    );
     assert_eq!(direct.source.label, "Launch plan");
     let crew = listed
         .items
@@ -3988,6 +3997,15 @@ async fn notification_identities_use_live_agents_and_bound_crew_avatars() {
         crew.participants[0].id.as_deref(),
         Some(agents[0].id.as_str())
     );
+    assert_eq!(
+        crew.participants[0].avatar.as_ref().map(|avatar| avatar
+            .choices
+            .get("eyes")
+            .map(String::as_str)
+            .unwrap_or("")),
+        Some("visor")
+    );
+    assert!(crew.participants[1].avatar.is_none());
     let counts = summary(db, &f.owner).await.unwrap();
     assert_eq!(counts.by_kind.len(), 6);
     assert_eq!(counts.by_kind["agent_update"], 2);

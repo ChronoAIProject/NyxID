@@ -225,6 +225,7 @@ const contentParent = (name: string) =>
               : [
                     "AgentDetail",
                     "AgentProfileEdit",
+                    "AgentAvatarEdit",
                     "AgentCreate",
                     "AgentMachines",
                     "AgentMachineEditor",

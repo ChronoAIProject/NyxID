@@ -79,6 +79,9 @@ import {
   type AgentProfile,
   type AssistantAgent,
 } from "./agentContracts";
+import { useAgentAvatarsEnabled } from "../../lib/avatars/agentAvatarsFlag";
+import { rosterActivityLabel, rosterAvatarMood } from "./agentRosterMood";
+import { canEditAvatar } from "../../lib/avatars/agentAvatars";
 
 const ROOT = ["workspace", "agents"] as const;
 const errorMessage = (cause: unknown) =>
@@ -100,6 +103,7 @@ export function AgentsScreen({
   onOpenAutomations,
   onOpenMachines,
   onEditProfile,
+  onEditAvatar,
   onClose,
   listHeader,
   initialCreate = false,
@@ -114,6 +118,8 @@ export function AgentsScreen({
   onOpenMachines?: (agentId: string) => void;
   /** Opens the focused edit page for one profile value. */
   onEditProfile?: (agentId: string, field: AgentProfileField) => void;
+  /** Opens the avatar editor (only offered with `assistant:avatars` on). */
+  onEditAvatar?: (agentId: string) => void;
   onClose?: () => void;
   listHeader?: ReactNode;
   initialCreate?: boolean;
@@ -123,6 +129,7 @@ export function AgentsScreen({
 } = {}) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const avatars = useAgentAvatarsEnabled();
   const queryClient = useQueryClient();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
@@ -625,6 +632,17 @@ export function AgentsScreen({
                   )}
               </SettingsGroup>
             )}
+            {avatars && onEditAvatar && canEditAvatar(agent) && (
+              <SettingsGroup inset={false}>
+                <SettingsRow
+                  leading={<AgentAvatar agent={agent} size="lg" />}
+                  label={t("Avatar")}
+                  accessibilityLabel={t("Edit avatar")}
+                  disabled={busy}
+                  onPress={() => onEditAvatar(agent.id)}
+                />
+              </SettingsGroup>
+            )}
             {!agent.share_role && (
               <SettingsGroup
                 inset={false}
@@ -881,6 +899,14 @@ export function AgentsScreen({
         .toLowerCase()
         .includes(search.trim().toLowerCase()),
   );
+  const rows = filtered.map((agent) => {
+    const name = agent.display_name ?? agent.name;
+    const mood = avatars ? rosterAvatarMood(agent) : undefined;
+    const status = agent.status === "destroyed"
+      ? t("Destroyed")
+      : t(rosterActivityLabel(mood ?? "idle"));
+    return { agent, name, mood, status };
+  });
   const live =
     list.data?.agents.filter(
       (agent) =>
@@ -1012,13 +1038,13 @@ export function AgentsScreen({
             onPress={() => void list.refetch()} />
         </>
       )}
-      {filtered.map((agent) => (
+      {rows.map(({ agent, name, mood, status }) => (
         <Pressable
           key={agent.id}
           accessibilityRole="button"
-          accessibilityLabel={translateApp("Manage {{slug}}", {
-            slug: agent.display_name ?? agent.name,
-          })}
+          accessibilityLabel={avatars
+            ? t("Manage {{name}}, {{status}}", { name, status })
+            : translateApp("Manage {{slug}}", { slug: name })}
           onPress={() => {
             Keyboard.dismiss();
             setSelectedId(agent.id);
@@ -1029,7 +1055,7 @@ export function AgentsScreen({
         >
           <Card>
             <View style={styles.row}>
-              <AgentAvatar agent={agent} size="xl" />
+              <AgentAvatar agent={agent} size="xl" mood={mood} />
               <View style={styles.flex}>
                 <Text style={[styles.title, { color: colors.textPrimary }]}>
                   {agent.display_name ?? agent.name}
@@ -1360,7 +1386,7 @@ function AgentIdentityHeader({
   const { colors } = useTheme();
   return (
     <View style={styles.identity}>
-      <AgentAvatar agent={agent} size="xl" />
+      <AgentAvatar agent={agent} size="xl" animated />
       <Text
         accessibilityRole="header"
         style={[styles.identityName, { color: colors.textPrimary }]}

@@ -50,6 +50,18 @@ pub fn specialist_rights(
     member_rights(actor, agent, role)
 }
 
+/// Shared use audience predicate for complete agents and projected activity metadata.
+pub(crate) fn member_can_use(
+    actor: &str,
+    kind: crate::models::assistant_agent::AgentKind,
+    users: Option<&[String]>,
+    role: OrgRole,
+) -> bool {
+    role.can_proxy()
+        && kind != crate::models::assistant_agent::AgentKind::Nyxbot
+        && users.is_none_or(|ids| ids.iter().any(|id| id == actor))
+}
+
 pub fn member_rights(actor: &str, agent: &AssistantAgent, role: OrgRole) -> SpecialistRights {
     let eligible = role.can_proxy() && !agent.is_nyxbot();
     let includes = |list: &Option<Vec<String>>| {
@@ -57,7 +69,7 @@ pub fn member_rights(actor: &str, agent: &AssistantAgent, role: OrgRole) -> Spec
             .is_none_or(|ids| ids.iter().any(|id| id == actor))
     };
     SpecialistRights {
-        can_use: eligible && includes(&agent.org_user_ids),
+        can_use: member_can_use(actor, agent.kind, agent.org_user_ids.as_deref(), role),
         can_maintain: eligible && includes(&agent.org_maintainer_user_ids),
         maintain_revision: agent.org_maintain_revision,
         can_govern: role == OrgRole::Admin && !agent.is_nyxbot(),
@@ -540,6 +552,33 @@ pub async fn visible_owners(db: &Database, actor: &str) -> AppResult<Vec<String>
         .collect();
     owners.push(actor.into());
     Ok(owners)
+}
+
+/// Organization profiles visible to Viewers do not authorize live thread activity.
+pub(crate) async fn activity_owners(
+    db: &Database,
+    actor: &str,
+) -> AppResult<std::collections::HashMap<String, OrgRole>> {
+    let memberships = org_service::list_memberships_for_member(db, actor, false).await?;
+    let roles: std::collections::HashMap<_, _> = memberships
+        .into_iter()
+        .filter(|membership| membership.role.can_proxy())
+        .map(|membership| (membership.org_user_id, membership.role))
+        .collect();
+    if roles.is_empty() {
+        return Ok(roles);
+    }
+    let ids: Vec<_> = roles.keys().collect();
+    let active = db
+        .collection::<User>(USERS)
+        .find(doc! {"_id": {"$in": ids}, "user_type": "org", "is_active": true})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    Ok(active
+        .into_iter()
+        .filter_map(|user| roles.get(&user.id).map(|role| (user.id, *role)))
+        .collect())
 }
 
 pub async fn require_creation_enabled(db: &Database, actor: &str) -> AppResult<()> {

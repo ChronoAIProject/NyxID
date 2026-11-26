@@ -1476,6 +1476,9 @@ pub struct NotificationActor {
     pub id: Option<String>,
     pub name: String,
     pub display_name: Option<String>,
+    /// Agent actors only; absent means clients derive the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<super::assistant_avatar_service::AvatarView>,
     pub kind: Option<String>,
 }
 
@@ -1486,6 +1489,7 @@ impl NotificationActor {
             id: None,
             name: "NyxID".into(),
             display_name: None,
+            avatar: None,
             kind: None,
         }
     }
@@ -1936,7 +1940,7 @@ async fn load_lookups(
                 db,
                 AGENTS,
                 doc! {"_id": {"$in": ids(&agent_ids)}},
-                doc! {"_id": 1, "name": 1, "display_name": 1, "kind": 1, "destroyed_at": 1},
+                doc! {"_id": 1, "name": 1, "display_name": 1, "avatar": 1, "kind": 1, "destroyed_at": 1},
             )
             .await?,
         )
@@ -2642,6 +2646,11 @@ fn agent_identity(lookups: &Lookups, id: &str) -> Option<NotificationActor> {
             .ok()
             .filter(|name| !name.trim().is_empty())
             .map(|name| label(name, 80)),
+        avatar: agent
+            .get_document("avatar")
+            .ok()
+            .and_then(|avatar| bson::from_document(avatar.clone()).ok())
+            .map(|avatar| super::assistant_avatar_service::AvatarView::from(&avatar)),
         kind: Some(kind.to_owned()),
     })
 }
@@ -2700,6 +2709,7 @@ fn build(
                 id: source.trigger_id.clone(),
                 name: item.title.clone(),
                 display_name: None,
+                avatar: None,
                 kind: None,
             }
         } else {
@@ -2727,6 +2737,7 @@ fn build(
                             id: message.get_str("author_user_id").ok().map(str::to_owned),
                             name: label(name, 80),
                             display_name: None,
+                            avatar: None,
                             kind: None,
                         };
                     }

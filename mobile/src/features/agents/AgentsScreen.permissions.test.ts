@@ -229,6 +229,7 @@ function setup(
         "SettingsTextField",
       ].map((name) => [name, name]),
     ),
+    "../../lib/avatars/agentAvatarsFlag": { useAgentAvatarsEnabled: () => false },
     "./AgentProfileEditScreen": {
       agentProfileFieldTitle: (field: string, nyxbot?: boolean) =>
         field === "description" ? (nyxbot ? "Notes" : "Purpose") : field,

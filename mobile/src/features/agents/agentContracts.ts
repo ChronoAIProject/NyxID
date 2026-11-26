@@ -1,6 +1,8 @@
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
+import { ROSTER_ACTIVITY_STATES } from "../../../../shared/agent-avatars/activity";
 import { conversationIdSchema } from "../assistant/assistantTypes";
+import { agentAvatarFieldSchema } from "../../lib/avatars/avatarSchema";
 
 export const accessModeSchema = z.enum([
   "autopilot",
@@ -8,6 +10,16 @@ export const accessModeSchema = z.enum([
   "ask_every_time",
 ]);
 const guestAccessSchema = z.enum(["read", "use", "all"]);
+const threadActivitySchema = z.object({
+  conversation_id: z.string(),
+  state: z.enum(ROSTER_ACTIVITY_STATES),
+});
+const agentActivitySchema = z.array(z.unknown()).transform((items) =>
+  items.flatMap((item) => {
+    const result = threadActivitySchema.safeParse(item);
+    return result.success ? [result.data] : [];
+  }),
+);
 export const agentSchema = z.object({
   share_role: z.enum(["manager", "user"]).nullish(),
   guest_readiness: z
@@ -21,11 +33,14 @@ export const agentSchema = z.object({
   kind: z.enum(["nyxbot", "specialist"]),
   name: z.string(),
   display_name: z.string().nullish(),
+  /** The chosen avatar; absent derives the default from the agent id. */
+  avatar: agentAvatarFieldSchema,
   persona: z.string().nullish(),
   description: z.string(),
   model: z.string().optional(),
   access_mode_override: accessModeSchema.nullish(),
   status: z.enum(["running", "idle", "destroyed"]),
+  activity: agentActivitySchema.optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullish(),
   owner_kind: z.enum(["person", "org"]).optional(),

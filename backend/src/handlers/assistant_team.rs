@@ -2614,6 +2614,7 @@ async fn dispatch_agent_settings(
                         display_name: args["display_name"].as_str(),
                         persona: args["persona"].as_str(),
                         voice_instructions: None,
+                        avatar: None,
                     },
                     policy: team::AgentPolicy {
                         model: args["model"].as_str(),
@@ -3404,7 +3405,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     loop {
         let running = team::running_agents(db, owner).await?;
-        let busy = targets.iter().any(|id| running.contains(id));
+        let busy = targets.iter().any(|id| running.contains_key(id));
         let requests = team::pending_requests(db, owner).await?;
         let stopped = match own_turn.as_deref() {
             Some(turn_id) => engine::stop_requested(db, owner, caller, turn_id).await?,
@@ -3470,6 +3471,7 @@ pub struct AgentResponse {
     guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     #[serde(flatten)]
     summary: team::AgentSummary,
+    activity: Vec<crate::services::assistant_activity::ThreadActivity>,
     pending_acknowledgements: usize,
     channels: Vec<ChannelLinkResponse>,
 }
@@ -3481,19 +3483,36 @@ async fn agent_responses(
     requested: Option<&crate::models::assistant_agent::AssistantAgent>,
 ) -> AppResult<(Vec<AgentResponse>, bool)> {
     let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
-    let (mut summaries, destroyed_truncated) =
-        team::summaries_with_archive(&state.db, owner, true, include_destroyed, 300).await?;
-    summaries.extend(crate::services::shared_agent_service::summaries(&state.db, owner).await?);
+    let snapshot = team::roster_activity_snapshot(&state.db, owner).await?;
+    let (mut summaries, destroyed_truncated) = team::summaries_with_archive(
+        &state.db,
+        owner,
+        true,
+        include_destroyed,
+        300,
+        Some(&snapshot),
+    )
+    .await?;
+    summaries.extend(
+        crate::services::shared_agent_service::summaries_with_activity(
+            &state.db,
+            owner,
+            Some(&snapshot),
+        )
+        .await?,
+    );
     if let Some(agent) = requested
         && agent.destroyed_at.is_some()
         && !summaries.iter().any(|summary| summary.id == agent.id)
     {
-        summaries
-            .extend(team::summaries_for_agents(&state.db, owner, vec![agent.clone()], 300).await?);
+        summaries.extend(
+            team::summaries_for_agents(&state.db, owner, vec![agent.clone()], 300, Some(&snapshot))
+                .await?,
+        );
     }
     let channels = super::nyxbot::list(state, owner).await?;
     let mut responses = Vec::new();
-    for summary in summaries {
+    for mut summary in summaries {
         let linked = channels
             .iter()
             .filter(|channel| {
@@ -3511,6 +3530,7 @@ async fn agent_responses(
             guest_readiness: None,
             pending_acknowledgements: summary.pending_requests.len(),
             channels: linked,
+            activity: std::mem::take(&mut summary.activity),
             summary,
         });
     }
@@ -3548,6 +3568,32 @@ pub async fn list_agents(
         "destroyed_truncated": destroyed_truncated,
         "limits": SettingsResponse::from(settings::get(&state.db, &owner).await?),
     })))
+}
+
+#[derive(Serialize)]
+pub struct AgentActivityResponse {
+    agents: Vec<AgentActivityEntry>,
+}
+
+#[derive(Serialize)]
+struct AgentActivityEntry {
+    agent_id: String,
+    threads: Vec<crate::services::assistant_activity::ThreadActivity>,
+}
+
+pub async fn list_agent_activity(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<AgentActivityResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let agents = team::live_agent_activity(&state.db, &owner)
+        .await?
+        .into_iter()
+        .map(|(agent_id, threads)| AgentActivityEntry { agent_id, threads })
+        .collect();
+    Ok(Json(AgentActivityResponse { agents }))
 }
 
 #[derive(Deserialize)]
@@ -3900,10 +3946,15 @@ pub async fn get_agent(
     let threads: Vec<Value> = threads
         .into_iter()
         .map(|row| {
-            let running = live_turn(&row, now).is_some();
+            let state = crate::services::assistant_activity::thread_state(&row, now);
+            let activity = if response.summary.destroyed_at.is_some() {
+                None
+            } else {
+                state
+            };
             json!({"id": row.id, "title": row.title, "last_message_at": row.updated_at,
                 "channel": row.channel.map(|channel| json!({"platform": channel.platform})),
-                "running": running})
+                "running": state.is_some(), "activity": activity})
         })
         .collect();
     let can_maintain = response.summary.can_maintain;
@@ -3923,9 +3974,28 @@ pub async fn get_agent(
     ))
 }
 
+/// Compact catalogue choices. The server validates ids and agent-kind constraints.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvatarRequest {
+    template: String,
+    choices: std::collections::BTreeMap<String, String>,
+}
+impl From<AvatarRequest> for crate::models::assistant_avatar::Avatar {
+    fn from(request: AvatarRequest) -> Self {
+        Self {
+            template: request.template,
+            choices: request.choices,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateAgentRequest {
+    /// An object sets the avatar, `null` clears it, omitted leaves it.
+    #[serde(default, deserialize_with = "present")]
+    avatar: Option<Option<AvatarRequest>>,
     name: Option<String>,
     description: Option<String>,
     #[serde(default)]
@@ -3975,6 +4045,9 @@ pub async fn update_agent(
     if let Some(model) = body.model.as_deref() {
         super::assistant_nyxagent::require_available_model(&state, &auth, model).await?;
     }
+    let avatar = body
+        .avatar
+        .map(|value| value.map(crate::models::assistant_avatar::Avatar::from));
     let agent = team::patch_agent(
         &state.db,
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
@@ -3986,6 +4059,7 @@ pub async fn update_agent(
                 display_name: body.display_name.as_deref(),
                 persona: body.persona.as_deref(),
                 voice_instructions: body.voice_instructions.as_deref(),
+                avatar: avatar.as_ref().map(Option::as_ref),
             },
             policy: team::AgentPolicy {
                 model: body.model.as_deref(),
@@ -3997,7 +4071,7 @@ pub async fn update_agent(
     .await?;
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
-        "persona": agent.persona, "voice_instructions": agent.voice_instructions, "model": agent.model,
+        "persona": agent.persona, "avatar": crate::services::assistant_avatar_service::view(agent.avatar.as_ref()), "voice_instructions": agent.voice_instructions, "model": agent.model,
         "access_mode_override": agent.access_mode_override,
         "channel_checking_notice": agent.channel_checking_notice})))
 }
@@ -4668,6 +4742,10 @@ mod grant_services_tests;
 #[cfg(test)]
 #[path = "assistant_team_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "assistant_agent_activity_tests.rs"]
+mod activity_tests;
 
 pub async fn guest_operations(
     State(state): State<AppState>,

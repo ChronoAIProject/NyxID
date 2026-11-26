@@ -10,6 +10,7 @@ import {
   collaborationGroupSchema,
   collaborationDecisionSchema,
 } from "./collaborationContracts";
+import { agentAvatarFieldSchema } from "../../lib/avatars/avatarSchema";
 
 export const MAX_GROUP_MEMBERS = 8;
 export const MAX_GROUP_PARTICIPANTS = 16;
@@ -37,6 +38,7 @@ const agent = z.object({
   name: z.string(),
   display_name: z.string().nullish(),
   kind: z.enum(["nyxbot", "specialist"]),
+  avatar: agentAvatarFieldSchema,
 });
 export const groupMemberSchema = agent.extend({
   shared: z.boolean().optional(),

@@ -14,7 +14,7 @@ use mongodb::{
     bson::{self, doc},
     options::ReturnDocument,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ use crate::{
     },
     services::{
         api_key_mutation_service as transactions,
+        assistant_activity::{ActivityState, ThreadActivity},
         assistant_agent_credential_service::{self as credentials, KeyAuthority},
         assistant_nyxagent::{self as engine, excerpt, identifier, live_turn},
         assistant_profile_routing::{self as routing, RouteRole},
@@ -293,6 +294,7 @@ fn nyxbot_profile(owner: &str, model: String) -> AssistantAgent {
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: None,
+        avatar: None,
         persona: None,
         voice_instructions: None,
         destroyed_at: None,
@@ -1587,6 +1589,7 @@ async fn create_specialist_inner(
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
+        avatar: None,
         display_name: style_value(
             request.display_name.as_deref().unwrap_or_default(),
             MAX_DISPLAY_NAME_CHARS,
@@ -1716,6 +1719,8 @@ pub struct AgentStyle<'a> {
     pub display_name: Option<&'a str>,
     pub persona: Option<&'a str>,
     pub voice_instructions: Option<&'a str>,
+    /// `Some(None)` clears the avatar; omitted leaves it unchanged.
+    pub avatar: Option<Option<&'a crate::models::assistant_avatar::Avatar>>,
 }
 
 /// A bounded, credential-free display name or persona; empty clears it.
@@ -1909,6 +1914,38 @@ pub async fn patch_agent(
     if let Some(enabled) = checking_notice {
         set.insert("channel_checking_notice", enabled);
     }
+    if let Some(avatar) = style.avatar {
+        super::assistant_avatar_service::require_enabled(db, actor).await?;
+        match avatar {
+            Some(avatar) => {
+                super::assistant_avatar_service::validate_for_kind(avatar, current.is_nyxbot())?;
+                set.insert(
+                    "avatar",
+                    bson::to_bson(avatar).map_err(|error| {
+                        AppError::Internal(format!("Avatar serialization failed: {error}"))
+                    })?,
+                );
+            }
+            None => {
+                unset.insert("avatar", "");
+            }
+        }
+    }
+    // Metadata only: avatar-only edits are distinguishable from other
+    // profile edits, never the chosen ids.
+    let change_kind = if style.avatar.is_some()
+        && !policy_change
+        && checking_notice.is_none()
+        && name.is_none()
+        && description.is_none()
+        && style.display_name.is_none()
+        && style.persona.is_none()
+        && style.voice_instructions.is_none()
+    {
+        "avatar"
+    } else {
+        "profile"
+    };
     let mut update = doc! {"$set": set};
     if !unset.is_empty() {
         update.insert("$unset", unset);
@@ -1930,7 +1967,7 @@ pub async fn patch_agent(
             .await?
             .ok_or_else(not_found)?;
         session.commit_transaction().await?;
-        super::shared_agent_service::audit(db, actor, &updated, "profile").await;
+        super::shared_agent_service::audit(db, actor, &updated, change_kind).await;
         updated
     } else {
         super::org_agent_service::update_maintained(
@@ -1944,8 +1981,12 @@ pub async fn patch_agent(
         .ok_or_else(not_found)?
     };
     if !shared_manager {
-        super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
-        super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+        // A cosmetic avatar change is not an owner setup action: it must not
+        // clear a failed guest-model-setup backoff.
+        if change_kind != "avatar" {
+            super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
+        }
+        super::org_agent_service::audit_change(db, actor, &updated, change_kind).await;
         if checking_notice.is_some() {
             super::org_agent_service::audit_change(db, actor, &updated, "channel_checking_notice")
                 .await;
@@ -2947,6 +2988,8 @@ pub struct AgentSummary {
     pub kind: AgentKind,
     pub name: String,
     pub display_name: Option<String>,
+    /// Stored avatar; absent means clients derive the default.
+    pub avatar: Option<super::assistant_avatar_service::AvatarView>,
     pub persona: Option<String>,
     pub voice_instructions: Option<String>,
     pub description: String,
@@ -2960,6 +3003,9 @@ pub struct AgentSummary {
     pub channel_checking_notice: bool,
     /// `running`, `idle`, or `destroyed`.
     pub status: &'static str,
+    /// Human REST responses opt in to thread identifiers explicitly.
+    #[serde(skip)]
+    pub activity: Vec<ThreadActivity>,
     pub services: Vec<String>,
     pub account_read: bool,
     /// What guests may do with each granted service, by the name in
@@ -3188,21 +3234,250 @@ pub(crate) async fn last_reply(
     }))
 }
 
-/// Agents with a live turn in any of their threads.
-pub async fn running_agents(db: &Database, owner: &str) -> AppResult<HashSet<String>> {
-    let rows: Vec<AssistantConversation> = db
+pub(crate) const AGENT_ACTIVITY_LIMIT: i64 = 200;
+
+fn activity_thread_filter(owner: &str) -> bson::Document {
+    doc! {"collaboration": null, "user_id": owner}
+}
+
+async fn activity_rows(db: &Database, owner: &str) -> AppResult<Vec<AssistantConversation>> {
+    let mut filter = activity_thread_filter(owner);
+    filter.insert("active_turn.turn_id", doc! {"$exists": true});
+    Ok(db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"collaboration": null, "user_id": owner, "active_turn.turn_id": {"$exists": true}})
-        .limit(200)
+        .find(filter)
+        .limit(AGENT_ACTIVITY_LIMIT)
         .await?
         .try_collect()
-        .await?;
+        .await?)
+}
+
+fn collect_agent_activity(
+    rows: impl IntoIterator<Item = AssistantConversation>,
+    legacy_nyxbot_id: Option<&str>,
+) -> BTreeMap<String, Vec<ThreadActivity>> {
     let now = Utc::now();
+    let mut agents = BTreeMap::<_, Vec<_>>::new();
+    for row in rows {
+        if let Some(agent_id) = row.agent_id.as_deref().or(legacy_nyxbot_id)
+            && let Some(thread) = ThreadActivity::from_conversation(&row, now)
+        {
+            agents.entry(agent_id.to_owned()).or_default().push(thread);
+        }
+    }
+    agents
+}
+
+/// Viewer-scoped activity from the existing bounded running-agent read.
+pub async fn running_agents(
+    db: &Database,
+    owner: &str,
+) -> AppResult<BTreeMap<String, Vec<ThreadActivity>>> {
+    let rows = activity_rows(db, owner).await?;
     let nyxbot = ensure_nyxbot(db, owner).await?.id;
-    Ok(rows
+    Ok(collect_agent_activity(rows, Some(&nyxbot)))
+}
+
+#[derive(Deserialize)]
+struct ActivityAgent {
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+    kind: AgentKind,
+    #[serde(default)]
+    org_user_ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct ActivityThreadIdentity {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    shared_agent_thread: bool,
+}
+
+struct ActivityThread {
+    agent_id: Option<String>,
+    shared_agent_thread: bool,
+    shared_roster_thread: bool,
+    activity: ThreadActivity,
+    running: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct AgentActivity {
+    pub(crate) threads: Vec<ThreadActivity>,
+    pub(crate) running: bool,
+}
+
+pub(crate) type AgentActivitySnapshot = BTreeMap<String, AgentActivity>;
+
+async fn roster_activity_threads(db: &Database, owner: &str) -> AppResult<Vec<ActivityThread>> {
+    use super::shared_agent_service as sharing;
+    let (turns, mut pending) = tokio::try_join!(
+        activity_rows(db, owner),
+        super::assistant_acknowledgement_service::pending_activity_conversations(
+            db,
+            owner,
+            AGENT_ACTIVITY_LIMIT
+        ),
+    )?;
+    let now = Utc::now();
+    let mut rows = Vec::with_capacity(turns.len() + pending.len());
+    for row in turns {
+        let pending_owner_action = pending.remove(&row.id);
+        if let Some((activity, running)) = ThreadActivity::observe(&row, now, pending_owner_action)
+        {
+            rows.push(ActivityThread {
+                shared_roster_thread: sharing::is_shared_roster_thread(&row),
+                shared_agent_thread: row.shared_agent_thread,
+                agent_id: row.agent_id,
+                activity,
+                running,
+            });
+        }
+    }
+    if !pending.is_empty() {
+        let mut filter = activity_thread_filter(owner);
+        filter.extend(doc! {
+            "_id": {"$in": pending.into_iter().collect::<Vec<_>>()},
+            "$or": [doc! {"shared_agent_thread": {"$ne": true}}, sharing::shared_roster_thread_filter(owner)]
+        });
+        let threads: Vec<ActivityThreadIdentity> = db
+            .collection(CONVERSATIONS)
+            .find(filter)
+            .projection(doc! {"_id": 1, "agent_id": 1, "shared_agent_thread": 1})
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(threads.into_iter().map(|thread| ActivityThread {
+            agent_id: thread.agent_id,
+            shared_agent_thread: thread.shared_agent_thread,
+            shared_roster_thread: thread.shared_agent_thread,
+            activity: ThreadActivity {
+                conversation_id: thread.id,
+                state: ActivityState::Approval,
+            },
+            running: false,
+        }));
+    }
+    Ok(rows)
+}
+
+/// Read-only snapshot. Resolve current roster authority only for candidates
+/// from the same bounded thread read. The additional lookups are batched.
+pub(crate) async fn roster_activity_snapshot(
+    db: &Database,
+    owner: &str,
+) -> AppResult<AgentActivitySnapshot> {
+    use super::shared_agent_service as sharing;
+    let rows = roster_activity_threads(db, owner).await?;
+    if rows.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let ids: HashSet<_> = rows
         .iter()
-        .filter(|row| live_turn(row, now).is_some())
-        .map(|row| row.agent_id.clone().unwrap_or_else(|| nyxbot.clone()))
+        .filter_map(|row| row.agent_id.as_deref())
+        .collect();
+    let mut identities = vec![doc! {"_id": {"$in": ids.into_iter().collect::<Vec<_>>()}}];
+    if rows.iter().any(|row| row.agent_id.is_none()) {
+        identities.push(doc! {"user_id": owner, "kind": "nyxbot"});
+    }
+    let agents: HashMap<_, _> = db
+        .collection::<ActivityAgent>(AGENTS)
+        .find(doc! {"destroyed_at": null, "$or": identities})
+        .projection(doc! {"_id": 1, "user_id": 1, "kind": 1, "org_user_ids": 1})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect();
+
+    let foreign_specialist = |row: &ActivityThread| {
+        row.agent_id
+            .as_ref()
+            .and_then(|id| agents.get(id))
+            .filter(|agent| agent.kind == AgentKind::Specialist && agent.user_id != owner)
+    };
+    let org_owners = if rows
+        .iter()
+        .any(|row| !row.shared_agent_thread && foreign_specialist(row).is_some())
+    {
+        super::org_agent_service::activity_owners(db, owner).await?
+    } else {
+        HashMap::new()
+    };
+    let shared_ids: Vec<_> = rows
+        .iter()
+        .filter(|row| row.shared_roster_thread)
+        .filter_map(foreign_specialist)
+        .map(|agent| agent.id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let shares = if shared_ids.is_empty() {
+        None
+    } else {
+        Some(sharing::load(db, owner, Some(&shared_ids)).await?)
+    };
+
+    let legacy_nyxbot = agents
+        .values()
+        .find(|agent| agent.user_id == owner && agent.kind == AgentKind::Nyxbot);
+    let allowed = |row: &ActivityThread| {
+        let Some(id) = &row.agent_id else {
+            return legacy_nyxbot.is_some();
+        };
+        let Some(agent) = agents.get(id) else {
+            return false;
+        };
+        if agent.user_id == owner {
+            return true;
+        }
+        if agent.kind != AgentKind::Specialist {
+            return false;
+        }
+        if row.shared_agent_thread {
+            return row.shared_roster_thread
+                && shares
+                    .as_ref()
+                    .is_some_and(|shares| shares.agents.contains_key(id));
+        }
+        org_owners.get(&agent.user_id).is_some_and(|role| {
+            super::org_agent_service::member_can_use(
+                owner,
+                agent.kind,
+                agent.org_user_ids.as_deref(),
+                *role,
+            )
+        })
+    };
+    let mut result = AgentActivitySnapshot::new();
+    for row in rows.into_iter().filter(allowed) {
+        if let Some(agent_id) = row
+            .agent_id
+            .or_else(|| legacy_nyxbot.map(|agent| agent.id.clone()))
+        {
+            let agent = result.entry(agent_id).or_default();
+            agent.running |= row.running;
+            agent.threads.push(row.activity);
+        }
+    }
+    Ok(result)
+}
+
+pub async fn live_agent_activity(
+    db: &Database,
+    owner: &str,
+) -> AppResult<BTreeMap<String, Vec<ThreadActivity>>> {
+    Ok(roster_activity_snapshot(db, owner)
+        .await?
+        .into_iter()
+        .map(|(id, activity)| (id, activity.threads))
         .collect())
 }
 
@@ -3214,11 +3489,16 @@ pub async fn summaries(
     include_destroyed: bool,
     reply_chars: usize,
 ) -> AppResult<Vec<AgentSummary>> {
-    Ok(
-        summaries_with_archive(db, owner, include_nyxbot, include_destroyed, reply_chars)
-            .await?
-            .0,
+    Ok(summaries_with_archive(
+        db,
+        owner,
+        include_nyxbot,
+        include_destroyed,
+        reply_chars,
+        None,
     )
+    .await?
+    .0)
 }
 
 /// Archive metadata comes from the same bounded query as the returned rows.
@@ -3228,6 +3508,7 @@ pub async fn summaries_with_archive(
     include_nyxbot: bool,
     include_destroyed: bool,
     reply_chars: usize,
+    activity: Option<&AgentActivitySnapshot>,
 ) -> AppResult<(Vec<AgentSummary>, bool)> {
     ensure_nyxbot(db, owner).await?;
     let (mut rows, truncated) = agent_roster(db, owner, include_destroyed).await?;
@@ -3235,7 +3516,7 @@ pub async fn summaries_with_archive(
         rows.retain(|agent| !agent.is_nyxbot());
     }
     Ok((
-        summaries_for_agents(db, owner, rows, reply_chars).await?,
+        summaries_for_agents(db, owner, rows, reply_chars, activity).await?,
         truncated,
     ))
 }
@@ -3247,11 +3528,15 @@ pub(crate) async fn summaries_for_agents(
     owner: &str,
     rows: Vec<AssistantAgent>,
     reply_chars: usize,
+    snapshot: Option<&AgentActivitySnapshot>,
 ) -> AppResult<Vec<AgentSummary>> {
     let names = slug_names(db, &rows, owner).await?;
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
-    let running = running_agents(db, owner).await?;
+    let mut running = match snapshot {
+        Some(_) => BTreeMap::new(),
+        None => running_agents(db, owner).await?,
+    };
     let owners = super::org_agent_service::owners_for_page(
         db,
         owner,
@@ -3322,12 +3607,24 @@ pub(crate) async fn summaries_for_agents(
         } else {
             agent.home_conversation_id.clone()
         };
+        let (activity, has_live_turn) = if agent.destroyed_at.is_some() || !rights.can_use {
+            (Vec::new(), false)
+        } else if let Some(snapshot) = snapshot {
+            snapshot.get(&agent.id).map_or_else(
+                || (Vec::new(), false),
+                |entry| (entry.threads.clone(), entry.running),
+            )
+        } else {
+            let activity = running.remove(&agent.id).unwrap_or_default();
+            let has_live_turn = !activity.is_empty();
+            (activity, has_live_turn)
+        };
         let status = if agent.destroyed_at.is_some() {
             "destroyed"
-        } else if rights.can_use && running.contains(&agent.id) {
-            "running"
-        } else {
+        } else if !rights.can_use || !has_live_turn {
             "idle"
+        } else {
+            "running"
         };
         let last_reply = match (reply_chars, home_id.as_deref()) {
             (0, _) | (_, None) => None,
@@ -3386,8 +3683,10 @@ pub(crate) async fn summaries_for_agents(
                 .collect(),
             last_reply,
             status,
+            activity,
             kind: agent.kind,
             name: agent.name.clone(),
+            avatar: super::assistant_avatar_service::view(agent.avatar.as_ref()),
             display_name: agent.display_name.clone(),
             persona: agent.persona.clone(),
             voice_instructions: agent.voice_instructions.clone(),

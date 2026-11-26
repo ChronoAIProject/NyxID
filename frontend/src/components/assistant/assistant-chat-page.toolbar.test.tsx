@@ -70,7 +70,8 @@ vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,
 }));
 vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => state.desktop }));
-vi.mock("@/hooks/use-nyxbot-agents", () => ({
+vi.mock("@/hooks/use-nyxbot-agents", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/hooks/use-nyxbot-agents")>(),
   useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, status: state.destroyed ? "destroyed" : "idle", can_use: !state.destroyed, access_mode_override: state.override, ...(state.orgViewer ? { owner_kind: "org", can_maintain: false } : {}) }] } : undefined }),
   selectedAgentOf: (rows?: unknown[]) => rows?.[0],
   nyxBotOf: (rows?: unknown[]) => rows?.[0],

@@ -317,6 +317,13 @@ function setup(
   };
   const harness = hookHarness<Element>(
     {
+      "../../../components/AgentAvatar": { AgentAvatar: "AgentAvatar" },
+      "../../../components/avatar/VoiceRippleBanner": {
+        VoiceRippleBanner: "VoiceRippleBanner",
+      },
+      "../../../lib/avatars/agentAvatarsFlag": {
+        useAgentAvatarsEnabled: () => true,
+      },
       "../../../components/workspace/useNativeSheetDismiss": {
         useNativeSheetDismiss: (onClose: () => void) => ({
           modalProps: { visible: true, animationType: "slide" },

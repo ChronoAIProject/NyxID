@@ -93,6 +93,7 @@
   "Choose agent": "选择智能体",
   "Choose an agent to browse its chats.": "选择一个智能体以浏览其聊天。",
   "Choose another agent": "选择其他智能体",
+  "Choose compatible avatar settings from the face catalogue": "请从面部目录选择兼容的头像设置",
   "Choose either JSON or raw request bytes.": "请选择 JSON 或原始请求字节中的一种。",
   "Choose either an expiry date or no expiry": "请选择到期日期或永不过期",
   "Choose up to {{maxSelected}} options.": "最多选择 {{maxSelected}} 项。",

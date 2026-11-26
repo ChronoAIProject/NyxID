@@ -80,6 +80,7 @@ impl Registry {
             home_conversation_id: None,
             memory: vec![],
             display_name: None,
+            avatar: None,
             persona: None,
             voice_instructions: None,
             destroyed_at: None,

@@ -286,6 +286,7 @@ pub mod execution_permission_channel;
 
 pub mod assistant_tool_result;
 
+pub mod assistant_avatar;
 pub mod channel_turn_preparation;
 
 pub mod gateway_reply;

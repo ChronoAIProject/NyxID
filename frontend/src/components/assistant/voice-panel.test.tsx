@@ -58,6 +58,9 @@ vi.mock("@tanstack/react-query", async (original) => ({
 vi.mock("@/hooks/use-assistant-voice", () => ({
   useAssistantVoice: () => ({
     connected: mock.connected,
+    inputAccepting: mock.connected,
+    activity: { input: 0, output: 0 },
+    restoredEvent: null,
     starting: mock.starting,
     connectionStatus: mock.connectionStatus,
     error: mock.error,

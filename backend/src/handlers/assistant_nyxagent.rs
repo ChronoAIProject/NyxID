@@ -313,6 +313,7 @@ pub struct AgentRefResponse {
     pub kind: crate::models::assistant_agent::AgentKind,
     pub name: String,
     pub display_name: Option<String>,
+    pub avatar: Option<crate::services::assistant_avatar_service::AvatarView>,
     /// Destroyed agents' threads are read-only.
     pub destroyed: bool,
 }
@@ -391,6 +392,7 @@ impl ConversationResponse {
                 kind: agent.kind,
                 name: agent.name.clone(),
                 display_name: agent.display_name.clone(),
+                avatar: crate::services::assistant_avatar_service::view(agent.avatar.as_ref()),
                 destroyed: agent.destroyed_at.is_some(),
             })
             .or(self.agent);
@@ -484,6 +486,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 kind: crate::models::assistant_agent::AgentKind::Specialist,
                 name: "Shared agent".into(),
                 display_name: None,
+                avatar: None,
                 destroyed: false,
             }),
             pending_events: row.pending_events.len(),

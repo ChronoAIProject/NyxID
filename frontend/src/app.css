@@ -1554,9 +1554,8 @@ html.assistant-display [data-chat-index-target] {
 .agent-header-search-field { width: 100%; transform-origin: right center; }
 .agent-header-search[data-open="false"] .agent-header-search-field { position: absolute; right: 0; top: 0; width: 0; opacity: 0; visibility: hidden; overflow: hidden; }
 .agent-header-name, .agent-header-avatar { transform-origin: left center; }
-[data-agent-header][data-compact="true"] .agent-header-name { transform: scale(.867); }
-[data-agent-header][data-compact="true"] .agent-header-avatar { transform: translateX(6px) scale(.625); }
-[data-agent-header][data-compact="true"] .agent-header-subtitle { opacity: 0; transform: translateY(-8px); visibility: hidden; }
+[data-agent-header][data-compact="true"] .agent-header-subtitle { padding-left: calc(var(--spacing) * 11); padding-top: calc(var(--spacing) * 1.5); }
+[data-agent-header][data-compact="true"] .agent-header-created { display: none; }
 .agent-details-sheet { container: agent-details / inline-size; }
 @container agent-details (width < 480px) {
   [data-agent-header][data-search-open="true"] .agent-header-avatar,

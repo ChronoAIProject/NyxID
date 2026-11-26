@@ -1,6 +1,8 @@
 import { localizedError } from "../../i18n/localizedError";
+import { recordCreatedAvatar } from "../../../../shared/agent-avatars/created";
 import { z } from "zod";
 import { requestJson } from "./http";
+import type { AvatarConfig } from "../avatars/agentAvatars";
 import type { RequestOptions } from "./authenticatedTransport";
 import {
   grantServiceSchema,
@@ -15,9 +17,14 @@ const ROOT = "/assistant/nyxagent";
 const agentPath = (id: string) => `${ROOT}/agents/${encodeURIComponent(id)}`;
 export const agentsApi = {
   async grantServices(org?: string, signal?: AbortSignal) {
-    return z.object({ services: z.array(grantServiceSchema) }).parse(
-      await requestJson(`${ROOT}/grant-services${org ? `?org=${encodeURIComponent(org)}` : ""}`, { signal }),
-    ).services;
+    return z
+      .object({ services: z.array(grantServiceSchema) })
+      .parse(
+        await requestJson(
+          `${ROOT}/grant-services${org ? `?org=${encodeURIComponent(org)}` : ""}`,
+          { signal },
+        ),
+      ).services;
   },
   async list(signal?: AbortSignal) {
     return z
@@ -42,7 +49,7 @@ export const agentsApi = {
   },
   async create(input: AgentCreate) {
     const { display_name, persona, ...body } = agentCreateSchema.parse(input);
-    return z
+    const created = z
       .object({
         id: z.string(),
         name: z.string(),
@@ -58,6 +65,8 @@ export const agentsApi = {
           },
         }),
       );
+    recordCreatedAvatar(created.id);
+    return created;
   },
   async update(
     id: string,
@@ -65,6 +74,10 @@ export const agentsApi = {
     options?: Pick<RequestOptions, "authorityGuard">,
   ) {
     await requestJson(agentPath(id), { ...options, method: "PATCH", body });
+  },
+  /** An object sets the avatar; null clears it back to the derived default. */
+  async updateAvatar(id: string, body: { avatar: AvatarConfig | null }, authorityGuard?: () => void) {
+    await requestJson(agentPath(id), { method: "PATCH", body, authorityGuard });
   },
   async grants(
     id: string,

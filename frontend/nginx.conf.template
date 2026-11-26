@@ -258,9 +258,17 @@ server {
     }
 
     location ~* \.map$ { return 404; }
+    # The eye-performance worker is the only script that compiles WebAssembly.
+    # This response policy does not widen the SPA or API document policies.
+    location ~ ^/assets/rive-motion\.worker-[A-Za-z0-9_-]+\.js$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        include @@RIVE_WORKER_HEADERS@@;
+        try_files $uri =404;
+    }
 
     # Cache hashed static assets for 1 year
-    location ~* \.(?:js|css|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
+    location ~* \.(?:js|css|wasm|riv|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
         include @@STATIC_HEADERS@@;
