@@ -1,9 +1,11 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Search, Menu, X, Bot, LayoutDashboard, Terminal, type LucideIcon } from "lucide-react";
-import { NyxidLogo } from "@/components/brand/nyxid-logo";
+import { PublicBrand, PublicFooter, PublicThemeToggle } from "../public-site/public-chrome";
+import { usePublicThemeElement } from "../public-site/public-theme";
+import "../website-a/public-reading.css";
 import {
   DOCS_TABS,
   DOCS_SHARED,
@@ -13,7 +15,9 @@ import {
 } from "./manifest";
 import { DocsSearch } from "./docs-search";
 
-const STATIC_RUNTIME = { isAuthed: false, themeToggle: undefined as ReactNode };
+// The pre-rendered public docs learn the session and the app's display settings
+// (text size, density) after the public session starts. `display` renders no UI.
+const STATIC_RUNTIME = { isAuthed: false, display: undefined as ReactNode };
 let publicRuntime = STATIC_RUNTIME;
 const runtimeListeners = new Set<() => void>();
 function subscribeRuntime(listener: () => void) {
@@ -22,9 +26,9 @@ function subscribeRuntime(listener: () => void) {
 }
 export function updatePublicDocsRuntime(
   isAuthed: boolean,
-  themeToggle: ReactNode,
+  display: ReactNode,
 ) {
-  publicRuntime = { isAuthed, themeToggle };
+  publicRuntime = { isAuthed, display };
   runtimeListeners.forEach((listener) => listener());
 }
 
@@ -171,10 +175,8 @@ export function DocsLayout({
   hideNav,
   children,
   isAuthed: explicitAuthed,
-  themeToggle: explicitThemeToggle,
 }: {
   readonly isAuthed?: boolean;
-  readonly themeToggle?: ReactNode;
   readonly activeTab: DocTabId;
   readonly currentSlug?: string;
   readonly toc?: readonly TocItem[];
@@ -189,7 +191,8 @@ export function DocsLayout({
     () => STATIC_RUNTIME,
   );
   const isAuthed = explicitAuthed ?? runtime.isAuthed;
-  const themeToggle = explicitThemeToggle ?? runtime.themeToggle;
+  const scope = useRef<HTMLDivElement>(null);
+  usePublicThemeElement(scope);
   const [searchOpen, setSearchOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
 
@@ -208,8 +211,9 @@ export function DocsLayout({
   }, []);
 
   return (
-    <div className="min-h-dvh bg-background font-sans text-foreground">
-      <header className="fixed top-0 right-0 left-0 z-40 border-b border-border bg-background/80 backdrop-blur-md">
+    <div ref={scope} className="nyx-public public-reading public-docs">
+      {runtime.display}
+      <header className="public-docs-bar">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
           {!hideNav && (
             <button
@@ -222,43 +226,38 @@ export function DocsLayout({
             </button>
           )}
 
-          <a href="/" className="flex shrink-0 items-center">
-            <NyxidLogo className="h-7 w-auto" />
+          <a href="/" className="public-docs-home shrink-0">
+            <PublicBrand />
           </a>
-          <span className="text-text-tertiary" aria-hidden>
+          <span className="public-docs-sep" aria-hidden>
             /
           </span>
-          <Link
-            to="/docs"
-            className="font-display type-card-title tracking-tight text-foreground"
-          >{translateUi("Docs")}</Link>
+          <Link to="/docs" className="public-docs-crumb">{translateUi("Docs")}</Link>
 
-          <div className="ml-auto flex items-center gap-2 sm:gap-3">
+          <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 type-row-title text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
+              className="public-docs-search"
+              aria-label={translateUi("Search")}
             >
-              <Search className="h-3.5 w-3.5" />
+              <Search className="h-3.5 w-3.5" aria-hidden />
               <span className="hidden sm:inline">{translateUi("Search")}</span>
-              <kbd className="hidden rounded border border-border px-1 font-mono text-12 text-text-tertiary sm:inline">
+              <kbd className="hidden sm:inline" aria-hidden>
                 /
               </kbd>
             </button>
-            {themeToggle}
+            <PublicThemeToggle />
             <a
               href={GITHUB_URL}
               target="_blank"
               rel="noopener noreferrer"
               aria-label={translateUi("GitHub")}
-              className="hidden text-muted-foreground transition-colors hover:text-foreground sm:block"
+              className="public-docs-github hidden place-items-center sm:grid"
             >
               <GithubMark />
             </a>
-            <a
-              href={isAuthed ? "/dashboard" : "/login"}
-              className="rounded-lg bg-primary px-4 py-1.5 type-row-title text-white transition-colors hover:bg-nyx-600"
-            >
+            <a href={isAuthed ? "/dashboard" : "/login"} className="public-cta">
               {isAuthed ? translateUi("Dashboard") : translateUi("Log in")}
             </a>
           </div>
@@ -308,6 +307,8 @@ export function DocsLayout({
           )}
         </div>
       )}
+
+      <PublicFooter showStatus={false} />
 
       {/* Mobile nav drawer */}
       {mobileNav && (

@@ -101,7 +101,7 @@ export const descriptions: Record<string, string> = {
   "/pricing":
     "Services we pay for on your behalf include a 15% markup. Bring your own provider account and pay no platform fee.",
   "/integrations":
-    "145 apps and APIs across 30 categories. Connect each one with a secure sign-in link, then decide exactly what your AI may do with it.",
+    "Connect apps, AI providers and voice services with your own accounts or credentials.",
   "/blog": "Practical ideas for putting AI to work, safely.",
   "/contact":
     "Questions about bundles, self-hosting or your setup? Pick whichever is easiest.",

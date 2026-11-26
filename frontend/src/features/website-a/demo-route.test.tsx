@@ -8,6 +8,10 @@ const location = vi.hoisted(() => ({
   hash: "",
 }));
 vi.mock("@tanstack/react-router", () => ({ useLocation: () => location }));
+vi.mock("./site-link", async () => {
+  const { forwardRef } = await import("react");
+  return { SiteLink: forwardRef<HTMLAnchorElement, React.AnchorHTMLAttributes<HTMLAnchorElement>>(function Anchor(props, ref) { return <a {...props} ref={ref} />; }) };
+});
 vi.mock("./generated/en/WebsiteHeader", () => ({ default: () => null }));
 vi.mock("./generated/zh/WebsiteHeader", () => ({ default: () => null }));
 vi.mock("./generated/en/WebsiteFooter", () => ({ default: () => null }));

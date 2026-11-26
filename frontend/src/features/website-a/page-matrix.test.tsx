@@ -151,7 +151,7 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
   ])("marks the navbar section for %s", async (pathname, section) => {
     const { container } = await openPage(pathname, language);
     const links = [
-      ...container.querySelectorAll<HTMLAnchorElement>("nav a.nl"),
+      ...container.querySelectorAll<HTMLAnchorElement>(".public-nav-links a, .public-more-menu > a"),
     ];
     const active = links.filter((link) => link.getAttribute("aria-current"));
     if (section === "/blog") {
@@ -159,12 +159,12 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
       expect(active).toHaveLength(0);
       return;
     }
-    expect(active).toHaveLength(1);
-    expect(parsePublicPath(active[0]?.pathname ?? "/").route).toBe(section);
-    expect(active[0]).toHaveClass("on");
-    expect(links.filter((link) => link.classList.contains("on"))).toHaveLength(
-      1,
-    );
+    // Desktop links and their mobile-menu equivalents identify the same section.
+    expect(active.length).toBeGreaterThan(0);
+    for (const link of active) {
+      expect(parsePublicPath(link.pathname).route).toBe(section);
+      expect(link).toHaveAttribute("aria-current", pathname === section ? "page" : "location");
+    }
   });
 });
 
@@ -229,7 +229,7 @@ it("withholds unapproved articles and newsletter promises", async () => {
 
 it("offers a real locale URL preserving business query and nested return", async () => {
   const { container } = await openPage("/contact");
-  const link = within(container.querySelector("nav")!).getByRole("link", {
+  const link = within(container.querySelector(".public-footer")!).getByRole("link", {
     name: "中文",
   });
   const url = new URL(link.getAttribute("href")!, window.location.href);

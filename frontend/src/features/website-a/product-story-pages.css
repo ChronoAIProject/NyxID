@@ -1,0 +1,41 @@
+/* Each product page is arranged around its own object. */
+.website-a.nyx-public .st-journey{padding:8px 0 64px}
+.website-a.nyx-public .st-journey-layout{display:grid;grid-template-columns:minmax(220px,.65fr) minmax(0,1.4fr);gap:80px;align-items:start}
+.website-a.nyx-public .st-journey-context{position:sticky;top:116px;padding-top:24px;border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-journey-context>p{font-size:13px;margin-bottom:14px;color:var(--site-faint)}
+.website-a.nyx-public .st-journey-context h2{font-size:36px;margin-bottom:24px}
+.website-a.nyx-public .st-journey-steps{list-style:none;padding:0;margin:0}
+.website-a.nyx-public .st-journey-steps>li{position:relative;display:grid;grid-template-columns:32px minmax(0,1fr);gap:24px;padding:28px 0 34px;border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-journey-number{font:13px var(--site-mono);color:var(--site-faint);padding-top:6px}
+.website-a.nyx-public .st-journey-steps h3{font-size:28px;max-width:none}
+.website-a.nyx-public .st-journey-steps p{margin-top:14px;font-size:17px;line-height:1.6}
+.website-a.nyx-public .st-journey-detail{padding-left:14px;margin-top:20px;border-left:2px solid var(--site-rule-strong);color:var(--site-faint);font-size:14px}
+.website-a.nyx-public .st-nyxbot-channels{display:grid;grid-template-columns:1fr 1fr;gap:80px}
+.website-a.nyx-public .st-nyxbot-channels .st-apps{margin-top:20px}
+.website-a.nyx-public .st-nyxbot-channels .st-link{margin-top:14px}
+.website-a.nyx-public .st-nyxbot-security-note{margin-top:24px;font-size:15px}
+.website-a.nyx-public .st-security-records{display:grid;grid-template-columns:1fr 1fr;gap:80px}
+.website-a.nyx-public .st-security-records h3{margin:18px 0 14px}
+.website-a.nyx-public .st-security-records svg{color:var(--site-body)}
+.website-a.nyx-public .st-agent-connect{padding-bottom:64px}
+.website-a.nyx-public .st-agent-connect .code{max-width:none;border:1px solid var(--site-rule-strong);box-shadow:none}
+.website-a.nyx-public .st-agent-connect .code pre{font-size:14px;line-height:1.7;padding:26px;min-height:210px;white-space:pre-wrap;overflow-wrap:anywhere}
+.website-a.nyx-public .st-agent-setup{list-style:none;padding:0;margin:0}
+.website-a.nyx-public .st-agent-setup li{display:grid;grid-template-columns:24px minmax(190px,.7fr) minmax(0,1.3fr);gap:28px;padding:24px 0;border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-agent-setup li>span{font:12px var(--site-mono);color:var(--site-faint);padding-top:4px}
+.website-a.nyx-public .st-agent-guides{display:grid;grid-template-columns:1.3fr .7fr;gap:80px}
+.website-a.nyx-public .st-agent-guides p{margin-top:20px}
+.website-a.nyx-public .st-agent-guides>div:last-child{display:flex;flex-direction:column;align-items:flex-start;gap:8px}
+@media(max-width:900px){.website-a.nyx-public .st-journey-layout{gap:36px}.website-a.nyx-public .st-agent-setup li{gap:20px;grid-template-columns:24px minmax(160px,.7fr) 1fr}}
+@media(max-width:700px){
+ .website-a.nyx-public .st-journey-layout,.website-a.nyx-public .st-nyxbot-channels,.website-a.nyx-public .st-security-records,.website-a.nyx-public .st-agent-guides{grid-template-columns:1fr;gap:32px}
+ .website-a.nyx-public .st-journey-context{position:static}
+ .website-a.nyx-public .st-journey-context .st-link{margin-top:12px}
+ .website-a.nyx-public .st-journey-steps>li{grid-template-columns:20px minmax(0,1fr);gap:12px;padding:24px 0}
+ .website-a.nyx-public .st-journey-steps h3{font-size:25px}
+ .website-a.nyx-public .st-journey-steps p{font-size:16px}
+ .website-a.nyx-public .st-agent-setup li{grid-template-columns:20px 1fr;gap:12px}
+ .website-a.nyx-public .st-agent-setup p{grid-column:2}
+ .website-a.nyx-public .st-agent-connect .code pre{font-size:11.5px;padding:20px;min-height:250px}
+ .website-a.nyx-public .st-agent-connect,.website-a.nyx-public .st-journey{padding-bottom:44px}
+}

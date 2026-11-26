@@ -1,40 +1,24 @@
 // NyxID home page, ported from the "light night" design (mockups/landing-combined/nyxid-light-night.html).
 // The markup below is the design's markup converted to JSX; nyx-home-motion.js runs its animations.
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { CSSProperties } from "react";
 import { useWebsite } from "../website-context";
+import { HomeJobs } from "./nyx-home-jobs";
+import { ToolCatalog } from "./nyx-home-tools";
+import { PublicHeader, PublicFooter } from "../../public-site/public-chrome";
+import { usePublicThemeElement } from "../../public-site/public-theme";
 import "./nyx-home.css";
-
-const THEME_KEY = "nyxid-theme";
-
-/* Day or night: a saved choice wins, otherwise the system setting. Set on the page element only,
-   so the app's own theme is never touched. Also marks the page as scripted (.js), which the
-   entrance animations wait for; without scripts every section shows its finished state. */
-function applyStartingTheme(page: HTMLElement) {
-  page.classList.add("js");
-  let saved: string | null = null;
-  try {
-    saved = localStorage.getItem(THEME_KEY);
-  } catch {
-    saved = null; // storage blocked: follow the system
-  }
-  page.dataset.theme =
-    saved === "light" || saved === "dark"
-      ? saved
-      : window.matchMedia("(prefers-color-scheme: dark)").matches
-        ? "dark"
-        : "light";
-}
 
 export default function NyxHomePage() {
   const s = useWebsite();
   const ref = useRef<HTMLDivElement>(null);
-  // Runs before the first paint, so the page never flashes the wrong mode.
+  usePublicThemeElement(ref);
+  // Mark entrance animations before paint; theme is shared with the detailed pages.
   useLayoutEffect(() => {
-    if (ref.current) applyStartingTheme(ref.current);
+    ref.current?.classList.add("js");
   }, []);
   // The animation code (GSAP, Lenis, WebGL) loads only in the browser, after the page shows.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const page = ref.current;
     if (!page) return;
     let stop: (() => void) | undefined;
@@ -53,7 +37,7 @@ export default function NyxHomePage() {
     };
   }, []);
   return (
-    <div ref={ref} className="nyx-home">
+    <div ref={ref} className="nyx-home nyx-public">
       {" "}
       <div className="page-sky" aria-hidden="true" />{" "}
       <a className="skip" href="#main">
@@ -168,60 +152,7 @@ export default function NyxHomePage() {
           </span>
         </span>{" "}
       </div>{" "}
-      <header className="nav" data-nav="">
-        {" "}
-        <div className="wrap nav-bar">
-          {" "}
-          <div className="nav-box">
-            <a className="nav-logo" href="#top" aria-label="NyxID home">
-              <img
-                className="logo-dark"
-                src="/nyxid-coloured-logo-dark.svg"
-                alt="NyxID"
-                width="75"
-                height="21"
-              />
-              <img
-                className="logo-light"
-                src="/nyxid-coloured-logo.svg"
-                alt="NyxID"
-                width="75"
-                height="21"
-              />
-            </a>
-          </div>{" "}
-          <div className="nav-box nav-r">
-            {" "}
-            <nav className="nav-links main" aria-label="Main">
-              <a href="#pile">How it works</a>
-              <a href="#agent">Your agent</a>
-              <a href="#apps">Apps</a>
-              <a href="#jobs">Solutions</a>
-            </nav>{" "}
-            <span className="nav-sep" aria-hidden="true" />{" "}
-            <nav className="nav-links" aria-label="Account">
-              <a href={s.authHref("login")}>Log in</a>
-            </nav>{" "}
-            <button
-              className="theme-btn"
-              type="button"
-              data-theme-toggle=""
-              aria-label="Switch to night mode"
-            >
-              <svg className="moon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z" />
-              </svg>
-              <svg className="sun" viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="4" />
-                <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" />
-              </svg>
-            </button>{" "}
-            <a className="btn" href={s.authHref("register")}>
-              Get started
-            </a>{" "}
-          </div>{" "}
-        </div>{" "}
-      </header>{" "}
+      <PublicHeader home siteHref={s.siteHref} authHref={s.authHref} localeHref={s.localeHref} />
       <nav className="hud" aria-label="Page position" data-hud="">
         {" "}
         <a href="#top">
@@ -230,7 +161,7 @@ export default function NyxHomePage() {
         </a>{" "}
         <a href="#pile">
           <i />
-          <span>02 How it works</span>
+          <span>02 NyxBot</span>
         </a>{" "}
         <a href="#agent">
           <i />
@@ -238,7 +169,7 @@ export default function NyxHomePage() {
         </a>{" "}
         <a href="#apps">
           <i />
-          <span>04 Apps</span>
+          <span>04 Tools</span>
         </a>{" "}
         <a href="#jobs">
           <i />
@@ -310,7 +241,11 @@ export default function NyxHomePage() {
                 <span>
                   <img src="/landing/nyx/icons/telegram.svg" alt="Telegram" />
                   <img src="/landing/nyx/icons/x.svg" alt="X" />
-                  <img src="/landing/nyx/icons/whatsapp.svg" alt="WhatsApp" />
+                  <img
+                    src="/landing/nyx/icons/whatsapp.svg"
+                    alt="WhatsApp (coming soon)"
+                    title="WhatsApp — coming soon"
+                  />
                   <img src="/landing/nyx/icons/slack.svg" alt="Slack" />
                   <img src="/landing/nyx/icons/discord.svg" alt="Discord" />
                   and the NyxID app
@@ -380,12 +315,26 @@ export default function NyxHomePage() {
             {" "}
             <div className="pile-copy">
               {" "}
+              <p className="section-label">NyxBot at work</p>
               <h2>The pile on your counter, sorted before you wake.</h2>{" "}
               <p className="lede">
-                Seven things landed while Luna Bistro was closed. Scroll to
-                watch NyxBot work through them, or pick one up and hand it over
-                yourself.
+                Your agent works in the apps and chats you connect. You set the
+                limits and review actions that need approval.
               </p>{" "}
+              <div className="pile-detail-links">
+                <a className="link" href={s.siteHref("/how-it-works")}>
+                  How it works{" "}
+                  <span className="arr" aria-hidden="true">
+                    →
+                  </span>
+                </a>
+                <a className="link" href={s.siteHref("/security")}>
+                  Security{" "}
+                  <span className="arr" aria-hidden="true">
+                    →
+                  </span>
+                </a>
+              </div>
               <p className="count" aria-live="polite">
                 <span>
                   <b data-n-done="">0</b>
@@ -393,7 +342,7 @@ export default function NyxHomePage() {
                 </span>
                 <span>
                   <b data-n-wait="">0</b>
-                  waiting for your yes
+                  waiting for approval
                 </span>
               </p>{" "}
               <div
@@ -737,7 +686,7 @@ export default function NyxHomePage() {
               <div className="tray tray--wait" data-tray="wait">
                 {" "}
                 <p className="tray-h">
-                  {"Waiting for your yes "}
+                  {"Waiting for approval "}
                   <span data-h-wait="">nothing yet</span>
                 </p>{" "}
                 <ol>
@@ -787,8 +736,7 @@ export default function NyxHomePage() {
                 <em>Connect it.</em>
               </h2>{" "}
               <p className="lede">
-                Point any MCP client at NyxID and it can use the same apps. Each
-                agent gets its own scoped key. NyxID adds the real login at the
+                Point any MCP client at NyxID and it can use the same apps. Use a separate Agent Key for each agent and choose its service scope. NyxID adds the real login at the
                 proxy, so the agent never holds it.
               </p>{" "}
               <div className="agent-who">
@@ -812,10 +760,6 @@ export default function NyxHomePage() {
                     alt=""
                   />
                   Codex
-                </span>{" "}
-                <span className="chip">
-                  <img src="/landing/nyx/icons/n8n.svg" alt="" />
-                  n8n
                 </span>{" "}
               </div>{" "}
               <div className="term">
@@ -850,9 +794,10 @@ export default function NyxHomePage() {
                   <s>$</s>
                   {" claude mcp add --transport http --scope user "}
                   <i>nyxid</i>
-                  {" http://localhost:3001/mcp"}
+                  {" https://nyx-api.chrono-ai.fun/mcp"}
                 </pre>{" "}
               </div>{" "}
+              <a className="link" href={s.siteHref("/agents")}>Your agent <span aria-hidden="true">→</span></a>
             </div>{" "}
             <div className="swap">
               {" "}
@@ -998,13 +943,8 @@ export default function NyxHomePage() {
                 <em>in your apps.</em>
               </h2>{" "}
               <p className="lede">
-                {
-                  "NyxBot listens where you and your customers already write. It works in the apps your business already runs on. Each one connects through a "
-                }
-                <span style={{ whiteSpace: "nowrap" } as CSSProperties}>
-                  sign-in
-                </span>
-                {" link."}
+                Connect the apps your business runs on. Give NyxBot or your own
+                agent access through a connected account or API key.
               </p>{" "}
             </div>{" "}
             <div className="hub" data-hub="">
@@ -1022,7 +962,7 @@ export default function NyxHomePage() {
                 </span>{" "}
                 <span className="tile" data-node="in">
                   <img src="/landing/nyx/icons/whatsapp.svg" alt="" />
-                  WhatsApp
+                  WhatsApp <span className="tile-status">Coming soon</span>
                 </span>{" "}
                 <span className="tile" data-node="in">
                   <img src="/landing/nyx/icons/slack.svg" alt="" />
@@ -1073,6 +1013,7 @@ export default function NyxHomePage() {
                 </span>{" "}
               </div>{" "}
             </div>{" "}
+            <ToolCatalog />
             <div className="apps-note">
               {" "}
               <p>
@@ -1081,8 +1022,8 @@ export default function NyxHomePage() {
                   " Any REST API with an OpenAPI file becomes a tool NyxBot can use."
                 }
               </p>{" "}
-              <a className="link" href={s.siteHref("/docs")}>
-                {"Read the docs "}
+              <a className="link" href={s.siteHref("/docs/ai/guides/wrap-rest-api-as-mcp")}>
+                {"API connection guide "}
                 <span className="arr" aria-hidden="true">
                   →
                 </span>
@@ -1098,327 +1039,30 @@ export default function NyxHomePage() {
             <div className="jobs-head">
               {" "}
               <h2>
-                {"Start with a job that is "}
-                <em>already written.</em>
+                {"Start with a job."}
               </h2>{" "}
               <a className="link" href={s.siteHref("/solutions")}>
-                {"See every solution "}
+                {"Solutions "}
                 <span className="arr" aria-hidden="true">
                   →
                 </span>
               </a>{" "}
             </div>{" "}
-            <div className="jobs-rail" data-jobs-rail="">
-              {" "}
-              <div className="jobs-track" data-jobs-track="">
-                {" "}
-                <a className="job" href={s.siteHref("/solutions")}>
-                  {" "}
-                  <div className="ticket-wrap">
-                    <div className="ticket">
-                      {" "}
-                      <p className="job-from">
-                        <img src="/landing/nyx/icons/telegram.svg" alt="" />
-                        Starts from a Telegram message
-                      </p>{" "}
-                      <h3>Front desk after closing</h3>{" "}
-                      <p className="job-desc">
-                        Takes bookings and answers menu questions while the
-                        restaurant is shut.
-                      </p>{" "}
-                      <ol className="t-lines">
-                        {" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img
-                              src="/landing/nyx/icons/google-calendar.svg"
-                              alt=""
-                            />
-                          </span>
-                          <p className="t-what">Checks free tables</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img
-                              src="/landing/nyx/icons/google-calendar.svg"
-                              alt=""
-                            />
-                          </span>
-                          <p className="t-what">Creates the booking</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/telegram.svg" alt="" />
-                          </span>
-                          <p className="t-what">Replies to the customer</p>
-                        </li>{" "}
-                      </ol>{" "}
-                      <p className="job-go">
-                        {"Use this job "}
-                        <span className="arr" aria-hidden="true">
-                          →
-                        </span>
-                      </p>{" "}
-                    </div>
-                  </div>{" "}
-                </a>{" "}
-                <a className="job" href={s.siteHref("/solutions")}>
-                  {" "}
-                  <div className="ticket-wrap">
-                    <div className="ticket">
-                      {" "}
-                      <p className="job-from">
-                        <img
-                          src="/landing/nyx/icons/google-calendar.svg"
-                          alt=""
-                        />
-                        Starts every weekday at 8:00
-                      </p>{" "}
-                      <h3>Morning brief</h3>{" "}
-                      <p className="job-desc">
-                        Sends you today's bookings and the emails that need a
-                        reply.
-                      </p>{" "}
-                      <ol className="t-lines">
-                        {" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img
-                              src="/landing/nyx/icons/google-calendar.svg"
-                              alt=""
-                            />
-                          </span>
-                          <p className="t-what">Reads today's bookings</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/gmail.svg" alt="" />
-                          </span>
-                          <p className="t-what">Finds emails waiting on you</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/telegram.svg" alt="" />
-                          </span>
-                          <p className="t-what">
-                            Sends the brief to your phone
-                          </p>
-                        </li>{" "}
-                      </ol>{" "}
-                      <p className="job-go">
-                        {"Use this job "}
-                        <span className="arr" aria-hidden="true">
-                          →
-                        </span>
-                      </p>{" "}
-                    </div>
-                  </div>{" "}
-                </a>{" "}
-                <a className="job" href={s.siteHref("/solutions")}>
-                  {" "}
-                  <div className="ticket-wrap">
-                    <div className="ticket">
-                      {" "}
-                      <p className="job-from">
-                        <img src="/landing/nyx/icons/twilio.svg" alt="" />
-                        Starts from a missed call
-                      </p>{" "}
-                      <h3>Call-back</h3>{" "}
-                      <p className="job-desc">
-                        Calls the customer back, confirms the order and tells
-                        you the result.
-                      </p>{" "}
-                      <ol className="t-lines">
-                        {" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/notion.svg" alt="" />
-                          </span>
-                          <p className="t-what">Looks up the order</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/twilio.svg" alt="" />
-                          </span>
-                          <p className="t-what">Calls the customer</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/notion.svg" alt="" />
-                          </span>
-                          <p className="t-what">Logs what was agreed</p>
-                        </li>{" "}
-                      </ol>{" "}
-                      <p className="job-go">
-                        {"Use this job "}
-                        <span className="arr" aria-hidden="true">
-                          →
-                        </span>
-                      </p>{" "}
-                    </div>
-                  </div>{" "}
-                </a>{" "}
-                <a className="job" href={s.siteHref("/solutions")}>
-                  {" "}
-                  <div className="ticket-wrap">
-                    <div className="ticket">
-                      {" "}
-                      <p className="job-from">
-                        <img src="/landing/nyx/icons/x.svg" alt="" />
-                        Starts from an X DM
-                      </p>{" "}
-                      <h3>Answers DMs on X</h3>{" "}
-                      <p className="job-desc">
-                        Replies to questions about hours and the menu, and
-                        passes anything else to you.
-                      </p>{" "}
-                      <ol className="t-lines">
-                        {" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/x.svg" alt="" />
-                          </span>
-                          <p className="t-what">Reads the message</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img
-                              src="/landing/nyx/icons/google-calendar.svg"
-                              alt=""
-                            />
-                          </span>
-                          <p className="t-what">Checks today's hours</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/x.svg" alt="" />
-                          </span>
-                          <p className="t-what">Replies on X</p>
-                        </li>{" "}
-                      </ol>{" "}
-                      <p className="job-go">
-                        {"Use this job "}
-                        <span className="arr" aria-hidden="true">
-                          →
-                        </span>
-                      </p>{" "}
-                    </div>
-                  </div>{" "}
-                </a>{" "}
-                <a className="job" href={s.siteHref("/solutions")}>
-                  {" "}
-                  <div className="ticket-wrap">
-                    <div className="ticket">
-                      {" "}
-                      <p className="job-from">
-                        <img
-                          src="/landing/nyx/icons/google-sheets.svg"
-                          alt=""
-                        />
-                        Starts every Monday at 9:00
-                      </p>{" "}
-                      <h3>Weekly takings</h3>{" "}
-                      <p className="job-desc">
-                        Adds up last week's sales and sends you one line per
-                        day.
-                      </p>{" "}
-                      <ol className="t-lines">
-                        {" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img
-                              src="/landing/nyx/icons/google-sheets.svg"
-                              alt=""
-                            />
-                          </span>
-                          <p className="t-what">Reads the sales sheet</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img
-                              src="/landing/nyx/icons/google-sheets.svg"
-                              alt=""
-                            />
-                          </span>
-                          <p className="t-what">Totals each day</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/slack.svg" alt="" />
-                          </span>
-                          <p className="t-what">Posts the summary in Slack</p>
-                        </li>{" "}
-                      </ol>{" "}
-                      <p className="job-go">
-                        {"Use this job "}
-                        <span className="arr" aria-hidden="true">
-                          →
-                        </span>
-                      </p>{" "}
-                    </div>
-                  </div>{" "}
-                </a>{" "}
-                <a className="job" href={s.siteHref("/solutions")}>
-                  {" "}
-                  <div className="ticket-wrap">
-                    <div className="ticket">
-                      {" "}
-                      <p className="job-from">
-                        <img src="/landing/nyx/icons/gmail.svg" alt="" />
-                        Starts from a customer email
-                      </p>{" "}
-                      <h3>Refund requests</h3>{" "}
-                      <p className="job-desc">
-                        Finds the order, prepares the refund and waits for your
-                        yes before sending it.
-                      </p>{" "}
-                      <ol className="t-lines">
-                        {" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/stripe.svg" alt="" />
-                          </span>
-                          <p className="t-what">Finds the order</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/landing/nyx/icons/stripe.svg" alt="" />
-                          </span>
-                          <p className="t-what">Prepares the refund</p>
-                        </li>{" "}
-                        <li className="t-line">
-                          <span className="t-ic">
-                            <img src="/nyxid-coloured-icon.svg" alt="" />
-                          </span>
-                          <p className="t-what">Asks you first on your phone</p>
-                        </li>{" "}
-                      </ol>{" "}
-                      <p className="job-go">
-                        {"Use this job "}
-                        <span className="arr" aria-hidden="true">
-                          →
-                        </span>
-                      </p>{" "}
-                    </div>
-                  </div>{" "}
-                </a>{" "}
-              </div>{" "}
-            </div>{" "}
+            <HomeJobs />
             <div className="jobs-bar" aria-hidden="true">
               <i data-jobs-bar="" />
             </div>{" "}
           </div>{" "}
         </section>{" "}
-      </main>{" "}
       {/* ============ 8. CLOSE ============ */}{" "}
-      <footer className="close on-ink" id="end">
+      <section className="close" id="end" aria-labelledby="closing-title">
         {" "}
         <div className="close-art" aria-hidden="true">
           <canvas data-nyx="/landing/nyx/art/moreau-nyx.jpg" />
         </div>{" "}
         <div className="wrap close-in" data-close="">
           {" "}
-          <p className="big" data-split="">
+          <p className="big" id="closing-title" data-split="">
             {"Give NyxBot "}
             <em>one task</em>
             {" today."}
@@ -1431,6 +1075,7 @@ export default function NyxHomePage() {
                 →
               </span>
             </a>{" "}
+            <a className="link" href={s.siteHref("/pricing")}>Pricing <span className="arr" aria-hidden="true">→</span></a>
             <a className="link" href="https://github.com/ChronoAIProject/NyxID">
               {"Self-host with Docker "}
               <span className="arr" aria-hidden="true">
@@ -1439,24 +1084,9 @@ export default function NyxHomePage() {
             </a>{" "}
           </div>{" "}
         </div>{" "}
-        <div className="foot">
-          {" "}
-          <div className="wrap">
-            {" "}
-            <div className="foot-grid">
-              {" "}
-              <nav className="foot-links" aria-label="Footer">
-                {" "}
-                <a href={s.siteHref("/docs")}>Docs</a>{" "}
-                <a href="https://github.com/ChronoAIProject/NyxID">GitHub</a>{" "}
-                <a href="https://discord.gg/QMvcs8UQBW">Discord</a>{" "}
-                <a href={s.siteHref("/privacy")}>Privacy</a>{" "}
-                <a href={s.siteHref("/terms")}>Terms</a>{" "}
-              </nav>{" "}
-            </div>{" "}
-          </div>{" "}
-        </div>{" "}
-      </footer>{" "}
+      </section>
+      </main>{" "}
+      <PublicFooter siteHref={s.siteHref} localeHref={s.localeHref} />{" "}
     </div>
   );
 }

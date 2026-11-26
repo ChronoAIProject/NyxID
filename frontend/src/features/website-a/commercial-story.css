@@ -1,0 +1,348 @@
+/* Pricing, Tools and Contact: the objects these pages need, on top of story-page.css.
+   Type, spacing, rules, actions, disclosures and the closing row come from the shared story
+   primitives; this file adds only page objects. Every rule is scoped to .st-commercial.
+   The memorable object per page: the receipt (pricing), the live directory (tools), the form (contact). */
+
+.website-a.nyx-public .st-commercial { --stc-ease: cubic-bezier(.2, .7, .2, 1); }
+.website-a.nyx-public .st-commercial :is(h1, h2) em { font-style: normal; font-weight: 800; }
+.website-a.nyx-public[lang="zh-CN"] .st-commercial :is(h1, h2, h3) { letter-spacing: 0; line-height: 1.2; }
+
+/* ---- pricing: the example as a receipt, the same torn-edge ticket as the landing page's jobs ---- */
+.website-a.nyx-public .st-commercial .stc-receipt { width: 100%; max-width: 480px; margin: 0 0 0 auto; }
+.website-a.nyx-public .st-commercial .stc-ticket-wrap {
+  filter: drop-shadow(0 0 1px var(--site-rule-strong)) drop-shadow(0 22px 26px rgba(23, 23, 26, .12));
+}
+.website-a.nyx-public[data-theme="dark"] .st-commercial .stc-ticket-wrap {
+  filter: drop-shadow(0 0 1px var(--site-rule-strong)) drop-shadow(0 22px 30px rgba(0, 0, 0, .55));
+}
+.website-a.nyx-public .st-commercial .stc-ticket {
+  --z: 9px;
+  padding: 22px 24px calc(20px + var(--z));
+  border-radius: 14px 14px 0 0;
+  background: var(--site-surface);
+  -webkit-mask: conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) 50% / calc(2 * var(--z)) 100%;
+  mask: conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) 50% / calc(2 * var(--z)) 100%;
+}
+.website-a.nyx-public .st-commercial .stc-ticket-head {
+  padding-bottom: 14px;
+  border-bottom: 1.5px dashed var(--site-rule-strong);
+  font-family: var(--site-mono);
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--site-faint);
+}
+.website-a.nyx-public .st-commercial .stc-lines { margin: 0; }
+.website-a.nyx-public .st-commercial .stc-lines > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--site-rule);
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--site-body);
+}
+.website-a.nyx-public .st-commercial .stc-lines dt { min-width: 0; }
+.website-a.nyx-public .st-commercial .stc-lines dd {
+  margin: 0;
+  font-family: var(--site-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--site-ink);
+}
+.website-a.nyx-public .st-commercial .stc-lines .is-total { font-weight: 600; color: var(--site-ink); }
+.website-a.nyx-public .st-commercial .stc-lines .is-total dd { font-weight: 500; }
+.website-a.nyx-public .st-commercial .stc-lines > div:last-child { padding-top: 16px; border-bottom: 0; font-size: 16px; }
+.website-a.nyx-public .st-commercial .stc-lines > div:last-child dd { font-size: 21px; letter-spacing: -.02em; }
+.website-a.nyx-public .st-commercial .stc-receipt figcaption {
+  max-width: 50ch;
+  margin-top: 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--site-faint);
+}
+
+/* pricing: the basis of the 15% as three ruled columns */
+.website-a.nyx-public .st-commercial .stc-basis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 clamp(20px, 3vw, 40px);
+  list-style: none;
+  border-top: 1px solid var(--site-rule-strong);
+}
+.website-a.nyx-public .st-commercial .stc-basis li { padding-top: 22px; }
+.website-a.nyx-public .st-commercial .stc-basis svg { color: var(--site-violet); }
+.website-a.nyx-public .st-commercial .stc-basis h3 { margin-top: 14px; font-size: 18px; }
+.website-a.nyx-public .st-commercial .stc-basis p { margin-top: 8px; font-size: 15px; line-height: 1.55; }
+
+/* pricing: the payment choice as one ruled comparison that shows who pays whom */
+.website-a.nyx-public .st-commercial .stc-choice {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--site-rule-strong);
+}
+.website-a.nyx-public .st-commercial .stc-path { padding: 28px clamp(20px, 3vw, 40px) 32px 0; }
+.website-a.nyx-public .st-commercial .stc-path + .stc-path { padding-left: clamp(20px, 3vw, 40px); border-left: 1px solid var(--site-rule); }
+.website-a.nyx-public .st-commercial .stc-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 3px 12px;
+  border: 1px solid var(--site-rule-strong);
+  border-radius: 999px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--site-body);
+}
+.website-a.nyx-public .st-commercial .stc-path h3,
+.website-a.nyx-public .st-commercial .stc-credit h3 { margin-top: 16px; }
+.website-a.nyx-public .st-commercial .stc-path p,
+.website-a.nyx-public .st-commercial .stc-credit p { margin-top: 8px; max-width: 46ch; font-size: 15.5px; line-height: 1.6; }
+.website-a.nyx-public .st-commercial .stc-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 24px; list-style: none; }
+.website-a.nyx-public .st-commercial .stc-flow li { display: inline-flex; align-items: center; gap: 8px; }
+.website-a.nyx-public .st-commercial .stc-flow li > span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: var(--site-recess);
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--site-ink);
+}
+.website-a.nyx-public .st-commercial .stc-flow svg { flex: none; color: var(--site-faint); }
+.website-a.nyx-public .st-commercial .stc-credit {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px clamp(20px, 3vw, 40px);
+  padding-top: 28px;
+  border-top: 1px solid var(--site-rule);
+}
+.website-a.nyx-public .st-commercial .stc-credit .stc-self-host { align-self: end; }
+.website-a.nyx-public .st-commercial .stc-credit .stc-self-host p { margin-top: 0; font-size: 14.5px; color: var(--site-faint); }
+
+/* pricing: questions beside their heading */
+.website-a.nyx-public .st-commercial .stc-faq { align-items: start; }
+.website-a.nyx-public .st-commercial .stc-faq > :first-child { position: sticky; top: 112px; }
+.website-a.nyx-public .st-commercial .stc-faq h2 + p { margin-top: 16px; }
+.website-a.nyx-public .st-commercial .stc-inline-link { color: var(--site-ink); text-decoration: underline 1px; text-underline-offset: 4px; }
+.website-a.nyx-public .st-commercial .stc-inline-link:hover { text-decoration-thickness: 2px; }
+
+/* ---- tools: the directory is the page; search and category stay in reach while you scroll ---- */
+.website-a.nyx-public:has(.stc-catalog) { --stc-toolbar-top: 76px; }
+.website-a.nyx-public:has(.stc-catalog) .public-header::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: var(--stc-toolbar-top);
+  z-index: -1;
+  background: var(--site-bg);
+  pointer-events: none;
+}
+.website-a.nyx-public .st-commercial.stc-catalog .st-hero { padding-bottom: 28px; }
+.website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions { display: block; max-width: 60ch; margin-top: 20px; }
+.website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions .st-details { border-top: 0; }
+.website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions .st-details > summary { min-height: 44px; padding: 10px 0; font-size: 15px; }
+.website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions .st-details-body { display: grid; gap: 4px; justify-items: start; font-size: 15px; }
+.website-a.nyx-public .st-commercial .stc-directory { padding-bottom: 64px; }
+.website-a.nyx-public .st-commercial .stc-filter {
+  position: sticky;
+  top: var(--stc-toolbar-top, 76px);
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--site-rule);
+  background: var(--site-bg);
+}
+.website-a.nyx-public .stc-catalog .stc-filter::before,
+.website-a.nyx-public .stc-catalog .stc-filter::after {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--site-gutter));
+  right: calc(-1 * var(--site-gutter));
+  pointer-events: none;
+}
+.website-a.nyx-public .stc-catalog .stc-filter::before {
+  top: 0;
+  bottom: 0;
+  z-index: -1;
+  background: var(--site-bg);
+}
+.website-a.nyx-public .stc-catalog .stc-filter::after {
+  top: 100%;
+  height: 32px;
+  background: linear-gradient(to bottom, var(--site-bg), transparent);
+}
+.website-a.nyx-public .st-commercial .stc-search {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 18px;
+  border: 1px solid var(--site-rule-strong);
+  border-radius: 999px;
+  background: var(--site-surface);
+  color: var(--site-faint);
+  transition: border-color .15s, box-shadow .15s;
+}
+.website-a.nyx-public .st-commercial .stc-search:focus-within { border-color: var(--site-violet); box-shadow: 0 0 0 3px var(--site-soft); }
+.website-a.nyx-public .st-commercial .stc-search input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--site-ink);
+  font: inherit;
+  font-size: 16px;
+}
+.website-a.nyx-public .st-commercial .stc-search input::placeholder { color: var(--site-faint); }
+.website-a.nyx-public .st-commercial .stc-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+.website-a.nyx-public .st-commercial .stc-cats button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--site-rule);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--site-body);
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.website-a.nyx-public .st-commercial .stc-cats button:hover { background: var(--site-hover); color: var(--site-ink); }
+.website-a.nyx-public .st-commercial .stc-cats button[aria-pressed="true"] { border-color: var(--site-ink); background: var(--site-ink); color: var(--site-bg); }
+.website-a.nyx-public .st-commercial .stc-cats button span { font-family: var(--site-mono); font-size: 11px; opacity: .75; }
+.website-a.nyx-public .st-commercial .stc-count { margin-left: auto; font-family: var(--site-mono); font-size: 12px; color: var(--site-faint); white-space: nowrap; }
+.website-a.nyx-public .st-commercial .stc-group { margin-top: 44px; }
+.website-a.nyx-public .st-commercial .stc-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--site-rule-strong);
+}
+.website-a.nyx-public .st-commercial .stc-group-head h2 { max-width: none; font-size: 22px; font-weight: 600; letter-spacing: -.02em; line-height: 1.3; }
+.website-a.nyx-public .st-commercial .stc-group-head span { font-family: var(--site-mono); font-size: 12px; color: var(--site-faint); }
+.website-a.nyx-public .st-commercial .stc-dir {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: 28px;
+  list-style: none;
+}
+.website-a.nyx-public .st-commercial .stc-dir .int {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 10px 0;
+  border: 0;
+  border-bottom: 1px solid var(--site-rule);
+  border-radius: 0;
+  background: transparent;
+}
+.website-a.nyx-public .st-commercial .stc-dir .int-logo {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--site-rule);
+  border-radius: 8px;
+  background: #fff; /* brand marks are drawn for a white tile, so they keep one in both modes */
+  color: #17171A;
+  font-family: var(--site-mono);
+  font-size: 10px;
+}
+.website-a.nyx-public .st-commercial .stc-dir .int-logo img { width: 18px; height: 18px; object-fit: contain; }
+.website-a.nyx-public .st-commercial .stc-dir .int-txt { display: flex; flex-direction: column; min-width: 0; }
+.website-a.nyx-public .st-commercial .stc-dir .int-txt b { overflow: hidden; font-size: 15px; font-weight: 500; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.website-a.nyx-public .st-commercial .stc-dir .int-txt small { overflow: hidden; font-size: 12.5px; line-height: 1.4; color: var(--site-faint); text-overflow: ellipsis; white-space: nowrap; }
+.website-a.nyx-public .st-commercial .stc-dir .int-txt small.is-soon { color: var(--site-body); }
+.website-a.nyx-public .st-commercial .stc-empty { padding: 40px 0 0; font-size: 16px; }
+.website-a.nyx-public .st-commercial .stc-missing { max-width: 68ch; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--site-rule-strong); font-size: 15.5px; line-height: 1.6; }
+.website-a.nyx-public .st-commercial .stc-missing b { color: var(--site-ink); font-weight: 600; }
+
+/* ---- contact: why and other ways on the left, the form on the right ---- */
+.website-a.nyx-public .st-commercial .stc-contact-grid {
+  display: grid;
+  grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr);
+  gap: 40px clamp(32px, 6vw, 88px);
+  align-items: start;
+  padding-top: 64px;
+  padding-bottom: 88px;
+}
+.website-a.nyx-public .st-commercial .stc-contact-intro { position: sticky; top: 112px; }
+.website-a.nyx-public .st-commercial .stc-contact-intro .st-lead { margin-top: 24px; }
+.website-a.nyx-public .st-commercial .stc-channels { margin-top: 40px; list-style: none; border-top: 1px solid var(--site-rule-strong); }
+.website-a.nyx-public .st-commercial .stc-channels a {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 76px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--site-rule);
+}
+.website-a.nyx-public .st-commercial .stc-ch-ic { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; background: var(--site-recess); color: var(--site-ink); }
+.website-a.nyx-public .st-commercial .stc-ch-ic svg { width: 18px; height: 18px; fill: currentColor; }
+.website-a.nyx-public .st-commercial .stc-ch-ic svg.lucide { fill: none; }
+.website-a.nyx-public .st-commercial .stc-channels b { display: block; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+.website-a.nyx-public .st-commercial .stc-channels small { display: block; margin-top: 2px; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; color: var(--site-body); }
+.website-a.nyx-public .st-commercial .stc-channels a > svg { color: var(--site-faint); transition: transform .2s var(--stc-ease), color .2s; }
+.website-a.nyx-public .st-commercial .stc-channels a:hover > svg { color: var(--site-ink); transform: translate(2px, -2px); }
+.website-a.nyx-public .st-commercial .stc-contact-form .contact { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; max-width: none; margin: 0; padding: 0; }
+.website-a.nyx-public .st-commercial .stc-contact-form .contact-form {
+  padding: clamp(24px, 3vw, 36px);
+  border: 1px solid var(--site-rule);
+  border-radius: 20px;
+  background: var(--site-surface);
+}
+.website-a.nyx-public .st-commercial .stc-contact-form .contact-form .over { font-family: var(--site-mono); font-size: 11.5px; font-weight: 400; letter-spacing: .08em; color: var(--site-faint); }
+.website-a.nyx-public .st-commercial .stc-contact-form .contact-side:empty { display: none; }
+
+/* ---- smaller screens: one column; reading order headline → example → explanation ---- */
+@media (max-width: 1080px) {
+  .website-a.nyx-public .st-commercial .stc-dir { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .website-a.nyx-public .st-commercial :is(.stc-credit, .stc-contact-grid) { grid-template-columns: minmax(0, 1fr); }
+  .website-a.nyx-public .st-commercial :is(.stc-contact-intro, .stc-faq > :first-child) { position: static; }
+  .website-a.nyx-public .st-commercial .stc-basis { grid-template-columns: minmax(0, 1fr); }
+  .website-a.nyx-public .st-commercial .stc-basis li { padding-bottom: 22px; border-bottom: 1px solid var(--site-rule); }
+  .website-a.nyx-public .st-commercial .stc-choice { grid-template-columns: minmax(0, 1fr); }
+  .website-a.nyx-public .st-commercial .stc-path { padding-right: 0; }
+  .website-a.nyx-public .st-commercial .stc-path + .stc-path { padding-left: 0; border-top: 1px solid var(--site-rule); border-left: 0; }
+  .website-a.nyx-public .st-commercial .stc-dir { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 20px; }
+  .website-a.nyx-public .st-commercial .stc-count { flex-basis: 100%; margin-left: 0; }
+}
+@media (max-width: 700px) {
+  .website-a.nyx-public .st-commercial .stc-receipt { margin-left: 0; }
+  .website-a.nyx-public .st-commercial .stc-contact-grid { padding-top: 36px; padding-bottom: 56px; }
+}
+@media (max-width: 560px) {
+  .website-a.nyx-public:has(.stc-catalog) { --stc-toolbar-top: 66px; }
+  .website-a.nyx-public .st-commercial .stc-cats { flex-wrap: nowrap; margin-inline: calc(var(--site-gutter) * -1); padding-inline: var(--site-gutter); overflow-x: auto; scrollbar-width: none; }
+  /* the directory entries are not controls, so two narrow columns with wrapping names keep the list short */
+  .website-a.nyx-public .st-commercial .stc-dir { column-gap: 16px; }
+  .website-a.nyx-public .st-commercial .stc-dir .int { align-items: flex-start; gap: 10px; min-height: 52px; }
+  .website-a.nyx-public .st-commercial .stc-dir .int-logo { width: 26px; height: 26px; }
+  .website-a.nyx-public .st-commercial .stc-dir .int-txt :is(b, small) { white-space: normal; overflow-wrap: anywhere; }
+  .website-a.nyx-public .st-commercial .stc-dir .int-txt b { font-size: 14px; }
+  .website-a.nyx-public .st-commercial .stc-lines > div { font-size: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .website-a.nyx-public .st-commercial * { transition: none !important; }
+}

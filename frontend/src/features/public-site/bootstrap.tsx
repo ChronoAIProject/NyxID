@@ -18,7 +18,16 @@ export async function bootPublicSite() {
       onRecoverableError: (error) => console.error("[public-hydration]", error),
     });
   else createRoot(root).render(tree);
-  // Reuse the existing session check, consent, and telemetry only in the browser.
-  const { startPublicSession } = await import("./session");
-  await startPublicSession(router);
+  if (import.meta.env.VITE_STATIC_PREVIEW === "true") {
+    // Static previews have no API or session. Keep docs display settings and public controls.
+    const [{ updatePublicDocsRuntime }, { PublicDocsTheme }] = await Promise.all([
+      import("../docs/docs-layout-view"),
+      import("./docs-theme"),
+    ]);
+    updatePublicDocsRuntime(false, <PublicDocsTheme />);
+  } else {
+    // Reuse the existing session check, consent, and telemetry only in the browser.
+    const { startPublicSession } = await import("./session");
+    await startPublicSession(router);
+  }
 }

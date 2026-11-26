@@ -3,7 +3,7 @@ import { renderToString } from "react-dom/server";
 import { hydrateRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { WebsitePage } from "../website-a/website-page";
-const location = vi.hoisted(() => ({ pathname: "/", searchStr: "", hash: "" }));
+const location = vi.hoisted(() => ({ pathname: "/contact", searchStr: "", hash: "" }));
 vi.mock("@tanstack/react-router", () => ({
   useLocation: () => location,
   Link: forwardRef<HTMLAnchorElement, Record<string, unknown>>(function Link(
@@ -58,7 +58,7 @@ it.each([
     container.innerHTML = renderToString(tree);
     document.body.append(container);
     expect(container.querySelector('a[href="/register"]')).toBeTruthy();
-    window.history.replaceState({}, "", `/${query}`);
+    window.history.replaceState({}, "", `/contact${query}`);
     location.searchStr = query;
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     let root: ReturnType<typeof hydrateRoot>;

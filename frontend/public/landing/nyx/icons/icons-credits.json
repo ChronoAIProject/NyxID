@@ -214,5 +214,17 @@
     "url": "https://github.com/gilbarbara/logos",
     "trademark": true,
     "markUrl": "https://x.com"
+  },
+  {
+    "file": "google-docs.svg",
+    "icon": "thesvg-color:google-docs",
+    "name": "Google Docs",
+    "kind": "colour",
+    "source": "https://api.iconify.design/thesvg-color/google-docs.svg",
+    "author": "thesvg.org",
+    "licence": "MIT",
+    "url": "https://github.com/glincker/thesvg",
+    "trademark": true,
+    "markUrl": "https://docs.google.com/"
   }
 ]

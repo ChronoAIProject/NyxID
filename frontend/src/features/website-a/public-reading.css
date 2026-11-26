@@ -1,0 +1,137 @@
+/* Public reading surfaces: docs, sign-in and legal pages wear the public site's material.
+   They are app routes that keep useApplyTheme for text size, density and form behaviour,
+   so the app's own colour and font tokens are redefined here on the scope element, from the
+   public theme. usePublicThemeElement sets data-theme on that element before paint; without
+   it the system setting applies (see public-design.css).
+   No theme-light/theme-dark class is added to the scope: <html> already carries the app's
+   class, and a second one would make dark: and light: variants match together. Every token
+   those variant pairs read resolves to the same public value instead.
+   Requires public-design.css (imported by public-chrome.tsx) for the --site-* tokens. */
+
+/* ---- values the public tokens do not cover: control edges and status colours ---- */
+.nyx-public.public-reading {
+  --reading-input:#85848B; /* 3.3:1 against the paper, for control edges */
+  --reading-overlay-strong:rgba(23,23,26,.09);
+  --reading-success:#047857; --reading-warning:#B45309; --reading-error:#B91C1C; --reading-info:#1D4ED8;
+  --reading-code:#E8E8E4;
+}
+.nyx-public.public-reading[data-theme="dark"] {
+  --reading-input:#6E6C75;
+  --reading-overlay-strong:rgba(243,243,240,.1);
+  --reading-success:#34D399; --reading-warning:#FBBF24; --reading-error:#F87171; --reading-info:#93C5FD;
+  --reading-code:#1C1C20;
+}
+@media (prefers-color-scheme:dark) {
+  .nyx-public.public-reading:not([data-theme]) {
+    --reading-input:#6E6C75;
+    --reading-overlay-strong:rgba(243,243,240,.1);
+    --reading-success:#34D399; --reading-warning:#FBBF24; --reading-error:#F87171; --reading-info:#93C5FD;
+    --reading-code:#1C1C20;
+  }
+}
+
+/* ---- the app's tokens, answered by the public material ---- */
+.nyx-public.public-reading {
+  --color-background:var(--site-bg);
+  --color-foreground:var(--site-ink);
+  --color-card:var(--site-surface);
+  --color-card-foreground:var(--site-ink);
+  --color-popover:var(--site-surface);
+  --color-popover-foreground:var(--site-ink);
+  --color-surface:var(--site-surface);
+  --color-sidebar:var(--site-bg);
+  --color-sidebar-hover:var(--site-hover);
+  --color-muted:var(--reading-code);
+  --color-muted-foreground:var(--site-body);
+  --color-secondary:var(--site-hover);
+  --color-secondary-foreground:var(--site-body);
+  --color-accent:var(--site-soft);
+  --color-accent-foreground:var(--site-ink);
+  --color-text-tertiary:var(--site-faint);
+  --color-border:var(--site-rule-strong);
+  --color-input:var(--reading-input);
+  --color-input-focus:var(--site-violet);
+  --color-ring:var(--site-violet);
+  --color-hairline:var(--site-rule);
+  --color-hairline-strong:var(--site-rule-strong);
+  --color-overlay:var(--site-hover);
+  --color-overlay-strong:var(--reading-overlay-strong);
+  /* primary actions are ink pills, as on the landing page; violet marks links and selection */
+  --color-primary:var(--site-ink);
+  --color-primary-foreground:var(--site-bg);
+  --color-primary-text:var(--site-violet);
+  --color-nyx-100:var(--site-soft);
+  --color-nyx-500:var(--site-violet);
+  --color-nyx-600:var(--site-ink);
+  --color-nyx-700:var(--site-violet);
+  --color-nyx-secondary-300:var(--site-ink);
+  --color-nyx-secondary-400:var(--site-violet);
+  --color-nyx-secondary-500:var(--site-violet);
+  --color-success:var(--reading-success);
+  --color-warning:var(--reading-warning);
+  --color-error:var(--reading-error);
+  --color-destructive:var(--reading-error);
+  --color-info:var(--reading-info);
+  --font-sans:var(--site-sans);
+  --font-display:var(--site-sans);
+  --font-mono:var(--site-mono);
+  min-height:100dvh;
+  background:var(--site-bg);
+  color:var(--site-ink);
+  font-family:var(--site-sans);
+}
+.nyx-public.public-reading ::selection{background:var(--site-soft);color:var(--site-ink)}
+.nyx-public.public-reading :focus-visible{outline-color:var(--site-violet)}
+/* Host Grotesk headings sit lighter than the app's Mona Sans weights, as on the landing page */
+.nyx-public.public-reading :is(h1,h2){font-weight:600;letter-spacing:-.025em}
+
+/* ---- docs: one stable full-width bar, because the sidebar and contents column are sticky below it ---- */
+.public-docs .public-docs-bar{position:fixed;inset:0 0 auto;z-index:40;border-bottom:1px solid var(--site-glass-rule);background:var(--site-glass);-webkit-backdrop-filter:blur(14px) saturate(1.4);backdrop-filter:blur(14px) saturate(1.4)}
+.public-docs .public-docs-home{display:flex;align-items:center;min-height:44px}
+.public-docs .public-docs-sep{color:var(--site-faint)}
+.public-docs .public-docs-crumb{font-size:15px;font-weight:500;line-height:1.5;color:var(--site-ink)}
+.public-docs .public-docs-search{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border:1px solid var(--site-rule-strong);border-radius:999px;background:transparent;color:var(--site-body);font-size:14px;line-height:1.5;cursor:pointer;transition:background .15s,color .15s}
+.public-docs .public-docs-search:hover{background:var(--site-hover);color:var(--site-ink)}
+.public-docs .public-docs-search kbd{padding:0 5px;border:1px solid var(--site-rule);border-radius:5px;font-family:var(--site-mono);font-size:11px;line-height:1.5;color:var(--site-faint)}
+/* display stays with the markup's responsive utilities: an unlayered display here would beat them */
+.public-docs .public-docs-github{width:38px;height:38px;border-radius:50%;color:var(--site-body);transition:background .15s,color .15s}
+.public-docs .public-docs-github:hover{background:var(--site-hover);color:var(--site-ink)}
+.public-docs .public-cta{margin-left:0}
+.public-docs .public-footer{margin-top:72px}
+.public-docs .type-prose{font-size:var(--text-20)}
+@media (max-width:560px){
+  .public-docs .public-docs-bar .public-brand img{height:20px}
+  .public-docs .public-docs-search{padding:0 11px}
+}
+
+/* ---- sign-in: the form on the paper, the landing page's closing painting on its own ground ---- */
+.public-auth .public-auth-form{background:var(--site-bg);border-right:1px solid var(--site-rule)}
+.public-auth .public-auth-top{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.public-auth .public-auth-home{display:flex;align-items:center;min-height:44px}
+/* The painting is a background, so only the image for the current mode is fetched. Each still is
+   the landing page's own closing halftone (captured from the rendered page) on the footer ground:
+   anchored top-left beside the form, it fills the panel; its right side already fades into the ground. */
+.public-auth .public-auth-art{background:var(--site-footer) url("/landing/nyx/art/nyx-halftone-day.webp") no-repeat 0 0 / cover}
+.public-auth[data-theme="dark"] .public-auth-art{background-image:url("/landing/nyx/art/nyx-halftone-night.webp")}
+@media (prefers-color-scheme:dark){.public-auth:not([data-theme]) .public-auth-art{background-image:url("/landing/nyx/art/nyx-halftone-night.webp")}}
+/* the primary action is the same ink pill as the landing page's Get started */
+.public-auth .nyx-gradient-vivid{border-radius:999px;background:var(--site-ink);color:var(--site-bg);box-shadow:none}
+.public-auth .nyx-gradient-vivid:hover{box-shadow:none;filter:none;opacity:.88}
+
+/* ---- legal: the canonical text on the paper, at a reading width ---- */
+.public-legal .public-legal-main{padding-top:clamp(112px,14vh,148px);padding-bottom:clamp(56px,8vw,96px)}
+/* no rule under the title: each numbered section brings its own, so the date line is not boxed in */
+.public-legal .public-legal-head{max-width:68ch;padding-bottom:20px}
+.public-legal .public-legal-head h1{font-size:clamp(32px,4vw,48px);font-weight:500;letter-spacing:-.04em;line-height:1.04;color:var(--site-ink)}
+.public-legal .public-legal-date{margin-top:14px;font-size:14px;line-height:1.5;color:var(--site-faint)}
+/* the prose surface is the page itself here, not a card */
+.public-legal .legal-prose{--color-card:var(--site-bg);max-width:68ch;padding-top:12px;background:transparent}
+.public-legal .legal-prose :is(p,li){font-size:17px;line-height:1.6}
+.public-legal .legal-prose code{font-size:15px}
+.public-legal .legal-prose h2{margin-top:44px;padding-top:28px;border-top:1px solid var(--site-rule);font-size:22px;font-weight:500;line-height:1.3;letter-spacing:-.02em}
+.public-legal .legal-prose h2:first-child{margin-top:0;padding-top:16px;border-top:0}
+.public-legal .legal-prose h3{margin-top:24px;font-size:17px;font-weight:600;line-height:1.5}
+.public-legal .legal-prose ul{padding-left:1.2em;list-style-position:outside}
+.public-legal .legal-prose a{text-underline-offset:3px}
+.public-legal .public-legal-back{display:inline-flex;align-items:center;gap:6px;min-height:44px;margin-top:40px;font-size:15px;line-height:1.5}
+.public-legal .public-footer{margin-top:0}
