@@ -105,7 +105,7 @@ fn guest_input() -> Document {
 // several guest lanes and an independent member transcript.
 fn eligible(org: &str, selectors: Document) -> Vec<Document> {
     let mut guest = doc! {
-        "user_id": org, "guest_turn": true, "guest_model_setup": {"$ne": true},
+        "user_id": org, "guest_model_setup": {"$ne": true},
         "collaboration": Bson::Null, "group_id": Bson::Null,
         "channel.org_execution.org_id": org, "channel.org_execution.actor_id": org,
         "channel.org_execution.guest": true, "channel.org_execution.version": 1,
@@ -116,12 +116,17 @@ fn eligible(org: &str, selectors: Document) -> Vec<Document> {
     guest.extend(selectors);
     vec![
         doc! {"$match": guest},
+        doc! {"$project": {
+            "agent_id": 1, "created_at": 1, "updated_at": 1, "meta_grant": 1,
+            "channel.nyxbot_channel_id": 1, "channel.partition": 1, "channel.org_execution": 1,
+        }},
         doc! {"$match": {"$expr": {"$eq": ["$channel.org_execution.agent_id", "$agent_id"]}}},
         doc! {"$lookup": {
             "from": CHANNELS, "localField": "channel.nyxbot_channel_id", "foreignField": "_id",
             "let": {"revision": "$channel.org_execution.revision"},
             "pipeline": [
-                {"$match": {"status": "active", "bot_owner_id": org,
+                {"$match": {"status": {"$in": ["active", "pending", "failed"]},
+                    "last_error": {"$ne": "org_access_lost"}, "bot_owner_id": org,
                     "org_specialist.org_id": org, "org_specialist.version": 1,
                     "$expr": {"$eq": ["$org_specialist.revision", "$$revision"]}}},
                 {"$project": {"user_id": 1, "channel_bot_id": 1, "agent_id": 1, "platform": 1, "bot_label": 1}},
@@ -304,7 +309,20 @@ pub(crate) async fn latest_by_chat(
         return Ok(Default::default());
     }
     super::require_admin(db, actor, org).await?;
-    let mut pipeline = eligible(org, doc! {"channel.nyxbot_channel_id": channel});
+    let sources: Vec<Document> = db.collection::<Document>(THREADS)
+        .find(doc! {"_id": {"$in": chat_ids}, "channel_id": channel, "record_scope": {"$ne": "platform_thread"}})
+        .projection(doc! {"partition": 1})
+        .await?
+        .try_collect()
+        .await?;
+    let partitions: Vec<_> = sources
+        .iter()
+        .filter_map(|row| row.get_str("partition").ok())
+        .collect();
+    let mut pipeline = eligible(
+        org,
+        doc! {"channel.nyxbot_channel_id": channel, "channel.partition": {"$in": partitions}},
+    );
     pipeline.extend([
         doc! {"$match": {"source._id": {"$in": chat_ids}, "source.record_scope": {"$ne": "platform_thread"}}},
         doc! {"$lookup": {
@@ -320,8 +338,9 @@ pub(crate) async fn latest_by_chat(
         doc! {"$group": {"_id": "$source._id", "conversation": {"$first": "$$ROOT"}}},
         doc! {"$replaceWith": "$conversation"},
     ]);
-    Ok(rows(db, pipeline)
-        .await?
+    let rows = rows(db, pipeline).await?;
+    super::require_admin(db, actor, org).await?;
+    Ok(rows
         .into_iter()
         .map(|row| {
             let conversation = Conversation::from(row);
@@ -432,7 +451,7 @@ pub(crate) async fn history(
     let id = conversation_id(handle).ok_or_else(missing)?;
     let row = db
         .collection::<Document>(CONVERSATIONS)
-        .find_one(doc! {"_id": &id, "guest_turn": true, "channel.org_execution.guest": true})
+        .find_one(doc! {"_id": &id, "channel.org_execution.guest": true})
         .projection(doc! {"agent_id": 1})
         .await?
         .ok_or_else(missing)?;
@@ -470,7 +489,8 @@ pub(crate) async fn history(
             doc! {"$match": {"guest_inputs.0": {"$exists": true}}},
             doc! {"$limit": limit + 1},
             doc! {"$project": {
-                "seq": 1, "role": 1, "text": 1, "status": 1, "created_at": 1, "error_code": 1,
+                "seq": 1, "role": 1, "status": 1, "created_at": 1, "error_code": 1,
+                "text": {"$cond": [{"$eq": ["$status", "completed"]}, "$text", ""]},
                 "delivery": "$turn_metadata.channel_delivery.status",
                 "failures": {"$cond": [{"$eq": ["$role", "assistant"]},
                     {"$map": {"input": {"$filter": {"input": {"$ifNull": ["$activities", []]},

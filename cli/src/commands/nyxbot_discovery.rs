@@ -55,8 +55,11 @@ impl Cursor {
         if token.len() > 4096 {
             bail!("Invalid conversation cursor");
         }
-        let bytes = URL_SAFE_NO_PAD.decode(token)?;
-        let cursor: Self = serde_json::from_slice(&bytes)?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(token)
+            .map_err(|_| anyhow::anyhow!("Invalid conversation cursor"))?;
+        let cursor: Self = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid conversation cursor"))?;
         if cursor.agent != agent {
             bail!("The conversation cursor belongs to another agent");
         }
@@ -176,15 +179,14 @@ fn merge(owner: Value, guest: Value, mut cursor: Cursor, limit: u32) -> Result<V
                 ) > (owner.last_message_at, owner.id.trim_start_matches("nyxa-"))
             }
         };
-        let (row, value) = if choose_guest {
-            let (row, value) = guest.entries.pop_front().expect("selected guest row");
-            (&mut guest_last, (row, value))
+        let (page, last) = if choose_guest {
+            (&mut guest, &mut guest_last)
         } else {
-            let (row, value) = owner.entries.pop_front().expect("selected owner row");
-            (&mut owner_last, (row, value))
+            (&mut owner, &mut owner_last)
         };
-        *row = Some(value.0);
-        rows.push(value.1);
+        let (row, value) = page.entries.pop_front().expect("selected conversation");
+        *last = Some(row);
+        rows.push(value);
     }
     cursor.owner = owner.after(cursor.owner, owner_last);
     cursor.guest = guest.after(cursor.guest, guest_last);
@@ -211,26 +213,31 @@ pub(super) async fn list(
     limit: u32,
 ) -> Result<()> {
     let mut api = ApiClient::from_auth(&auth)?;
-    let Some(agent) = agent.as_deref() else {
-        if cursor
-            .as_deref()
-            .is_some_and(|cursor| cursor.starts_with(CURSOR_PREFIX))
-        {
+    emit_discovery(
+        discover(&mut api, agent.as_deref(), cursor.as_deref(), limit).await?,
+        auth.output,
+    )
+}
+
+async fn discover(
+    api: &mut ApiClient,
+    agent: Option<&str>,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<Result<Value, CommandFailure>> {
+    let Some(agent) = agent else {
+        if cursor.is_some_and(|cursor| cursor.starts_with(CURSOR_PREFIX)) {
             bail!("A guest conversation cursor requires the original --agent");
         }
-        return emit_discovery(
-            read_discovery(&mut api, &owner_path(None, cursor.as_deref(), limit)).await,
-            auth.output,
-        );
+        return Ok(read_discovery(api, &owner_path(None, cursor, limit)).await);
     };
     let initial = cursor.is_none();
-    let cursor = match cursor.as_deref() {
+    let cursor = match cursor {
         Some(cursor) => match cursor.strip_prefix(CURSOR_PREFIX) {
             Some(token) => Cursor::decode(token, agent)?,
             None => {
-                return emit_discovery(
-                    read_discovery(&mut api, &owner_path(Some(agent), Some(cursor), limit)).await,
-                    auth.output,
+                return Ok(
+                    read_discovery(api, &owner_path(Some(agent), Some(cursor), limit)).await,
                 );
             }
         },
@@ -240,38 +247,34 @@ pub(super) async fn list(
             guest: Position::Start,
         },
     };
-    let owner = page(&mut api, &cursor.owner, |cursor| {
+    let owner = page(api, &cursor.owner, |cursor| {
         owner_path(Some(agent), cursor, limit)
     })
     .await;
     if let Err(failure) = owner.as_ref()
         && failure.discovery_refusal != Some(Refusal::SpecialistUse)
     {
-        return emit_discovery(owner.map(|_| Value::Null), auth.output);
+        return Ok(owner.map(|_| Value::Null));
     }
-    let guest = page(&mut api, &cursor.guest, |cursor| {
+    let guest = page(api, &cursor.guest, |cursor| {
         guest_path(agent, cursor, limit)
     })
     .await;
     let guest = match guest {
         Ok(value) => value,
         Err(failure)
-            if initial
-                && owner.is_ok()
+            if owner.as_ref().is_ok_and(Option::is_some)
                 && failure.discovery_refusal == Some(Refusal::EndpointOrGuestMissing) =>
         {
-            return emit_discovery(
-                owner.map(|value| value.expect("initial owner page")),
-                auth.output,
-            );
+            return Ok(owner.map(|value| value.expect("available owner page")));
         }
         Err(failure)
             if owner.is_err()
                 && failure.discovery_refusal == Some(Refusal::EndpointOrGuestMissing) =>
         {
-            return emit_discovery(owner.map(|_| Value::Null), auth.output);
+            return Ok(owner.map(|_| Value::Null));
         }
-        Err(failure) => return emit_discovery(Err(failure), auth.output),
+        Err(failure) => return Ok(Err(failure)),
     };
     if initial
         && owner.is_ok()
@@ -280,10 +283,7 @@ pub(super) async fn list(
                 && page["conversations"].as_array().is_some_and(Vec::is_empty)
         })
     {
-        return emit_discovery(
-            owner.map(|value| value.expect("initial owner page")),
-            auth.output,
-        );
+        return Ok(owner.map(|value| value.expect("initial owner page")));
     }
     let empty = || json!({"conversations": [], "next_cursor": null});
     let result = merge(
@@ -292,5 +292,207 @@ pub(super) async fn list(
         cursor,
         limit,
     )?;
-    emit_discovery(Ok(result), auth.output)
+    Ok(Ok(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    type Reply = (String, &'static str, Option<Value>);
+
+    async fn fixture(replies: Vec<Reply>) -> (ApiClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for (path, status, value) in replies {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let expected = format!("/api/v1{path}");
+                assert_eq!(
+                    line.split_whitespace().take(2).collect::<Vec<_>>(),
+                    ["GET", expected.as_str()]
+                );
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let body = value.as_ref().map(Value::to_string).unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        (
+            ApiClient::new(&format!("http://{address}"), "test-fixture".into()).unwrap(),
+            task,
+        )
+    }
+
+    fn index(rows: &[(&str, u8)], next: Option<&str>) -> Value {
+        let rows: Vec<_> = rows.iter().map(|(id, minute)| {
+            json!({"id": id, "last_message_at": format!("2026-01-01T00:{minute:02}:00Z"), "read_only": id.starts_with(HANDLE_PREFIX)})
+        }).collect();
+        json!({"conversations": rows, "next_cursor": next})
+    }
+
+    #[tokio::test]
+    async fn scoped_guest_discovery_pages_both_sources_within_the_total_limit() {
+        let owner_a = format!("nyxa-{}", "a".repeat(32));
+        let owner_b = format!("nyxa-{}", "b".repeat(32));
+        let guest_a = format!("org-guest-{}", "a".repeat(32));
+        let guest_b = format!("org-guest-{}", "b".repeat(32));
+        let partial_guest = format!("1767225780000:{guest_a}");
+        let (mut api, server) = fixture(vec![
+            (
+                owner_path(Some("agent"), None, 2),
+                "200 OK",
+                Some(index(&[(&owner_a, 4), (&owner_b, 1)], None)),
+            ),
+            (
+                guest_path("agent", None, 2),
+                "200 OK",
+                Some(index(&[(&guest_a, 3), (&guest_b, 2)], None)),
+            ),
+            (
+                owner_path(Some("agent"), Some(&format!("1767225840000:{owner_a}")), 2),
+                "200 OK",
+                Some(index(&[(&owner_b, 1)], None)),
+            ),
+            (
+                guest_path("agent", Some(&partial_guest), 2),
+                "200 OK",
+                Some(index(&[(&guest_b, 2)], None)),
+            ),
+        ])
+        .await;
+        let first = discover(&mut api, Some("agent"), None, 2)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        assert_eq!(first["conversations"][0]["id"], owner_a);
+        assert_eq!(first["conversations"][1]["id"], guest_a);
+        let cursor = first["next_cursor"].as_str().unwrap();
+        assert!(
+            discover(&mut api, Some("other"), Some(cursor), 2)
+                .await
+                .is_err()
+        );
+        let second = discover(&mut api, Some("agent"), Some(cursor), 2)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        assert_eq!(second["conversations"][0]["id"], guest_b);
+        assert_eq!(second["conversations"][1]["id"], owner_b);
+        assert_eq!(second["next_cursor"], Value::Null);
+        assert!(history_path(&guest_b, 20).contains("/guest-conversations/"));
+        assert!(!history_path(&owner_b, 20).contains("/guest-conversations/"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scoped_guest_discovery_preserves_old_servers_and_authority_failures() {
+        let owner = json!({"conversations": [], "next_cursor": null, "extension": "preserve"});
+        let guest = index(&[("org-guest-a", 1)], None);
+        let denial = json!({"error":"not_found","error_code":1003,"message":"Agent not found"});
+        let owner_path = owner_path(Some("agent"), None, 2);
+        let guest_path = guest_path("agent", None, 2);
+        for (first, second, expected) in [
+            (
+                ("200 OK", Some(owner.clone())),
+                ("404 Not Found", None),
+                Some(owner.clone()),
+            ),
+            (
+                ("404 Not Found", Some(denial.clone())),
+                ("200 OK", Some(guest.clone())),
+                Some(guest),
+            ),
+            (
+                ("200 OK", Some(owner.clone())),
+                ("503 Service Unavailable", None),
+                None,
+            ),
+            (("200 OK", Some(owner)), ("401 Unauthorized", None), None),
+        ] {
+            let (mut api, server) = fixture(vec![
+                (owner_path.clone(), first.0, first.1),
+                (guest_path.clone(), second.0, second.1),
+            ])
+            .await;
+            let result = discover(&mut api, Some("agent"), None, 2).await.unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(result.ok().unwrap(), expected);
+            } else {
+                assert_eq!(
+                    result.err().unwrap().http_status,
+                    second.0[..3].parse().ok()
+                );
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resumes_the_ordinary_cursor_when_guest_history_ends_or_disappears() {
+        let owner_id = format!("nyxa-{}", "c".repeat(32));
+        let resume_owner = format!("1767225780000:{owner_id}");
+        let resume_guest = format!("1767225840000:org-guest-{}", "d".repeat(32));
+        let combined = Cursor {
+            agent: "agent".into(),
+            owner: Position::After(resume_owner.clone()),
+            guest: Position::After(resume_guest.clone()),
+        }
+        .next()
+        .unwrap()
+        .unwrap();
+        let owner = index(&[(&owner_id, 1)], Some("ordinary-next-cursor"));
+        let (mut api, server) = fixture(vec![
+            (
+                owner_path(Some("agent"), Some(&resume_owner), 1),
+                "200 OK",
+                Some(owner.clone()),
+            ),
+            (
+                guest_path("agent", Some(&resume_guest), 1),
+                "404 Not Found",
+                None,
+            ),
+            (
+                owner_path(Some("agent"), Some("ordinary-next-cursor"), 1),
+                "400 Bad Request",
+                Some(json!({"error":"bad_request","error_code":1000,"message":"Invalid cursor"})),
+            ),
+        ])
+        .await;
+        let recovered = discover(&mut api, Some("agent"), Some(&combined), 1)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        assert_eq!(recovered, owner);
+        let result = discover(&mut api, Some("agent"), Some("ordinary-next-cursor"), 1)
+            .await
+            .unwrap();
+        assert_eq!(result.err().unwrap().http_status, Some(400));
+        assert!(
+            discover(&mut api, Some("agent"), Some("org-guest-v1.!"), 1)
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
 }

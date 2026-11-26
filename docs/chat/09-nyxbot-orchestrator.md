@@ -2178,7 +2178,10 @@ admins outside the specialist's use or maintenance lists. It applies to guest
 DMs and guest exchanges in shared chats on the current binding, including
 exchanges retained from earlier guest-policy revisions and while guest execution
 is suspended. The read requires the channel and specialist to retain the same
-organization binding. Source chats use NyxID's opaque chat identifiers.
+organization binding. A pending or failed channel with current binding
+authority remains readable. Disconnecting the channel, deactivating its bot,
+or retiring the binding for lost organization access removes the view.
+Source chats use NyxID's opaque chat identifiers.
 
 The read-only transcript contains guest input, retained final reply text, and
 bounded outcome codes. A retained reply is an execution record. Delivery status

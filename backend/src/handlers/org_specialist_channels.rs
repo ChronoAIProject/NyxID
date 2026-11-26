@@ -76,7 +76,12 @@ pub async fn guest_history(
         state.db.clone(),
         &crate::services::audit_service::AuditActor::from_auth_user(&auth),
         "org_channel_guest_history_read",
-        Some(json!({"org_id": org, "conversation_id": conversation.id})),
+        Some(json!({
+            "org_id": org,
+            "conversation_id": conversation.id,
+            "agent_id": conversation.agent_id,
+            "channel_id": conversation.channel.nyxbot_channel_id,
+        })),
     )
     .await?;
     Ok(Json(GuestHistory {

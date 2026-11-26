@@ -3111,14 +3111,14 @@ pub async fn list_channel_chats(
         {
             let mut view = member_chat_settings(&state, &row).await?;
             if admin {
-                add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await?;
+                add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await;
             }
             return Ok(Json(view));
         }
         let chats = list_chats(&state, &owner, Some(&id)).await?;
         let mut view = json!({"chats": chats, "can_manage":true});
         if admin {
-            add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await?;
+            add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await;
         }
         return Ok(Json(view));
     }
@@ -3132,19 +3132,25 @@ async fn add_guest_history_links(
     org: &str,
     channel: &str,
     view: &mut Value,
-) -> AppResult<()> {
+) {
     let chats = view["chats"].as_array_mut().expect("serialized chat list");
-    let ids: Vec<_> = chats.iter().filter_map(|chat| chat["id"].as_str()).collect();
+    let ids: Vec<_> = chats
+        .iter()
+        .filter_map(|chat| chat["id"].as_str())
+        .collect();
     let links = crate::services::org_channel_service::guest_history::latest_by_chat(
         &state.db, actor, org, channel, &ids,
     )
-    .await?;
+    .await;
+    let Ok(links) = links else {
+        tracing::debug!(channel_id = channel, "Guest history links unavailable");
+        return;
+    };
     for chat in chats {
         if let Some(id) = chat["id"].as_str().and_then(|id| links.get(id)) {
             chat["guest_conversation_id"] = json!(id);
         }
     }
-    Ok(())
 }
 
 // Filter before sorting/limiting. The bounded list has no total, cursor or
