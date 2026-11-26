@@ -5225,8 +5225,55 @@ pub enum NotificationCommands {
 
 // ---- Approval (I15-I20) ----
 
+#[derive(clap::Args)]
+pub struct ApproverTarget {
+    /// Organization UUID, slug or exact display name
+    #[arg(long)]
+    pub org: String,
+    /// Owned connection ID or catalog service ID
+    #[arg(long)]
+    pub service: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+}
+
+#[derive(clap::Args)]
+#[group(required = true, multiple = true)]
+pub struct ApproverEdit {
+    /// Restore automatic selection of all eligible Admins
+    #[arg(long, conflicts_with_all = ["set", "add", "remove"])]
+    pub inherit: bool,
+    /// Replace the entire list with these person UUIDs
+    #[arg(long, value_delimiter = ',', conflicts_with_all = ["add", "remove"])]
+    pub set: Vec<uuid::Uuid>,
+    /// Include these person UUIDs
+    #[arg(long, value_delimiter = ',')]
+    pub add: Vec<uuid::Uuid>,
+    /// Exclude these person UUIDs
+    #[arg(long, value_delimiter = ',')]
+    pub remove: Vec<uuid::Uuid>,
+}
+
+#[derive(Subcommand)]
+pub enum ApproverCommands {
+    /// Show saved policy and eligible Admins
+    Show(ApproverTarget),
+    /// Update the saved policy
+    Set {
+        #[command(flatten)]
+        target: ApproverTarget,
+        #[command(flatten)]
+        edit: ApproverEdit,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ApprovalCommands {
+    /// Manage approvers for an organization service
+    Approvers {
+        #[command(subcommand)]
+        command: ApproverCommands,
+    },
     /// List approval requests
     List {
         /// List approval history scoped to the given org instead of your
@@ -5367,7 +5414,7 @@ pub enum ApprovalCommands {
         /// scope. You must be an admin of that org. The org's policy is
         /// authoritative for org-shared services -- it overrides any
         /// personal policy each member may have set, and notifications
-        /// fan out to every active org admin.
+        /// reach the eligible approvers for that service.
         #[arg(
             long,
             value_name = "ID|SLUG|NAME",

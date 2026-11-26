@@ -244,6 +244,7 @@ async fn org_access_authoring_validates_shape_bounds_and_live_subjects() {
 
 #[tokio::test]
 async fn org_access_authoring_legacy_policy_key_invalidation_and_membership_pruning() {
+    use crate::models::org_membership::OrgRole;
     use crate::services::{
         assistant_team_service as team, org_agent_service as access, org_service,
     };

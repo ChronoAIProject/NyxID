@@ -13,6 +13,8 @@ use bson::{Document, doc};
 use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 
+pub(crate) mod authoring;
+
 pub(crate) const FLAG: &str = "approval:org-service-named-approvers-v1";
 
 pub(crate) fn refused() -> AppError {
@@ -106,17 +108,57 @@ pub(crate) async fn eligible(
     fence: bool,
     tx: &mut ClientSession,
 ) -> AppResult<Vec<String>> {
-    let org = &cfg.user_id;
+    let target = connection.map_or(AdminTarget::AllSiblings, AdminTarget::Connection);
+    select_admins(
+        db,
+        AdminSelection {
+            org: &cfg.user_id,
+            service: &cfg.service_id,
+            target,
+            subjects: cfg.approvers.approver_user_ids.as_deref(),
+        },
+        actor,
+        fence,
+        tx,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum AdminTarget<'a> {
+    Connection(&'a str),
+    AllSiblings,
+    AnySibling,
+}
+
+#[derive(Clone, Copy)]
+struct AdminSelection<'a> {
+    org: &'a str,
+    service: &'a str,
+    target: AdminTarget<'a>,
+    subjects: Option<&'a [String]>,
+}
+
+async fn select_admins(
+    db: &Database,
+    selection: AdminSelection<'_>,
+    actor: Option<&str>,
+    fence: bool,
+    tx: &mut ClientSession,
+) -> AppResult<Vec<String>> {
+    let org = selection.org;
+    let connection = match selection.target {
+        AdminTarget::Connection(id) => Some(id),
+        _ => None,
+    };
     if db.collection::<Document>(USERS).find_one(doc! {"_id":org,"user_type":"org","is_active":true,"platform_personal_deleting":{"$ne":true}}).projection(doc! {"_id":1}).session(&mut *tx).await?.is_none() {return Ok(vec![]);}
     let mut filter = doc! {"org_user_id":org,"role":"admin","revoked_at":null};
-    if let Some(ids) = &cfg.approvers.approver_user_ids {
+    if let Some(ids) = selection.subjects {
         filter.insert("member_user_id", doc! {"$in":ids});
     }
     if let Some(actor) = actor {
-        if cfg
-            .approvers
-            .approver_user_ids
-            .as_ref()
+        if selection
+            .subjects
             .is_some_and(|ids| !ids.iter().any(|id| id == actor))
         {
             return Ok(Vec::new());
@@ -152,7 +194,7 @@ pub(crate) async fn eligible(
             MemberScopeSource::Override => m.allowed_service_ids.is_some(),
         })
     {
-        let mut target = doc! {"user_id":org,"deleted_at":null,"is_active":true,"$or":[{"_id":&cfg.service_id},{"catalog_service_id":&cfg.service_id}]};
+        let mut target = doc! {"user_id":org,"deleted_at":null,"is_active":true,"$or":[{"_id":selection.service},{"catalog_service_id":selection.service}]};
         if let Some(id) = connection {
             target.insert("_id", id);
         }
@@ -178,9 +220,11 @@ pub(crate) async fn eligible(
         } else {
             inherited.as_deref()
         };
-        // Without a concrete connection a scoped Admin must cover every possible sibling.
-        if allowed.is_none_or(|ids| !targets.is_empty() && targets.iter().all(|s| ids.contains(s)))
-        {
+        // Management uses the existing config scope. An ambiguous operation requires every sibling.
+        if allowed.is_none_or(|ids| match selection.target {
+            AdminTarget::AnySibling => targets.iter().any(|s| ids.contains(s)),
+            _ => !targets.is_empty() && targets.iter().all(|s| ids.contains(s)),
+        }) {
             candidates.push(m.member_user_id);
         }
     }
@@ -204,8 +248,15 @@ pub(crate) async fn eligible(
         // (including the previously absent default). Each selected person and
         // connection conflicts with concurrent disable, unlink or removal.
         super::org_membership_authority::fence_org(db, org, tx).await?;
-        for id in &ids {
-            super::org_membership_authority::fence_live_member(db, id, tx).await?;
+        let mut live = live_person();
+        live.insert("_id", doc! {"$in": &ids});
+        let people = db
+            .collection::<Document>(USERS)
+            .update_many(live, doc! {"$inc":{"membership_authority_revision":1_i64}})
+            .session(&mut *tx)
+            .await?;
+        if people.matched_count != ids.len() as u64 {
+            return Err(stale());
         }
         if !targets.is_empty() {
             db.collection::<Document>(SERVICES)
