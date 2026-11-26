@@ -248,8 +248,9 @@ the same service selection as the submitted decision. It distinguishes an
 explicit selection from All services, which includes future connections, and
 shows already authorized or retained access when existing authorization data
 is available. Ordinary approval preserves the stored grant and issues authority
-for the approved request. Incremental approval carries forward the existing
-grant and adds the approved services.
+for the approved request. Incremental review lists newly requested permissions,
+including long-lived and durable broker access. Incremental approval carries
+forward the existing grant and adds the approved services.
 
 Service disclosures describe the connected credential and known catalog
 operations. They do not narrow full service access or replace credential,

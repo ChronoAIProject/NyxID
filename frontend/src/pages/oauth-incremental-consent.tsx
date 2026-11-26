@@ -111,10 +111,6 @@ export function OAuthIncrementalConsentPage({
     snapshot?.scopes
       .split(/\s+/)
       .filter((scope) => scope && !currentScopes.includes(scope) && (scope !== "machine" || machineSelectionRequired)) ?? [];
-  const addedPermissions = addedScopes.filter((scope) =>
-    scope !== "offline_access" && scope !== "urn:nyxid:scope:broker_binding",
-  );
-
   function selectionProvenance(id: string): ConsentProvenance[] {
     if (currentIds.includes(id)) return ["retained"];
     return [requiredAdditions.includes(id) ? "required" : "selected"];
@@ -309,7 +305,7 @@ export function OAuthIncrementalConsentPage({
                         </details>
                       )}
                     </section>
-                    {addedPermissions.length > 0 && (
+                    {addedScopes.length > 0 && (
                       <section
                         aria-labelledby="incremental-permissions"
                         className="border-t border-border py-5"
@@ -319,7 +315,7 @@ export function OAuthIncrementalConsentPage({
                           className="type-card-title text-foreground"
                         >{translateUi("Additional identity and app permissions")}</h2>
                         <div className="mt-4 divide-y divide-border/60 border-y border-border/60">
-                          {addedPermissions.map((scope) => (
+                          {addedScopes.map((scope) => (
                             <div key={scope} className="py-3.5 text-14">
                               <p className="font-medium text-foreground">
                                 {OAUTH_SCOPE_META[scope]?.title ?? scope}

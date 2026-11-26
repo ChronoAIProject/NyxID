@@ -265,6 +265,23 @@ describe("incremental consent", () => {
     ).toBeEnabled();
   });
 
+  it.each([
+    ["offline_access", "Long-lived access"],
+    ["urn:nyxid:scope:broker_binding", "Durable broker access"],
+  ])("lists newly requested %s among the permissions being approved", (scope, title) => {
+    const payload = request({ scope: `openid proxy ${scope}` });
+    payload.incremental_consent.current_scopes = "openid proxy";
+    payload.incremental_consent.scopes = `openid proxy ${scope}`;
+    payload.incremental_consent.required_service_ids = [];
+    open(payload);
+
+    const permissions = screen.getByRole("region", {
+      name: "Additional identity and app permissions",
+    });
+    expect(within(permissions).getByText(title)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Allow 1 permission" })).toBeEnabled();
+  });
+
   it.each(["loading", "failed"])(
     "shows scope-only permissions while service inventory is %s",
     (kind) => {

@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     errors::AppResult,
-    models::{downstream_service, provider_config, service_endpoint, user_api_key},
+    models::{downstream_service, provider_config, service_endpoint, user_api_key, user_endpoint},
     services::{
         org_service, platform_key_service, scope_catalog,
         user_service_service::{self, CredentialSource},
@@ -78,6 +78,13 @@ struct ProviderMetadata {
 }
 
 #[derive(Deserialize)]
+struct MountedEndpoint {
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+}
+
+#[derive(Deserialize)]
 struct CatalogMetadata {
     #[serde(rename = "_id")]
     id: String,
@@ -131,8 +138,17 @@ pub async fn list(
         .collect();
     let key_ids: Vec<_> = key_ids.into_iter().collect();
     let catalog_ids: Vec<_> = catalog_ids.into_iter().collect();
+    let endpoint_ids: Vec<_> = services
+        .iter()
+        .filter(|row| row.service.catalog_service_id.is_some())
+        .map(|row| row.service.endpoint_id.as_str())
+        .collect();
 
-    let (keys, catalog): (Vec<KeyMetadata>, Vec<CatalogMetadata>) = tokio::try_join!(
+    let (keys, catalog, mounted_endpoints): (
+        Vec<KeyMetadata>,
+        Vec<CatalogMetadata>,
+        Vec<MountedEndpoint>,
+    ) = tokio::try_join!(
         async {
             db.collection::<KeyMetadata>(user_api_key::COLLECTION_NAME)
                 .find(doc! { "_id": { "$in": &key_ids } })
@@ -154,7 +170,26 @@ pub async fn list(
                 .try_collect()
                 .await
         },
+        async {
+            if endpoint_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            db.collection::<MountedEndpoint>(user_endpoint::COLLECTION_NAME)
+                .find(doc! {
+                    "_id": { "$in": &endpoint_ids },
+                    "openapi_spec_url": { "$type": "string" },
+                })
+                .projection(doc! { "user_id": 1 })
+                .max_time(READ_DEADLINE)
+                .await?
+                .try_collect()
+                .await
+        },
     )?;
+    let mounted_endpoints: HashMap<_, _> = mounted_endpoints
+        .into_iter()
+        .map(|endpoint| (endpoint.id, endpoint.user_id))
+        .collect();
     let keys: HashMap<_, _> = keys.into_iter().map(|key| (key.id.clone(), key)).collect();
     let catalog: HashMap<_, _> = catalog.iter().map(|row| (row.id.as_str(), row)).collect();
     let catalog_ids: Vec<_> = catalog.keys().copied().collect();
@@ -264,12 +299,20 @@ pub async fn list(
                 });
             let catalog_id = service.catalog_service_id.as_deref();
             let metadata = catalog_id.and_then(|id| catalog.get(id));
+            // A mounted spec can replace the catalog operation inventory for
+            // this connection. Disclosure leaves its operation counts unknown.
+            let has_mounted_spec =
+                mounted_endpoints.get(&service.endpoint_id) == Some(&service.user_id);
+            let known_operations = catalog_id
+                .filter(|_| !has_mounted_spec)
+                .and_then(|id| operations.get(id))
+                .cloned();
             ServiceDisclosure {
                 service_id: service.id,
                 source: row.source,
                 credential_kind,
                 upstream_scopes,
-                known_operations: catalog_id.and_then(|id| operations.get(id)).cloned(),
+                known_operations,
                 model_calls: metadata
                     .and_then(|row| row.inference.as_ref())
                     .map(|_| true),
@@ -344,6 +387,76 @@ mod tests {
         );
         assert!(describe_scopes(" ", &catalog).is_none());
         assert!(describe_scopes("bad\"scope", &catalog).is_none());
+    }
+
+    #[tokio::test]
+    async fn consent_disclosure_omits_catalog_counts_for_mounted_specs() {
+        let Some(db) = connect_test_database("oauth_consent_disclosure_mounted_spec").await else {
+            return;
+        };
+        let id = || Uuid::new_v4().to_string();
+        let actor = id();
+        let catalog_id = id();
+        let catalog_service_id = id();
+        let mounted_service_id = id();
+        for (service_id, spec_url) in [
+            (&catalog_service_id, None),
+            (
+                &mounted_service_id,
+                Some("https://example.invalid/spec.json"),
+            ),
+        ] {
+            let endpoint_id = id();
+            let mut endpoint = doc! { "_id": &endpoint_id, "user_id": &actor };
+            if let Some(spec_url) = spec_url {
+                endpoint.insert("openapi_spec_url", spec_url);
+            }
+            db.collection::<Document>(user_endpoint::COLLECTION_NAME)
+                .insert_one(endpoint)
+                .await
+                .unwrap();
+            db.collection::<Document>(user_service::COLLECTION_NAME)
+                .insert_one(doc! {
+                    "_id": service_id, "user_id": &actor, "slug": service_id,
+                    "endpoint_id": &endpoint_id, "catalog_service_id": &catalog_id,
+                    "is_active": true, "auth_method": "none", "auth_key_name": "",
+                    "created_at": DateTime::now(), "updated_at": DateTime::now(),
+                })
+                .await
+                .unwrap();
+        }
+        db.collection::<Document>(downstream_service::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &catalog_id, "is_active": true })
+            .await
+            .unwrap();
+        db.collection::<Document>(service_endpoint::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": id(), "service_id": &catalog_id, "is_active": true,
+                "publication": "published", "method": "GET", "risk": "read",
+            })
+            .await
+            .unwrap();
+
+        let rows = list(
+            &db,
+            &actor,
+            &[catalog_service_id.clone(), mounted_service_id.clone()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let counts = |id: &str| {
+            rows.iter()
+                .find(|row| row.service_id == id)
+                .unwrap()
+                .known_operations
+                .as_ref()
+        };
+        assert_eq!(
+            counts(&catalog_service_id).map(|counts| counts.read),
+            Some(1)
+        );
+        assert!(counts(&mounted_service_id).is_none());
     }
 
     #[tokio::test]
