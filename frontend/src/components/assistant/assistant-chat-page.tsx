@@ -59,6 +59,10 @@ import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type { NyxAgentConversationAgent } from "@/schemas/assistant-nyxagent";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { AssistantLinkModalHost } from "@/components/assistant/assistant-link-modals";
+import { NyxBotHandoffContext } from "@/lib/assistant/nyxbot-handoff-context";
+import { startNyxBotHandoff } from "@/lib/assistant/nyxbot-handoff";
+import { completePlatformSetup } from "@/lib/assistant/platform-setup";
+import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import {
   lazy,
   Suspense,
@@ -702,6 +706,7 @@ function NyxAgentThreadPage() {
   });
   const selectedId = search.draft ? undefined : search.c;
   const errorScope = `${user?.id}:${selectedId ?? `draft:${search.agent ?? "nyxbot"}`}`;
+  const setupIdentityRevision = getAssistantIdentityRevision();
   const [requestError, setRequestError] = useState<{ scope: string; message: string }>();
   const pendingSend = useRef<{ scope: string } | undefined>(undefined);
   // No thread, draft or agent in the URL: the NyxBot home.
@@ -1180,6 +1185,34 @@ function NyxAgentThreadPage() {
       }
     >
       <ReviewCardNavigation selectionKey={`${user?.id}:${selectedId ?? "draft"}:${search.card ?? ""}`}>
+      <NyxBotHandoffContext value={{
+        ownerUserId: user?.id,
+        sourceConversationId: selectedId,
+        eligible: Boolean(selectedId && nyxAgentTransport.getConversation(selectedId)?.handoff_eligible === true && threadAgent?.kind === "specialist" && !threadAgent.destroyed && nyxBotOf(agents.data?.agents)),
+        continue: async (handoff, onAdopt, receiptKey) => {
+          const source = selectedId;
+          const target = nyxBotOf(agents.data?.agents);
+          if (!target) throw new Error(translateUi("NyxBot is unavailable. Refresh your chats and try again."));
+          await startNyxBotHandoff(handoff, source, (id) => {
+            onAdopt(id);
+            if (selection.current === source) void navigate({
+              to: "/assistant",
+              search: { c: id, ...(search.mock ? { mock: 1 as const } : {}) },
+            });
+          }, receiptKey, { id: target.id, kind: "nyxbot", name: target.name, destroyed: target.status === "destroyed" });
+        },
+        open: (id) => navigateTo({ c: id }),
+        complete: user && selectedId ? (result) => completePlatformSetup(result, {
+          ownerUserId: user.id, identityRevision: setupIdentityRevision, conversationId: selectedId,
+        }) : undefined,
+        navigate: (href) => {
+          const target = new URL(href, window.location.origin);
+          if (target.origin !== window.location.origin) return;
+          if (target.pathname === "/assistant" && target.searchParams.has("details") && selectedId) target.searchParams.set("c", selectedId);
+          if (search.mock) target.searchParams.set("mock", "1");
+          void navigate({ href: `${target.pathname}${target.search}` });
+        },
+      }}>
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {threadPanels}
         <AgentDetailsSheet
@@ -1552,6 +1585,7 @@ function NyxAgentThreadPage() {
           />
         </div>
       </div>
+      </NyxBotHandoffContext>
       </ReviewCardNavigation>
     </AssistantShell>
   );

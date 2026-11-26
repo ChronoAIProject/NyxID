@@ -99,6 +99,8 @@ export const nyxAgentChannelOriginSchema = z.object({
 });
 export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
+  /** Server-authored privacy boundary for the specialist handoff UI. */
+  handoff_eligible: z.boolean().optional(),
   id: conversationId,
   title: z.string(),
   platform_thread: platformThreadSchema.nullish(),

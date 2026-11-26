@@ -558,6 +558,7 @@ pub(crate) async fn turn_notes(
     previous_user_message: Option<DateTime<Utc>>,
 ) -> String {
     let mut notes = engine::channel_note(row);
+    notes.push_str(engine::specialist_handoff_capability(row));
     notes.push_str(
         &engine::additional_channel_length_note(&state.db, row)
             .await
@@ -576,7 +577,7 @@ pub(crate) async fn turn_notes(
         }
         if let Some(note) = turn.note.as_deref() {
             notes.push_str("\n\n");
-            notes.push_str(note);
+            notes.push_str(&note.replace(engine::HANDOFF_UI_NOTE, ""));
         }
     }
     // Someone other than the owner is talking: nothing private to the owner

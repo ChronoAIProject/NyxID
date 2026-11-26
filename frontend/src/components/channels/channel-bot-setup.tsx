@@ -3,6 +3,7 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
+import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -78,7 +79,9 @@ export function ChannelBotSetup({
   prefill,
   onComplete,
   onContinue,
+  onFinish,
   returnTo,
+  initialTelegramRequestId,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -93,20 +96,29 @@ export function ChannelBotSetup({
   readonly prefill?: Readonly<Record<string, string>>;
   readonly onComplete?: () => void;
   readonly onContinue?: () => void | Promise<void>;
+  /** A verified, metadata-only completion back to the source chat. */
+  readonly onFinish?: (botId: string) => Promise<void>;
   readonly returnTo?: string;
+  readonly initialTelegramRequestId?: string;
 }) {
   useUiTranslation();
   const navigate = useNavigate();
   const link = useChannelConnectLinkContext();
   const catalog = useChannelPlatformViews();
   const { getPlatform } = catalog;
-  const createBot = useCreateChannelBot();
+  const actorRevision = useRef(getAssistantIdentityRevision()).current;
+  const createBot = useCreateChannelBot(() => {
+    if (actorRevision !== getAssistantIdentityRevision()) throw new Error("Your account changed. Reopen setup before continuing.");
+  });
   const orgs = useOrgs();
   const [createdBot, setCreatedBot] = useState<CreateChannelBotResponse | null>(
     null,
   );
   const [connectedBotLabel, setConnectedBotLabel] = useState<string>();
   const [connectedBotId, setConnectedBotId] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const finishingRef = useRef(false);
+  const [completionError, setCompletionError] = useState<string>();
   const completedId = createdBot?.id ?? connectedBotId;
   const dialogContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -355,11 +367,24 @@ export function ChannelBotSetup({
           )}
           <GuestSetupEditor botId={completedId} />
           <div className="flex justify-end gap-2">
-            {onContinue && fullPage ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>{translateUi("Open channel bot")}</Link></Button> : null}
+            {completionError && <p role="alert" className="text-13 text-destructive">{completionError}</p>}
+            {onContinue && fullPage && !stayInPlace ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>{translateUi("Open channel bot")}</Link></Button> : null}
             <Button
               variant="primary"
               className={fullPage ? "w-full" : undefined}
+              disabled={finishing}
+              isLoading={finishing}
               onClick={() => {
+                if (onFinish) {
+                  if (finishingRef.current) return;
+                  finishingRef.current = true;
+                  setFinishing(true);
+                  setCompletionError(undefined);
+                  void onFinish(completedId).then(() => onOpenChange(false)).catch((error: unknown) => {
+                    setCompletionError(translateErrorMessage(error instanceof Error ? error.message : "Could not continue the chat. Try again."));
+                  }).finally(() => { finishingRef.current = false; setFinishing(false); });
+                  return;
+                }
                 if (onContinue) { void onContinue(); return; }
                 if (!fullPage) onOpenChange(false);
                 if (!stayInPlace) {
@@ -387,6 +412,7 @@ export function ChannelBotSetup({
             fullPage={fullPage}
             stayInPlace={stayInPlace}
             returnTo={returnTo}
+            initialRequestId={initialTelegramRequestId}
             preferManual={Boolean(prefill && Object.keys(prefill).length)}
             onConnected={(id, replace, result, botLabel) => {
               setConnectedBotLabel(botLabel ?? result?.label);

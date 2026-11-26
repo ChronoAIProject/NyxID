@@ -121,6 +121,9 @@ notice).
 - Unchanged: secret exclusions, per-service proxy approval policies, node
   routing, billing to the acting person.
 
+For setup outside a specialist's authority, the browser supports an explicit
+[user-started setup handoff](05-frontend-ui.md#specialist-setup-handoffs).
+
 ## 6. Thread authority and permission modes
 
 New and legacy NyxBot threads retain the full account authority needed by NyxBot; the owner-level permission mode and agent override govern confirmations. A legacy Ask-mode row
