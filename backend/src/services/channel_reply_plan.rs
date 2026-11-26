@@ -762,18 +762,10 @@ fn commonmark_text(
                     } else {
                         dest_url
                     };
-                    // Decode first, then find the end of the visible bare URL.
-                    // Control characters still fail the supported-target check.
-                    let mut target = display;
-                    if let Some(separator) =
-                        display.find(|ch: char| ch.is_whitespace() && !ch.is_control())
-                    {
-                        target = &display[..separator];
-                    }
-                    if supported_link_target(target) {
+                    if supported_link_target(display) {
                         entities.push(serde_json::json!({
-                            "type":"url","offset":units,"length":target.encode_utf16().count(),
-                            "url":target
+                            "type":"url","offset":units,"length":display.encode_utf16().count(),
+                            "url":display
                         }));
                     }
                     text.push_str(display);

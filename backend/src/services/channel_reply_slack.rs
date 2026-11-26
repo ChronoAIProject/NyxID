@@ -109,18 +109,68 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     escape_slashes.dedup();
     character_references.sort_unstable_by_key(|(range, _)| range.start);
 
+    let mut scan = String::new();
+    let mut mapping = Vec::new();
+    let mut next = 0;
+    for (range, value) in &character_references {
+        // Keep decoded controls inside the candidate so target validation can
+        // reject it instead of opening a link to a different destination.
+        if value.chars().any(char::is_control) {
+            continue;
+        }
+        scan.push_str(&source[next..range.start]);
+        let start = scan.len();
+        scan.push_str(value);
+        mapping.push((start..scan.len(), range.clone()));
+        next = range.end;
+    }
+    let scan = if mapping.is_empty() {
+        source
+    } else {
+        scan.push_str(&source[next..]);
+        &scan
+    };
+
     let mut finder = linkify::LinkFinder::new();
     finder.kinds(&[linkify::LinkKind::Url]);
+    // Linkify doesn't treat every Unicode whitespace scalar as a separator.
+    // Keep the same boundaries for decoded references and literal whitespace.
+    let words = scan
+        .split_inclusive(char::is_whitespace)
+        .scan(0, |offset, word| {
+            let start = *offset;
+            *offset += word.len();
+            Some((start, word.trim_end_matches(char::is_whitespace)))
+        });
     let mut urls = Vec::new();
-    for link in finder.links(source) {
-        let start = link.start();
+    let links = words.flat_map(|(start, word)| finder.links(word).map(move |link| (start, link)));
+    for (word_start, link) in links.filter(|(_, link)| supported_link_target(link.as_str())) {
         // Linkify strips trailing asterisks. Keep them when CommonMark does
         // not identify a matching style that opened outside the URL.
-        let mut end = link.end()
-            + source.as_bytes()[link.end()..]
+        let start = word_start + link.start();
+        let end = word_start + link.end();
+        let end = end
+            + scan.as_bytes()[end..]
                 .iter()
                 .take_while(|&&b| b == b'*')
                 .count();
+        let (Some(start), Some(mut end)) = (
+            source_boundary(&mapping, start),
+            source_boundary(&mapping, end),
+        ) else {
+            continue;
+        };
+        let Some((scheme, _)) = link.as_str().split_once(':') else {
+            continue;
+        };
+        // The temporary angle autolink needs a literal CommonMark scheme.
+        // An encoded scheme stays ordinary decoded display text.
+        if !source[start..end]
+            .strip_prefix(scheme)
+            .is_some_and(|rest| rest.starts_with(':'))
+        {
+            continue;
+        }
         let first_close = style_ends.partition_point(|&(close, _)| close < start);
         if let Some(&(close, _)) = style_ends[first_close..]
             .iter()
@@ -138,16 +188,11 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
             character_references.partition_point(|(range, _)| range.start < start);
         let after_references = character_references.partition_point(|(range, _)| range.start < end);
         let references = &character_references[first_reference..after_references];
-        // Linkify can trim the semicolon from a trailing character reference.
-        if let Some((reference, _)) = references.last() {
-            end = end.max(reference.end);
-        }
         let first_opaque = opaque.partition_point(|range| range.end <= start);
         if opaque
             .get(first_opaque)
             .is_none_or(|range| range.start >= end)
             && !source[start..end].contains(['<', '>'])
-            && supported_link_target(&source[start..end])
         {
             urls.push((start..end, references));
         }
@@ -203,6 +248,19 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     }
     marked.push_str(&source[next..]);
     Some(commonmark_text(&marked, Some(&bare_urls), rich))
+}
+
+fn source_boundary(mapping: &[(Range<usize>, Range<usize>)], at: usize) -> Option<usize> {
+    let index = mapping.partition_point(|(decoded, _)| decoded.start <= at);
+    let Some((decoded, source)) = index.checked_sub(1).map(|index| &mapping[index]) else {
+        return Some(at);
+    };
+    if at == decoded.start {
+        return Some(source.start);
+    }
+    // A source reference is indivisible. Leave it to CommonMark if the
+    // scanner placed a boundary between two scalars it decodes to.
+    Some(source.end + at.checked_sub(decoded.end)?)
 }
 
 fn normalize_bare_url(

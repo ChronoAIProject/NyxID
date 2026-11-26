@@ -678,6 +678,10 @@ fn slack_bare_urls_keep_commonmark_character_references() {
         part.metadata.unwrap()["blocks"][0]["elements"][0]["elements"],
         serde_json::json!([{"type":"text","text":"*x* https://example.test/A\nB"}])
     );
+    assert_eq!(
+        wire(r"\*x\* https&#58;//example.test/A", "slack"),
+        "*x* https://example.test/A"
+    );
 }
 
 #[test]
@@ -710,6 +714,39 @@ fn slack_bare_url_character_references_preserve_decoded_whitespace_boundaries() 
                 {"type":"link","url":"https://example.test/A","text":"https://example.test/A"},
                 {"type":"text","text":suffix}
             ])
+        );
+    }
+
+    for (source, control) in [
+        ("https://example.test/A.&#32;B", "https://example.test/A. B"),
+        (
+            "https://example.test/A&#32;https://second.test/B",
+            "https://example.test/A https://second.test/B",
+        ),
+        (
+            "https://example.test/A.&#32;**https://second.test/B**",
+            "https://example.test/A. **https://second.test/B**",
+        ),
+        (
+            "https://example.test/A&#32;<https://second.test/A&#66;B>",
+            "https://example.test/A <https://second.test/A&#66;B>",
+        ),
+        (
+            "https://example.test/A&#32;[guide](https://second.test/A&#66;B)",
+            "https://example.test/A [guide](https://second.test/A&#66;B)",
+        ),
+        (
+            "https://example.test/A&ThickSpace;https://second.test/B",
+            "https://example.test/A\u{205f}\u{200a}https://second.test/B",
+        ),
+    ] {
+        let source = assistant_parts(&format!(r"\*escaped\* {source}"), "slack", "");
+        let control = assistant_parts(&format!(r"\*escaped\* {control}"), "slack", "");
+        assert_eq!(
+            fingerprint(&source),
+            fingerprint(&control),
+            "{:?}",
+            source[0].text
         );
     }
 }
