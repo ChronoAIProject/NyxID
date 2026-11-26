@@ -205,8 +205,17 @@ pub(crate) async fn gateway_call_at_base(
     body: Option<&Value>,
     idempotency_key: Option<&str>,
 ) -> AppResult<GatewayResponse> {
-    let response =
-        exchange_at_base(base, method, path, bearer, body, idempotency_key, None).await?;
+    let response = exchange_at_base(
+        base,
+        method,
+        path,
+        bearer,
+        body,
+        idempotency_key,
+        None,
+        false,
+    )
+    .await?;
     let status = response
         .status
         .ok_or_else(|| AppError::ValidationError("gateway_unavailable".into()))?;
@@ -215,6 +224,37 @@ pub(crate) async fn gateway_call_at_base(
         result => result?,
     };
     Ok(GatewayResponse { status, body })
+}
+
+pub(crate) async fn side_message_available(
+    base: &str,
+    path: &str,
+    bearer: &str,
+) -> AppResult<bool> {
+    let probe = exchange_at_base(
+        base,
+        reqwest::Method::GET,
+        path,
+        bearer,
+        None,
+        None,
+        None,
+        true,
+    );
+    match tokio::time::timeout(Duration::from_secs(2), probe).await {
+        Ok(Ok(Exchange {
+            status: Some(401 | 403 | 410),
+            ..
+        })) => Err(AppError::Forbidden(
+            "Native supplemental delivery refused".into(),
+        )),
+        Ok(Ok(Exchange {
+            status: Some(200),
+            body: Ok(body),
+            ..
+        })) => Ok(body["available"].as_bool() == Some(true)),
+        _ => Ok(false),
+    }
 }
 
 struct Exchange {
@@ -231,6 +271,7 @@ async fn exchange_at_base(
     body: Option<&Value>,
     idempotency_key: Option<&str>,
     reply: Option<(chrono::DateTime<chrono::Utc>, bool)>,
+    capability_probe: bool,
 ) -> AppResult<Exchange> {
     let mut operation = crate::turn_trace::Operation::start(
         crate::turn_trace::TurnContext::current(),
@@ -255,7 +296,11 @@ async fn exchange_at_base(
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
         }
-        super::channel_turn_preparation::effect().await?;
+        // Capability discovery runs inside permission-result preparation. Only
+        // the following POST may advance its durable effect fence.
+        if !capability_probe {
+            super::channel_turn_preparation::effect().await?;
+        }
         if let Some((deadline, _)) = reply {
             let remaining = (deadline - chrono::Utc::now())
                 .to_std()
@@ -283,12 +328,17 @@ async fn exchange_at_base(
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(retry_after);
-        let body = gateway_body(
-            response,
-            requires_json,
-            reply.is_some_and(|(_, target)| target),
-        )
-        .await;
+        let body = if capability_probe && status != 200 {
+            // A slow error body cannot hide a refusal we already received.
+            Ok(Value::Null)
+        } else {
+            gateway_body(
+                response,
+                requires_json,
+                reply.is_some_and(|(_, target)| target),
+            )
+            .await
+        };
         Ok(Exchange {
             status: Some(status),
             body,
@@ -342,6 +392,7 @@ pub(crate) async fn reply_call(
         Some(body),
         key,
         Some((deadline, target_operation)),
+        false,
     )
     .await?;
     Ok(classify_reply(response, target_operation))

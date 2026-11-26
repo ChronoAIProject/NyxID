@@ -819,17 +819,19 @@ Failed local supplemental text keeps its receipts and audit. The live-turn
 notice claim selects one attempt across replicas. An already claimed local
 notice completing just after the final cannot suppress or duplicate it.
 
-Native progress is not sent. Genuine independent native team/followed/permission
-results retain today's event reply behavior. While the same event's primary
-answer is pending, those sends can still suppress that answer on confirmation
-or leave both uncertain under the gateway's routed unknown-tool barrier. This
-needs the gateway's non-answer-send contract. Metadata-only
-`nyxbot_channel_supplemental_delivery` audits include those `gateway_event`
-results as well as local sends/skips, their closed purpose/outcome/reason and
-anchor (`event_source`, `chat_pointer`, `chat_reference_event`, `thread_binding`,
-`none`), plus turn/event/conversation IDs. No text, inbound references, tokens
-or binding digests are recorded. No owner action is needed; drain old replicas
-to apply the result window and claims everywhere.
+Native Discord and WhatsApp progress and independent results use side messages when the original
+event advertises support. When the capability is unavailable, independent
+results use event replies and progress skips with
+`native_progress_unsupported`. The original event window, post-turn claims
+and permission receipt fences apply to both routes. See the [gateway delivery
+contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-provider-late-replies-and-cma-contract-boundary).
+
+Metadata-only `nyxbot_channel_supplemental_delivery` audits record native side
+messages, gateway event replies, local sends and skips. They include the
+closed purpose, egress, outcome, reason and anchor class (`event_source`,
+`chat_pointer`, `chat_reference_event`, `thread_binding`, `none`), plus
+turn/event/conversation IDs. They omit text, inbound references, tokens and
+binding digests.
 
 Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.

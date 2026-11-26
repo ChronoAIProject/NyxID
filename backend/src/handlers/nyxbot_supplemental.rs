@@ -1,4 +1,4 @@
-//! Supplemental text uses the local relay without marking a gateway event replied.
+//! Source-bound supplemental text delivery and metadata-only auditing.
 use super::*;
 use crate::models::assistant_conversation::AssistantConversation;
 use crate::services::channel_supplemental_delivery as sources;
@@ -9,6 +9,7 @@ pub(crate) use crate::services::channel_supplemental_delivery::{Anchor, Purpose,
 pub enum Egress {
     LocalRelay,
     GatewayEvent,
+    GatewaySideMessage,
     Skipped,
 }
 
@@ -24,6 +25,9 @@ enum Outcome {
 pub struct Decision {
     pub(super) saved_result: bool,
     pub(crate) source: Option<sources::ResultSource>,
+    pub(super) machine_control: Option<(String, i64)>,
+    pub(super) native_route: Option<native_responses::SupplementalRoute>,
+    pub(super) require_side_message: bool,
     pub purpose: Purpose,
     pub anchor: Anchor,
     pub event: Option<String>,
@@ -37,6 +41,9 @@ impl Decision {
         Self {
             saved_result: false,
             source: None,
+            machine_control: None,
+            native_route: None,
+            require_side_message: false,
             purpose,
             anchor: Anchor::None,
             event: None,
@@ -337,14 +344,7 @@ pub async fn native(
     decision: &mut Decision,
 ) -> AppResult<()> {
     decision.event = origin.native_event_id.clone();
-    if decision.purpose.progress() {
-        decision.skip(Reason::NativeProgressUnsupported);
-        return Ok(());
-    }
     decision.anchor = Anchor::EventSource;
-    if !decision.needs_post_turn_claim() {
-        decision.dispatch(Egress::GatewayEvent);
-    }
     let outcome =
         native_responses::send_supplemental(state, channel, origin, conversation, text, decision)
             .await?;
