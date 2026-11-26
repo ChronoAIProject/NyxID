@@ -109,6 +109,7 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
+import { conversationTitle } from "../../components/workspace/workspaceChatListModel";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { withVoiceRequestDeadline } from "./voice/voiceRequestDeadline";
 import { chatBubbleColors } from "../../theme/chatAppearance";
@@ -381,7 +382,7 @@ export function AssistantScreen({
     panelInsets.left + panelInsets.right,
   ).enabled;
   const chatTitle = assistant.conversationId
-    ? (conversation?.title ?? translateApp("Loading chat…"))
+    ? (conversation ? conversationTitle(conversation) : translateApp("Loading chat…"))
     : homeVisible
       ? translateApp("Home")
       : translateApp("New chat");
@@ -396,7 +397,7 @@ export function AssistantScreen({
       : undefined;
   const headerDetail = chatThreadInfo(
     assistant.conversationId
-      ? conversation?.title
+      ? (conversation ? conversationTitle(conversation) : undefined)
       : homeVisible
         ? translateApp("Home")
         : translateApp("New chat"),
@@ -2171,7 +2172,7 @@ export function AssistantScreen({
                 <Label style={styles.sheetSection}>
                         {translateApp("This thread")}
                       </Label>
-                <Label>{conversation?.title || chatTitle}</Label>
+                <Label>{chatTitle}</Label>
                 <Label muted>{agentName}</Label>
                 {conversation ? (
                   <Label muted>

@@ -72,6 +72,7 @@ import {
   notificationTime,
   notificationTitle,
   notificationSentence,
+  notificationPreview,
   notificationContextLabel,
   notificationTone,
   notificationMatchesSearch,
@@ -203,6 +204,7 @@ export function NotificationRow({
   const palette = toneColors(colors, tone);
   const Icon = KIND_ICON[item.kind];
   const sentence = notificationSentence(item);
+  const preview = notificationPreview(item);
   const contextLabel = notificationContextLabel(item);
   const agents = (item.participants ?? [])
     .filter((actor) => actor.type === "agent" && actor.id)
@@ -312,13 +314,13 @@ export function NotificationRow({
             )}
           </Text>
         </View>
-        {item.preview ? (
+        {preview ? (
           <Text
             numberOfLines={cornerWindow ? 3 : 2}
             ellipsizeMode="tail"
             style={[styles.preview, { color: colors.textSecondary }]}
           >
-            {item.preview}
+            {preview}
           </Text>
         ) : null}
         <View style={styles.metaLine}>

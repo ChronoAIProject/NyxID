@@ -13,6 +13,7 @@ import {
   notificationTarget,
   notificationTime,
   notificationSentence,
+  notificationPreview,
   notificationTitle,
   notificationMatchesSearch,
   unreadForSource,
@@ -235,4 +236,22 @@ test("automation sub-cases have client-owned action phrases and missing agents u
     assert.equal(notificationSentence(make(extra)).text, `Digest ${action}`);
   }
   assert.equal(notificationSentence(make({ kind: "agent_update", actor: { type: "system", name: "NyxID" } })).text, "NyxID replied in Launch");
+});
+
+test("completed automation results localize the action and omit only empty-result previews", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  const item = row({ kind: "automation_result", actor: { type: "automation", name: "顾客订单通知" } });
+  for (const [language, action] of [["zh-CN", "已完成"], ["zh-TW", "已完成"], ["en", "finished"]] as const) {
+    setAppTranslationLanguage(language);
+    assert.equal(notificationSentence(item).text, "顾客订单通知 " + action);
+    for (const preview of ["无（建设中，未发送）", "Completed.", "  "]) {
+      const empty = { ...item, preview };
+      assert.equal(notificationPreview(empty), "");
+      assert.ok(!notificationAccessibilityLabel(empty).includes("建设中"));
+      assert.equal(notificationMatchesSearch(empty, "建设中"), false);
+    }
+    const text = "顾客备注：无（建设中，未发送）";
+    assert.equal(notificationPreview({ ...item, preview: text }), text);
+    assert.equal(notificationPreview({ ...item, kind: "chat_update", preview: "Completed." }), "Completed.");
+  }
 });

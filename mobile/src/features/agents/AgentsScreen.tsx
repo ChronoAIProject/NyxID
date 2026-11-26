@@ -1358,6 +1358,16 @@ function AgentIdentityHeader({
 }) {
   useAppLanguage();
   const { colors } = useTheme();
+  const status = translateApp({
+    running: "Running",
+    idle: "Idle",
+    destroyed: "Destroyed",
+  }[agent.status]);
+  const identityFormat = agent.owner_kind === "org" && agent.can_maintain === false
+    ? "@{{agent}} · {{status}}"
+    : agent.kind === "nyxbot"
+      ? "@{{agent}} · {{status}} · Your orchestrator · {{memoryCount}} memories"
+      : "@{{agent}} · {{status}} · Specialist · {{memoryCount}} memories";
   return (
     <View style={styles.identity}>
       <AgentAvatar agent={agent} size="xl" />
@@ -1367,7 +1377,9 @@ function AgentIdentityHeader({
       >
         {title}
       </Text>
-      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>{agent.owner_kind === "org" && agent.can_maintain === false ? translateApp("@{{agent}} · {{status}}", { agent: agent.name, status: agent.status }) : (agent.kind === "nyxbot" ? translateApp("@{{agent}} · {{status}} · Your orchestrator · {{memoryCount}} memories", { agent: agent.name, status: agent.status, memoryCount: agent.memory_count}) : translateApp("@{{agent}} · {{status}} · Specialist · {{memoryCount}} memories", { agent: agent.name, status: agent.status, memoryCount: agent.memory_count }))}</Text>
+      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
+        {translateApp(identityFormat, { agent: agent.name, status, memoryCount: agent.memory_count })}
+      </Text>
       <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
         {subtitle}
       </Text>

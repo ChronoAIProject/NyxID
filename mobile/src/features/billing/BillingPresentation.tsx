@@ -27,7 +27,7 @@ export function BillingWalletCard({ wallet, grants, allowances, now }: { wallet:
             credits: formatCredits(wallet.available),
           })} />
       {credits.map((row) => (
-          <SettingsRow key={row.key} label={row.label} value={`${row.value}${row.unit === "" ? "" : ` ${row.unit ?? "credits"}`}`}
+          <SettingsRow key={row.key} label={row.label} value={row.unit == null ? translateApp("{{credits}} credits", { credits: row.value }) : [row.value, row.unit].filter(Boolean).join(" ")}
         valueTone={row.value.startsWith("-") ? "danger" : "default"}
         accessibilityLabel={(row.unit === "" ? translateApp("{{label}}: {{amount}}", { label: row.label, amount: row.exactValue ?? row.value}) : translateApp("{{label}}: {{amount}} {{unit}}", { label: row.label, amount: row.exactValue ?? row.value, unit: row.unit ?? translateApp("credits") }))} />
         ))}
