@@ -20,8 +20,9 @@ fn is_unsafe_method(method: &Method) -> bool {
     )
 }
 
-fn is_social_callback_path(path: &str) -> bool {
-    path.starts_with("/api/v1/auth/social/") && path.ends_with("/callback")
+fn is_provider_callback_path(path: &str) -> bool {
+    path == "/api/v1/providers/callback"
+        || (path.starts_with("/api/v1/auth/social/") && path.ends_with("/callback"))
 }
 
 fn looks_like_browser_request(headers: &HeaderMap) -> bool {
@@ -140,7 +141,7 @@ pub async fn browser_csrf_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
-    if !is_unsafe_method(request.method()) || is_social_callback_path(request.uri().path()) {
+    if !is_unsafe_method(request.method()) || is_provider_callback_path(request.uri().path()) {
         return Ok(next.run(request).await);
     }
 
@@ -309,22 +310,30 @@ mod tests {
     }
 
     #[test]
+    fn connector_csrf_exemption_is_limited_to_the_external_callback() {
+        assert!(is_provider_callback_path("/api/v1/providers/callback"));
+        assert!(!is_provider_callback_path(
+            "/api/v1/providers/callback/continuation/id/confirm"
+        ));
+    }
+
+    #[test]
     fn social_callback_path_is_exempt() {
-        assert!(is_social_callback_path(
+        assert!(is_provider_callback_path(
             "/api/v1/auth/social/apple/callback"
         ));
-        assert!(is_social_callback_path(
+        assert!(is_provider_callback_path(
             "/api/v1/auth/social/google/callback"
         ));
-        assert!(!is_social_callback_path("/api/v1/auth/social/google"));
+        assert!(!is_provider_callback_path("/api/v1/auth/social/google"));
     }
 
     #[test]
     fn social_callback_exemption_requires_exact_prefix_and_suffix_shape() {
-        assert!(!is_social_callback_path(
+        assert!(!is_provider_callback_path(
             "/api/v1/auth/social/google/callback/extra"
         ));
-        assert!(!is_social_callback_path("/auth/social/google/callback"));
+        assert!(!is_provider_callback_path("/auth/social/google/callback"));
     }
 
     #[test]

@@ -3417,9 +3417,9 @@ curl http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890
 
 #### GET /api/v1/providers/callback
 
-Generic OAuth callback endpoint. Handles the redirect from OAuth providers after user authorization. Resolves the provider from the `state` parameter, verifies the session user matches, exchanges the code for tokens, and redirects to the frontend callback page.
+NyxID registers this callback with external providers. It resolves the provider and initiating account from the one-time state. A matching per-attempt browser launch cookie authorizes the code exchange. An authenticated callback session, when present, must also match the initiating account.
 
-**Auth:** Required (session cookie)
+If the browser lacks the launch cookie, NyxID holds the provider code encrypted for at most five minutes within the original state lifetime and sends the browser to a confirmation page. The initiating NyxID user signs in and confirms before exchange. The normal web, CLI completion, and validated mobile connector destinations apply after exchange.
 
 **Query Parameters:**
 
@@ -3430,7 +3430,7 @@ Generic OAuth callback endpoint. Handles the redirect from OAuth providers after
 | `error`             | string | No       | Error code from the provider               |
 | `error_description` | string | No       | Error description from the provider        |
 
-**Response:** HTTP 302 redirect to `{FRONTEND_URL}/providers/callback?status=success` on success, or `?status=error&message=...` on failure.
+**Response:** HTTP 303 to the flow's completion destination or an initiating-user confirmation page.
 
 This endpoint is not called directly by the frontend. It is the OAuth redirect URI registered with external providers.
 

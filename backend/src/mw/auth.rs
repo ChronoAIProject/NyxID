@@ -782,6 +782,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     matches!(
         segments.as_slice(),
         ["providers", "callback"]
+            | ["providers", "callback", "continuation", ..]
             | ["providers", "codex-connection"]
             | ["providers", _, "callback"]
             | ["providers", _, "connect", "oauth"]

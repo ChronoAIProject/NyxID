@@ -394,8 +394,14 @@ pub async fn managed_start(
                 )
                 .await?;
                 links::pin_connection(&state.db, &claim, &started.connection_id).await?;
+                let headers = super::user_tokens::connector_launch_headers(
+                    &state,
+                    &auth,
+                    &started.state_id,
+                    &started.launch_proof,
+                )?;
                 Ok((
-                    headers(),
+                    headers,
                     Json(managed::StartResponse {
                         connection_id: started.connection_id,
                         authorization_url: started.authorization_url,

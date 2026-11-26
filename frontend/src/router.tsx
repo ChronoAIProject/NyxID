@@ -18,6 +18,7 @@ import {
   parseMachineDesktopSearch,
 } from "@/lib/machine-search";
 import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
+import { ConnectorContinuationPage } from "@/pages/connector-continuation";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
@@ -291,6 +292,12 @@ const oauthLaunchingRoute = createRoute({
   path: "/oauth-launching",
   getParentRoute: () => rootRoute,
   component: OAuthLaunchingPage,
+});
+
+const connectorContinuationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/connector-continuation/$id",
+  component: ConnectorContinuationPage,
 });
 
 export const oauthCompleteRoute = createRoute({
@@ -1328,6 +1335,7 @@ const routeTree = rootRoute.addChildren([
   ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
   oauthLaunchingRoute,
   oauthCompleteRoute,
+  connectorContinuationRoute,
   oauthErrorRoute,
   privacyRoute,
   termsRoute,

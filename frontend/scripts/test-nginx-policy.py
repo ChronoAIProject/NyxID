@@ -68,6 +68,11 @@ class PolicyInputs(unittest.TestCase):
         self.assertIn("proxy_pass http://backend:3001;", location)
         self.assertIn("proxy_set_header Host $host;", location)
 
+    def test_connector_continuation_ids_are_redacted(self):
+        config = self.render({})["default.conf"]
+        self.assertIn("~*^/connector-continuation(?:/|$) /connector-continuation/:id;", config)
+        self.assertIn("~*^/api/v1/providers/callback/continuation/ /api/v1/providers/callback/continuation/:id;", config)
+
     @staticmethod
     def render(env):
         template = Path(__file__).parents[1].joinpath("nginx.conf.template").read_text()

@@ -126,6 +126,7 @@ pub mod connect_link_service;
 pub mod connection_expiry_service;
 pub(crate) mod connection_record_service;
 pub mod connection_service;
+pub mod connector_launch_service;
 pub mod consent_service;
 pub mod content_type;
 #[allow(dead_code)]
