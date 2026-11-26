@@ -241,6 +241,7 @@
   "Unable to load sign-in options. Please try again.": "无法加载登录选项。请重试。",
   "Unable to verify account access. Please try again.": "无法验证账户访问权限。请重试。",
   "Unknown time": "未知时间",
+  "Update NyxID to continue with social sign-in.": "请更新 NyxID 以继续使用第三方登录。",
   "Use a recovery code": "使用恢复码",
   "Use a restricted Agent Key for limited access.": "如需限制访问权限，请使用受限的智能体密钥。",
   "Use an authenticator code": "使用身份验证器代码",

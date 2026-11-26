@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
@@ -20,6 +21,7 @@ export function PrivilegedMfaEnrollmentBanner() {
 
 function AccountEnrollment({ user }: { readonly user: User }) {
   const [open, setOpen] = useState(false);
+  const { t } = useUiTranslation();
   const needsEnrollment =
     user.mfa_enabled === false &&
     (canReadAdminUsage(user) ||
@@ -35,13 +37,13 @@ function AccountEnrollment({ user }: { readonly user: User }) {
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
           <ShieldCheck className="h-5 w-5 shrink-0 text-warning" aria-hidden="true" />
           <div className="min-w-0 flex-1 basis-48" role="status">
-            <p className="text-14 font-medium text-foreground">MFA required for admin access</p>
-            <p className="text-12 text-muted-foreground">
-              Set up an authenticator app to keep your admin access. Enrolling signs you out on your other devices.
+            <p className="type-row-title text-foreground">{t("MFA required for admin access")}</p>
+            <p className="type-secondary text-muted-foreground">
+              {t("Set up an authenticator app to keep your admin access. Enrolling signs you out on your other devices.")}
             </p>
           </div>
           <Button variant="primary" size="sm" onClick={() => setOpen(true)}>
-            Set up MFA
+            {t("Set up MFA")}
           </Button>
         </div>
       )}
