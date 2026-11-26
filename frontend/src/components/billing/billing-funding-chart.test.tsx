@@ -1,7 +1,14 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { billingRow } from "@/test/billing-fixture";
 import { BillingFundingChart } from "./billing-funding-chart";
+
+import { appI18n } from "@/i18n";
+import { translateUi } from "@/i18n/use-ui-translation";
+
+afterEach(async () => {
+  await appI18n.changeLanguage("en");
+});
 
 describe("BillingFundingChart", () => {
   it("uses exact fractional funding rather than truncated legacy micros", () => {
@@ -73,4 +80,42 @@ describe("BillingFundingChart", () => {
     expect(screen.getAllByText("0 credits")).toHaveLength(3);
     expect(screen.queryByText(/unavailable/)).not.toBeInTheDocument();
   });
+});
+
+it("updates the accessible funding name and legends in Chinese at render time", async () => {
+  const view = render(
+    <BillingFundingChart
+      rows={[
+        billingRow({
+          grant_credits_micros: 5,
+          allowance_credits_micros: 3,
+          wallet_credits_micros: 2,
+        }),
+      ]}
+    />,
+  );
+  await act(async () => {
+    await appI18n.changeLanguage("zh-CN");
+  });
+  const label = screen.getByRole("img").getAttribute("aria-label")!;
+  for (const key of ["Credit grants", "Allowances", "Wallet"]) {
+    expect(label).toContain(translateUi(key));
+    expect(
+      view.container.querySelector(".funding-visual-legend"),
+    ).toHaveTextContent(translateUi(key));
+  }
+  expect(view.container.textContent + label).not.toMatch(
+    /Credit grants|Allowances|Wallet|credits|No known funding/,
+  );
+  view.rerender(<BillingFundingChart rows={[]} />);
+  expect(screen.getByRole("img")).toHaveAccessibleName(
+    translateUi("{{value}}: {{barLabel}}", {
+      value: translateUi("Funding"),
+      barLabel: translateUi("No known funding values for this period"),
+    }),
+  );
+  expect(screen.getByRole("img").getAttribute("aria-label")).not.toMatch(
+    /No known funding|credits/,
+  );
+  view.unmount();
 });

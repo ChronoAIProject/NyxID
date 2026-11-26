@@ -1582,7 +1582,8 @@ mod tests {
                 State(state),
                 test_auth_user(&admin_id),
                 HeaderMap::new(),
-                Path(org_id)
+                Path(org_id),
+                axum::extract::Query(crate::handlers::users::ErasureResponseQuery::default()),
             )
             .await,
             Err(AppError::ValidationError(_))

@@ -367,7 +367,6 @@ export function NyxBotHome({
   onStartNextStep,
   onHideNextSteps,
   onShowNextSteps,
-  onReplayIntro,
 }: {
   readonly userName: string | undefined;
   readonly agents: readonly AssistantAgent[];
@@ -389,7 +388,6 @@ export function NyxBotHome({
   /** Hides the whole section, leaving a direct restore control. */
   readonly onHideNextSteps?: () => void;
   readonly onShowNextSteps?: () => void;
-  readonly onReplayIntro?: () => void;
 }) {
   useUiTranslation();
   const [now] = useState(() => new Date());
@@ -499,16 +497,9 @@ export function NyxBotHome({
           <Section
             id="nyxbot-home-next-steps"
             title={translateUi("Suggested for you")}
-            action={
-              <div className="flex items-center gap-1">
-                {onReplayIntro ? (
-                  <Button size="sm" variant="ghost" onClick={onReplayIntro}>{translateUi("Replay intro")}</Button>
-                ) : null}
-                {onHideNextSteps ? (
-                  <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
-                ) : null}
-              </div>
-            }
+            action={onHideNextSteps ? (
+              <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
+            ) : null}
           >
             <NextStepCards
               steps={nextSteps}

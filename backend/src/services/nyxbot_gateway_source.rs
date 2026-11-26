@@ -9,6 +9,7 @@ use crate::{
         nyxbot_channel::{GatewaySource, NyxbotChannel},
     },
 };
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 pub const READINESS: &str = "nyxbot:native-gateway-v1";
@@ -227,15 +228,14 @@ pub async fn credentials(
                     "native_whatsapp_identity_mismatch".into(),
                 ));
             }
-            let app_secret = state
-                .encryption_keys
-                .decrypt(
-                    bot.app_secret_encrypted
-                        .as_deref()
-                        .ok_or_else(|| AppError::OAuthAuthorityUnavailable)?,
-                )
-                .await
-                .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+            let app_secret = super::channel_registration::open_secret(
+                &state.encryption_keys,
+                bot,
+                "app_secret_encrypted",
+            )
+            .await
+            .map_err(|_| AppError::OAuthAuthorityUnavailable)?
+            .ok_or_else(|| AppError::OAuthAuthorityUnavailable)?;
             let app_secret = crate::crypto::guarded_utf8(app_secret)
                 .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
             let token =
@@ -576,6 +576,171 @@ pub(crate) async fn record_activation(
         bson::doc! {"$set":{"gateway_native_activation":status,"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null,"delivery_checked_at":bson::DateTime::now()}}).await?;
     Ok(())
 }
+
+fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// Parse the authoritative connection projection returned by CMA. A future
+/// retry remains inconclusive, while a null or already-due retry makes a
+/// not-ready report conclusive. Stale projections are authoritative down
+/// evidence even when CMA masks the booleans.
+fn discord_connection_state(connection: &Value) -> Option<(DateTime<Utc>, bool)> {
+    if connection["scope"] != "serving_instance" || connection["lease"] != "acquired" {
+        return None;
+    }
+    let observed_at = timestamp(&connection["observed_at"])?;
+    let stale = connection["stale"].as_bool()?;
+    let retry_at = connection.get("retry_at")?;
+    let retry_at = if retry_at.is_null() {
+        None
+    } else {
+        Some(timestamp(retry_at)?)
+    };
+    if stale {
+        if ["connected", "authenticated", "ready"].iter().any(|key| {
+            !connection
+                .get(*key)
+                .is_some_and(|value| value.is_null() || value.is_boolean())
+        }) {
+            return None;
+        }
+        return Some((observed_at, true));
+    }
+    let connected = connection["connected"].as_bool()?;
+    let authenticated = connection["authenticated"].as_bool()?;
+    let ready = connection["ready"].as_bool()?;
+    if connected && authenticated && ready {
+        return Some((observed_at, false));
+    }
+    match retry_at {
+        None => Some((observed_at, true)),
+        Some(retry_at) if retry_at <= observed_at => Some((observed_at, true)),
+        Some(_) => None,
+    }
+}
+
+fn response_matches_discord_identity(row: &NyxbotChannel, body: &Value, bot_id: &str) -> bool {
+    if body
+        .get("channel_id")
+        .is_some_and(|id| id.as_str() != row.gateway_channel_id.as_deref())
+        || body["provider"]
+            .get("binding_id")
+            .is_some_and(|id| id.as_str() != row.binding_id.as_deref())
+    {
+        return false;
+    }
+    body["definition"].get("sources").is_none_or(|sources| {
+        sources.as_array().is_some_and(|sources| {
+            sources.len() == 1
+                && sources[0]["type"] == "discord"
+                && sources[0]["bot_id"].as_str() == Some(bot_id)
+        })
+    })
+}
+
+/// Persist one authoritative Discord status observation with binding, remote
+/// channel and provider identity fences. Down wins an equal observed_at tie.
+pub(crate) async fn record_discord_connection(
+    db: &mongodb::Database,
+    row: &NyxbotChannel,
+    body: &Value,
+) -> AppResult<()> {
+    let (Some(binding_id), Some(gateway_channel_id), Some(GatewaySource::Discord { bot_id })) = (
+        &row.binding_id,
+        &row.gateway_channel_id,
+        &row.gateway_source,
+    ) else {
+        return Ok(());
+    };
+    if !ready(row) || !response_matches_discord_identity(row, body, bot_id) {
+        return Ok(());
+    }
+    let Some((observed_at, down)) =
+        discord_connection_state(&body["native_discord_activation"]["connection"])
+    else {
+        return Ok(());
+    };
+    let observation = crate::models::nyxbot_channel::DiscordConnectionObservation {
+        binding_id: binding_id.clone(),
+        gateway_channel_id: gateway_channel_id.clone(),
+        bot_id: bot_id.clone(),
+        observed_at,
+        down,
+    };
+    let observed_at = bson::DateTime::from_chrono(observed_at);
+    let mut newer = vec![
+        bson::doc! {"gateway_discord_connection.binding_id": {"$ne": binding_id}},
+        bson::doc! {"gateway_discord_connection.gateway_channel_id": {"$ne": gateway_channel_id}},
+        bson::doc! {"gateway_discord_connection.bot_id": {"$ne": bot_id}},
+        bson::doc! {"gateway_discord_connection.observed_at": {"$lt": observed_at}},
+    ];
+    if down {
+        newer.push(bson::doc! {
+            "gateway_discord_connection.observed_at": observed_at,
+            "gateway_discord_connection.down": false,
+        });
+    }
+    let before = db
+        .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one_and_update(
+            bson::doc! {
+                "_id": &row.id,
+                "user_id": &row.user_id,
+                "channel_bot_id": &row.channel_bot_id,
+                "bot_owner_id": &row.bot_owner_id,
+                "binding_id": binding_id,
+                "gateway_channel_id": gateway_channel_id,
+                "gateway_record_id": &row.gateway_record_id,
+                "gateway_version": &row.gateway_version,
+                "gateway_source.type": "discord",
+                "gateway_source.bot_id": bot_id,
+                "status": "active",
+                "transport": "gateway",
+                "gateway_native_phase": "ready",
+                "gateway_setup_release_id": null,
+                "pending_agent_api_key_id": null,
+                "$or": newer,
+            },
+            bson::doc! {"$set": {"gateway_discord_connection": bson::to_document(&observation).map_err(|error| AppError::Internal(error.to_string()))?}},
+        )
+        .await?;
+    if down
+        && let Some(before) = before
+        && !before
+            .gateway_discord_connection
+            .as_ref()
+            .is_some_and(|saved| {
+                saved.binding_id == *binding_id
+                    && saved.gateway_channel_id == *gateway_channel_id
+                    && saved.bot_id == *bot_id
+                    && saved.down
+            })
+    {
+        let bot = super::channel_bot_service::get_bot(db, &row.channel_bot_id).await?;
+        if bot.is_active
+            && bot.platform == "discord"
+            && bot.platform_bot_id == *bot_id
+            && bot.user_id == row.bot_owner_id.as_ref().unwrap_or(&row.user_id).as_str()
+        {
+            let intake = super::channel_bot_health::discord::Intake {
+                receiving_side: "native_gateway",
+                state: "connection_down".into(),
+                code: Some(super::channel_bot_health::discord::NATIVE_CONNECTION_DOWN),
+                block_reason: None,
+                handed_over_at: None,
+                last_inbound_at: None,
+            };
+            let recommendation = super::channel_bot_health::discord::advice(&intake)
+                .expect("native connection down recommendation");
+            super::channel_bot_health::notify_failure(db, &bot, &recommendation);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn check_status(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
     let Some(channel) = row.gateway_channel_id.as_deref() else {
         return Ok(());
@@ -588,6 +753,13 @@ pub(crate) async fn check_status(state: &AppState, row: &NyxbotChannel) -> AppRe
     let result =
         gateway::gateway_call(state, reqwest::Method::GET, &path, &creator, None, None).await?;
     record_activation(&state.db, row, &result.body).await?;
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(GatewaySource::Discord { .. })
+    ) && (200..300).contains(&result.status)
+    {
+        record_discord_connection(&state.db, row, &result.body).await?;
+    }
     if matches!(
         row.gateway_source.as_ref(),
         Some(GatewaySource::WhatsApp { .. })
@@ -697,6 +869,89 @@ pub(crate) fn validate_created(row: &NyxbotChannel, body: &Value) -> AppResult<(
 mod tests {
     use super::*;
     use mongodb::bson::{self, doc};
+    use serde_json::json;
+
+    #[test]
+    fn discord_native_connection_parser_preserves_authority_and_retry_rules() {
+        let observed = "2026-11-26T00:00:00Z";
+        let before = "2026-11-25T23:59:00Z";
+        let future = "2026-11-26T00:05:00Z";
+        let cases = [
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"acquired", "stale":false,
+                    "connected":false, "authenticated":false, "ready":false,
+                    "observed_at":observed, "retry_at":null
+                }),
+                Some(true),
+            ),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"acquired", "stale":false,
+                    "connected":false, "authenticated":false, "ready":false,
+                    "observed_at":observed, "retry_at":before
+                }),
+                Some(true),
+            ),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"acquired", "stale":false,
+                    "connected":false, "authenticated":false, "ready":false,
+                    "observed_at":observed, "retry_at":future
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"acquired", "stale":false,
+                    "connected":true, "authenticated":true, "ready":true,
+                    "observed_at":observed, "retry_at":future
+                }),
+                Some(false),
+            ),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"acquired", "stale":true,
+                    "connected":null, "authenticated":null, "ready":null,
+                    "observed_at":observed, "valid_until":"2026-11-25T00:00:00Z",
+                    "retry_at":null
+                }),
+                Some(true),
+            ),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"unknown", "stale":false,
+                    "connected":false, "authenticated":false, "ready":false,
+                    "observed_at":observed, "retry_at":future
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"released", "stale":false,
+                    "connected":false, "authenticated":false, "ready":false,
+                    "observed_at":observed, "retry_at":null
+                }),
+                None,
+            ),
+            (json!({}), None),
+            (
+                json!({
+                    "scope":"serving_instance", "lease":"acquired", "stale":false,
+                    "connected":false, "authenticated":false, "ready":"false",
+                    "observed_at":observed, "retry_at":null
+                }),
+                None,
+            ),
+        ];
+        for (connection, expected) in cases {
+            assert_eq!(
+                discord_connection_state(&connection).map(|(_, down)| down),
+                expected,
+                "{connection}"
+            );
+        }
+    }
 
     fn row() -> NyxbotChannel {
         bson::from_document(doc! {

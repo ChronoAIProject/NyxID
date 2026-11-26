@@ -703,6 +703,7 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
     first.guest = true;
     let row = begin(&f, &f.owner, &first).await;
     let execution = crate::models::org_channel::Execution {
+        org_use_revision: 0,
         version: 1,
         org_id: org.clone(),
         revision: "rev-1".into(),
@@ -1745,6 +1746,24 @@ async fn group_cards_mark_the_visible_group_and_opening_it_reads_them_without_re
         None
     );
     let card = action_card(&f, &row, &researcher.id, "Delete service g?").await;
+    let turn_id = &row.active_turn.as_ref().unwrap().turn_id;
+    assert_eq!(card.requested_turn_id.as_ref(), Some(turn_id));
+    acks::record_auto_allowed(
+        db,
+        &chat_authority(&row, &researcher.id),
+        "read_item",
+        &json!({}),
+        &acks::AutoAllowed {
+            class: acks::OwnerActionClass::Read,
+            mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            reason: "approval",
+        },
+        "Read the group item",
+    )
+    .await;
+    assert_eq!(db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .count_documents(doc! {"conversation_id":&row.id,"requested_turn_id":turn_id,"decided_by":"access_mode"})
+        .await.unwrap(),1);
     let rows = rows_of(&f, &f.owner).await;
     assert_eq!(rows.len(), 1);
     let pending = &rows[0];
@@ -1956,6 +1975,7 @@ async fn concurrent_producers_on_one_source_yield_one_unread_row_with_the_full_c
         last_recipient_ids_by_actor: Default::default(),
         created_by: "user".into(),
         message_count: 0,
+        pending_org_use_revisions: Default::default(),
         pending_agent_ids: Vec::new(),
         hops_remaining: 0,
         followers: Vec::new(),

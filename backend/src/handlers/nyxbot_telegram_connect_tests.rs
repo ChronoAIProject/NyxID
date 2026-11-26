@@ -350,6 +350,17 @@ fn telegram_personal_specialist_connect_introspection_owner_link_and_turn() {
                 assert_eq!(row.status, "active");
                 assert_eq!(row.platform, "telegram");
                 assert_eq!(row.transport, "gateway");
+                if f.state.encryption_keys.contextual_record_writes() {
+                    assert_eq!(
+                        row.secret_context_versions.get(channel_key::FIELD),
+                        Some(&3)
+                    );
+                    let raw = decrypt_agent_key(&f.state, &row).await.unwrap().unwrap();
+                    let mut wrong_scope = row.clone();
+                    wrong_scope.id = Uuid::new_v4().to_string();
+                    assert!(decrypt_agent_key(&f.state, &wrong_scope).await.is_err());
+                    assert!(!raw.is_empty());
+                }
                 assert!(row.org_specialist.is_none());
                 assert!(row.owner_sender_ids.is_empty());
                 assert_eq!(row.agent_id.as_deref(), Some(f.specialist.id.as_str()));
@@ -683,6 +694,8 @@ fn telegram_real_connect_configuration_refusal_records_attempt_without_keys() {
             assert_eq!(row.status, "failed");
             assert!(row.route_api_key_id.is_empty()); // no credential was ever allocated
             assert!(row.agent_api_key_id.is_none());
+            assert!(row.agent_key_ciphertext.is_none());
+            assert!(row.secret_context_versions.is_empty());
             assert_eq!(keys.count_documents(doc! {}).await.unwrap(), count);
             assert!(f.gateway_calls.lock().await.is_empty());
             let health =

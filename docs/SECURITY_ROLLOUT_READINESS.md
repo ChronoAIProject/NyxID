@@ -225,6 +225,7 @@ feature flags requires deployment readiness:
 | --- | --- |
 | `channel:discord-gateway` | Relay socket ownership and gateway transport handoff; every transport writer must wait for relay shutdown before remote setup. The socket worker additionally requires live readiness at acquisition and renewal. |
 | `assistant:org-agents` | Creation/configuration and use-oriented organization-agent discovery gate (`delegation_summaries`); direct use retains live membership/resource ACLs. |
+| `assistant:org-agent-access-lists-v1` | Organization specialist access-list authoring. Effective flag enables, clearing an override that enables authoring, and each policy PUT require durable activation and live fleet support. |
 | `assistant:operation-scopes` | Scope editing gate; stored scopes are enforced during authentication and execution with the flag off. |
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
@@ -476,3 +477,21 @@ look is not evidence of rollback. Initial heartbeat publication precedes workers
 and HTTP serving. The observation-floor limitations above still apply to invisible
 pre-protocol builds. No lease checkpoint, manual activation or provider total can
 certify missing history. Delivery, admission and money are unaffected.
+
+## Organization specialist access lists
+
+Deploy the enforcing readers and workers before the authoring release. Keep
+`assistant:org-agent-access-lists-v1` off until every process that can admit,
+execute or deliver specialist work enforces saved restrictions. On the
+authoring release, check the capability’s `serving_ready` in
+`GET /api/v1/admin/security-readiness`, then enable the flag for the desired
+cohort. The PUT resolves the flag for the Admin in the specialist’s owning
+organization. A missing activation or an unsupported live generation makes
+GET report `authoring_available: false` and PUT return HTTP 403.
+
+To roll back, disable authoring at the effective scopes and deploy the
+reader release (#2977) or another release that enforces both lists and their
+revisions. Disabling the flag preserves each saved policy and outstanding
+revocations. Keep pre-reader replicas out of ingress, execution and delivery
+while restricted data or work exists. Heartbeats can assess only observed
+generations. See [organization specialist agents](ORG_AGENTS.md).

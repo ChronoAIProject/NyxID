@@ -4,9 +4,9 @@
 
 The HTTP Event Gateway lets external devices, analyzers, and services push events into an AI agent conversation over a simple HTTP POST. It bridges the "pull mode" NyxID has always had (agents calling external APIs via `/proxy`) with a "push mode" where real-world sensors can notify an agent when something happens.
 
-A camera analyzer detects a person entering the living room, a thermostat reports a spike, an ESP32 sensor fires an alert — all land as a `CallbackPayload` on the agent's webhook and are delivered end-to-end through the same channel relay pipeline already used for Telegram, Discord, Lark, and Feishu bots.
+A camera analyzer detects a person entering the living room, a thermostat reports a spike, an ESP32 sensor fires an alert — all land as a `CallbackPayload` on the agent's callback URL, using the same callback contract as channel bot relay. Events target only **device conversations**: active `channel_conversations` rows with `platform: "device"` that are assigned to the calling agent key. They never reach a Telegram, Discord, Lark or other bot conversation.
 
-NyxID is a **pure passthrough gateway** for events (see [ADR-013](#adr-013-pure-passthrough)): it authenticates, applies cluster-wide rate limits and deduplication, and forwards once. It never retries, never queues, and never stores event payload content. The agent receives the event, acts on it, and optionally replies through the existing async reply endpoint.
+NyxID is a **pure passthrough gateway** for events (see [ADR-013](#adr-013-pure-passthrough)): it authenticates, applies cluster-wide rate limits and deduplication, and forwards once. It never retries, never queues, and never stores event payload content. The agent receives the event and acts on it. Device conversations are one-way: replies, thread replies, edits and attachment downloads that target a device conversation or a device-event message return `400 device_channel_reply_not_allowed` (code 10006), and proactive `/channel-relay/send` refuses device conversations.
 
 ```mermaid
 graph LR
@@ -23,8 +23,7 @@ graph LR
     end
 
     subgraph Agent
-        CB[callback_url<br/>POST with HMAC]
-        ASYNC[POST /channel-relay/reply]
+        CB[callback_url<br/>POST with callback JWT]
     end
 
     A --> H
@@ -34,8 +33,6 @@ graph LR
     SVC --> LOG
     SVC --> CB
     CB -->|202| SVC
-    CB -.optional reply.-> ASYNC
-    ASYNC --> D[Telegram / Discord / Lark]
 ```
 
 ## ADR-013 Pure Passthrough
@@ -67,8 +64,8 @@ sequenceDiagram
 
     Analyzer->>NyxID: POST /api/v1/channel-events/{conversation_id}<br/>Bearer nyxid_ag_... + envelope
     NyxID->>NyxID: AuthUser extractor (require AuthMethod::ApiKey)
-    NyxID->>DB: find ChannelConversation by (_id, is_active, agent_api_key_id)
-    alt not found / not owned
+    NyxID->>DB: find ChannelConversation by (_id, is_active, agent_api_key_id, platform="device")
+    alt not found / not owned / not a device conversation
         DB-->>Analyzer: 401 Unauthorized
     end
     NyxID->>NyxID: reject if platform_conversation_id == "*"
@@ -83,10 +80,10 @@ sequenceDiagram
         Dedup-->>Analyzer: 200 OK (idempotent no-op)
     end
     NyxID->>DB: fetch ApiKey (callback_url, key_hash)
-    NyxID->>NyxID: lookup recent inbound thread_id<br/>(Discord interaction / Telegram topic)
+    NyxID->>NyxID: lookup recent non-device inbound thread_id<br/>(normally none on a device conversation)
     NyxID->>DB: store ChannelMessage (metadata only, callback_status=pending)
     NyxID->>NyxID: build CallbackPayload<br/>platform="device"<br/>message_id=NyxID uuid<br/>content.text=<envelope JSON>
-    NyxID->>Agent: POST callback_url<br/>X-NyxID-Signature (HMAC-SHA256)
+    NyxID->>Agent: POST callback_url<br/>X-NyxID-Callback-Token (RS256 JWT)<br/>+ legacy X-NyxID-Signature (HMAC-SHA256)
     alt HTTP 202
         Agent-->>NyxID: 202 Accepted
         NyxID->>Dedup: commit exact claim with dedup TTL
@@ -121,7 +118,7 @@ flowchart LR
     end
 
     subgraph State["Shared MongoDB Coordination"]
-        DSTORE[(coordination_event_dedup<br/>claim + commit + TTL)]
+        DSTORE[(event_dedup_records<br/>claim + commit + TTL)]
         PCL[(coordination_token_buckets<br/>conversation token bucket)]
     end
 
@@ -182,7 +179,7 @@ Device events synthesized by the gateway persist a row here too with `platform: 
 
 ### ChannelConversation (collection: `channel_conversations`)
 
-Conversations now also carry the default-off human `allow_agent_initiated` setting for the bot send interface. Device conversations remain one-way: discovery reports all outbound capabilities as false, and `/channel-relay/send` rejects them. The gateway fetches by `{_id, is_active, agent_api_key_id}` so unknown, inactive, and foreign conversations all collapse into a single 401 response without leaking existence.
+Conversations also carry the default-off human `allow_agent_initiated` setting for the bot send interface. Device conversations (`platform: "device"`, no `channel_bot_id`) are one-way: discovery reports all outbound capabilities as false, and `/channel-relay/send` rejects them. The gateway fetches by `{_id, is_active, agent_api_key_id, platform: "device"}` so unknown, inactive, foreign and bot-backed conversations all collapse into a single 401 response without leaking existence.
 
 ## Backend Services
 
@@ -193,20 +190,20 @@ Orchestration layer. Exposes a single public function `forward_event()` that tie
 Execution order matters — each step is ordered to minimize wasted work on the failure paths and to prevent side-channel leaks:
 
 1. **Auth extraction** — require `AuthMethod::ApiKey`. Relay JWTs carry an `api_key_id` too but they represent delegated access, not a real agent key; accepting them here would let a callback recipient synthesize device events. Short-circuits before any DB work.
-2. **Scoped conversation lookup** — `find_one({_id, is_active, agent_api_key_id})`. Unknown / inactive / foreign → single 401. The rate-limit bucket is only consumable by legitimate owners.
+2. **Scoped conversation lookup** — `find_one({_id, is_active, agent_api_key_id, platform: "device"})`. Unknown / inactive / foreign / bot-backed → single 401. The rate-limit bucket is only consumable by legitimate owners.
 3. **Wildcard reject** — `platform_conversation_id == "*"` rows are default-agent catch-all routes; async replies cannot round-trip through them. Rejected with 400 `wildcard_conversation_not_supported`. Only surfaces to owners (not a leak).
 4. **Per-channel rate limit** — token bucket keyed by `conversation_id`, default 100/s burst 200.
 5. **Dedup claim** - `claim(namespace, conversation, event)` uses an atomic MongoDB upsert. Exactly one replica receives the fenced claim; concurrent callers return `outcome=deduped`. Failed preparation or forwarding releases the exact claim so a retry can proceed.
 6. **API key load** — fetch the agent key for `callback_url` + `key_hash`. Reject if `callback_url` is unset.
-7. **Inherit thread_id** — `lookup_recent_inbound_thread_id()` finds the most recent webhook-driven inbound in the conversation with a non-null `thread_id`. Interaction tokens have a 2-minute age cap; Telegram topic ids have no TTL.
-8. **Persist metadata** — `store_device_event_message()` writes a `ChannelMessage` row with the inherited thread_id. The stored message's UUID becomes the callback's `message_id` so async replies can look it up.
-9. **Build payload** — `CallbackPayload` with `platform = "device"`, `content.text` = full envelope JSON, `conversation.type = "device"`, `sender.platform_id = envelope.source`, timestamp in RFC 3339.
+7. **Thread lookup** — `lookup_recent_inbound_thread_id()` looks for the most recent non-device inbound row in the selected conversation with a non-null `thread_id` (interaction tokens older than 2 minutes are skipped). A device conversation receives only device events, so the lookup normally finds nothing.
+8. **Persist metadata** — `store_device_event_message()` writes a `ChannelMessage` row (with any thread_id the lookup returned). The stored message's UUID becomes the callback's `message_id`, correlating the callback with this row; it does not enable a reply.
+9. **Build payload** — `CallbackPayload` with `platform = "device"`, `content.text` = full envelope JSON, `conversation.type` = the conversation's stored `platform_conversation_type` (default `"device"`), `sender.platform_id = envelope.source`, no `thread_id` or `reply_token`, timestamp in RFC 3339.
 10. **Forward and measure** — `channel_relay_service::forward_to_agent()` returns a `CallbackDelivery { http_status: Option<u16>, result }`. Latency captured around the call.
 11. **Record outcome** - on success: commit the fenced dedup claim with the configured TTL, touch conversation `last_message_at`, update `callback_status = "delivered"`, and write `ChannelEventLog` with the real upstream status. On failure: release the claim, update `callback_status = "failed"`, and write the failure log.
 
 ### event_dedup_cache (`backend/src/services/event_dedup_cache.rs`)
 
-Thin namespace wrapper around `coordination_service::EventDedupStore`. Records are keyed by a hash of `(namespace, scope, event_id)` in `coordination_event_dedup`. `claim()` is an atomic first-writer-wins upsert, `commit()` requires the exact unexpired claim fence, and `release()` deletes only the caller's claim. A TTL index removes expired claims and committed dedup records. Channel events and trigger events use separate namespaces.
+Thin namespace wrapper around `coordination_service::EventDedupStore`. Records are keyed by a hash of `(namespace, scope, event_id)` in `event_dedup_records`. `claim()` is an atomic first-writer-wins upsert, `commit()` requires the exact unexpired claim fence, and `release()` deletes only the caller's claim. A TTL index removes expired claims and committed dedup records. Channel events and trigger events use separate namespaces.
 
 ### channel_relay_service (`backend/src/services/channel_relay_service.rs`)
 
@@ -216,7 +213,7 @@ Existing file, three changes:
 
 The `http_status` field on `CallbackDelivery` records the actual agent status (`Some(202)` / `Some(200)` / `Some(5xx)`) or `None` for transport failures (connection refused, timeout, serialization error). This status flows all the way into `ChannelEventLog.upstream_status_code`.
 
-**`store_device_event_message()` — new helper.** Persists a metadata-only `ChannelMessage` row from the gateway path. Accepts an `inherited_thread_id: Option<String>` parameter that carries forward Discord interaction tokens or Telegram topic ids from the conversation's most recent webhook-driven inbound.
+**`store_device_event_message()` — new helper.** Persists a metadata-only `ChannelMessage` row from the gateway path. Accepts an `inherited_thread_id: Option<String>` parameter for a thread id found on an earlier non-device inbound row of the same conversation; on device conversations it is normally `None`.
 
 **`store_inbound_message()` and `store_outbound_message()` — content stripped.** No longer write `text`, `attachments`, or `raw_platform_data`. `store_outbound_message()` lost its `text` parameter entirely — reply text goes to the platform adapter directly and is not persisted.
 
@@ -235,10 +232,12 @@ Responsibilities:
 
 ### channel_relay (`backend/src/handlers/channel_relay.rs`)
 
-Modified: `async_reply` gained a platform-aware dispatch block that translates the original inbound message's `thread_id` into the outbound adapter's metadata key:
+Device channels have no reply surface. `async_reply` (also used by `/thread-reply`), the edit-context resolvers behind `/reply/update` and attachment downloads refuse a request when the original message or its conversation has `platform: "device"`, returning `400 device_channel_reply_not_allowed` (10006) before any bot lookup. The check on the original message also covers legacy device-event rows that older gateway versions stored inside bot conversations. Initiated `/send` also refuses device conversations.
 
-- **Discord interaction** (`thread_id` starts with `"interaction:"`): injected as `metadata.interaction_thread_id` so `discord::send_reply()` targets the follow-up webhook endpoint. Gated by a platform-specific TTL window — 14 minutes for webhook-driven originals, 12 minutes for device-event originals (source age is already capped at 2 minutes at inheritance time, so combined worst case is 14 min < Discord's 15-min TTL).
-- **Telegram topic** (`conversation.platform == "telegram"`): injected as `metadata.message_thread_id` with no TTL guard (topic ids don't expire). Dispatch uses `conversation.platform`, not `original.platform`, because device events stored into Telegram conversations still carry `original.platform == "device"`.
+For bot conversations, each adapter's `reply_context` translates the original inbound message's `thread_id` into outbound metadata:
+
+- **Discord interaction** (`thread_id` starts with `"interaction:"`): injected as `metadata.interaction_thread_id` while the original message is younger than 14 minutes, so `discord::send_reply()` targets the follow-up webhook endpoint; an older token falls back to the regular channel message API.
+- **Telegram topic**: the Telegram adapters inject `metadata.message_thread_id` with no TTL guard (topic ids don't expire).
 - Other platforms: unchanged.
 
 ### channel_webhooks (`backend/src/handlers/channel_webhooks.rs`)
@@ -361,13 +360,14 @@ Content-Type: application/json
 | `type` | `content.type` |
 | `timestamp` | `timestamp` (RFC 3339) |
 | `payload` / `metadata` | embedded in `content.text`, never stored separately |
-| — | `message_id` = NyxID-assigned `ChannelMessage._id` (enables async reply lookup) |
+| — | `message_id` = NyxID-assigned `ChannelMessage._id` (correlates the callback with the stored row; replies to it are refused) |
 | — | `platform` = `"device"` |
 | — | `conversation.id` = path param |
 | — | `conversation.platform_id` = `ChannelConversation.platform_conversation_id` |
-| — | `conversation.type` = `"device"` |
+| — | `conversation.type` = `ChannelConversation.platform_conversation_type` (default `"device"`) |
 | — | `agent.api_key_id` = caller's `api_key_id` |
-| — | `thread_id` = inherited from most recent webhook-driven inbound (Discord interaction or Telegram topic) |
+| — | `thread_id` = absent |
+| — | `reply_token` = absent (device events have no reply surface) |
 
 ### Response codes
 
@@ -375,7 +375,7 @@ Content-Type: application/json
 |---|---|
 | 200 | Accepted (`status: "accepted"`) or deduplicated (`status: "duplicate"`) |
 | 400 | Invalid envelope shape, or wildcard `platform_conversation_id` |
-| 401 | Missing/invalid bearer, `AuthMethod != ApiKey`, or conversation not owned by this key |
+| 401 | Missing/invalid bearer, `AuthMethod != ApiKey`, or conversation not an active device conversation assigned to this key |
 | 429 | Per-channel rate limit exceeded |
 | 502 | Downstream agent unreachable or returned non-2xx |
 
@@ -388,7 +388,7 @@ Content-Type: application/json
 
 ### Conversation existence is not leakable
 
-The `find_one({_id, is_active, agent_api_key_id})` query collapses "not found", "inactive", and "foreign" into a single 401. A caller holding a valid agent key cannot distinguish a foreign conversation from a nonexistent one via timing or status code. The wildcard 400 check runs *after* the ownership filter, so a 400 is only ever surfaced to legitimate owners.
+The `find_one({_id, is_active, agent_api_key_id, platform: "device"})` query collapses "not found", "inactive", "foreign" and "bot-backed" into a single 401. Every lookup miss returns the same response, so a caller holding a valid agent key cannot tell a foreign, inactive, nonexistent or bot-backed conversation apart by status code. An active device conversation assigned to the caller proceeds to rate limiting and forwarding. The wildcard 400 check runs *after* the ownership filter, so a 400 is only ever surfaced to legitimate owners.
 
 ### Pure passthrough, no payload persistence
 
@@ -396,7 +396,7 @@ Per ADR-013, `channel_event_logs` stores only metadata. Event payloads (`payload
 
 ### HMAC signing
 
-The callback is signed with `HMAC-SHA256(api_key.key_hash, body_bytes)` and carries `X-NyxID-Signature`, `X-NyxID-Message-Id`, `X-NyxID-Timestamp`, and `X-NyxID-Platform` headers. Agents verify the signature to confirm the callback came from NyxID and not an arbitrary third party.
+The callback carries `X-NyxID-Callback-Token`, an RS256 JWT whose `body_sha256` claim binds the exact request body bytes. Agents verify it against NyxID's `/.well-known/jwks.json` to confirm the callback came from NyxID and not an arbitrary third party; see [Callback Authentication (JWT)](./CHANNEL_BOT_RELAY.md#callback-authentication-jwt) for the claims. During the transition NyxID also sends the legacy `X-NyxID-Signature` header (`HMAC-SHA256(api_key.key_hash, body_bytes)`), together with `X-NyxID-Message-Id`, `X-NyxID-Timestamp`, and `X-NyxID-Platform`.
 
 ### Rate limiter ordering prevents bucket exhaustion attacks
 
@@ -408,17 +408,18 @@ When the CLI reads the payload from stdin, an API key prompt on stdin would sile
 
 ## Discord Interaction Handling
 
-Discord slash commands and button interactions produce a follow-up webhook token valid for **~15 minutes** with up to 5 follow-ups. NyxID stores the token on the original `ChannelMessage` as `thread_id = "interaction:{app}:{token}"` and translates it into `metadata.interaction_thread_id` at reply time, which `discord::send_reply()` uses to call the follow-up webhook endpoint instead of the normal `/channels/{id}/messages` API.
+Discord slash commands and button interactions produce a follow-up webhook token valid for **~15 minutes** with up to 5 follow-ups. NyxID stores the token on the original `ChannelMessage` as `thread_id = "interaction:{app}:{token}"` and translates it into `metadata.interaction_thread_id` at reply time, which `discord::send_reply()` uses to call the follow-up webhook endpoint instead of the normal `/channels/{id}/messages` API. This applies to replies in bot conversations only.
 
-When a device event is pushed into a conversation whose most recent inbound was an interaction, the token is inherited onto the synthesized device-event row subject to two compounding guards:
+Device events never use these tokens. They target only device conversations, their callbacks carry no `thread_id`, and replies to them are refused (10006). The event service's thread lookup still applies the guards below, so a token can be copied onto a device-event row only from a fresh non-device inbound row in the same conversation:
 
 ### Copy-time window (2 minutes)
 
-`lookup_recent_inbound_thread_id()` only returns an interaction token if the source webhook inbound is fresher than 2 minutes. Stale tokens are not inherited.
+`lookup_recent_inbound_thread_id()` only returns an interaction token if the source webhook inbound is fresher than 2 minutes. Stale tokens are not inherited. A copied value is stored on the device-event row only; it is never sent in the callback or used for a reply.
 
-### Reply-time window (12 minutes for device events)
+<a id="reply-time-window-12-minutes-for-device-events"></a>
+### Reply-time window (bot conversations; none for device events)
 
-`async_reply` uses a platform-aware TTL: 14 minutes for webhook-driven originals (where `original.created_at` IS the real interaction timestamp, 1-minute safety margin under Discord's 15-min limit) and **12 minutes for device-event originals** (where `created_at` is as much as 2 minutes after the real interaction, so combined worst-case is 2 + 12 = 14 min).
+Device events have no reply-time window because replies to them are refused. For bot conversations, a reply attaches the interaction token only while the original message is younger than 14 minutes (one minute under Discord's 15-minute limit); an older token falls back to the regular channel message API.
 
 ### Stale-token poisoning protection
 
@@ -430,7 +431,7 @@ Telegram forum topics use a numeric `message_thread_id` to scope messages. NyxID
 
 **Inbound continuity and outbound topics.** Inbound `ChannelMessage.thread_id` and NyxBot partitions retain the native `message_thread_id` or gateway `conversation.thread_id` exactly as before. Existing reply-chain conversations and follows keep their identities. Image audiences and outbound metadata use separate `telegram_topic` evidence: native messages require `is_topic_message: true` for a topic; version 1 gateway thread facts declare `kind: topic` with a positive decimal `native_thread_id`. Explicit reply-chain evidence makes the outbound target chat-level while retaining the inbound key. Telegram facts remain the gateway's declaration; NyxID validates Lark and Feishu facts only. Legacy saved anchors without this additive evidence retain their historical outbound target. Old replicas ignore the evidence and share the unchanged inbound keys; the image claim guarantee applies after the fleet upgrade. No thread migration is needed.
 
-Topic ids have no TTL, so there is no reply-time age check for this case. The dispatch uses `conversation.platform` (not `original.platform`) so device events injected into Telegram conversations — where `original.platform == "device"` — still route correctly.
+Topic ids have no TTL, so there is no reply-time age check for this case. Device events never reach Telegram conversations, and replies to legacy device-event rows stored in bot conversations are refused (10006).
 
 ## Migration Notes
 
@@ -451,7 +452,7 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 ## Related Documents
 
 - [ADR-013: NyxID Pure Passthrough](https://github.com/ChronoAIProject/chrono-ai-ceo/blob/main/decisions/013-nyxid-pure-passthrough.md) — the architectural principle that drives every "no retry / no store / no queue" decision here
-- [Channel Bot Relay](./CHANNEL_BOT_RELAY.md) — the bot-side inbound path that the event gateway reuses for HMAC signing, conversation storage, and async reply delivery
+- [Channel Bot Relay](./CHANNEL_BOT_RELAY.md) — the bot-side inbound path whose callback signing and conversation storage the event gateway reuses
 - [Agent Isolation](./AGENT_ISOLATION.md) — how API keys carry scope and rate-limit policies that also apply to event senders
 - [NyxID#221](https://github.com/ChronoAIProject/NyxID/issues/221) — original feature request and CEO review thread
 
@@ -621,12 +622,16 @@ ingress and asynchronous replies retain the same authority check.
 
 The 15-second assistant sweep attempts at most one transport move per replica.
 Flag-on moves owner-verified relay bots to the gateway; refusal leaves their
-working route unchanged and retries daily. **Flag-off now also moves existing
+working route unchanged and retries daily. **Flag-off also moves existing
 personal and org gateway bots back to the relay**. Both directions build beside
 the working route, recheck authority/flag/active answers, then atomically swap the
 channel and route key. A busy bot answers first and retries in ten minutes.
 Returning releases the gateway channel and deletes its agent key and old route
 key. Telegram always uses the gateway and is excluded from flag-off returns.
+WhatsApp is also an exception: only dedicated-app BYO bots are eligible for the
+gateway (managed Embedded Signup bots stay on the relay), and its flag-off return
+waits for verified restoration of the Meta relay callback; see
+[Native WhatsApp](#native-whatsapp-dedicated-byo-apps-track-2-checkpoint).
 
 ### Independent custom-event channels
 
@@ -768,9 +773,13 @@ transaction clears only the exact stored intake-unconfirmed state; real delivery
 failures remain. Bot inbound diagnostics share the existing admission fence write. Health
 and the channel aggregate use this evidence separately from activation and
 historical relay delivery; no event means `discord_native_intake_unconfirmed`.
-Existing native bots are not automatically returned to relay. Positive connection
-confirmation and automatic rollback require a negotiated CMA health contract,
-a default-off rollout and all-replica readiness; CMA#1586 tracks that contract.
+The existing native delivery sweep also observes the gateway's
+`native_discord_activation.connection` status, including already flagged native
+bindings, and persists conclusive connection evidence scoped to the adopted
+binding and remote channel. See [Discord intake health](CHANNEL_BOT_RELAY.md#discord-intake-health-and-failed-hand-overs-2328-2323)
+for the authority, ordering, outage and recovery contract. Existing native bots
+are not automatically returned to relay. Automatic rollback requires a separate
+negotiated CMA contract, a default-off rollout and all-replica readiness.
 
 Failed setup is cleaned through the exact attempt fence, including errors before
 a reservation is returned. The bounded release sweep also repairs stale direct
@@ -974,6 +983,136 @@ a fixed notice only to an existing authorized owner thread. No
 public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
+### Reconciling a retained relay source
+
+An existing conversation reader can pass the workflow's `source_event_id` to
+`GET /api/v1/channel-conversations/{id}/messages?source_event_id=<alias>`.
+The alias is the 64-character lowercase hexadecimal value from verified channel
+context. The conversation ID is the same NyxID route ID used for the message
+history. The existing conversation ACL admits the resource owner and active
+members of the owning organization, including viewers. The lookup applies to
+NyxID-relayed events. Native gateway ingress, including native Discord and
+WhatsApp, uses its own receipt paths.
+
+Readers who supply the exact retained alias can see source and result metadata
+for its bound turn, including turns associated with a private channel
+conversation. The response is limited to the alias, the original inbound ID,
+the recorded platform message and sender IDs, the provider response ID, and
+the turn and reply status fields. Message text, attachments, assistant
+conversation and turn IDs, execution identity, and gateway credentials stay
+outside this response. The alias is a lookup key under the conversation ACL.
+
+Before using any returned IDs, require a top-level `source_event_id` that
+exactly equals the requested alias and an `inbound_message_id` that is a
+NyxID message UUID. Older servers can return a normal message page with HTTP
+200 because they ignore the query parameter. Treat any response without the
+exact mapping fields as unresolved during rollout.
+
+The response includes the original `inbound_message_id`, its native
+`platform_message_id` and `sender_platform_id` when recorded, and the provider
+`response_id` when retained. The relay activity's event UUID is the NyxID
+inbound message ID. That UUID also appears as `reply_to_message_id` on related
+outbound message rows. A source may have several related messages, such as an
+explicit tool post and an automatic reply. For CMA-owned delivery, use the
+designated consumer's receipt for the exact event and response to identify the
+answer, and use outbound rows to cross-check platform message IDs.
+
+`turn_status` reports the exact assistant turn's status. `reply_status` reports
+NyxID's local reply evidence. `confirmed` records the completion of NyxID's
+reply operation. `reply_evidence` distinguishes explicit confirmation returned
+by the gateway reply target from a complete set of locally recorded platform
+part receipts. `reply_kind`
+marks confirmed output as `completed_turn_output`, `failed_turn_output`, or
+`unclassified`. Failed-turn output can include a failure notice or partial
+answer and does not establish a successful final answer.
+`pending` covers preparation or a receipt wait, including a gateway 409
+`routed_reply_in_progress` admission. `handed_to_gateway` records provider
+stream or replay custody. A terminal provider frame carries no platform
+receipt evidence. `unconfirmed`, `unknown`,
+`silent` and `refused` preserve distinct local outcomes. A missing
+`response_id` or missing delivery evidence leaves the corresponding join
+or result unknown.
+
+Ordinary text source aliases expire 24 hours after admission. Media events can
+be retained for seven days, with response-read mappings still limited to
+24 hours. Unknown, expired and out-of-conversation sources return 404.
+A lookup does not extend retention or schedule execution.
+
+#### Reconcile the original Work item
+
+The read-only event-operations weekly report reads CMA's recent activity and
+saved snapshots, and paginates NyxID message history with `per_page=100&page=…`
+using the owner's local CLI session. Its join starts with the gateway event
+ID. The workflow still needs to consume the exact alias lookup and use an
+existing authorized Work writer to apply verified receipts to the original
+item. [Weekly report reader](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/blob/c6a98d09f954a01311b3d6b5f23be8907243f764/automation/community-event-ops/ledger.py)
+
+1. Verify the unattended consumer's actual credential on the exact route
+   using an authorized test Work item. The reader must be eligible for that
+   route and have existing owner or active organization membership access.
+   Keep the pending Work item if the consumer lacks that access. Specialist
+   and conversation keys keep their existing route restrictions. Use
+   credentials issued to the reader under its own identity.
+2. Use the saved Work key, route ID and verified `source_event_id` to fetch
+   the exact mapping within the retention window. Verify the alias echo and
+   inbound UUID, then save the mapping with the Work key. Keep an unresolved
+   item pending when the mapping is missing or the old server returns a page.
+3. With the existing gateway reader, match the inbound UUID to the event on
+   the intended channel. Select the designated consumer and exact
+   `response_id`, then check its answer receipt and platform message ID. Keep
+   an absent or ambiguous result unverified. Record the turn outcome and
+   delivery evidence independently so a confirmed explicit post or failure
+   notice does not count as the automatic answer.
+4. Apply the result to the original Work key. Use the source and exact
+   receipt identifiers to reuse the same evidence on later reads. Preserve
+   verified evidence when a later activity view omits the receipt. Consume
+   the same receipt twice and verify one Work item, one set of evidence, no
+   second send, and no increase in the completion count on the second pass.
+   Check that the next report reflects the reconciled result. [Receipt consumption](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/issues/108) · [Work update and replay](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/issues/112)
+
+Saving an alias mapping preserves the join for that Work item. Weekly receipt
+coverage depends on the gateway's retained capture and its reported coverage
+window. The current recent activity view returns up to 50 events, and its
+saved snapshots can leave gaps. Track durable history activation and weekly
+coverage separately.
+[CMA receipt history](https://github.com/ChronoAIProject/cma/issues/2188)
+
+#### Investigate a historical failed turn after delivery
+
+Keep the UTC occurrence time, original relay event UUID or verified source
+alias, designated CMA `response_id` (`resp_…`), and any confirmed platform
+message ID in the protected incident record. The event and response IDs
+identify the gateway occurrence. The source alias joins the workflow to the
+original inbound. The platform message ID identifies the observed send. For
+the cases on #2487, start with the retained evidence from the incident.
+[Incident report](https://github.com/ChronoAIProject/NyxID/issues/2487#issuecomment-6892205110) · [Follow-up evidence](https://github.com/ChronoAIProject/NyxID/issues/2487#issuecomment-6893592385)
+
+The NyxID trace tools require the internal **turn UUID v4**. In retained
+operator evidence, a `nyxbot_channel_answer_delivery` audit row can carry the
+source alias in `event_data.event_id` and the bound UUID in
+`event_data.turn_id`. An operator with existing access to retained provider
+and event metadata can also follow the exact provider response to its source
+event and read the event's bound `turn_id`. The relay source lookup returns
+the gateway response ID for receipt correlation.
+`X-NyxID-Trace-Id` can also supply the UUID when the response headers were
+written after admission. Before admission that header can carry a request
+ID. Use only a confirmed turn association.
+
+With that UUID, use **Admin → Audit log → Search field → Turn ID (exact)**
+or the existing admin `GET /api/v1/admin/audit-log?turn_id=<UUID>` and
+`GET /api/v1/admin/audit-log/count?turn_id=<UUID>` under current RBAC. Check
+that the response echoes `applied_turn_id`. For timing, give the same UUID or
+its 32-character hex form to `scripts/turn-trace.py --trace-id` with the
+authorized NDJSON exports. Use delivery and execution milestones separately.
+[Turn trace reader and bounds](TURN_TRACE.md#admin-reader)
+
+If the turn association has expired, old audit rows lack the turn UUID, or
+trace exports lack the terminal span or counterpart records, record that
+coverage gap. Trace metadata contains stage, outcome and timing when recorded.
+It cannot recover tool arguments, tool results or message content. Preserve
+any confirmed send and recorded failed turn, and leave the historical cause
+unresolved when the retained evidence cannot establish it.
+
 ### Reply-target receipts and dispatch lookup
 
 `POST /reply-targets/{ref}/messages` with exactly `409` and
@@ -1142,21 +1281,14 @@ The agent-key presence check and every live delivery-authority check remain.
 Checking, capacity and machine-control progress keep their existing reference
 window (29 minutes); permission occurrences keep their existing event/target gates.
 
-Only these widened result paths atomically claim the settled assistant message
-for their stable destination before text dispatch (#2462). Primary and additional
-results to the same destination share the claim. A repeated attempt skips with
-`already_claimed`; database errors authorize no send. Confirmed, rejected,
-unknown and interrupted attempts keep the claim, with no retry or preparation
-lease. A crash after claiming but before sending can lose text. Claims contain
-only destination digests, never appear in APIs/logs/audit, and leave with the
-message on purge. Missing settled replies authorize no send. New replicas share
-the serde-defaulted list; old replicas ignore it and retain their 29-minute
-behavior until drained, including on rollback. This cannot retroactively fence
-pre-upgrade sends or old writers; there is no readiness gate. Missing or expired
-sources do not redirect replies. A missing permission source finishes refused;
-other supplemental text is skipped while the transcript remains available.
-Direct and relay-era replies, images and multipart receipts retain their prior
-paths. Primary final and durable late replies retain their original barriers.
+The post-turn text claim applies to relay-source and native gateway team and
+additional-chat results, including followed threads. The hook reads the exact
+settled reply and its saved additional destinations. The rules for a missing
+reply, destination privacy, direct relay claims and rolling upgrades are in the [NyxBot
+delivery contract](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
+Missing or expired sources skip delivery to that destination. A missing
+permission source finishes refused. Image claims, multipart receipts, primary
+final replies and durable late replies use their existing delivery paths.
 
 Native-source progress is suppressed. Genuine independent native team results,
 followed results and permission occurrences retain their existing event replies
@@ -1821,6 +1953,13 @@ reservation. These and unknown 400s retain the existing release obligation for
 record-ID reconciliation and the admin release review API. Only known pre-effect
 validation/authentication refusals settle as `not_created`. Local authority and
 keys are retired independently of remote cleanup availability.
+
+The shared `nyxbot_channel_connection_service` owns connection preflight,
+transactional bot-generation capture, credential allocation and setup diagnostics.
+Gateway agent credentials use `nyxbot_channel_key` sealing for the exact channel,
+linking owner and key ID. A refused preflight allocates no credentials and writes
+no credential context marker. Direct Meta connections use the same orchestration
+with their live default-route proof, repair fences and committed guest policy.
 
 Failed Telegram connection health surfaces a bounded last-attempt code and
 allowlisted operation, HTTP status and validation pointer, never remote detail

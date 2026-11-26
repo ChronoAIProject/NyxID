@@ -1,4 +1,5 @@
 import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
+import { ChannelMetaCallbackPage } from "@/pages/channel-meta-callback";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -75,6 +76,7 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
+  ActivityPage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -115,7 +117,6 @@ import {
   PrivacyPage,
   TermsPage,
   DataDeletionPage,
-  NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
@@ -224,6 +225,12 @@ const loginRoute = createRoute({
       : {}),
   }),
   component: LoginPage,
+});
+
+const activityRoute = createRoute({
+  path: "/activity",
+  getParentRoute: () => rootRoute,
+  component: ActivityPage,
 });
 
 const nyxbotOnboardingRoute = createRoute({
@@ -829,7 +836,9 @@ const designSystemRoute = createRoute({
 const notificationSettingsRoute = createRoute({
   path: "/approvals/settings",
   getParentRoute: () => dashboardLayout,
-  component: NotificationSettingsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings", search: { tab: "notifications" }, replace: true });
+  },
 });
 
 const approvalHistoryRoute = createRoute({
@@ -1009,6 +1018,12 @@ export const channelBotSetupRoute = createRoute({
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: parseChannelBotSetupPageSearch,
   component: ChannelBotSetupPage,
+});
+
+const channelMetaCallbackRoute = createRoute({
+  path: "/channel-bots/meta-callback/$platform",
+  getParentRoute: () => rootRoute,
+  component: ChannelMetaCallbackPage,
 });
 
 const channelBotDetailRoute = createRoute({
@@ -1306,6 +1321,7 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  activityRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
@@ -1327,6 +1343,7 @@ const routeTree = rootRoute.addChildren([
   loginCodeRoute,
   loginAgentKeyRoute,
   channelBotSetupRoute,
+  channelMetaCallbackRoute,
   connectLinkRoute,
   channelConnectLinkRoute,
   connectLinkReturnRoute,

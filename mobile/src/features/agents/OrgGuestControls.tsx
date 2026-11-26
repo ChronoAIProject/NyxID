@@ -46,6 +46,7 @@ export function OrgGuestChannel({
     !query.isError
       ? query.data
       : undefined;
+  const canManage = settings?.can_manage && agent.can_maintain !== false;
   return (
     <>
       <SettingsRow
@@ -68,7 +69,7 @@ export function OrgGuestChannel({
                 value={settings?.guest_enabled ?? false}
                 disabled={
                   !settings ||
-                  !settings.can_manage ||
+                  !canManage ||
                   session.busy ||
                   channel.status !== "active" ||
                   (!settings.guest_enabled &&
@@ -76,7 +77,7 @@ export function OrgGuestChannel({
                       Boolean(settings.readiness_reason)))
                 }
                 onValueChange={(enabled) => {
-                  if (settings?.can_manage && !session.busy)
+                  if (settings && canManage && !session.busy)
                     void session.run(() =>
                       orgGuestApi.toggle(
                         channel.id,
@@ -91,7 +92,7 @@ export function OrgGuestChannel({
           />
           {settings ? (
             <>
-              {!settings.can_manage && <Notice message={t("An organization admin can change these settings.")} />}
+              {!canManage && <Notice message={t("An organization admin can change these settings.")} />}
               {(settings.guest_policy_mode === "grants" || settings.binding_limits_guest_services) && (
                 <SettingsRow
                   label={translateApp("Guests can use")}

@@ -926,6 +926,19 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
             }),
         )
         .await;
+        deliver_to(&f.state, &row, &origin, "event result", None).await;
+        let duplicate = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {
+                "event_type":"nyxbot_channel_supplemental_delivery",
+                "event_data.turn_id":&turn_id,
+                "event_data.reason":"already_claimed",
+            })
+            .await
+            .unwrap();
+        assert_eq!(duplicate, 1);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
         let requests = f.platform.received_requests().await.unwrap();
         let replies: Vec<_> = requests
@@ -1597,6 +1610,7 @@ async fn org_member_group_dm_group(linking_admin: bool) {
         OWNER,
         &f.row,
         serde_json::from_value(json!({"enabled":false})).unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -2358,7 +2372,8 @@ async fn delayed_source_identity(newer_message: bool) {
                 OWNER,
                 &conversation,
                 work,
-                None
+                None,
+                false
             )
             .await
             .unwrap()

@@ -71,6 +71,8 @@ impl AppError {
             | Self::SkillRead(_)
             | Self::AssistantMissingAccess(_)
             | Self::Conflict(_)
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. }
             | Self::AssistantTurnActive
             | Self::VoiceQueueFull
             | Self::VoiceProviderUnavailable
@@ -84,6 +86,7 @@ impl AppError {
             | Self::BillingRecoveryFailed { .. }
             | Self::VoiceStartFailed(_)
             | Self::AssistantTurnRequired
+            | Self::OrgAgentAccessAuthoringUnavailable
             | Self::AssistantModelAuthorityChanged
             | Self::GrantCascadeConfirmationRequired(_)
             | Self::RateLimited

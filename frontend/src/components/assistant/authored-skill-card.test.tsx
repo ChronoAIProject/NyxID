@@ -267,12 +267,16 @@ it("shows a sanitized unresolved-publication message and prevents discard", asyn
   mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["check"], failure_code: "publish_uncertain" });
   show({ ...card, status: "used" });
   expect(await screen.findByText(/cannot yet confirm whether Ornn published/)).toBeVisible();
+  expect(screen.getByText(/start a new skill draft\. NyxID will not publish this draft twice/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Retry publication" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
 });
 it("keeps a conflicting uncertain version available for read-only checks", async () => {
-  mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["check"], failure_code: "version_conflict" });
+  mocks.json.mockResolvedValue({ ...preview, base_scripts_not_copied: true, status: "publication_failed", actions: ["check"], failure_code: "version_conflict" });
   show({ ...card, status: "used" });
   expect(await screen.findByText(/Ask NyxBot for a new draft after this publication is resolved/)).toBeVisible();
+  expect(screen.queryByText(/start a new skill draft/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry publication" })).not.toBeInTheDocument();
@@ -295,6 +299,7 @@ it("does not claim an interrupted attempt is still in progress", async () => {
   show({ ...card, status: "used" });
   expect(await screen.findByText(/The last attempt was interrupted\. NyxID cannot yet confirm whether Ornn published this version; Check again only reads/)).toBeVisible();
   expect(screen.queryByText("Publication is in progress.")).not.toBeInTheDocument();
+  expect(screen.getByText(/start a new skill draft/)).toBeVisible();
   expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
 });
 it("says nothing was sent when an interrupted attempt can still be retried", async () => {

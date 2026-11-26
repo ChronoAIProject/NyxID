@@ -770,6 +770,52 @@ async fn discarded_attempt_replaces_browser_block_before_retry_and_settlement() 
     state.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn citation_markers_are_removed_from_the_settled_reply_and_checkpoint() {
+    let text = "答案 \u{e200}cite\u{e202}turn652437view1\u{e202}turn652437view2\u{e201}。";
+    let terminal = json!({"type":"response.completed", "sequence_number":1, "response":{
+        "id":RESPONSE, "conversation":{"id":SESSION}, "status":"completed",
+        "output":[{"type":"message","role":"assistant","phase":"final_answer",
+            "content":[{"type":"output_text","text":text,"annotations":[]}]}]
+    }});
+    let (state, _, server) = setup_stream(
+        "nyxa_citations",
+        Duration::ZERO,
+        vec![Frame::Created, Frame::Data(terminal)],
+    )
+    .await;
+    let reply = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let events = drain(reply).await;
+    let block = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .find(|event| event["event"] == "block.completed")
+        .unwrap();
+    assert_eq!(block["block"]["text"], "答案。");
+
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let reply = messages.last().unwrap();
+    assert_eq!(reply.status, "completed");
+    assert_eq!(reply.text, "答案。");
+    let checkpoint = engine::checkpoint(&state.db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.output.as_deref(), Some("答案。"));
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
 /// Short execution bounds for this test's thread (current-thread runtime).
 fn short_bounds() {
     TEST_STREAM_BOUNDS.with(|bounds| {
@@ -3076,6 +3122,9 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        meta_contexts: Vec::new(),
+        org_maintenance_targets: Default::default(),
+        org_maintain_revision: 0,
         activity_execution: None,
         automation_work: None,
         execution_task: None,
@@ -4883,6 +4932,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             digest: None,

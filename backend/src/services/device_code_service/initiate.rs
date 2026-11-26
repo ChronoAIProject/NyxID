@@ -62,6 +62,7 @@ where
             approved_org_id: None,
             issued_api_key_id: None,
             issued_node_id: None,
+            delivery_context_version: None,
             delivery_api_key_encrypted: None,
             delivery_refresh_token_encrypted: None,
             refresh_token_hash: None,

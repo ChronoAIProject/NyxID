@@ -639,6 +639,94 @@ pub(crate) async fn revoke_in_session(
     }
 }
 
+/// Retire all local authority derived from a NyxBot channel while another
+/// installation transaction still owns the parent lock.  Meta reconnects can
+/// replace the provider application without having an `AppState` (and without
+/// making a remote gateway call), but they must use the same route, follow,
+/// notification, and execution fences as ordinary channel retirement.
+pub(crate) async fn retire_references_in_session(
+    db: &Database,
+    row: &NyxbotChannel,
+    reason: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    if row.org_specialist.is_some() {
+        super::org_channel_service::lifecycle::retire_in_session(db, session, &row.id, None)
+            .await?;
+    }
+    super::channel_thread_follow_service::suspend_in_session(
+        db,
+        &row.user_id,
+        &row.id,
+        reason,
+        session,
+    )
+    .await?;
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.channel_id": &row.id})
+        .session(&mut *session)
+        .await?;
+    db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME)
+        .delete_many(doc! {"task.channel_source.channel_id": &row.id})
+        .session(&mut *session)
+        .await?;
+
+    retire_keys_in_session(db, row, session).await?;
+    db.collection::<Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": &row.user_id},
+            doc! {
+                "$inc": {"execution_policy_revision": 1_i64, "notification_epoch": 1_i64},
+                "$set": {"status": "disconnected", "owner_sender_ids": [], "last_error": reason,
+                    "gateway_no_progress": false, "updated_at": bson::DateTime::now()},
+                "$unset": {"gateway_setup_release_id": "", "agent_key_ciphertext": "",
+                    crate::services::nyxbot_channel_key::VERSION_PATH: "",
+                    "pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+                    "link_code_hash": "", "link_code_expires_at": ""},
+            },
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(())
+}
+
+/// Revoke the dedicated route and agent credentials without broadening a
+/// grant-scoped content purge to the channel's other retained history.
+pub(crate) async fn retire_keys_in_session(
+    db: &Database,
+    row: &NyxbotChannel,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let owner = bot_owner(row).to_owned();
+    let mut route_keys = std::collections::BTreeSet::new();
+    route_keys.insert(row.route_api_key_id.clone());
+    if let Some(key) = row.pending_route_api_key_id.as_deref() {
+        route_keys.insert(key.to_owned());
+    }
+    for key in route_keys.into_iter().filter(|key| !key.is_empty()) {
+        super::channel_routing_service::retire_key_routes_in_session(
+            db,
+            &owner,
+            &row.channel_bot_id,
+            &key,
+            session,
+        )
+        .await?;
+        revoke_in_session(db, &owner, &key, session).await?;
+    }
+    for key in [
+        row.agent_api_key_id.as_deref(),
+        row.pending_agent_api_key_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|key| !key.is_empty())
+    {
+        revoke_in_session(db, &row.user_id, key, session).await?;
+    }
+    Ok(())
+}
+
 /// Retire only a still-unadopted attempt. A failed read/unknown commit never
 /// authorizes rollback of a subsequently adopted connection.
 pub(crate) async fn retire_attempt(
@@ -683,6 +771,7 @@ pub(crate) async fn retire_attempt(
                     if row.status=="pending" {
                         set.insert("status","failed");set.insert("last_error","setup_interrupted");
                         unset.insert("agent_key_ciphertext","");
+                        unset.insert(crate::services::nyxbot_channel_key::VERSION_PATH,"");
                         unset.insert("link_code_hash","");unset.insert("link_code_expires_at","");
                     }
                     db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"gateway_setup_release_id":&id},doc! {
@@ -724,6 +813,62 @@ pub(crate) async fn retire_connection(
     status: &str,
     error: Option<&str>,
 ) -> AppResult<Vec<String>> {
+    retire_connection_checked(state, row, reason, status, error, None, None).await
+}
+
+pub(crate) async fn disconnect_as(
+    state: &AppState,
+    row: &NyxbotChannel,
+    actor: &str,
+) -> AppResult<Vec<String>> {
+    retire_connection_checked(
+        state,
+        row,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+        Some(actor),
+        None,
+    )
+    .await
+}
+
+struct RepairGuard {
+    actor: String,
+    meta_callback: Option<String>,
+}
+
+pub(crate) async fn retire_for_repair(
+    state: &AppState,
+    actor: &str,
+    expected: &NyxbotChannel,
+    meta_callback: Option<&str>,
+) -> AppResult<Vec<String>> {
+    retire_connection_checked(
+        state,
+        expected,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+        Some(actor),
+        Some(RepairGuard {
+            actor: actor.into(),
+            meta_callback: meta_callback.map(str::to_owned),
+        }),
+    )
+    .await
+}
+
+async fn retire_connection_checked(
+    state: &AppState,
+    row: &NyxbotChannel,
+    reason: ReleaseReason,
+    status: &str,
+    error: Option<&str>,
+    manager: Option<&str>,
+    repair: Option<RepairGuard>,
+) -> AppResult<Vec<String>> {
+    let manager = manager.map(str::to_owned);
     let scoped_state = state.clone();
     let db = state.db.clone();
     let scoped_row = row.clone();
@@ -735,23 +880,47 @@ pub(crate) async fn retire_connection(
         let row = &scoped_row;
         let work:AppResult<_>=Box::pin(async {
             let current=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&row.id,"user_id":&row.user_id}).session(&mut *session).await?.ok_or_else(conflict)?;
+            if let Some(repair) = &repair {
+                super::channel_bot_service::fence_owner_management(
+                    &db, session, &repair.actor, bot_owner(&current),
+                ).await?;
+                super::platform_bot_authority::fence_personal_routes(
+                    &db, &current.channel_bot_id, bot_owner(&current), session,
+                ).await?;
+                // The write below contends with activation/relinking. Revalidate
+                // the exact repair snapshot on every transaction retry before
+                // retiring any route, key, follow or gateway release.
+                if !repair_snapshot_matches(row, &current) {
+                    return Err(AppError::Conflict("Channel assignment changed during repair".into()));
+                }
+                if let Some(callback) = &repair.meta_callback {
+                    super::nyxbot_channel_query_service::require_no_competing_meta_default(
+                        &db, session, &current,
+                    ).await?;
+                    if super::nyxbot_channel_query_service::meta_default_matches(
+                        &db, &current, callback, Some(&mut *session),
+                    ).await? {
+                        return Err(AppError::Conflict("This inbox route recovered during repair. Check its current assignment".into()));
+                    }
+                }
+            }
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok((Vec::new(), false));}
+            if let Some(actor) = manager.as_deref() && let Some(binding) = current.org_specialist.as_ref() {
+                let target = db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&current.agent_id,"user_id":&binding.org_id}).session(&mut *session).await?.ok_or_else(conflict)?;
+                super::org_agent_service::fence_maintenance(&db,session,actor,&target).await?;
+                super::org_channel_service::live_doc(&db,session,"org_memberships",doc! {"org_user_id":&binding.org_id,"member_user_id":actor,"revoked_at":null,"role":"admin"},true).await?;
+            }
             let ids=retire_in_session(state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
-                "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
+                "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"",crate::services::nyxbot_channel_key::VERSION_PATH:"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
             super::channel_thread_follow_service::suspend_in_session(&db,&current.user_id,&current.id,error.as_deref().unwrap_or("disconnected"),session).await?;
             db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
                 .delete_many(doc! {"source.channel_id":&current.id}).session(&mut *session).await?;
             db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME).delete_many(
                 doc!{"task.channel_source.channel_id":&current.id}).session(&mut *session).await?;
-            for key in [Some(current.route_api_key_id.as_str()),current.pending_route_api_key_id.as_deref()].into_iter().flatten().filter(|key|!key.is_empty()) {
-                super::channel_routing_service::retire_key_routes_in_session(&db,bot_owner(&current),&current.channel_bot_id,key,session).await?;
-                revoke_in_session(&db,bot_owner(&current),key,session).await?;
-            }
-            for key in [current.agent_api_key_id.as_deref(),current.pending_agent_api_key_id.as_deref()].into_iter().flatten().filter(|key|!key.is_empty()) {
-                revoke_in_session(&db,&current.user_id,key,session).await?;
-            }
+            retire_keys_in_session(&db, &current, session).await?;
             if reason == ReleaseReason::OrgAccessLost {
                 audit(&db, session, &current.user_id, "nyxbot_channel_org_access_lost",
                     json!({"channel_agent_id":current.id,"platform":current.platform})).await?;
@@ -763,6 +932,25 @@ pub(crate) async fn retire_connection(
         super::org_thread_notice::after_retirement(state.db.clone(), row.id.clone());
     }
     Ok(ids)
+}
+
+fn repair_snapshot_matches(expected: &NyxbotChannel, current: &NyxbotChannel) -> bool {
+    expected.channel_bot_id == current.channel_bot_id
+        && expected.bot_owner_id == current.bot_owner_id
+        && expected.execution_policy_revision == current.execution_policy_revision
+        && expected.notification_epoch == current.notification_epoch
+        && expected.status == current.status
+        && expected.delivery_status == current.delivery_status
+        && expected.agent_id == current.agent_id
+        && expected.route_id == current.route_id
+        && expected.route_api_key_id == current.route_api_key_id
+        && expected.agent_api_key_id == current.agent_api_key_id
+        && expected.pending_route_api_key_id == current.pending_route_api_key_id
+        && expected.pending_agent_api_key_id == current.pending_agent_api_key_id
+        && expected.gateway_setup_release_id == current.gateway_setup_release_id
+        && expected.gateway_version == current.gateway_version
+        && expected.binding_id == current.binding_id
+        && expected.updated_at == current.updated_at
 }
 
 fn live_filter(release: &Release) -> Document {
@@ -2356,7 +2544,7 @@ pub(crate) async fn fallback(
             super::channel_routing_service::fence_route_key(&db,&next_key,session).await?;
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id,"status":"pending"},doc! {
                 "$inc":{"execution_policy_revision":1_i64},"$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
-                "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
+                "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"",crate::services::nyxbot_channel_key::VERSION_PATH:"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
                 .session(&mut *session).await?;
             Ok(ids)
         }).await;transactions::transaction_result(work)

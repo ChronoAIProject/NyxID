@@ -308,7 +308,8 @@ for (const platform of ["ios", "android"] as const) {
     assert.ok(scroller);
     assert.equal(
       scroller.props.keyboardDismissMode,
-      platform === "ios" ? "interactive" : "on-drag",
+      platform === "ios" ? "interactive" : "none",
+      "dragging the Android form must keep the IME open",
     );
     assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
     assert.ok(

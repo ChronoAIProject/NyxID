@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::{
     errors::{AppError, AppResult},
-    models::assistant_agent::{AssistantAgent, COLLECTION_NAME},
+    models::assistant_agent::AssistantAgent,
 };
 
 use super::{
@@ -220,11 +220,11 @@ pub async fn set(
     } else {
         vec![doc! {"skills_revision":selection.expected_revision}]
     };
-    let result = db.collection::<AssistantAgent>(COLLECTION_NAME).update_one(
+    let result = super::org_agent_service::update_maintained(db,actor,&agent,
         doc! {"_id":agent_id,"user_id":&agent.user_id,"destroyed_at":bson::Bson::Null,"$or":revisions},
         doc! {"$set":{"skill_metadata":bson::to_bson(&agent.skill_metadata).map_err(|_| invalid("Invalid skill metadata"))?,"skills_revision":revision,"updated_at":bson::DateTime::now()}},
     ).await?;
-    if result.matched_count != 1 {
+    if result.is_none() {
         return Err(AppError::Conflict(
             "Skills changed; reload the current revision".into(),
         ));

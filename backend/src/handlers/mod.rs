@@ -55,7 +55,7 @@ pub mod channel_conversations;
 pub mod channel_events;
 pub mod channel_managed;
 #[cfg(test)]
-mod channel_managed_tests;
+pub(crate) mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
@@ -254,4 +254,5 @@ pub(crate) mod invocation_diagnostics;
 mod platform_model_gateway;
 pub mod platform_models;
 
+pub mod channel_meta;
 pub mod crash_reports;

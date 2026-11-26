@@ -23,6 +23,12 @@ export const nyxAgentTurnActivitySchema = z.object({
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
   failure: z.object({ reason: z.string().max(64).nullish().transform((value) => value ?? undefined).optional(), kind: z.string(), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
+  memory_recovery: z.object({
+    failed_activity_id: z.uuid(),
+    part: z.number().int().min(1).max(10),
+    total: z.number().int().min(1).max(10),
+    committed: z.boolean().default(false),
+  }).refine(({ part, total }) => part <= total).nullish().catch(undefined),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
@@ -537,6 +543,7 @@ export const assistantAgentSchema = z.object({
   org_role: z.enum(["admin", "member", "viewer"]).nullable().optional(),
   can_maintain: z.boolean().optional(),
   can_use: z.boolean().optional(),
+  can_govern: z.boolean().optional(),
   id: z.string(),
   kind: assistantAgentKindSchema,
   /** The @handle (fixed "NyxBot" for NyxBot). */

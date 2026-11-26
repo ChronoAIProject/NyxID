@@ -769,6 +769,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     assert!(prompt.contains(SCHEDULE_PROMPT));
     assert!(prompt.len() <= base.len() + 16384);
     context.set_checkpoint(Some(AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "checkpoint-turn".into(),
@@ -1005,6 +1007,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         created_at: Utc::now(),
         activities: (0..40)
             .map(|i| crate::models::assistant_conversation::TurnActivity {
+                memory_recovery: None,
                 decision: None,
                 retry_identity: None,
                 failure: None,
@@ -1088,6 +1091,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -1162,6 +1166,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -1236,6 +1241,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -1523,6 +1529,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        meta_grant: None,
         title_language: None,
         automation_v2: false,
         artifact_head: None,
@@ -1540,6 +1547,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         automation_thread: false,
         voice_parent_conversation_id: None,
         guest_model_setup: false,
+        org_use_revision: 0,
         shared_agent_thread: false,
         agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
@@ -1643,6 +1651,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
+        reply_channel_meta_grant: None,
         deliver_also: Vec::new(),
     }
 }
@@ -6886,6 +6895,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        meta_contexts: Vec::new(),
         artifact_catalog_service_id: None,
         artifact_mode: None,
         artifact_result: None,
@@ -9358,6 +9368,8 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
 
 fn token_checkpoint(row: &AssistantConversation) -> AssistantCheckpoint {
     AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "turn".into(),

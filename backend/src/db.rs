@@ -3020,6 +3020,15 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    // Shared signing migrations traverse all dependent bots, including inactive ones.
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"credential_source":1,"_id":1})
+                .build(),
+        )
+        .await?;
+
     // Bounded Discord Gateway keyset discovery, additive for mixed replicas.
     channel_bots
         .create_index(
@@ -3178,6 +3187,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     crate::services::channel_reply_delivery::ensure_indexes(db).await?;
+    crate::services::channel_meta_service::ensure_indexes(db).await?;
     crate::services::channel_text_delivery::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──

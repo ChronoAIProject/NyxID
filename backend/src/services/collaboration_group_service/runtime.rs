@@ -219,6 +219,11 @@ pub(crate) async fn key_authority(
             grants,
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
+            if b.authority.lane == model::Lane::OrgMember {
+                b.authority.revision
+            } else {
+                0
+            },
         )
     };
     Ok(KeyAuthority::Collaboration(

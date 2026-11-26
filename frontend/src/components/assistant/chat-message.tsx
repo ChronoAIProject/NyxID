@@ -5,6 +5,7 @@ import { activityPresentationStatus } from "@/schemas/assistant-history-compat";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
+import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
 import { activityDecisionPresentation } from "@/lib/assistant/activity-decision";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
@@ -327,8 +328,27 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   const waited = message.status === "complete" && (capacityWaitMs > 0 || attempts > 1);
   const delivery = message.role === "assistant" ? message.channelDelivery : undefined;
   if (!count && !decisions.length && !waited && !delivery) return null;
+  const settled = message.status === "complete" || message.status === "error" || message.status === "stopped";
+  const memoryRecoveries = new Map<string, { total: number; saved: Set<number>; firstRetainedId: string }>();
+  const retainedMemoryFailures = new Set<string>();
+  if (settled) {
+    for (const tool of tools) {
+      if (tool.name !== "nyxid__remember") continue;
+      if (tool.status === "error") retainedMemoryFailures.add(tool.id);
+      const part = tool.memoryRecovery;
+      if (!part) continue;
+      const recovery = memoryRecoveries.get(part.failed_activity_id) ?? {
+        total: part.total,
+        saved: new Set<number>(),
+        firstRetainedId: tool.id,
+      };
+      if (part.committed && part.total === recovery.total) recovery.saved.add(part.part);
+      memoryRecoveries.set(part.failed_activity_id, recovery);
+    }
+  }
   const failed = steps.filter((step) => step.status === "error").length
-    + tools.filter((tool) => activityPresentationStatus(activityDecisionPresentation(tool.decision)?.status ?? tool.status, tool.failure?.kind) === "error").length;
+    + tools.filter((tool) => !(settled && tool.name === "nyxid__remember" && tool.memoryRecovery?.committed)
+      && activityPresentationStatus(activityDecisionPresentation(tool.decision)?.status ?? tool.status, tool.failure?.kind) === "error").length;
   const onTool = new Map<string, NyxAgentAcknowledgement[]>();
   const loose: NyxAgentAcknowledgement[] = [];
   for (const row of decisions) {
@@ -403,12 +423,33 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
           ))}
           {tools.map((tool) => {
             const decision = activityDecisionPresentation(tool.decision);
-            const status = activityPresentationStatus(decision?.status ?? tool.status, tool.failure?.kind);
+            const outcome = activityPresentationStatus(decision?.status ?? tool.status, tool.failure?.kind);
+            const part = settled && tool.name === "nyxid__remember" ? tool.memoryRecovery : undefined;
+            const memoryUnconfirmed = part?.committed === false && (outcome === "done" || outcome === "running");
+            const status = part?.committed ? "done" : memoryUnconfirmed ? "unknown" : outcome;
+            const recovery = tool.name === "nyxid__remember" && status === "error" ? memoryRecoveries.get(tool.id) : undefined;
+            const retainedRecovery = part && !retainedMemoryFailures.has(part.failed_activity_id)
+              ? memoryRecoveries.get(part.failed_activity_id)
+              : undefined;
+            const skillReason = status === "error" && tool.name === "nyxid__draft_agent_skill" && tool.failure?.kind === "tool_error"
+              ? tool.failure.reason : undefined;
+            let skillDetail: string | undefined;
+            if (skillReason === "publication_ambiguous") {
+              skillDetail = translateUi("NyxID could not confirm the save and will not repeat it. Check Ornn or use Check again on the review card if you have one.");
+            } else if (skillReason?.startsWith("ornn_")) {
+              skillDetail = translateUi(publicationFailureText(skillReason, "publication_failed", "authored"));
+            }
+            let label = decision ? translateUi(decision.label) : describeToolActivity(tool.name || tool.id, tool.status);
+            if (skillReason === "publication_ambiguous") label = translateUi("Skill save unconfirmed");
+            else if (part?.committed) label = describeToolActivity(tool.name, "done");
+            else if (memoryUnconfirmed) label = translateUi("Memory save unconfirmed");
+            else if (status === "skipped") label = toolFailureCopy(tool.failure, tool.name);
+            else if (status === "unknown") label = translateUi("Activity details unavailable in this app version.");
             return (
             <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
             <details className="text-13 text-muted-foreground">
               <summary
-                data-tool-status={status === "skipped" || status === "unknown" ? status : tool.decision?.state ?? tool.status}
+                data-tool-status={status === "skipped" || status === "unknown" || part?.committed ? status : tool.decision?.state ?? tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
               >
                 <span className="flex w-full min-w-0 items-center gap-2">
@@ -419,7 +460,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                       status === "error" && "text-destructive",
                     )}
                   >
-                    {status === "skipped" ? toolFailureCopy(tool.failure, tool.name) : status === "unknown" ? translateUi("Activity details unavailable in this app version.") : decision ? translateUi(decision.label) : describeToolActivity(tool.name || tool.id, tool.status)}
+                    {label}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
                   <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", status === "error" ? "text-destructive" : "text-text-tertiary")}>
@@ -430,9 +471,25 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     /></span> : null}
                   </span>
                 </span>
-                {decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{translateUi(decision.detail)}</span> : status === "error" ? (
+                {skillDetail ? <span className="break-words pl-5">{skillDetail}</span> : decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{translateUi(decision.detail)}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
-                    {toolFailureCopy(tool.failure, tool.name)}{translateUi(" The assistant can continue after a failed step.")}</span>
+                    {toolFailureCopy(tool.failure, tool.name)}{!recovery && translateUi(" The assistant can continue after a failed step.")}</span>
+                ) : null}
+                {recovery ? (
+                  <span className="break-words pl-5">
+                    {translateUi("Confirmed saves linked by NyxBot to this failure ({{saved}} of {{total}}).", {
+                      saved: recovery.saved.size,
+                      total: recovery.total,
+                    })}
+                  </span>
+                ) : null}
+                {retainedRecovery?.firstRetainedId === tool.id ? (
+                  <span className="break-words pl-5">
+                    {translateUi("Recent activity shows {{saved}} of {{total}} confirmed saves linked by NyxBot to an earlier failure.", {
+                      saved: retainedRecovery.saved.size,
+                      total: retainedRecovery.total,
+                    })}
+                  </span>
                 ) : null}
               </summary>
               {tool.result ? (

@@ -567,6 +567,19 @@ fn error_result_inner(
                 value,
             };
         }
+        AppError::SkillPublication(failure) => {
+            let instructions = if failure.recovery == "check" {
+                "Report that setup is incomplete and the save was not confirmed. Give the recovery step. Do not draft again or guess a cause."
+            } else {
+                "Report that setup is incomplete and the skill was not saved. Give the reported reason and recovery step. Do not guess a cause."
+            };
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": body.message, "details": body.details, "instructions": instructions}),
+            };
+        }
         AppError::SkillDraftValidation(_) | AppError::MemoryWrite(_) | AppError::SkillRead(_) => {
             return ToolResult {
                 permission_request: None,
@@ -1083,11 +1096,17 @@ impl AccountTools<'_> {
             }
             "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
-                format!(
+                let mut summary = format!(
                     "Delete {}channel bot '{}' and all its routes",
                     self.org_prefix(user, &bot.user_id).await?,
                     short(&bot.label)
-                )
+                );
+                if super::channel_adapters::meta::is_meta(&bot.platform)
+                    && bot.credential_source != "platform"
+                {
+                    summary.push_str(". After unsubscribe, NyxID erases this inbox's guest conversations, message records and delivery history.");
+                }
+                summary
             }
             "delete_channel_route" => {
                 let route = self.managed_route(user, text(args, "route_id")).await?;
@@ -1335,10 +1354,29 @@ impl AccountTools<'_> {
             "update_channel_bot" | "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
                 // Org bots are managed as their org, like in the UI.
-                let user = bot.user_id.as_str();
+                let owner = bot.user_id.as_str();
                 let adapter =
                     channel_adapters::resolve_adapter(&bot.platform, self.token_exchange_cache)?;
                 if name == "delete_channel_bot" {
+                    if super::channel_adapters::meta::is_meta(&bot.platform) {
+                        let cleanup = channel_bot_service::delete_meta_bot(
+                            self.db,
+                            self.config,
+                            self.http,
+                            self.keys,
+                            &bot,
+                            user,
+                        )
+                        .await?;
+                        let mut result =
+                            json!({"local_delivery_stopped": true, "webhook_cleanup": cleanup});
+                        if cleanup == Some("failed") {
+                            result["next_step"] = json!(
+                                "NyxID has stopped delivery and will retry removing the inbox subscription."
+                            );
+                        }
+                        return Ok(result);
+                    }
                     channel_bot_service::delete_bot(
                         self.db,
                         self.config,
@@ -1346,18 +1384,21 @@ impl AccountTools<'_> {
                         self.keys,
                         adapter.as_ref(),
                         &bot.id,
-                        user,
+                        owner,
                     )
                     .await?;
                     Ok(json!({"deleted": true}))
                 } else {
-                    let bot = channel_bot_service::update_bot(
+                    let bot = channel_bot_service::update_bot_as_actor(
                         self.db,
                         self.keys,
                         self.http,
                         adapter.as_ref(),
                         &bot.id,
-                        user,
+                        channel_bot_service::UpdateBotAuthority {
+                            actor_id: user,
+                            owner_id: owner,
+                        },
                         channel_bot_service::UpdateBotParams {
                             x_events: None,
                             label: args["label"].as_str(),

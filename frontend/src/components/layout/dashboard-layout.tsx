@@ -221,7 +221,7 @@ function TopBar({
     "/orgs",
     "/nodes",
     "/channel-bots",
-    "/settings", "/guide", "/approvals/settings", "/approvals/history",
+    "/settings", "/guide", "/approvals/history",
     "/approvals/grants", "/developer/apps", "/ai-setup", "/integration-guide",
   ]);
   const showBack = !ROOT_PATHS.has(pathname);

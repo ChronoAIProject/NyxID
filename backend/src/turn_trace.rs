@@ -36,6 +36,7 @@ static DROPPED: AtomicU64 = AtomicU64::new(0);
 tokio::task_local! {
     static CURRENT: Option<TurnContext>;
     static TURN_CALLBACK: bool;
+    static CALLBACK_GAP: Option<CallbackGap>;
     static INGRESS: Ingress;
     #[cfg(test)]
     static CAPTURE: std::sync::Mutex<Vec<Record>>;
@@ -176,39 +177,52 @@ impl TurnContext {
 
     /// Authentication must already have loaded the exact turn. A reusable
     /// conversation key without matching propagation is deliberately unlinked.
-    pub(crate) fn callback(headers: &HeaderMap, admitted_turn: Option<&str>) -> Option<Self> {
-        let root = Self::for_turn(admitted_turn?)?;
+    fn callback(self, headers: &HeaderMap) -> Result<Self, GapReason> {
         if headers
             .get("traceparent")
             .is_some_and(|value| value.as_bytes().len() > 256)
             || !crate::services::proxy_service::valid_traceparent_header(headers)
         {
-            uncorrelated(if headers.contains_key("traceparent") {
+            return Err(if headers.contains_key("traceparent") {
                 GapReason::InvalidParent
             } else {
                 GapReason::MissingParent
             });
-            return None;
         }
-        let value = headers.get("traceparent")?.to_str().ok()?;
-        if value[3..35] != root.turn.simple().to_string() {
-            uncorrelated(GapReason::MismatchedTurn);
-            return None;
+        let value = headers
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok())
+            .ok_or(GapReason::InvalidParent)?;
+        if value[3..35] != self.turn.simple().to_string() {
+            return Err(GapReason::MismatchedTurn);
         }
-        let parent = u64::from_str_radix(&value[36..52], 16).ok()?;
-        Some(Self {
+        let parent =
+            u64::from_str_radix(&value[36..52], 16).map_err(|_| GapReason::InvalidParent)?;
+        Ok(Self {
             span: parent,
-            ..root
+            ..self
         })
     }
 
     pub(crate) fn for_request(headers: &HeaderMap, admitted_turn: Option<&str>) -> RequestContext {
+        let mut gap = None;
+        let turn = admitted_turn.and_then(|turn| {
+            if let Some(context) = Self::current().filter(|context| context.turn_id() == turn) {
+                return Some(context);
+            }
+            match Self::for_turn(turn)?.callback(headers) {
+                Ok(context) => Some(context),
+                Err(reason) => {
+                    let callback = CallbackGap::new(reason);
+                    emit(callback.record());
+                    gap = Some(callback);
+                    None
+                }
+            }
+        });
         RequestContext {
-            turn: admitted_turn.and_then(|turn| {
-                Self::current()
-                    .filter(|context| context.turn_id() == turn)
-                    .or_else(|| Self::callback(headers, Some(turn)))
-            }),
+            turn,
+            gap,
             turn_callback: admitted_turn.is_some() || turn_callback(),
         }
     }
@@ -238,6 +252,7 @@ impl TurnContext {
 #[derive(Clone, Copy)]
 pub(crate) struct RequestContext {
     turn: Option<TurnContext>,
+    gap: Option<CallbackGap>,
     turn_callback: bool,
 }
 
@@ -248,7 +263,10 @@ impl RequestContext {
 
     pub(crate) async fn scope<T>(self, future: impl Future<Output = T>) -> T {
         TURN_CALLBACK
-            .scope(self.turn_callback, scope(self.turn, future))
+            .scope(
+                self.turn_callback,
+                CALLBACK_GAP.scope(self.gap, scope(self.turn, future)),
+            )
             .await
     }
 
@@ -258,7 +276,10 @@ impl RequestContext {
         future: impl Future<Output = AppResult<Response>>,
     ) -> AppResult<Response> {
         TURN_CALLBACK
-            .scope(self.turn_callback, response(self.turn, stage, future))
+            .scope(
+                self.turn_callback,
+                CALLBACK_GAP.scope(self.gap, response(self.turn, stage, future)),
+            )
             .await
     }
 }
@@ -399,11 +420,74 @@ enum GapReason {
     MismatchedTurn,
 }
 
-fn uncorrelated(reason: GapReason) {
-    let ingress = Ingress::new();
-    let mut record = ingress.record(Phase::Milestone);
-    record.gap_reason = Some(reason);
-    emit(record);
+#[derive(Clone, Copy)]
+struct CallbackGap {
+    context: TurnContext,
+    reason: GapReason,
+}
+
+impl CallbackGap {
+    fn new(reason: GapReason) -> Self {
+        Self {
+            context: TurnContext {
+                turn: Uuid::nil(),
+                span: fresh_span(),
+                parent: None,
+                request: INGRESS
+                    .try_with(|ingress| ingress.request_id)
+                    .unwrap_or_else(|_| Uuid::new_v4()),
+            },
+            reason,
+        }
+    }
+
+    fn record(self) -> Record {
+        let mut record = Record::new(self.context, Stage::Ingress, Phase::Milestone);
+        record.turn_id = None;
+        record.trace_id = None;
+        record.gap_reason = Some(self.reason);
+        record
+    }
+}
+
+/// Observed organization guest service failures, emitted only at the decision or response boundary.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuestServiceFailure {
+    ApprovalRequired,
+    ApprovalDenied,
+    GuestOperationDenied,
+    InvalidToolArguments,
+    DownstreamHttpError,
+}
+
+impl GuestServiceFailure {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "approval_required",
+            Self::ApprovalDenied => "approval_denied",
+            Self::GuestOperationDenied => "guest_operation_denied",
+            Self::InvalidToolArguments => "invalid_tool_arguments",
+            Self::DownstreamHttpError => "downstream_http_error",
+        }
+    }
+
+    pub(crate) fn record(self, stage: Stage, status: Option<u16>) {
+        let mut record = match TurnContext::current() {
+            Some(context) => Record::new(context, stage, Phase::Milestone),
+            None => match CALLBACK_GAP.try_with(|gap| *gap).ok().flatten() {
+                Some(gap) => gap.record(),
+                None => return,
+            },
+        };
+        record.guest_service_failure = Some(self);
+        record.outcome = Some(match self {
+            Self::DownstreamHttpError => Outcome::Failed,
+            _ => Outcome::Rejected,
+        });
+        record.http_status = status;
+        emit(record);
+    }
 }
 
 fn trace_id<S: Serializer>(id: &Option<Uuid>, serializer: S) -> Result<S::Ok, S::Error> {
@@ -460,6 +544,8 @@ struct Record {
     #[serde(skip_serializing_if = "Option::is_none")]
     gap_reason: Option<GapReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    guest_service_failure: Option<GuestServiceFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     part_index: Option<u32>,
 }
 
@@ -485,6 +571,7 @@ impl Record {
             ingress_request_id: None,
             related_turn_id: None,
             gap_reason: None,
+            guest_service_failure: None,
             part_index: None,
         }
     }

@@ -507,6 +507,7 @@ export function AssistantScreen({
   const canCompose =
     !running &&
     !destroyed &&
+    !assistant.restricted &&
     assistant.online &&
     !assistant.loading &&
     !assistant.loadingOlder &&
@@ -532,6 +533,7 @@ export function AssistantScreen({
     disabled:
       !assistant.online ||
       !!destroyed ||
+      !!assistant.restricted ||
       assistant.loading ||
       assistant.recoveryRequired ||
       !!route?.params?.openLatest ||
@@ -1385,7 +1387,7 @@ export function AssistantScreen({
   }
 
   function renderAcknowledgement(row: AssistantAcknowledgement) {
-    if (row.status !== "pending") return null;
+    if (row.status !== "pending" || (assistant.agent?.owner_kind === "org" && assistant.agent.can_maintain === false && row.kind !== "action")) return null;
     return (
       <AssistantAcknowledgementCard
         key={row.id}
@@ -1455,6 +1457,14 @@ export function AssistantScreen({
     />
   ), [homeVisible, currentAgent, conversation, openPanelChat, createPanelAgent]);
 
+  if (assistant.restricted) return (
+    <WorkspacePage title={translateApp("Chat access is restricted.")}>
+      <ActionButton label={translateApp("Back to workspace")} onPress={() => navigation.setParams({
+        conversationId: undefined, agentId: undefined, acknowledgementId: undefined,
+        messageId: undefined, openLatest: false, draft: false, home: true,
+      })} />
+    </WorkspacePage>
+  );
   return (
     <WorkspacePage
       title={chatTitle}
@@ -2018,18 +2028,10 @@ export function AssistantScreen({
                             name: agentName,
                           })
                     }
-              // Phones: idle composers are one row; anything typed, attached,
-              // uploading or dictating keeps the full two-row layout.
-              compactWhenIdle={
-                narrowHeader &&
-                !dictation.active &&
-                uploads.files.length === 0 &&
-                !uploads.picking &&
-                !uploads.session.sending
-              }
+              compactWhenIdle={!dictation.active}
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={narrowHeader ? layout : undefined}
+                  layout={layout}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||
@@ -2060,6 +2062,7 @@ export function AssistantScreen({
                   mention={mentionAction}
                   settings={
                     <AssistantComposerSettings
+                      hideTrigger={layout.compact}
                       scope={`${getAuthEpoch()}:${draftKey}`}
                       agentOverride={assistant.agent?.access_mode_override}
                       activeTurn={permissionsLocked}

@@ -444,7 +444,7 @@ async fn run_member_with_work(
     if groups::members(&state.db, owner, group)
         .await?
         .iter()
-        .any(|m| m.id == agent_id && m.shared && !m.available)
+        .any(|m| m.id == agent_id && !m.available)
     {
         if durable {
             crate::services::assistant_wake_service::group::retire(
@@ -529,12 +529,25 @@ async fn run_member_with_work(
     crate::services::durable_wake_tests::after("member_prepared").await;
     let limit = team_pool_limit(state, owner).await + 1;
     let attempt = start_server_turn(state, owner, start, Pool::Team { owner, limit });
-    let result = if durable {
+    let org_revision = if work.is_none() && agent.user_id != owner {
+        Some(
+            group
+                .pending_org_use_revisions
+                .get(agent_id)
+                .copied()
+                .unwrap_or(0),
+        )
+    } else {
+        None
+    };
+    let result = if durable || org_revision.is_some() {
         crate::services::assistant_wake_service::group::with_member(
             crate::services::assistant_wake_service::group::Member {
                 group_id: group.id.clone(),
                 agent_id: agent_id.to_owned(),
                 upper_seq: newest,
+                org_revision,
+                durable,
             },
             attempt,
         )
@@ -698,7 +711,7 @@ pub(crate) async fn member_settled(
                     })
                     .collect();
                 let handed = spend_handoffs(state, owner, group_id, mentioned).await?;
-                groups::address(&state.db, owner, group_id, &handed).await?;
+                groups::address_members(&state.db, owner, group_id, &handed, &members).await?;
             }
             None => {}
             Some("cancelled") => {
@@ -965,7 +978,7 @@ async fn post_with_uploads(
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
     groups::reset_hops(&state.db, owner, group_id).await?;
-    groups::address(&state.db, owner, group_id, &addressed).await?;
+    groups::address_members(&state.db, owner, group_id, &addressed, &members).await?;
     advance(state, owner, group_id).await;
     Ok((message, addressed))
 }

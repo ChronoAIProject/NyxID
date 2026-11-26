@@ -5,7 +5,7 @@ use crate::{
     },
     services::{
         assistant_authority_tests::{Fixture, orchestrator_fixture},
-        assistant_learning_publication as publication,
+        assistant_learning_publication as publication, assistant_learning_record as record,
         feature_flag_service::FlagTarget,
     },
 };
@@ -20,9 +20,69 @@ use wiremock::{
 mod validation_regressions;
 
 #[path = "assistant_learning_recovery_tests.rs"]
-mod recovery;
+pub(crate) mod recovery;
 
-fn input(agent: &str) -> Value {
+pub(crate) async fn contextualize(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    raw: &mut bson::Document,
+) {
+    use crate::crypto::record_field::RecordContext;
+    use bson::{Binary, spec::BinarySubtype};
+    let row: AssistantAgentLearningProposal = bson::from_document(raw.clone()).unwrap();
+    for (name, marker, path) in [
+        (
+            "body_encrypted",
+            "body_context_version",
+            vec!["body_encrypted", &row.agent_id],
+        ),
+        (
+            "scope_encrypted",
+            "scope_context_version",
+            vec!["scope_encrypted", &row.agent_id],
+        ),
+        (
+            "interface_encrypted",
+            "interface_context_version",
+            vec![
+                "publication",
+                "interface_encrypted",
+                &row.agent_id,
+                row.publication
+                    .as_ref()
+                    .map_or("", |p| p.operation_id.as_str()),
+            ],
+        ),
+    ] {
+        let parent = if name == "interface_encrypted" {
+            let Ok(p) = raw.get_document_mut("publication") else {
+                continue;
+            };
+            p
+        } else {
+            &mut *raw
+        };
+        let Ok(bytes) = parent.get_binary_generic(name) else {
+            continue;
+        };
+        let clear = keys.decrypt(bytes).await.unwrap();
+        let ctx =
+            RecordContext::new(PROPOSALS_COLLECTION_NAME, &row.id, &row.owner_id, &path).unwrap();
+        let bytes = keys.encrypt_record(&clear, &ctx).await.unwrap();
+        parent.insert(
+            name,
+            Binary {
+                subtype: BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        parent.insert(marker, 3_i32);
+    }
+}
+
+#[path = "assistant_skill_authoring_meta_lifecycle_tests.rs"]
+mod meta_lifecycle;
+
+pub(crate) fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
 
@@ -75,7 +135,7 @@ async fn pending_skill_event_count(
         .count()
 }
 
-async fn fixture(name: &str) -> Fixture {
+pub(crate) async fn fixture(name: &str) -> Fixture {
     let f = orchestrator_fixture(name).await;
     review::migrate_publication_targets(&f.state, false)
         .await
@@ -103,8 +163,17 @@ async fn make_with_access(
     value: Value,
     owner_reader: bool,
 ) -> (AssistantAgentLearningProposal, AssistantAcknowledgement) {
+    make_in_state(f, &f.state, value, owner_reader).await
+}
+
+async fn make_in_state(
+    f: &Fixture,
+    state: &crate::AppState,
+    value: Value,
+    owner_reader: bool,
+) -> (AssistantAgentLearningProposal, AssistantAcknowledgement) {
     let reader = crate::handlers::agent_skills::Reader {
-        state: &f.state,
+        state,
         person: &f.owner,
         thread_key: if owner_reader {
             None
@@ -115,7 +184,7 @@ async fn make_with_access(
         chat: (!owner_reader).then(|| std::sync::Arc::new(f.chat.clone())),
     };
     let result = create(
-        &f.state,
+        state,
         &f.chat,
         serde_json::from_value(value).unwrap(),
         &reader,
@@ -607,14 +676,9 @@ async fn active_publication_refuses_reject_and_edit() {
         })
         .await
         .unwrap();
-    let edited: Value = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let edited: Value =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     for (status, started, uncertain, verified, expiry) in [
         (
             "pending",
@@ -1326,7 +1390,7 @@ async fn mount_version(
         .mount(server)
         .await;
 }
-async fn setup_ornn(f: &Fixture) -> MockServer {
+pub(crate) async fn setup_ornn(f: &Fixture) -> MockServer {
     let server = MockServer::start().await;
     let mut service = crate::test_utils::test_auto_connected_catalog_service();
     service.slug = "ornn-api".into();
@@ -1348,20 +1412,13 @@ async fn mount_publication(
     verb: &str,
 ) {
     let p = row.publication.as_ref().unwrap();
-    let bytes = f
-        .state
-        .encryption_keys
-        .decrypt(&row.body_encrypted)
-        .await
-        .unwrap();
+    let bytes = record::body(&f.state.encryption_keys, row).await.unwrap();
     let draft: GeneratedProposal = serde_json::from_slice(&bytes).unwrap();
-    let snapshot: Option<publication::InterfaceSnapshot> = match &p.interface_encrypted {
-        Some(encrypted) => Some(
-            serde_json::from_slice(&f.state.encryption_keys.decrypt(encrypted).await.unwrap())
-                .unwrap(),
-        ),
-        None => None,
-    };
+    let snapshot: Option<publication::InterfaceSnapshot> =
+        record::interface(&f.state.encryption_keys, row, p)
+            .await
+            .unwrap()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap());
     let archive = publication::package_with_snapshot(
         &draft,
         &p.operation_id,
@@ -1419,14 +1476,9 @@ async fn crash_revision(
     let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
     let skill_id = Uuid::new_v4().to_string();
     let base_p = base.publication.as_ref().unwrap();
-    let base_draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&base.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let base_draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &base).await.unwrap())
+            .unwrap();
     let base_bytes = publication::package_with_snapshot(
         &base_draft,
         &base_p.operation_id,
@@ -1563,19 +1615,13 @@ async fn allowed_card(f: &Fixture, card: &AssistantAcknowledgement) -> Assistant
 
 async fn publication_bytes(f: &Fixture, row: &AssistantAgentLearningProposal) -> Vec<u8> {
     let p = row.publication.as_ref().unwrap();
-    let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, row).await.unwrap())
+            .unwrap();
     let snapshot: publication::InterfaceSnapshot = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(p.interface_encrypted.as_ref().unwrap())
+        &record::interface(&f.state.encryption_keys, row, p)
             .await
+            .unwrap()
             .unwrap(),
     )
     .unwrap();
@@ -1850,14 +1896,9 @@ async fn base_verify_integrity_failures_keep_source_review_code() {
         } else {
             owner.to_owned()
         };
-        let draft: GeneratedProposal = serde_json::from_slice(
-            &f.state
-                .encryption_keys
-                .decrypt(&row.body_encrypted)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let draft: GeneratedProposal =
+            serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+                .unwrap();
         let base_hash = draft.base_skill.as_ref().unwrap().sha256.clone();
         Mock::given(method("POST"))
             .and(path("/api/v1/skill-format/validate"))
@@ -2255,6 +2296,144 @@ async fn post_write_zip_hash_mismatch_keeps_check_only_barrier() {
 }
 
 #[tokio::test]
+async fn new_skill_acknowledgement_can_retry_a_refused_proxy_create() {
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+
+    let f = fixture("authoring_create_proxy_refusal").await;
+    let server = setup_ornn(&f).await;
+    let mut value = input(&f.chat.agent_id);
+    value["scope"] = json!({"status":"reduced","omissions":["Older notes were omitted."]});
+    let (row, card) = make(&f, value).await;
+    let skill_id = Uuid::new_v4().to_string();
+    mount_publication(&f, &server, &row, &skill_id, "POST").await;
+    let services = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME);
+    services
+        .update_one(
+            doc! {"slug":"ornn-api"},
+            doc! {"$set":{"proxy_operation_policy":{
+                "rules":[{"method":"POST","path_template":"/api/v1/skill-format/validate"}]
+            }}},
+        )
+        .await
+        .unwrap();
+    let acknowledge = || {
+        crate::handlers::assistant_nyxagent::decide_acknowledgement(
+            State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            Path((card.conversation_id.clone(), card.id.clone())),
+            Json(
+                serde_json::from_value(json!({"decision":"allow","accept_reduced_scope":true}))
+                    .unwrap(),
+            ),
+        )
+    };
+    let failure = acknowledge().await.err().expect("policy denies create");
+    let requests = ornn_requests(&server).await;
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.path() == "/api/v1/skill-format/validate")
+    );
+    assert!(!requests.iter().any(|r| r.url.path() == "/api/v1/skills"));
+    assert!(
+        matches!(&failure, AppError::Conflict(code) if code == "nyxid_refused"),
+        "{failure}"
+    );
+    let failed = stored(&f, &row.id).await;
+    assert_eq!(failed.failure_code.as_deref(), Some("nyxid_refused"));
+    let p = failed.publication.unwrap();
+    assert!(!p.started && !p.uncertain_dispatch);
+    assert!(
+        card_preview(&f, &row, &card).await["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("retry"))
+    );
+    services
+        .update_one(
+            doc! {"slug":"ornn-api"},
+            doc! {"$unset":{"proxy_operation_policy":""}},
+        )
+        .await
+        .unwrap();
+    let _ = acknowledge().await.unwrap();
+    let _ = acknowledge().await.unwrap();
+    let published = stored(&f, &row.id).await;
+    assert_eq!(published.status, "pinned");
+    let publication = published.publication.unwrap();
+    assert_eq!(publication.operation_id, p.operation_id);
+    assert_eq!(publication.skill_id.as_deref(), Some(skill_id.as_str()));
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_skill_check_finds_the_exact_version_after_a_lost_create_response() {
+    let f = fixture("authoring_create_exact_recovery").await;
+    let server = setup_ornn(&f).await;
+    let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+    let p = row.publication.as_ref().unwrap();
+    let id = Uuid::new_v4().to_string();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        matches!(finish(&f, card.clone(), true).await, Err(AppError::SkillPublication(failure)) if failure.reason == "publication_ambiguous")
+    );
+    let used = allowed_card(&f, &card).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/skill-search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+        )
+        .mount(&server)
+        .await;
+    assert!(
+        matches!(finish(&f, used.clone(), true).await, Err(AppError::SkillPublication(failure)) if failure.reason == "publication_ambiguous")
+    );
+    assert_eq!(
+        card_preview(&f, &row, &used).await["actions"],
+        json!(["check"])
+    );
+    Mock::given(method("GET")).and(path(format!("/api/v1/skills/{}", p.name)))
+        .and(query_param("version", &p.version))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{
+            "guid":id,"name":p.name,"version":p.version,"skillHash":p.sha256,
+            "isPrivate":true,"createdBy":f.owner,"sharedWithUsers":[],"sharedWithOrgs":[],"grants":[]
+        }}))).expect(1).mount(&server).await;
+    let body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
+    let archive =
+        publication::package_with_snapshot(&body, &p.operation_id, &p.name, &p.version, None)
+            .unwrap();
+    mount_version(&server, &f.owner, &id, p, archive).await;
+    finish(&f, used, true).await.unwrap();
+    let published = stored(&f, &row.id).await;
+    assert_eq!(published.status, "pinned");
+    assert_eq!(
+        published.publication.unwrap().skill_id.as_deref(),
+        Some(id.as_str())
+    );
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_version() {
     let mut f = fixture("authoring_publish").await;
     let server = setup_ornn(&f).await;
@@ -2571,19 +2750,13 @@ async fn two_authored_drafts_cannot_publish_the_same_update_target_after_uncerta
         .unwrap();
     assert!(finish(&f, allowed.clone(), true).await.is_err());
     let p = held.publication.as_ref().unwrap();
-    let draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&held.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &held).await.unwrap())
+            .unwrap();
     let snapshot: publication::InterfaceSnapshot = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(p.interface_encrypted.as_ref().unwrap())
+        &record::interface(&f.state.encryption_keys, &held, p)
             .await
+            .unwrap()
             .unwrap(),
     )
     .unwrap();
@@ -2618,14 +2791,9 @@ async fn interface_refusal_releases_barrier_and_requires_a_revised_draft() {
     let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
     let base_p = base.publication.as_ref().unwrap();
-    let base_draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&base.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let base_draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &base).await.unwrap())
+            .unwrap();
     let base_bytes = publication::package_with_snapshot(
         &base_draft,
         &base_p.operation_id,
@@ -2739,14 +2907,9 @@ async fn released_target_is_claimed_by_second_draft_and_old_retry_reports_target
     let (base, base_card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
     let base_p = base.publication.as_ref().unwrap();
-    let base_draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&base.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let base_draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &base).await.unwrap())
+            .unwrap();
     let base_bytes = publication::package_with_snapshot(
         &base_draft,
         &base_p.operation_id,
@@ -2785,7 +2948,18 @@ async fn released_target_is_claimed_by_second_draft_and_old_retry_reports_target
         .expect(1)
         .mount(&server)
         .await;
-    assert!(finish(&f, first_card.clone(), true).await.is_err());
+    let refusal = finish(&f, first_card.clone(), true)
+        .await
+        .err()
+        .unwrap()
+        .response_body();
+    assert_eq!(refusal.error, "conflict");
+    assert_eq!(
+        refusal.details.unwrap(),
+        json!({
+            "reason": "ornn_write_forbidden", "upstream_status": 403, "recovery": "check_access"
+        })
+    );
     let failed = f
         .state
         .db
@@ -3046,6 +3220,16 @@ async fn verified_checkpoint_survives_pin_failure_without_republishing() {
     assert_eq!(
         fresh_preview["current_skills_revision"],
         row.agent_skills_revision + 1
+    );
+    let original_card_preview =
+        review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &allowed.id)
+            .await
+            .unwrap();
+    assert!(
+        original_card_preview["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("renew"))
     );
     let axum::Json(renewal) = crate::handlers::assistant_agent_learning::approve(
         axum::extract::State(f.state.clone()),
@@ -4452,17 +4636,15 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
     .unwrap();
     assert!(hidden.is_empty());
     // A later turn is the same draft, never another proposal or approval card.
-    let turn = Uuid::new_v4().to_string();
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"active_turn.turn_id":&turn}},
+    f.finish_turn(&f.row).await;
+    f.row = f
+        .begin_turn(
+            crate::models::assistant_conversation::TurnOrigin::User,
+            "Review the requested skill",
         )
-        .await
-        .unwrap();
-    f.chat.turn_id = Some(turn);
+        .await;
+    f.chat =
+        super::super::assistant_authority_tests::chat_for_row(&f.state, &f.owner, &f.row).await;
     let activity = super::super::assistant_nyxagent::activity_started_for_turn(
         &f.state.db,
         &f.owner,
@@ -4782,6 +4964,204 @@ async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_ide
 }
 
 #[tokio::test]
+async fn queued_meta_skill_claim_preserves_b_input_and_proof_on_public_creation_and_recovery() {
+    use crate::models::{
+        assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        assistant_conversation::{ChannelTurnContext, TurnOrigin},
+        channel_bot::ChannelBot,
+    };
+    use crate::services::{assistant_nyxagent as engine, channel_meta_service as meta};
+    async fn finish(
+        state: &AppState,
+        row: &crate::models::assistant_conversation::AssistantConversation,
+    ) {
+        engine::finish_turn(
+            &state.db,
+            row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Finished".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let f = fixture("meta_authored_skill_source").await;
+    let db = &f.state.db;
+    let a = crate::services::channel_adapters::meta::tests::registered_bot(
+        &f.state,
+        &f.owner,
+        "instagram",
+    )
+    .await;
+    let mut b = crate::services::channel_adapters::meta::tests::registered_bot(
+        &f.state,
+        &f.owner,
+        "instagram",
+    )
+    .await;
+    b.platform_bot_id = "444".into();
+    db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&b.id}, &b)
+        .await
+        .unwrap();
+    for bot in [&a, &b] {
+        crate::services::transaction_service::run_db_only(db, &(db, bot), |tx, &(db, bot)| {
+            Box::pin(meta::scopes::ensure_current(db, tx, bot, true))
+        })
+        .await
+        .unwrap();
+    }
+    let context = |bot: &ChannelBot| -> ChannelTurnContext {
+        bson::from_document(doc! {"meta_grant":bson::to_bson(&meta::scopes::reference(bot).unwrap()).unwrap(),
+        "source_event_id":Uuid::new_v4().to_string(),"channel_id":Uuid::new_v4().to_string(),"channel_bot_id":&bot.id,
+        "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true}).unwrap()
+    };
+    finish(&f.state, &f.row).await;
+    let request: engine::TurnRequest =
+        serde_json::from_value(json!({"conversation_id":&f.row.id,"text":"A direct question"}))
+            .unwrap();
+    let mut start = engine::TurnStart::from(&request);
+    start.origin = TurnOrigin::Channel;
+    start.channel_context = Some(context(&a));
+    let a_turn = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let mut queued = team::event("message", "B asks for a skill".into(), None);
+    queued.channel_message = Some("B asks for a skill".into());
+    queued.channel_contexts = vec![context(&b)];
+    engine::push_events(db, &f.owner, &f.row.id, vec![queued])
+        .await
+        .unwrap()
+        .unwrap();
+    finish(&f.state, &a_turn).await;
+    let request: engine::TurnRequest =
+        serde_json::from_value(json!({"conversation_id":&f.row.id,"text":"Process B question"}))
+            .unwrap();
+    let mut start = engine::TurnStart::from(&request);
+    start.origin = TurnOrigin::Event;
+    let b_turn = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let b_chat =
+        crate::services::assistant_authority_tests::chat_for_row(&f.state, &f.owner, &b_turn).await;
+    let first = draft_in_chat(&f, &b_chat).await.unwrap();
+    let proposal = first["proposal_id"].as_str().unwrap();
+    let card_id = first["acknowledgement_id"].as_str().unwrap();
+    let cards = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    let card = cards.find_one(doc! {"_id":card_id}).await.unwrap().unwrap();
+    assert_eq!(card.creation_turn_id, b_chat.turn_id);
+    assert_eq!(card.requested_turn_id, b_chat.turn_id);
+    let claim = db
+        .collection::<bson::Document>(AUTHORED_CLAIMS_COLLECTION_NAME)
+        .find_one(doc! {"claim.proposal_id":proposal})
+        .await
+        .unwrap()
+        .unwrap();
+    let claim = claim.get_document("claim").unwrap();
+    assert_eq!(
+        claim.get_str("requested_turn_id"),
+        Ok(b_chat.turn_id.as_deref().unwrap())
+    );
+    assert!(claim.get_str("initiating_input_id").is_ok());
+    assert_eq!(claim.get_array("meta_contexts").unwrap().len(), 1);
+    cards.delete_one(doc! {"_id":card_id}).await.unwrap();
+    finish(&f.state, &b_turn).await;
+    let request: engine::TurnRequest = serde_json::from_value(
+        json!({"conversation_id":&f.row.id,"text":"Independent later web question"}),
+    )
+    .unwrap();
+    let later = engine::begin_turn(db, &f.owner, &request, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let caller = another_authoring_chat(&f).await;
+    let activity = engine::activity_started_for_turn(
+        db,
+        &f.owner,
+        &caller.conversation_id,
+        caller.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let recovered = crate::services::machine_activity_service::ACTIVITY_ID
+        .scope(Some(activity.clone()), draft_in_chat(&f, &caller))
+        .await
+        .unwrap();
+    let recovered = cards
+        .find_one(doc! {"_id":recovered["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.creation_turn_id, card.creation_turn_id);
+    assert_eq!(recovered.requested_turn_id, card.requested_turn_id);
+    assert_eq!(
+        bson::to_bson(&recovered.meta_contexts).unwrap(),
+        bson::to_bson(&card.meta_contexts).unwrap()
+    );
+    let caller_row = engine::get(db, &f.owner, &caller.conversation_id)
+        .await
+        .unwrap();
+    assert!(
+        caller_row
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|entry| entry.id == activity
+                && entry
+                    .decision
+                    .as_ref()
+                    .is_some_and(|decision| decision.id == recovered.id))
+    );
+    let original_home = engine::get(db, &f.owner, &later.id).await.unwrap();
+    assert!(
+        !original_home
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|entry| entry.id == activity)
+    );
+    finish(&f.state, &later).await;
+    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&a.id},doc! {"$set":{"is_active":false,"meta_binding.provider_revoked":true,"meta_binding.subscription":"removed"}}).await.unwrap();
+    let service = meta::MetaService::from(&f.state);
+    let cutoff = bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(1));
+    let mut done = false;
+    for _ in 0..80 {
+        if meta::scope_erasure::pass(
+            &f.state,
+            &service,
+            &a.id,
+            &meta::scopes::reference(&a).unwrap().grant_id,
+            cutoff,
+        )
+        .await
+        .unwrap()
+        {
+            done = true;
+            break;
+        }
+    }
+    assert!(done);
+    assert_eq!(
+        acks::decide(db, &f.owner, &f.row.id, &recovered.id, true)
+            .await
+            .unwrap()
+            .status,
+        "allowed"
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn noninteractive_retry_cannot_request_an_interrupted_drafts_review() {
     let f = fixture("authoring_noninteractive_recovery").await;
     let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
@@ -5081,10 +5461,7 @@ async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
     assert_eq!(proposal.status, "pending");
     assert!(proposal.scope_encrypted.is_none());
     assert!(proposal.scope_digest.is_none());
-    let encoded = f
-        .state
-        .encryption_keys
-        .decrypt(&proposal.body_encrypted)
+    let encoded = record::body(&f.state.encryption_keys, &proposal)
         .await
         .unwrap();
     let mut mac =
@@ -5097,9 +5474,7 @@ async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
         hex::encode(mac.finalize().into_bytes())
     );
     let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&proposal.body_encrypted)
+        &record::body(&f.state.encryption_keys, &proposal)
             .await
             .unwrap(),
     )
@@ -5145,10 +5520,7 @@ async fn owner_edit_starts_an_improve_draft_from_the_exact_pinned_package() {
         .await
         .unwrap()
         .unwrap();
-    let encoded = f
-        .state
-        .encryption_keys
-        .decrypt(&saved.body_encrypted)
+    let encoded = record::body(&f.state.encryption_keys, &saved)
         .await
         .unwrap();
     let expected =
@@ -5327,14 +5699,9 @@ async fn top_level_files_are_reviewed_and_packaged_under_references() {
         {"path":"assets/notes.txt","content":"Plain notes."}
     ]);
     let (row, _card) = make(&f, value).await;
-    let draft: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let draft: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     let paths: Vec<_> = draft.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(paths, ["references/faq.md", "assets/notes.txt"]);
     let archive =
@@ -5662,6 +6029,7 @@ async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
     let mut old_row = row.clone();
     old_row.scope_digest = None;
     old_row.scope_encrypted = None;
+    old_row.scope_context_version = None;
     let old_binding = publication::binding(&old_row, p, p.skills_revision);
     assert!(old_binding.get("scope_digest").is_none());
     assert_ne!(
@@ -5797,14 +6165,9 @@ async fn scope_identity_acceptance_revision_and_durable_repair_cap() {
     .await
     .unwrap();
     assert_ne!(complete["proposal_id"], result["proposal_id"]);
-    let body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     review::edit(
         &f.state,
         &f.owner,
@@ -5876,6 +6239,7 @@ async fn reduced_scope_publication_requires_consent_and_pins_with_metadata_audit
     let (row, card) = make(&f, value).await;
     let skill_id = Uuid::new_v4().to_string();
     mount_publication(&f, &server, &row, &skill_id, "POST").await;
+    assert_eq!(row.body_context_version, Some(3));
     assert!(finish(&f, card.clone(), true).await.is_err());
     assert!(
         server
@@ -6408,7 +6772,7 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
             .unwrap(),
     ] {
         f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
-            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"scope_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes}}}).await.unwrap();
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"scope_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes}}, "$unset":{"scope_context_version":""}}).await.unwrap();
         let preview =
             review::authored_preview_for_card(&f.state, &f.owner, &row.agent_id, &row.id, &card.id)
                 .await
@@ -6421,7 +6785,7 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
         .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
         .update_one(
             doc! {"_id":&row.id},
-            doc! {"$unset":{"scope_encrypted":"","scope_digest":""}},
+            doc! {"$unset":{"scope_encrypted":"","scope_context_version":"","scope_digest":""}},
         )
         .await
         .unwrap();
@@ -6437,14 +6801,9 @@ async fn unavailable_scope_preview_distinguishes_decryption_parse_and_legacy_row
 async fn relocated_authored_package_records_postapproval_failure_and_clears_rules_after_edit() {
     let f = fixture("authoring_legacy_root_preclaim").await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
-    let mut body: GeneratedProposal = serde_json::from_slice(
-        &f.state
-            .encryption_keys
-            .decrypt(&row.body_encrypted)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let mut body: GeneratedProposal =
+        serde_json::from_slice(&record::body(&f.state.encryption_keys, &row).await.unwrap())
+            .unwrap();
     let server = setup_ornn(&f).await;
     // The root path is relocated before review, preserving main's released contract.
     assert_eq!(
@@ -7096,4 +7455,95 @@ async fn specialist_draft_recovery_preserves_assigned_routing_across_a_direct_tu
         1
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn learning_rewrap_loses_to_edit_publication_pin_and_erasure() {
+    for action in ["edit", "publish_and_pin", "erase"] {
+        let mut f = fixture("learning_storage_race").await;
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        f.state.encryption_keys = std::sync::Arc::new(legacy);
+        let server = setup_ornn(&f).await;
+        let (row, card) = make(&f, input(&f.chat.agent_id)).await;
+        let rows = f
+            .state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+        let selector = doc! {"_id": &row.id, "owner_id": &row.owner_id};
+        let original = rows.find_one(selector.clone()).await.unwrap().unwrap();
+        f.state.encryption_keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
+        let (keys, pause) = crate::services::record_field_service::tests::pause_first_wrap();
+        let rewrap = record::storage::migrate(&f.state.db, &keys, &original);
+        let writer = async {
+            pause.entered.notified().await;
+            assert!(record::storage::verify(&keys, &original).await.is_err());
+            match action {
+                "edit" => {
+                    let plain = record::body(&keys, &row).await.unwrap();
+                    let mut draft: Value = serde_json::from_slice(&plain).unwrap();
+                    draft["description"] = json!("Revised by the owner");
+                    review::edit(
+                        &f.state,
+                        &f.owner,
+                        &row.agent_id,
+                        &row.id,
+                        row.revision,
+                        &draft,
+                    )
+                    .await
+                    .unwrap();
+                }
+                "publish_and_pin" => {
+                    mount_publication(&f, &server, &row, &Uuid::new_v4().to_string(), "POST").await;
+                    Box::pin(finish(&f, card, true)).await.unwrap();
+                    let pinned = stored(&f, &row.id).await;
+                    assert_eq!(pinned.status, "pinned");
+                    assert!(
+                        pinned.body_encrypted.is_empty() && pinned.body_context_version.is_none()
+                    );
+                }
+                "erase" => {
+                    assert_eq!(
+                        rows.delete_one(selector.clone())
+                            .await
+                            .unwrap()
+                            .deleted_count,
+                        1
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let winner = rows.find_one(selector.clone()).await.unwrap();
+            pause.release.notify_one();
+            winner
+        };
+        let (changed, winner) = tokio::join!(Box::pin(rewrap), Box::pin(writer));
+        assert!(!changed.unwrap());
+        assert!(rows.find_one(selector.clone()).await.unwrap() == winner);
+        if let Some(winner) = winner {
+            assert!(
+                record::storage::migrate(&f.state.db, &keys, &winner)
+                    .await
+                    .unwrap()
+            );
+            let current = rows.find_one(selector).await.unwrap().unwrap();
+            record::storage::verify(&keys, &current).await.unwrap();
+            if action == "publish_and_pin" {
+                assert!(
+                    !current.contains_key("body_encrypted")
+                        && !current.contains_key("body_context_version")
+                );
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/v1/skills")
+                        .count(),
+                    1
+                );
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    }
 }

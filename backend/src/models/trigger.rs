@@ -87,7 +87,16 @@ impl fmt::Debug for TriggerDelivery {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct AssistantTargetOwner {
+    pub agent_id: String,
+    pub owner_id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Trigger {
+    /// Owner resolved at target selection. Absent on legacy assistant deliveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_target_owner: Option<AssistantTargetOwner>,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
@@ -165,6 +174,7 @@ mod tests {
     fn bson_roundtrip_and_debug_redaction() {
         let now = Utc::now();
         let trigger = Trigger {
+            assistant_target_owner: None,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,

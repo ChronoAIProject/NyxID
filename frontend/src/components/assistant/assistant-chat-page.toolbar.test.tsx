@@ -69,7 +69,7 @@ vi.mock("@/hooks/use-feature-flag", () => ({
 }));
 vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => state.desktop }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
+  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, status: state.destroyed ? "destroyed" : "idle", can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
   selectedAgentOf: (rows?: unknown[]) => rows?.[0],
   nyxBotOf: (rows?: unknown[]) => rows?.[0],
   useNyxBotSettings: () => ({ data: { access_mode: state.mode, voice: state.savedVoice ? voicePreferences : null } }),
@@ -107,8 +107,6 @@ vi.mock("@/hooks/use-assistant-onboarding", () => ({
   useAssistantOnboarding: () => ({ data: undefined }),
   useHideSuggestions: () => ({ mutate: () => undefined }),
   useShowSuggestions: () => ({ mutate: () => undefined }),
-  useIntroReplay: (select: (state: { pending: boolean; consume: () => void }) => unknown) =>
-    select({ pending: false, consume: () => undefined }),
 }));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
 vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));

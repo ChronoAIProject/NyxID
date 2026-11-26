@@ -11,7 +11,7 @@ import { Link, useRouter } from "@tanstack/react-router";
 import { Menu, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { SidebarRailContext } from "./sidebar-rail-context";
-import { AssistantThreadsContext } from "./assistant-threads-context";
+import { AssistantThreadsContext, AssistantMobileThreadsContext } from "./assistant-threads-context";
 import "./assistant-navigation.css";
 import { useAssistantLayoutStore } from "@/stores/assistant-layout-store";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -33,6 +33,7 @@ import type { CmaOperation } from "@/schemas/cma-operation";
 
 interface AssistantShellProps {
   readonly title: string;
+  readonly displayTitle?: string;
   readonly sidebar: ReactNode;
   readonly headerActions?: ReactNode;
   readonly onRenameTitle?: (title: string) => Promise<void>;
@@ -61,6 +62,7 @@ export function AssistantShell(props: AssistantShellProps) {
 
 function AssistantShellLayout({
   title,
+  displayTitle,
   sidebar,
   headerActions,
   onRenameTitle,
@@ -83,8 +85,8 @@ function AssistantShellLayout({
   const setPreviewPercent = useMachinePaneStore((state) => state.setPercent);
   const hasPreview = Boolean(aside || (wideScreen && cmaCards));
   const shellTitle = contentTitle ? null : onRenameTitle ? (
-    <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
-  ) : <h1 className="truncate type-card-title text-foreground" title={title}>{title}</h1>;
+    <ThreadTitle key={titleKey} title={title} displayTitle={displayTitle} onRename={onRenameTitle} heading />
+  ) : <h1 className="truncate type-card-title text-foreground" title={title}>{displayTitle ?? title}</h1>;
   const viewportRef = useAssistantViewport();
   useScrollFades(viewportRef);
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
@@ -281,16 +283,18 @@ function AssistantShellLayout({
               />
               <aside
                 data-tour="sidebar"
-                className="relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
+                className="relative flex h-full w-full flex-col bg-sidebar"
                 style={{
                   paddingTop: "var(--sat)",
                   paddingBottom: "var(--sab)",
                   paddingLeft: "var(--sal)",
+                  paddingRight: "var(--sar)",
                 }}
               >
                 <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-1 border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="mr-auto h-5 w-auto" />
                   <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
+                    <NotificationsBell />
                     <AssistantSearchButton onOpen={openSearch} />
                     <button
                       type="button"
@@ -320,7 +324,7 @@ function AssistantShellLayout({
                     }
                   }}
                 >
-                  {sidebar}
+                  <AssistantMobileThreadsContext value>{sidebar}</AssistantMobileThreadsContext>
                 </div>
               </aside>
             </div>

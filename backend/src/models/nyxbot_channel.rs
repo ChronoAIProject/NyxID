@@ -68,6 +68,18 @@ pub struct GatewayIntake {
     pub last_inbound_at: Option<DateTime<Utc>>,
 }
 
+/// Last conclusive native Discord connection observation, scoped to the
+/// adopted provider binding and remote channel. No upstream prose is retained.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiscordConnectionObservation {
+    pub binding_id: String,
+    pub gateway_channel_id: String,
+    pub bot_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+    pub down: bool,
+}
+
 /// A channel bot linked to one of the owner's agents (NyxBot or a
 /// specialist). Telegram bots, and bots on platforms whose
 /// `nyxbot:gateway-{platform}` feature flag is on for their linking person, are reached
@@ -101,6 +113,8 @@ pub struct NyxbotChannel {
     pub gateway_native_delivery: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_intake: Option<GatewayIntake>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_discord_connection: Option<DiscordConnectionObservation>,
     #[serde(default)]
     pub gateway_bot_mentions: GatewayBotMentionSupport,
     #[serde(default)]
@@ -142,6 +156,8 @@ pub struct NyxbotChannel {
     pub agent_api_key_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub agent_key_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]
     pub gateway_channel_id: Option<String>,
     #[serde(default)]
@@ -364,6 +380,8 @@ pub struct NyxbotThread {
     /// gate supplemental-send eligibility while it is unexpired. Opaque, never logged.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub event_ref_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_ref_context_version: Option<u8>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub event_ref_expires_at: Option<DateTime<Utc>>,
     /// Relay inbound paired with the reference, including bot-originated activity.
@@ -500,6 +518,8 @@ pub struct NyxbotEvent {
     pub custom_binding_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_context_version: Option<u8>,
     /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is
     /// accepted with its original source before it is bound to an execution turn.
     /// A proven no-turn human Busy attempt may be `retryable`, atomically
@@ -643,6 +663,27 @@ pub struct ChannelTurnDelivery {
     pub claim_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub target_ciphertext: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_context_version: Option<u8>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub target_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct WaitingGuest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) media_event_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
+    pub(crate) conversation: String,
+    pub(crate) agent: String,
+    pub(crate) profile: String,
+    pub(crate) text: String,
+    pub(crate) note: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) question: Option<String>,
+    pub(crate) question_key: Option<String>,
+    pub(crate) origin: super::assistant_conversation::ChannelOrigin,
+    #[serde(default)]
+    pub(crate) reply_channel: Option<super::assistant_conversation::ChannelOrigin>,
 }

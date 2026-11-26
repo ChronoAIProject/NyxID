@@ -294,4 +294,5 @@ pub mod client_error_report;
 
 pub mod client_release_registry;
 
+pub mod channel_meta;
 pub mod nyxbot_response_read;

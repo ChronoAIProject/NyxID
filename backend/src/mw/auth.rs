@@ -1998,6 +1998,11 @@ pub async fn ensure_relay_agent_key_active(
             AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
         })?;
     crate::services::key_service::require_ordinary_purpose(key.purpose)?;
+    if crate::services::erasure_admission::is_erasure_accepted(db, &key.user_id).await? {
+        return Err(AppError::Unauthorized(
+            "Relay token's agent key is inactive or revoked".into(),
+        ));
+    }
     Ok(key)
 }
 
@@ -3374,7 +3379,7 @@ mod tests {
                 .await
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["platforms"].as_array().unwrap().len(), 10);
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 12);
         }
         for token in [&delegated, &service] {
             let response = delegated_router_response(
@@ -3953,6 +3958,7 @@ mod tests {
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: Some(actor_id.to_string()),
                 created_at: chrono::Utc::now(),

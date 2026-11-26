@@ -274,6 +274,7 @@ impl ProxyTarget {
     pub(crate) async fn direct_destination(
         &self,
         url: &str,
+        path: &str,
     ) -> AppResult<super::proxy_destination::Destination> {
         super::proxy_destination::Destination::for_request(
             self.approved_private_base(),
@@ -281,16 +282,16 @@ impl ProxyTarget {
             url,
         )
         .await
-        .inspect_err(|_| self.log_destination_refusal())
-    }
-
-    fn log_destination_refusal(&self) {
-        tracing::warn!(service_id=%self.service.id, "Direct proxy destination refused");
+        .inspect_err(|failure| failure.log(&self.service, "GET", path, false))
+        .map_err(AppError::from)
     }
 
     fn http_clients(
         &self,
         url: &reqwest::Url,
+        method: &str,
+        path: &str,
+        redirect: bool,
     ) -> AppResult<Arc<super::proxy_destination::http::Clients>> {
         super::proxy_destination::http::for_url(
             self.approved_private_base(),
@@ -298,7 +299,8 @@ impl ProxyTarget {
             url,
             false,
         )
-        .inspect_err(|_| self.log_destination_refusal())
+        .inspect_err(|failure| failure.log(&self.service, method, path, redirect))
+        .map_err(AppError::from)
     }
 
     pub(crate) fn require_credential_materialized(&self) -> AppResult<()> {
@@ -4833,6 +4835,7 @@ async fn return_or_follow_same_origin(
     target: &ProxyTarget,
     mut client: Client,
     mut request: reqwest::Request,
+    path: &str,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     use reqwest::header::{
@@ -4841,10 +4844,14 @@ async fn return_or_follow_same_origin(
     let mut followed = Vec::new();
     let mut response = loop {
         let replay = request.try_clone();
+        let method = request.method().clone();
         let response = client.execute(request).await.map_err(|error| {
-            if !followed.is_empty() && super::proxy_destination::http::refused_connection(&error) {
-                target.log_destination_refusal();
-                ForwardRequestError::Application(super::proxy_destination::refused())
+            if !followed.is_empty()
+                && let Some(failure) = super::proxy_destination::http::connection_failure(&error)
+            {
+                // The first request already reached the provider.
+                failure.log(&target.service, method.as_str(), path, true);
+                ForwardRequestError::Application(failure.into())
             } else {
                 ForwardRequestError::from(error)
             }
@@ -4889,7 +4896,9 @@ async fn return_or_follow_same_origin(
                 next.headers_mut().remove(name);
             }
         }
-        client = target.http_clients(next.url())?.ordinary()?;
+        client = target
+            .http_clients(next.url(), next.method().as_str(), path, true)?
+            .ordinary()?;
         if let Some(guard) = egress_guard {
             Box::pin(guard.revalidate()).await?;
         }
@@ -4997,8 +5006,12 @@ async fn forward_request_with_egress_guard_inner(
         None => SecretText::concat(&[base, "/", wire_path]),
     };
 
-    let url = reqwest::Url::parse(&url).map_err(|_| ForwardRequestError::PreDispatchRejected(super::proxy_destination::refused()))?;
-    let clients = target.http_clients(&url).map_err(ForwardRequestError::PreDispatchRejected)?;
+    let url = reqwest::Url::parse(&url).map_err(|_| {
+        let failure = super::proxy_destination::Failure::UrlShape;
+        failure.log(&target.service, method.as_str(), path, false);
+        ForwardRequestError::PreDispatchRejected(failure.into())
+    })?;
+    let clients = target.http_clients(&url, method.as_str(), path, false).map_err(ForwardRequestError::PreDispatchRejected)?;
     let client = if super::credential_verification::checking() {
         clients.verification()?
     } else {
@@ -5277,9 +5290,16 @@ async fn forward_request_with_egress_guard_inner(
             let token = token_exchange_cache.get_or_fetch(&cache_key, || async {
                 let exchange_url = provider_token_exchange_service::resolve_endpoint(&exchange_config.endpoint, &target.base_url);
                 let url = reqwest::Url::parse(&exchange_url).map_err(|_| super::proxy_destination::refused())?;
-                let client = target.http_clients(&url)?.ordinary()?;
+                let client = target.http_clients(&url, "POST", "/{token_exchange}", false)?.ordinary()?;
                 provider_token_exchange_service::fetch_exchange_token(&client, &target.base_url, exchange_config, &credential_map).await
-            }).await?;
+            }).await.map_err(|error| {
+                if matches!(error, AppError::PoolAttemptTransport(crate::errors::PoolAttemptTransportKind::ResolutionUnavailable)) {
+                    super::proxy_destination::Failure::ResolutionUnavailable.log(&target.service, "POST", "/{token_exchange}", false);
+                    ForwardRequestError::PreDispatchRejected(error)
+                } else {
+                    ForwardRequestError::Application(error)
+                }
+            })?;
             request = provider_token_exchange_service::apply_injection(
                 request,
                 &exchange_config.injection,
@@ -5440,7 +5460,7 @@ async fn forward_request_with_egress_guard_inner(
                 && target.service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
                 && !super::telegram_new_api::original_bot_api_request(request.url())
             {
-                return_or_follow_same_origin(target, client, request, egress_guard).await
+                return_or_follow_same_origin(target, client, request, path, egress_guard).await
             } else { client.execute(request).await.map_err(ForwardRequestError::from) }
         };
         if let Some(permit) = &target.execution_permission {
@@ -5468,17 +5488,19 @@ async fn forward_request_with_egress_guard_inner(
     Ok(response)
 
     }).await;
-    let result = match result {
-        Err(ForwardRequestError::Transport(error))
-            if super::proxy_destination::http::refused_connection(&error) =>
+    let result = result.map_err(|error| {
+        if let ForwardRequestError::Transport(transport) = &error
+            && let Some(failure) = super::proxy_destination::http::connection_failure(transport)
         {
-            target.log_destination_refusal();
-            Err(ForwardRequestError::PreDispatchRejected(
-                super::proxy_destination::refused(),
-            ))
+            failure.log(&target.service, method.as_str(), path, false);
+            if failure == super::proxy_destination::Failure::ResolutionUnavailable {
+                super::credential_verification::record("not_verified", "check_unavailable");
+            }
+            ForwardRequestError::PreDispatchRejected(failure.into())
+        } else {
+            error
         }
-        result => result,
-    };
+    });
     if let Err(ForwardRequestError::Transport(error)) = &result {
         super::credential_verification::record(
             "not_verified",
@@ -5997,6 +6019,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some(actor_id.clone()),
             created_at: now,

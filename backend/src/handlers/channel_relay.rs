@@ -657,10 +657,12 @@ fn validate_message_bot_scope(
 async fn consume_reply_token_use(
     state: &AppState,
     claims: &jwt::RelayReplyClaims,
+    owner_id: &str,
 ) -> AppResult<()> {
     crate::services::channel_relay_service::consume_reply_token_use(
         &state.db,
         &reply_token_use(claims)?,
+        owner_id,
     )
     .await
 }
@@ -826,7 +828,7 @@ async fn resolve_reply_token_message_context_classified(
                 .into());
             }
         } else if consume {
-            consume_reply_token_use(state, &claims).await?;
+            consume_reply_token_use(state, &claims, &original.user_id).await?;
         }
 
         Ok(ReplyRequestContext {
@@ -4407,6 +4409,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -4425,6 +4428,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -4474,6 +4479,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -4511,6 +4517,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -5017,6 +5024,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -5257,6 +5265,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -5275,6 +5284,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -6613,3 +6624,7 @@ mod x_public_tests;
 #[cfg(test)]
 #[path = "channel_activity_tests.rs"]
 mod activity_tests;
+
+#[cfg(test)]
+#[path = "channel_meta_integration_tests.rs"]
+mod meta_integration_tests;

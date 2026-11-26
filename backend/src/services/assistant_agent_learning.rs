@@ -72,13 +72,28 @@ pub(crate) struct GeneratedFile {
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
-    for field in ["owner_id", "agent_id"] {
-        db.collection::<bson::Document>(
-            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
-        )
-        .create_index(IndexModel::builder().keys(doc! {field:1}).build())
+    db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).create_index(IndexModel::builder()
+        .keys(doc! {"authoring_origin.meta_contexts.meta_grant.bot_id":1,"authoring_origin.meta_contexts.meta_grant.grant_id":1,"_id":1})
+        .build()).await?;
+    let claims = db.collection::<bson::Document>(
+        crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+    );
+    claims
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"owner_id": 1}).build(),
+            IndexModel::builder().keys(doc! {"agent_id": 1}).build(),
+            IndexModel::builder()
+                .keys(doc! {"claim.proposal_id": 1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {
+                    "claim.meta_contexts.meta_grant.bot_id": 1,
+                    "claim.meta_contexts.meta_grant.grant_id": 1,
+                    "_id": 1,
+                })
+                .build(),
+        ])
         .await?;
-    }
     db.collection::<bson::Document>(CONFIG_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -244,6 +259,7 @@ pub async fn configure(
             let result: AppResult<_> = async {
                 let actor = actor.as_str();
                 let agent_id = agent_id.as_str();
+                super::org_agent_service::fence_maintenance(&db, session, actor, &agent).await?;
                 fence_live_agent(&db, agent_id, &agent.user_id, session).await?;
                 let collection = db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME);
                 let now = Utc::now();
@@ -407,10 +423,15 @@ pub async fn enrollment_epoch(
         return Ok((config.learning_epoch > 0).then_some(config.learning_epoch));
     }
     let can_use = match snapshot {
-        Some(access) => access.matches(actor, &agent.user_id),
-        None => super::org_agent_service::can_use(
-            &super::org_agent_service::access(db, actor, &agent.user_id).await?,
-        ),
+        Some(access) => access.permits_agent(actor, agent),
+        None => {
+            super::org_agent_service::specialist_rights(
+                actor,
+                agent,
+                &super::org_agent_service::access(db, actor, &agent.user_id).await?,
+            )
+            .can_use
+        }
     };
     if !can_use {
         return Ok(None);
@@ -457,24 +478,23 @@ async fn owner_is_org(db: &Database, owner: &str) -> AppResult<bool> {
     Ok(user.user_type.is_org())
 }
 
-async fn member_ids(
-    db: &Database,
-    agent_id: &str,
-    owner_id: &str,
-    epoch: i64,
-) -> AppResult<Vec<String>> {
+async fn member_ids(db: &Database, agent: &AssistantAgent, epoch: i64) -> AppResult<Vec<String>> {
     let members: Vec<AssistantAgentLearningMember> = db
         .collection::<AssistantAgentLearningMember>(MEMBERS_COLLECTION_NAME)
-        .find(doc! {"agent_id": agent_id, "opted_in": true, "learning_epoch": epoch})
+        .find(doc! {"agent_id": &agent.id, "opted_in": true, "learning_epoch": epoch})
         .limit(1000)
         .await?
         .try_collect::<Vec<_>>()
         .await?;
     let mut ids = Vec::with_capacity(members.len());
     for member in members {
-        if super::org_agent_service::can_use(
-            &super::org_agent_service::access(db, &member.member_user_id, owner_id).await?,
-        ) {
+        if super::org_agent_service::specialist_rights(
+            &member.member_user_id,
+            agent,
+            &super::org_agent_service::access(db, &member.member_user_id, &agent.user_id).await?,
+        )
+        .can_use
+        {
             ids.push(member.member_user_id);
         }
     }
@@ -501,7 +521,7 @@ async fn candidate_threads(
         filter.insert("agent_owner_id", bson::Bson::Null);
     } else {
         filter.insert("agent_owner_id", &config.owner_id);
-        let ids = member_ids(db, &agent.id, &config.owner_id, config.learning_epoch).await?;
+        let ids = member_ids(db, agent, config.learning_epoch).await?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -821,6 +841,7 @@ async fn create_run(
         turn_id: row.turn_id.clone(),
     });
     let run = AssistantAgentLearningRun {
+        org_maintain_revision: agent.org_maintain_revision,
         id: Uuid::new_v4().to_string(),
         agent_id: agent.id.clone(),
         owner_id: agent.user_id.clone(),
@@ -862,6 +883,7 @@ async fn reserve_run(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<_> = async {
+                super::org_agent_service::fence_maintenance(&db,session,&run.actor_id,&agent).await?;
                 fence_live_agent(&db, &agent.id, &agent.user_id, session).await?;
                 if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
                     .count_documents(doc! {"agent_id": &agent.id, "status": {"$in": ["queued", "analyzing"]}})
@@ -1085,9 +1107,13 @@ async fn evidence_is_current(
             return Ok(None);
         }
     } else if agent.user_id == run.owner_id {
-        if !super::org_agent_service::can_use(
+        if !super::org_agent_service::specialist_rights(
+            &conversation.user_id,
+            agent,
             &super::org_agent_service::access(db, &conversation.user_id, &agent.user_id).await?,
-        ) {
+        )
+        .can_use
+        {
             return Ok(None);
         }
         if db
@@ -1219,6 +1245,9 @@ async fn run_authority_error(
     if config.is_none() {
         return Ok(Some("configuration_changed"));
     }
+    if run.org_maintain_revision != agent.org_maintain_revision {
+        return Ok(Some("owner_access_lost"));
+    }
     if agent.user_id == run.actor_id {
         return Ok(None);
     }
@@ -1331,9 +1360,20 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         .find_one(doc! {"_id": &run.agent_id})
         .await?
         .map_or(0, |agent| agent.skills_revision);
+    let id = Uuid::new_v4().to_string();
+    let (body_encrypted, body_context_version) = super::assistant_learning_record::Field::Body
+        .seal(
+            &state.encryption_keys,
+            &id,
+            &run.owner_id,
+            &run.agent_id,
+            &body,
+        )
+        .await?;
     let proposal = AssistantAgentLearningProposal {
+        authoring_origin: None,
         source: Default::default(),
-        id: Uuid::new_v4().to_string(),
+        id,
         agent_id: run.agent_id.clone(),
         owner_id: run.owner_id.clone(),
         run_id: run.id.clone(),
@@ -1348,10 +1388,12 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         failure_code: None,
         failure_rules: Vec::new(),
         scope_encrypted: None,
+        scope_context_version: None,
         scope_digest: None,
         evidence: run.evidence.clone(),
         body_bytes: body.len() as i64,
-        body_encrypted: state.encryption_keys.encrypt(&body).await?,
+        body_encrypted,
+        body_context_version,
         created_at: now,
         updated_at: now,
     };
@@ -1480,7 +1522,7 @@ pub fn spawn(state: AppState) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::models::assistant_agent_learning::DEFAULT_THRESHOLD;
 
@@ -1559,6 +1601,11 @@ mod tests {
         commands.lock().unwrap().clear();
         let now = Utc::now();
         let agent = AssistantAgent {
+            org_maintainer_user_ids: None,
+            org_user_ids: None,
+            org_access_revision: 0,
+            org_use_revision: 0,
+            org_maintain_revision: 0,
             channel_checking_notice: false,
             id: Uuid::new_v4().to_string(),
             user_id: "learning-test-owner".into(),
@@ -1665,6 +1712,42 @@ mod tests {
             before
         );
         f.state.db.drop().await.unwrap();
+    }
+
+    pub(crate) async fn mixed_learned_row(
+        keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    ) -> bson::Document {
+        use crate::services::assistant_oneshot_inference::tests::ACTOR;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let (mut state, mock, agent, config) = destruction_fixture().await;
+        state.encryption_keys = keys;
+        let content = serde_json::json!({"schema_version":1,"kind":"new","name":"checklist","description":"Reusable checklist","skill_md":"Validate each step.","files":[],"rationale":"Repeatable work","safety_notes":"Review first"});
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"choices":[{"message":{"content":content.to_string()}}]}),
+            ))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        let id = run.id.clone();
+        Box::pin(process_with_state(&state, run)).await.unwrap();
+        let row = state
+            .db
+            .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
+            .find_one(doc! {"run_id": id})
+            .await
+            .unwrap()
+            .unwrap();
+        state.db.drop().await.unwrap();
+        row
     }
 
     async fn destruction_fixture() -> (

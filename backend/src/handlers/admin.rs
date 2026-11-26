@@ -691,6 +691,7 @@ pub async fn delete_user(
     auth_user: AuthUser,
     _headers: HeaderMap,
     Path(user_id): Path<String>,
+    Query(query): Query<super::users::ErasureResponseQuery>,
 ) -> AppResult<Json<super::users::DeleteAccountResponse>> {
     require_admin(&state, &auth_user).await?;
     let actor = auth_user.user_id.to_string();
@@ -708,7 +709,8 @@ pub async fn delete_user(
     let job = crate::services::personal_erasure_service::accept(&state.db, &user_id, &actor, None)
         .await?;
     Ok(Json(
-        super::users::DeleteAccountResponse::from_job(&state.db, job).await?,
+        super::users::DeleteAccountResponse::from_job(&state.db, job, query.include_retained)
+            .await?,
     ))
 }
 
@@ -717,6 +719,8 @@ pub async fn delete_user(
 pub struct ErasureStatusQuery {
     pub after: Option<String>,
     pub nodes_after: Option<String>,
+    #[serde(default)]
+    pub include_retained: bool,
 }
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureEffectResponse {
@@ -788,7 +792,10 @@ pub async fn erasure_status(
     let next_node_after =
         (node_drains.len() == 64).then(|| node_drains.last().unwrap().node_id.clone());
     let erasure = match job {
-        Some(job) => Some(super::users::DeleteAccountResponse::from_job(&state.db, job).await?),
+        Some(job) => Some(
+            super::users::DeleteAccountResponse::from_job(&state.db, job, query.include_retained)
+                .await?,
+        ),
         None => None,
     };
     Ok(Json(ErasureProgressResponse {
@@ -2312,11 +2319,9 @@ pub async fn create_oauth_client(
         )
         .await?;
     }
-    let revocation_webhook_secret_encrypted =
-        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
-            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
-            None => None,
-        };
+    let revocation_webhook_secret =
+        normalize_optional_nonempty(body.revocation_webhook_secret.as_deref())
+            .map(|secret| (state.encryption_keys.as_ref(), secret));
 
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
@@ -2329,7 +2334,7 @@ pub async fn create_oauth_client(
         crate::models::oauth_client::ScopeProvenance::Explicit,
         body.broker_capability_enabled.unwrap_or(false),
         revocation_webhook_url,
-        revocation_webhook_secret_encrypted,
+        revocation_webhook_secret,
         &[],
     )
     .await?;
@@ -3381,6 +3386,7 @@ mod operator_route_tests {
             Query(ErasureStatusQuery {
                 after: None,
                 nodes_after: None,
+                include_retained: false,
             }),
         )
         .await
@@ -3441,6 +3447,7 @@ mod operator_route_tests {
             Query(ErasureStatusQuery {
                 after: None,
                 nodes_after: None,
+                include_retained: false,
             }),
         )
         .await
@@ -3968,6 +3975,7 @@ mod operator_route_tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dynamic_registration".to_string()),
             created_at: now,

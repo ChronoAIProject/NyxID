@@ -63,6 +63,26 @@ impl Decision {
             _ => Outcome::Unknown,
         };
     }
+    pub(super) fn needs_post_turn_claim(&self) -> bool {
+        self.purpose.result() && !self.saved_result && self.turn.is_some()
+    }
+    pub(super) async fn claim_result(
+        &mut self,
+        state: &AppState,
+        owner: &str,
+        conversation: &str,
+        origin: &ChannelOrigin,
+    ) -> AppResult<bool> {
+        match sources::claim_result(&state.db, owner, conversation, self.turn.as_deref(), origin)
+            .await?
+        {
+            Ok(()) => Ok(true),
+            Err(reason) => {
+                self.skip(reason);
+                Ok(false)
+            }
+        }
+    }
     pub fn result(&mut self, result: &AppResult<()>) {
         if let Err(error) = result {
             if self.egress == Egress::Skipped {
@@ -171,13 +191,7 @@ pub async fn relay(
             return Ok(());
         }
         // Progress retains the original gateway-reference window.
-        let ciphertext = thread
-            .event_ref_ciphertext
-            .as_deref()
-            .ok_or_else(|| AppError::Internal("Event reference unavailable".into()))?;
-        let reference = state.encryption_keys.decrypt(ciphertext).await?;
-        std::str::from_utf8(&reference)
-            .map_err(|_| AppError::Internal("Event reference unavailable".into()))?;
+        crate::services::nyxbot_thread_reference::open(&state.encryption_keys, thread).await?;
     }
     if decrypt_agent_key(state, channel).await?.is_none() {
         decision.skip(Reason::AuthorityRefused);
@@ -239,16 +253,10 @@ pub async fn relay(
         // the ordinary adapter still revalidates immediately before sending.
         prepare_local_result(state, channel, thread, &id, text).await?;
         if !decision.saved_result
-            && let Err(reason) = sources::claim_result(
-                &state.db,
-                &row.user_id,
-                &row.id,
-                row.active_turn.as_ref().map(|turn| turn.turn_id.as_str()),
-                origin,
-            )
-            .await?
+            && !decision
+                .claim_result(state, &row.user_id, &row.id, origin)
+                .await?
         {
-            decision.skip(reason);
             return Ok(());
         }
     }
@@ -334,17 +342,15 @@ pub async fn native(
         return Ok(());
     }
     decision.anchor = Anchor::EventSource;
-    decision.dispatch(Egress::GatewayEvent);
-    let outcome = native_responses::send_supplemental(
-        state,
-        channel,
-        origin,
-        conversation,
-        text,
-        decision.turn.as_deref().filter(|_| decision.saved_result),
-    )
-    .await?;
-    decision.outcome(outcome);
+    if !decision.needs_post_turn_claim() {
+        decision.dispatch(Egress::GatewayEvent);
+    }
+    let outcome =
+        native_responses::send_supplemental(state, channel, origin, conversation, text, decision)
+            .await?;
+    if let Some(outcome) = outcome {
+        decision.outcome(outcome);
+    }
     Ok(())
 }
 
@@ -402,9 +408,15 @@ pub async fn followed(
             decision.skip(Reason::ReferenceUnavailable);
             return Ok(());
         };
-        let context: Value =
-            serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
-                .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
+        let context: Value = serde_json::from_slice(
+            &crate::services::nyxbot_event_record::event_context(
+                &state.encryption_keys,
+                &event,
+                ciphertext,
+            )
+            .await?,
+        )
+        .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
         if context["event_ref"].as_str().is_none() {
             decision.skip(Reason::ReferenceUnavailable);
             return Ok(());
@@ -436,16 +448,10 @@ pub async fn followed(
         // root without sending or acquiring an image delivery claim.
         thread_follow::bound_image_audience(state, channel, owner, origin, conversation).await?;
         prepare_result_text(text, &channel.platform, "")?;
-        if let Err(reason) = sources::claim_result(
-            &state.db,
-            owner,
-            conversation,
-            decision.turn.as_deref(),
-            origin,
-        )
-        .await?
+        if !decision
+            .claim_result(state, owner, conversation, origin)
+            .await?
         {
-            decision.skip(reason);
             return Ok(());
         }
     }
@@ -475,7 +481,7 @@ pub async fn followed(
     Ok(())
 }
 
-fn prepare_result_text(text: &str, platform: &str, chat: &str) -> AppResult<()> {
+pub(super) fn prepare_result_text(text: &str, platform: &str, chat: &str) -> AppResult<()> {
     crate::services::channel_reply_plan::ordinary(
         &crate::services::channel_platform::OutboundReply {
             text: Some(text.to_owned()),

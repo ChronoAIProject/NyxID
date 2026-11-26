@@ -40,11 +40,13 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
     to,
+    search,
   }: {
     readonly children: ReactNode;
     readonly to: string;
+    readonly search?: Record<string, string>;
   }) => (
-    <a href={to} data-router-link="true">
+    <a href={search ? `${to}?${new URLSearchParams(search)}` : to} data-router-link="true">
       {children}
     </a>
   ),
@@ -343,7 +345,7 @@ describe("ApprovalGrantsPage", () => {
     ).toHaveAttribute("data-router-link", "true");
     expect(
       screen.getByRole("link", { name: "Configure approval policies" }),
-    ).toHaveAttribute("href", "/approvals/settings");
+    ).toHaveAttribute("href", "/settings?tab=notifications");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 

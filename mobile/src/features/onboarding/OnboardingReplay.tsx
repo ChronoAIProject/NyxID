@@ -1,3 +1,4 @@
+import { onboardingText } from "../../../../shared/onboardingCopy";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useMemo, useRef } from "react";
@@ -46,7 +47,7 @@ export function OnboardingReplay({
   const reducedMotion = useReducedMotion();
   const topicKey = topics.join(",");
   const beats = useMemo(
-    () => replayScript(kind, topicKey.split(",")),
+    () => replayScript(kind, topicKey.split(","), appLanguage),
     [kind, topicKey, appLanguage],
   );
   const scene = useReplayScene(beats, reducedMotion);
@@ -110,7 +111,7 @@ export function OnboardingReplay({
               )}
               {scene.specialist?.after === entry.id ? (
                 <View style={styles.specialist}>
-                  <AgentAvatar agent={RESEARCH} size="xs" />
+                  <AgentAvatar agent={{ ...RESEARCH, display_name: onboardingText(appLanguage, RESEARCH.display_name) }} size="xs" />
                   <Label muted style={styles.flex}>
                     {scene.specialist.state === "working"
                       ? translateApp("Research is working on it")

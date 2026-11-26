@@ -123,6 +123,16 @@ pub async fn resolve_bot_token(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<Zeroizing<String>> {
+    if super::channel_adapters::meta::is_meta(&bot.platform)
+        && bot
+            .meta_binding
+            .as_ref()
+            .is_some_and(|binding| binding.provider_revoked)
+    {
+        return Err(super::channel_adapters::meta::unreachable(
+            "reconnect_required",
+        ));
+    }
     if bot.credential_source == "telegram_manager" {
         let values =
             super::telegram_manager_registry::values(db, keys, Some(&bot.platform_bot_id)).await?;

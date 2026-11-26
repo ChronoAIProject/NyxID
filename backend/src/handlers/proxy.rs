@@ -45,6 +45,7 @@ use crate::services::{
     ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::turn_trace::{GuestServiceFailure, Stage};
 
 #[path = "proxy_ingress.rs"]
 pub(crate) mod ingress;
@@ -69,6 +70,9 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::RateLimited => (429, 1005),
         AppError::ServiceConcurrencyLimited => (429, 12600),
         AppError::Internal(_) => (500, 1006),
+        AppError::PoolAttemptTransport(
+            crate::errors::PoolAttemptTransportKind::ResolutionUnavailable,
+        ) => (err.status_code().as_u16(), err.error_code()),
         AppError::DatabaseError(_) => (500, 1007),
         AppError::ValidationError(_) => (400, 1008),
         AppError::NodeNotFound(_) => (404, 8000),
@@ -1522,7 +1526,8 @@ fn pool_attempt_evidence(
         crate::errors::PoolAttemptTransportKind::NodeAfterDispatch => {
             crate::services::pool_failover::AttemptEvidence::NodeTransportAfterDispatch
         }
-        crate::errors::PoolAttemptTransportKind::AfterDispatch => {
+        crate::errors::PoolAttemptTransportKind::AfterDispatch
+        | crate::errors::PoolAttemptTransportKind::ResolutionUnavailable => {
             crate::services::pool_failover::AttemptEvidence::TransportAfterDispatch
         }
     })
@@ -3344,6 +3349,13 @@ async fn preflight_proxy_deny_before_resolution(
     .await?;
 
     if denied {
+        if auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.is_org_channel_guest())
+        {
+            GuestServiceFailure::ApprovalDenied.record(Stage::Proxy, Some(403));
+        }
         crate::services::assistant_model_observer::denied_before_resolution(
             state,
             auth_user,
@@ -4182,6 +4194,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::invocation_diagnostics::DiagnosticProbe>()
         .is_some();
+    let publication_dispatch = request
+        .extensions()
+        .get::<crate::services::agent_skill_service::PublicationDispatch>()
+        .cloned();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4785,6 +4801,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .assistant_chat
         .as_deref()
         .is_some_and(|chat| chat.guest || chat.confirmation_policy.is_some());
+    let org_channel_guest = auth_user
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.is_org_channel_guest());
     if operation_scoped {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
     }
@@ -4796,6 +4816,9 @@ async fn execute_resolved_proxy_inner<'a>(
             &body_bytes,
         )
     {
+        if org_channel_guest {
+            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+        }
         return Err(AppError::ApiKeyScopeForbidden(
             "Operation scopes, guest and webhook calls forbid method overrides".into(),
         ));
@@ -4827,7 +4850,12 @@ async fn execute_resolved_proxy_inner<'a>(
             all_headers
                 .get(axum::http::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
-        )?;
+        )
+        .inspect_err(|error| {
+            if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+                GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+            }
+        })?;
     }
     let operation_guest = box_proxy_future(|| {
         crate::services::agent_operation_scope_service::check_non_mcp_context(
@@ -4859,7 +4887,12 @@ async fn execute_resolved_proxy_inner<'a>(
             },
         )
     })
-    .await?;
+    .await
+    .inspect_err(|error| {
+        if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+        }
+    })?;
 
     if operation_guest {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
@@ -5183,7 +5216,17 @@ async fn execute_resolved_proxy_inner<'a>(
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,
-    )?;
+    )
+    .inspect_err(|_| {
+        if org_channel_guest {
+            let reason = if matches!(approval_outcome, approval_service::ApprovalOutcome::Denied) {
+                GuestServiceFailure::ApprovalDenied
+            } else {
+                GuestServiceFailure::ApprovalRequired
+            };
+            reason.record(Stage::Proxy, Some(403));
+        }
+    })?;
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -5781,6 +5824,11 @@ async fn execute_resolved_proxy_inner<'a>(
 
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
+    if let Some(dispatch) = &publication_dispatch {
+        // Admission and approval have finished. Fence the owner, invocation and
+        // exact lease before reserving funds or handing the ZIP to a transport.
+        dispatch.begin().await?;
+    }
     if crate::services::telnyx_platform_service::contract(&target.service).is_some() {
         // Scheduled writes require a separate durable-grant lifecycle. Reject
         // unsupported execution surfaces before either billing or dispatch.
@@ -5811,6 +5859,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 ),
             )?;
         destination_audit.dispatch();
+        if let Some(dispatch) = &publication_dispatch {
+            dispatch.transport_attempt(true);
+        }
         let managed = crate::services::telnyx_platform_service::execute(
             &state.db,
             state.billing.clone(),
@@ -6439,6 +6490,9 @@ async fn execute_resolved_proxy_inner<'a>(
                             return Err(error);
                         }
                     }
+                    if let Some(dispatch) = &publication_dispatch {
+                        dispatch.transport_attempt(true);
+                    }
                     let result = if let Some(upload) = streaming_body.take() {
                         let headers = std::mem::take(&mut attempt_request.headers);
                         let mut parameters = crate::crypto::secret_json::SecretJson(
@@ -6491,6 +6545,12 @@ async fn execute_resolved_proxy_inner<'a>(
                             )
                             .await
                     };
+                    if let (Some(dispatch), Err(failure)) = (&publication_dispatch, &result)
+                        && !failure.dispatched
+                        && !had_dispatched_failure
+                    {
+                        dispatch.transport_attempt(false);
+                    }
                     if let Err(failure) = &result
                         && !failure.dispatched
                         && !matches!(failure.error, AppError::NodeCredentialMissing(_))
@@ -7376,6 +7436,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
                 mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
                 destination_audit.dispatch();
+                if let Some(dispatch) = &publication_dispatch {
+                    dispatch.transport_attempt(true);
+                }
                 let response_result = until_client_disconnect(
                     &downstream_cancellation,
                     box_proxy_future(|| {
@@ -7627,11 +7690,15 @@ async fn execute_resolved_proxy_inner<'a>(
                 resource_owner_id: service_owner_for_approval,
                 user_service_id: resolved_user_service_id.as_deref(),
             };
+            if let Some(dispatch) = &publication_dispatch {
+                dispatch.transport_attempt(true);
+            }
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
-                        if crate::services::credential_verification::checking()
+                        if publication_dispatch.is_some()
+                            || crate::services::credential_verification::checking()
                             || is_pool_attempt
                             || operation_scoped
                             || operation_guest
@@ -7668,6 +7735,17 @@ async fn execute_resolved_proxy_inner<'a>(
                 }),
             )
             .await;
+            if let (Some(dispatch), Ok(Err(error))) = (&publication_dispatch, &downstream_result)
+                && !had_dispatched_failure
+                && (matches!(
+                    error,
+                    proxy_service::ForwardRequestError::PreDispatchRejected(_)
+                ) || matches!(error, proxy_service::ForwardRequestError::Transport(e) if e.is_connect()))
+            {
+                // Reviewed uploads return redirects. A connect failure here
+                // cannot follow an earlier successful same-origin hop.
+                dispatch.transport_attempt(false);
+            }
             let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
                 Some(meter) => Ok(Err(proxy_service::ForwardRequestError::from(meter.error()))),
                 None => downstream_result,
@@ -7691,6 +7769,13 @@ async fn execute_resolved_proxy_inner<'a>(
             }
             let downstream_response = match downstream_result {
                 Ok(Ok(response)) => {
+                    if org_channel_guest
+                        && (response.status().is_client_error()
+                            || response.status().is_server_error())
+                    {
+                        GuestServiceFailure::DownstreamHttpError
+                            .record(Stage::Proxy, Some(response.status().as_u16()));
+                    }
                     if let Some(model) = &model_request {
                         model.received_headers(response.status().as_u16());
                     }
@@ -7709,6 +7794,18 @@ async fn execute_resolved_proxy_inner<'a>(
                             had_dispatched_failure,
                         )
                         .await?;
+                    if matches!(
+                        error,
+                        AppError::PoolAttemptTransport(
+                            crate::errors::PoolAttemptTransportKind::ResolutionUnavailable
+                        )
+                    ) && !had_dispatched_failure
+                        && (is_pool_attempt || nyxagent_admission)
+                    {
+                        return Err(AppError::PoolAttemptTransport(
+                            crate::errors::PoolAttemptTransportKind::Connect,
+                        ));
+                    }
                     return Err(error);
                 }
                 Ok(Err(error)) => {
@@ -8496,8 +8593,10 @@ pub(crate) fn build_downstream_ws_request(
 
 /// Connect to a downstream WebSocket, injecting credentials and identity
 /// headers into the upgrade request.
+#[allow(clippy::too_many_arguments)]
 async fn connect_downstream_ws(
     url: &str,
+    path: &str,
     target: &proxy_service::ProxyTarget,
     delegated: &[delegation_service::DelegatedCredential],
     identity_headers: &[(String, String)],
@@ -8517,19 +8616,18 @@ async fn connect_downstream_ws(
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
-    let (ws_stream, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS),
-        async {
-            let destination = target.direct_destination(url).await?;
-            let stream = destination
-                .connect()
-                .await
-                .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
-            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
-                .await
-                .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
-        },
-    )
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS);
+    let destination = target.direct_destination(url, path).await?;
+    let (ws_stream, response) = tokio::time::timeout_at(deadline, async {
+        let stream = destination
+            .connect()
+            .await
+            .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
+        tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
+            .await
+            .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
+    })
     .await
     .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))??;
 
@@ -9096,6 +9194,7 @@ async fn handle_ws_passthrough(
     }
     let downstream = connect_downstream_ws(
         &downstream_url,
+        path,
         target,
         delegated,
         identity_headers,
@@ -11336,7 +11435,8 @@ mod tests {
             BillingIngress::Proxy,
         )
         .unwrap();
-        let result = super::connect_downstream_ws(url, &target, &[], &[], &[], None, permit).await;
+        let result =
+            super::connect_downstream_ws(url, "/", &target, &[], &[], &[], None, permit).await;
         assert!(matches!(
             result,
             Err(crate::errors::AppError::ValidationError(_))
@@ -11391,6 +11491,7 @@ mod tests {
 
         let connection = super::connect_downstream_ws(
             &format!("ws://{addr}/v1/convai/conversation"),
+            "v1/convai/conversation",
             &target,
             &[],
             &[],

@@ -683,7 +683,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    key_mutations::insert_one(db, &new_key, session).await?;
+    key_mutations::insert_one_for_actor(db, &new_key, scope_actor_user_id, session).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -1324,7 +1324,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         "rotation predecessor changed concurrently".to_string(),
                     ));
                 }
-                key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                key_mutations::insert_one_for_actor(&db, &successor, actor_id.as_deref(), Some(&mut *session)).await?;
                 let assistant_managed =
                     super::assistant_agent_credential_service::adopt_rotated_key(
                         &db,
@@ -1390,6 +1390,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             grants,
                             scopes,
                             owner,
+                            _,
                         ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner)
                         | super::assistant_agent_credential_service::KeyAuthority::OrgChannelGuest(grants, scopes, owner) => {
                             successor.assistant_agent_owner_id = Some(owner.clone());
@@ -1421,10 +1422,10 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                                 .as_ref()
                                 .and(conversation.group_id.clone())
                         });
-                    if successor.assistant_group_id.is_some()
+                    if super::org_agent_service::ordinary_member_org(&conversation).is_some() || successor.assistant_group_id.is_some()
                         || super::org_channel_service::origin(&conversation).is_some()
                     {
-                        // Group, collaboration and org-channel authentication bind
+                        // Organization specialist and group authentication bind
                         // the key to its thread. Move that binding with the encrypted successor,
                         // rather than waiting for the next turn to refresh it.
                         db.collection::<bson::Document>(

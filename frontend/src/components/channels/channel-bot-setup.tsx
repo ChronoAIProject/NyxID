@@ -1,3 +1,4 @@
+import { MetaCustomerSetup } from "./meta-customer-setup";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -307,6 +308,7 @@ export function ChannelBotSetup({
       )}
       {completedId ? (
         <div className="space-y-4">
+          {["messenger", "instagram"].includes(platform) && completedId && <MetaCustomerSetup botId={completedId} orgId={targetOrgId ?? null} />}
           {(fullPage || stayInPlace) && (
             <div
               role="status"

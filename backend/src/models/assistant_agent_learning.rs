@@ -19,6 +19,10 @@ pub const AUTHORED_CLAIMS_COLLECTION_NAME: &str = "assistant_authored_draft_clai
 /// A generation's original review surface, retained across interrupted preparation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuthoredDraftClaim {
+    #[serde(default)]
+    pub initiating_input_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meta_contexts: Vec<super::assistant_conversation::ChannelTurnContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub proposal_id: String,
@@ -134,6 +138,8 @@ pub struct LearningEvidence {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantAgentLearningRun {
+    #[serde(default)]
+    pub org_maintain_revision: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub agent_id: String,
@@ -177,6 +183,10 @@ pub enum ProposalSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAgentLearningProposal {
+    /// Original source belongs to this proposal, independently of the reusable
+    /// content claim. Removed with grant cleanup; verified publication survives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_origin: Option<AuthoredDraftClaim>,
     #[serde(default)]
     pub source: ProposalSource,
     #[serde(rename = "_id")]
@@ -202,12 +212,16 @@ pub struct AssistantAgentLearningProposal {
     pub failure_rules: Vec<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub scope_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_context_version: Option<u8>,
     #[serde(default)]
     pub scope_digest: Option<String>,
     #[serde(default)]
     pub evidence: Vec<LearningEvidence>,
     #[serde(default, with = "crate::models::bson_bytes::required")]
     pub body_encrypted: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_context_version: Option<u8>,
     pub body_bytes: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -271,6 +285,8 @@ pub struct LearningPublication {
     pub started: bool,
     pub approved_by: Option<String>,
     pub approval_digest: Option<String>,
+    #[serde(default)]
+    pub org_maintain_revision: i64,
     pub acknowledgement_id: Option<String>,
     pub skills_revision: i64,
     pub lease_id: Option<String>,
@@ -292,6 +308,8 @@ pub struct LearningPublication {
     pub target_skill_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub interface_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_context_version: Option<u8>,
     /// 2: prepared by snapshot-aware NyxID (an update carries the base
     /// interface snapshot). Absent (0) on packages prepared before it existed;
     /// such updates are never dispatched.

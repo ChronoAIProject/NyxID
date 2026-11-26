@@ -6,32 +6,53 @@ fn callback_requires_exact_authenticated_turn_and_valid_parent() {
     let turn = Uuid::new_v4().to_string();
     let root = TurnContext::for_turn(&turn).unwrap();
     let mut headers = HeaderMap::new();
-    assert!(TurnContext::callback(&headers, Some(&turn)).is_none());
+    assert!(
+        TurnContext::for_request(&headers, Some(&turn))
+            .context()
+            .is_none()
+    );
     headers.insert("traceparent", root.traceparent().parse().unwrap());
     assert_eq!(
-        TurnContext::callback(&headers, Some(&turn))
+        TurnContext::for_request(&headers, Some(&turn))
+            .context()
             .unwrap()
             .turn_id(),
         turn
     );
-    assert!(TurnContext::callback(&headers, None).is_none());
-    assert!(TurnContext::callback(&headers, Some(&Uuid::new_v4().to_string())).is_none());
+    assert!(TurnContext::for_request(&headers, None).context().is_none());
+    assert!(
+        TurnContext::for_request(&headers, Some(&Uuid::new_v4().to_string()))
+            .context()
+            .is_none()
+    );
     let oversized = format!(
         "{}-{}",
         root.traceparent().replacen("00-", "01-", 1),
         "a".repeat(256)
     );
     headers.insert("traceparent", oversized.parse().unwrap());
-    assert!(TurnContext::callback(&headers, Some(&turn)).is_none());
+    assert!(
+        TurnContext::for_request(&headers, Some(&turn))
+            .context()
+            .is_none()
+    );
     headers.insert("traceparent", root.traceparent().parse().unwrap());
     headers.append("traceparent", root.traceparent().parse().unwrap());
-    assert!(TurnContext::callback(&headers, Some(&turn)).is_none());
+    assert!(
+        TurnContext::for_request(&headers, Some(&turn))
+            .context()
+            .is_none()
+    );
     for invalid in [
         "private-canary",
         "00-00000000000000000000000000000000-0000000000000001-01",
     ] {
         headers.insert("traceparent", invalid.parse().unwrap());
-        assert!(TurnContext::callback(&headers, Some(&turn)).is_none());
+        assert!(
+            TurnContext::for_request(&headers, Some(&turn))
+                .context()
+                .is_none()
+        );
     }
 }
 

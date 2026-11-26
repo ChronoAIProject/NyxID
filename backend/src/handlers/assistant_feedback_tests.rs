@@ -77,6 +77,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -115,6 +116,7 @@ mod fixtures {
 
     pub fn group(id: &str, owner: &str) -> AssistantGroup {
         AssistantGroup {
+            pending_org_use_revisions: Default::default(),
             collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: Default::default(),
@@ -833,6 +835,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            pending_org_use_revisions: Default::default(),
             collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
@@ -935,6 +938,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            pending_org_use_revisions: Default::default(),
             collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: std::collections::HashMap::new(),

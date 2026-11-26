@@ -647,6 +647,7 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
   view.harness.unmount();
   const optedOut = setup({
     value: "",
+    compactWhenIdle: false,
     renderActions: (mention: Element, layout: any) => {
       layouts.push(layout);
       return { type: "Toolbar", props: { children: [mention] } };
@@ -655,7 +656,7 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
   assert.equal(
     layouts.at(-1).compact,
     false,
-    "wide/persistent layouts never collapse",
+    "an explicit active-layout override can keep two rows",
   );
   optedOut.harness.unmount();
 });

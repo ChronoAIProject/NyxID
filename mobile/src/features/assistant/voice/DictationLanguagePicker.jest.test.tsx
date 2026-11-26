@@ -61,6 +61,9 @@ function language() {
       },
       ...languageOptions(["zh-CN", "ja-JP", "en-US"]),
     ],
+    manualEntry: false,
+    retry: jest.fn(),
+    openSpeechSettings: jest.fn(),
     choose: jest.fn(),
   };
 }
@@ -130,4 +133,44 @@ it("shows an empty search state and can close without changing the language", as
   await fireEvent.press(screen.getByLabelText("Close"));
   expect(close).toHaveBeenCalledTimes(1);
   expect(state.choose).not.toHaveBeenCalled();
+});
+it("offers retry, speech settings and an explicit validated language when the provider returns no list", async () => {
+  const state = {
+    ...language(),
+    manualEntry: true,
+    listUnavailable: true,
+    options: [language().options[0]!],
+  };
+  const close = jest.fn();
+  await render(<DictationLanguagePicker language={state} onClose={close} />);
+  await fireEvent.press(screen.getByText("Retry language list"));
+  expect(state.retry).toHaveBeenCalledTimes(1);
+  await fireEvent.press(screen.getByText("Speech recognition settings"));
+  expect(state.openSpeechSettings).toHaveBeenCalledTimes(1);
+  await fireEvent.changeText(screen.getByLabelText("Language code"), " ZH_cn ");
+  await fireEvent.press(screen.getByText("Use language code"));
+  expect(state.choose).toHaveBeenCalledWith("zh-CN");
+  expect(close).toHaveBeenCalledTimes(1);
+});
+
+it("rejects invalid manual language codes before persisting any choice", async () => {
+  const state = {
+    ...language(),
+    manualEntry: true,
+    listUnavailable: true,
+    options: [language().options[0]!],
+  };
+  const close = jest.fn();
+  await render(<DictationLanguagePicker language={state} onClose={close} />);
+  for (const value of [
+    "English",
+    "zh CN",
+    "en-US;lang=ja-JP",
+    "en-u-ca-gregory",
+  ]) {
+    await fireEvent.changeText(screen.getByLabelText("Language code"), value);
+    await fireEvent.press(screen.getByText("Use language code"));
+    expect(state.choose).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  }
 });

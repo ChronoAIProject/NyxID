@@ -1,3 +1,4 @@
+import { useChannelPlatforms } from "@/hooks/use-channel-platforms";
 import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -9,6 +10,7 @@ import {
   LockKeyhole,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -41,9 +43,11 @@ import {
 import { BrandIcon } from "./brand-icon";
 import { AEVATAR_CHANNELS_URL } from "@/lib/nyxbot-aevatar-auth";
 
-const CHANNEL_AVAILABILITY: Record<NyxbotChannel, boolean> = {
+const CHANNEL_DEFAULTS: Record<NyxbotChannel, boolean> = {
   telegram: true,
   whatsapp: false,
+  messenger: false,
+  instagram: false,
 };
 
 export function ChannelStep({
@@ -62,6 +66,8 @@ export function ChannelStep({
   readonly onSpendingCap: () => void;
 }) {
   const { t } = useTranslation();
+  const catalog = useChannelPlatforms();
+  const CHANNEL_AVAILABILITY = { ...CHANNEL_DEFAULTS, messenger: catalog.data?.platforms.some((p) => p.platform === "messenger" && p.enabled) ?? false, instagram: catalog.data?.platforms.some((p) => p.platform === "instagram" && p.enabled) ?? false };
   const channel =
     preferredChannel && CHANNEL_AVAILABILITY[preferredChannel]
       ? preferredChannel
@@ -144,7 +150,7 @@ export function ChannelStep({
             >
               {t("reviewCap")}
             </Button>
-          ) : (
+          ) : channel !== "messenger" && channel !== "instagram" ? (
             <Button
               form="nyxbot-telegram"
               type="submit"
@@ -159,7 +165,7 @@ export function ChannelStep({
             >
               {t("connectChannel")}
             </Button>
-          )}
+          ) : null}
         </>
       }
     >
@@ -168,7 +174,7 @@ export function ChannelStep({
         disabled={createBot.isPending}
       >
         <Label asChild><legend className="sr-only">{t("channelTitle")}</legend></Label>
-        {(["telegram", "whatsapp"] as const).map((option) => (
+        {(["telegram", "whatsapp", "messenger", "instagram"] as const).map((option) => (
           <Label
             className={
               CHANNEL_AVAILABILITY[option]
@@ -206,23 +212,11 @@ export function ChannelStep({
             </span>
           </Label>
         ))}
-        {[
-          { id: "instagram", name: "Instagram" },
-          { id: "facebook", name: "FB Messenger" },
-        ].map((option) => (
-          <div
-            className="nb-tile nb-tile-unavailable"
-            aria-disabled="true"
-            key={option.id}
-          >
-            <BrandIcon brand={option.id} />
-            <div className="nb-channel-unavailable-copy">
-              <strong>{option.name}</strong>
-              <span>{t("comingSoon")}</span>
-            </div>
-          </div>
-        ))}
       </fieldset>
+      {(channel === "messenger" || channel === "instagram") && <OnboardingNotice>
+        <p>{t("Connect your business inbox, choose a support specialist, and explicitly enable customer conversations.")}</p>
+        <Link className="nb-primary" to="/channel-bots/connect/$platform" params={{ platform: channel }}>{t("Set up customer inbox")}</Link>
+      </OnboardingNotice>}
       {channel === "telegram" && (
         <>
           {userServices.isPending && (

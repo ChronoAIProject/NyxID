@@ -10,6 +10,10 @@ use url::Url;
 use super::url_validation::{AddressClass, address_class, is_cloud_metadata_host};
 use crate::errors::{AppError, AppResult};
 
+tokio::task_local! {
+    pub(crate) static INTERNAL_CALLER: &'static str;
+}
+
 #[derive(Default)]
 struct Policy {
     loopback: bool,
@@ -55,6 +59,76 @@ pub(super) fn refused() -> AppError {
     AppError::ValidationError("Direct proxy destination is not permitted".into())
 }
 
+/// Bounded facts from the destination check. Resolver errors can contain hostnames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Failure {
+    #[error("url_shape")]
+    UrlShape,
+    #[error("address_not_permitted")]
+    AddressNotPermitted,
+    #[error("resolution_unavailable")]
+    ResolutionUnavailable,
+    #[error("transport_unavailable")]
+    TransportUnavailable,
+}
+
+impl From<Failure> for AppError {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::ResolutionUnavailable => Self::PoolAttemptTransport(
+                crate::errors::PoolAttemptTransportKind::ResolutionUnavailable,
+            ),
+            Failure::TransportUnavailable => {
+                Self::Internal("Private catalog transport unavailable".into())
+            }
+            Failure::AddressNotPermitted | Failure::UrlShape => refused(),
+        }
+    }
+}
+
+impl Failure {
+    pub(super) fn log(
+        self,
+        service: &crate::models::downstream_service::DownstreamService,
+        method: &str,
+        path: &str,
+        redirect: bool,
+    ) {
+        use super::proxy_authorization::{CanonicalPath, rule_matches};
+        let path = path
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        // The logical route can itself contain opaque user data. Emit only route templates.
+        let path = if path.is_empty() {
+            "/"
+        } else {
+            service
+                .proxy_operation_policy
+                .as_ref()
+                .and_then(|policy| {
+                    let canonical = CanonicalPath::from_mcp_built(path).ok()?;
+                    policy
+                        .rules
+                        .iter()
+                        .find(|rule| rule_matches(rule, method, &canonical))
+                        .map(|rule| rule.path_template.as_str())
+                })
+                .unwrap_or("/{path}")
+        };
+        let caller = INTERNAL_CALLER.try_with(|caller| *caller).ok();
+        match self {
+            Self::ResolutionUnavailable | Self::TransportUnavailable => {
+                tracing::warn!(service_id=%service.id, reason=%self, method, path, redirect, caller, "Direct proxy destination unavailable")
+            }
+            Self::AddressNotPermitted | Self::UrlShape => {
+                tracing::warn!(service_id=%service.id, reason=%self, method, path, redirect, caller, "Direct proxy destination refused")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Access {
     private: bool,
@@ -67,8 +141,8 @@ impl Access {
         base: &str,
         url: &Url,
         hosted: bool,
-    ) -> AppResult<Self> {
-        let policy = POLICY.as_ref().map_err(|_| refused())?;
+    ) -> Result<Self, Failure> {
+        let policy = POLICY.as_ref().map_err(|_| Failure::UrlShape)?;
         let private = approved == Some(base)
             && Url::parse(base).is_ok_and(|base| {
                 let scheme = match url.scheme() {
@@ -98,23 +172,23 @@ impl Access {
         !addresses.is_empty() && addresses.iter().all(|address| self.permits(address.ip()))
     }
 
-    fn check_url(self, url: &Url) -> AppResult<()> {
+    fn check_url(self, url: &Url) -> Result<(), Failure> {
         if !matches!(url.scheme(), "http" | "https" | "ws" | "wss")
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
         {
-            return Err(refused());
+            return Err(Failure::UrlShape);
         }
-        let host = url.host_str().ok_or_else(refused)?;
+        let host = url.host_str().ok_or(Failure::UrlShape)?;
         if is_cloud_metadata_host(host)
             || (!self.loopback && host.trim_end_matches('.').eq_ignore_ascii_case("localhost"))
         {
-            return Err(refused());
+            return Err(Failure::AddressNotPermitted);
         }
-        match url.host().ok_or_else(refused)? {
-            url::Host::Ipv4(ip) if !self.permits(ip.into()) => Err(refused()),
-            url::Host::Ipv6(ip) if !self.permits(ip.into()) => Err(refused()),
+        match url.host().ok_or(Failure::UrlShape)? {
+            url::Host::Ipv4(ip) if !self.permits(ip.into()) => Err(Failure::AddressNotPermitted),
+            url::Host::Ipv6(ip) if !self.permits(ip.into()) => Err(Failure::AddressNotPermitted),
             _ => Ok(()),
         }
     }
@@ -129,15 +203,15 @@ impl Destination {
         approved: Option<&str>,
         base: &str,
         request: &str,
-    ) -> AppResult<Self> {
-        let url = Url::parse(request).map_err(|_| refused())?;
+    ) -> Result<Self, Failure> {
+        let url = Url::parse(request).map_err(|_| Failure::UrlShape)?;
         let access = Access::for_request(approved, base, &url, false)?;
         Self::resolve(&url, access).await
     }
 
-    pub(crate) async fn resolve(url: &Url, access: Access) -> AppResult<Self> {
+    pub(crate) async fn resolve(url: &Url, access: Access) -> Result<Self, Failure> {
         access.check_url(url)?;
-        let port = url.port_or_known_default().ok_or_else(refused)?;
+        let port = url.port_or_known_default().ok_or(Failure::UrlShape)?;
         #[cfg(test)]
         if let Ok(Some(addresses)) =
             super::channel_media_service::TEST_PINNED_TRANSPORT.try_with(|fixture| {
@@ -156,24 +230,34 @@ impl Destination {
             return Self::checked(vec![SocketAddr::from(([127, 0, 0, 1], port))], access);
         }
 
-        let addresses: Vec<SocketAddr> = match url.host().ok_or_else(refused)? {
+        let addresses: Vec<SocketAddr> = match url.host().ok_or(Failure::UrlShape)? {
             url::Host::Ipv4(ip) => vec![SocketAddr::new(ip.into(), port)],
             url::Host::Ipv6(ip) => vec![SocketAddr::new(ip.into(), port)],
-            url::Host::Domain(name) => tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::lookup_host((name, port)),
-            )
-            .await
-            .map_err(|_| refused())?
-            .map_err(|_| refused())?
-            .collect(),
+            url::Host::Domain(name) => {
+                #[cfg(test)]
+                if let Some(lookup) = http::test_lookup(name) {
+                    let mut addresses = resolve_answers(lookup, Duration::from_secs(10)).await?;
+                    for address in &mut addresses {
+                        address.set_port(port);
+                    }
+                    return Self::checked(addresses, access);
+                }
+                resolve_answers(
+                    tokio::net::lookup_host((name, port)),
+                    Duration::from_secs(10),
+                )
+                .await?
+            }
         };
         Self::checked(addresses, access)
     }
 
-    fn checked(addresses: Vec<SocketAddr>, access: Access) -> AppResult<Self> {
+    fn checked(addresses: Vec<SocketAddr>, access: Access) -> Result<Self, Failure> {
+        if addresses.is_empty() {
+            return Err(Failure::ResolutionUnavailable);
+        }
         if !access.permits_all(&addresses) {
-            return Err(refused());
+            return Err(Failure::AddressNotPermitted);
         }
         Ok(Self { addresses })
     }
@@ -181,6 +265,17 @@ impl Destination {
     pub(crate) async fn connect(&self) -> std::io::Result<tokio::net::TcpStream> {
         tokio::net::TcpStream::connect(self.addresses.as_slice()).await
     }
+}
+
+async fn resolve_answers<I: Iterator<Item = SocketAddr>, E>(
+    lookup: impl Future<Output = Result<I, E>>,
+    timeout: Duration,
+) -> Result<Vec<SocketAddr>, Failure> {
+    let answers = tokio::time::timeout(timeout, lookup)
+        .await
+        .map_err(|_| Failure::ResolutionUnavailable)?
+        .map_err(|_| Failure::ResolutionUnavailable)?;
+    Ok(answers.collect())
 }
 
 pub(crate) fn approvable_url(raw: &str) -> bool {

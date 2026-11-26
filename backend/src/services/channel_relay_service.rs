@@ -250,6 +250,7 @@ pub(crate) fn inbound_metadata(
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
         original_message: is_telegram.then(|| super::telegram_input::original(&inbound.raw_data)),
+        meta_authority: None,
         nyxbot_admission: None,
         thread_context: None,
         activity: None,
@@ -293,6 +294,42 @@ pub(crate) fn inbound_metadata(
     }
 }
 
+/// Write the bot in the same transaction as creating a journal or observation.
+/// A completed provider send can still be recorded after a normal disconnect.
+/// Erasure writes this row before removing any of its identifying records.
+pub(crate) async fn fence_meta_observation(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    bot_id: &str,
+    platform: &str,
+    require_active: bool,
+) -> AppResult<()> {
+    if db
+        .collection::<bson::Document>("channel_meta_erasure_fences")
+        .find_one(doc! {"_id": bot_id})
+        .session(&mut *tx)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict("Meta inbox data is being erased".into()));
+    }
+    let mut filter = doc! {"_id": bot_id, "platform": platform};
+    if require_active {
+        filter.insert("is_active", true);
+    }
+    if db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(filter, doc! {"$inc":{"meta_observation_revision":1_i64}})
+        .session(&mut *tx)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict("Meta inbox is unavailable".into()));
+    }
+    Ok(())
+}
+
 /// Persist outbound-message metadata (agent -> platform direction).
 ///
 /// Per ADR-013, the reply *text* is not stored here. The caller passes the
@@ -320,6 +357,7 @@ pub async fn store_outbound_message(
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
         original_message: None,
+        meta_authority: None,
         nyxbot_admission: None,
         thread_context: None,
         activity: None,
@@ -350,9 +388,49 @@ pub async fn store_outbound_message(
         updated_at: Some(now),
     };
 
-    db.collection::<ChannelMessage>(COLLECTION_NAME)
-        .insert_one(&message)
+    if crate::services::channel_adapters::meta::is_meta(platform) {
+        let args = (
+            db.clone(),
+            message.clone(),
+            channel_bot_id.to_owned(),
+            platform.to_owned(),
+        );
+        crate::services::transaction_service::run_db_only(
+            db,
+            &args,
+            |tx, (db, message, channel_bot_id, platform)| {
+                Box::pin(async move {
+                    super::erasure_admission::fence_in_session(db,&message.user_id,tx).await?;
+                    let mut document=bson::to_document(message).map_err(|_|AppError::Internal("Message metadata unavailable".into()))?;
+                    if let Some(source)=message.reply_to_message_id.as_deref() {
+                        let source_row=db.collection::<bson::Document>(COLLECTION_NAME).find_one(doc! {
+                            "_id":source,"channel_bot_id":channel_bot_id,"user_id":&message.user_id,"direction":"inbound","platform":platform,
+                        }).session(&mut *tx).await?.ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                        let grant=super::channel_meta_service::scopes::source_document_in_session(db,tx,&source_row).await?
+                            .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                        if grant.bot_id!=*channel_bot_id || source_row.get_str("user_id")!=Ok(message.user_id.as_str()) {
+                            return Err(super::channel_meta_service::grants::incomplete());
+                        }
+                        super::channel_meta_service::scopes::fence_reference(db,tx,&grant,false).await?;
+                        document.insert("meta_grant",bson::to_bson(&grant).map_err(|_|super::channel_meta_service::grants::incomplete())?);
+                    } else {
+                        // Ordinary unbound controls retain their existing bot-wide fence.
+                        fence_meta_observation(db, tx, channel_bot_id, platform, false).await?;
+                    }
+                    db.collection::<bson::Document>(COLLECTION_NAME)
+                        .insert_one(document)
+                        .session(&mut *tx)
+                        .await?;
+                    Ok(())
+                })
+            },
+        )
         .await?;
+    } else {
+        db.collection::<ChannelMessage>(COLLECTION_NAME)
+            .insert_one(&message)
+            .await?;
+    }
 
     Ok(message)
 }
@@ -398,6 +476,7 @@ pub async fn store_device_event_message(
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
         original_message: None,
+        meta_authority: None,
         nyxbot_admission: None,
         thread_context: None,
         activity: None,
@@ -1068,30 +1147,128 @@ pub fn build_callback_payload(
 pub(crate) async fn consume_reply_token_use(
     db: &mongodb::Database,
     usage: &crate::models::reply_token_use::ReplyTokenUse,
+    owner_id: &str,
 ) -> AppResult<()> {
-    match db
-        .collection::<crate::models::reply_token_use::ReplyTokenUse>(
-            crate::models::reply_token_use::COLLECTION_NAME,
-        )
-        .insert_one(usage)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error)
+    let result = super::transaction_service::run_db_only(
+        db,
+        &(db, usage, owner_id),
+        |tx, (db, usage, owner_id)| {
+            Box::pin(async move {
+                fence_reply_token_owners(db, usage, owner_id, tx).await?;
+                db.collection::<crate::models::reply_token_use::ReplyTokenUse>(
+                    crate::models::reply_token_use::COLLECTION_NAME,
+                )
+                .insert_one(*usage)
+                .session(tx)
+                .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    match result {
+        Err(AppError::DatabaseError(error))
             if matches!(error.kind.as_ref(),
             mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write))
                 if write.code == 11000) =>
         {
             Err(AppError::Unauthorized("Reply token already used".into()))
         }
-        Err(error) => Err(error.into()),
+        result => result,
     }
+}
+
+pub(crate) async fn fence_reply_token_owners(
+    db: &mongodb::Database,
+    usage: &crate::models::reply_token_use::ReplyTokenUse,
+    owner_id: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &usage.api_key_id, "is_active": true})
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Relay agent key is unavailable".into()))?;
+    super::erasure_admission::fence_in_session(db, owner_id, tx).await?;
+    if key.user_id != owner_id {
+        super::erasure_admission::fence_in_session(db, &key.user_id, tx).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
+
+    #[tokio::test]
+    async fn reply_token_claim_respects_owner_erasure() {
+        use crate::models::{
+            api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
+            reply_token_use::{COLLECTION_NAME as TOKEN_USES, ReplyTokenUse},
+            user::{COLLECTION_NAME as USERS, User, UserType},
+        };
+        use crate::test_utils::{connect_transaction_test_database, test_user};
+        let db = connect_transaction_test_database("relay_reply_erasure").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let key_owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&owner, UserType::Person),
+                test_user(&key_owner, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(API_KEYS)
+            .insert_one(
+                doc! {"_id": &key_id, "user_id": &key_owner, "name": "Fixture",
+                "key_prefix": "fixture", "key_hash": "fixture-hash", "scopes": "proxy",
+                "is_active": true, "created_at": bson::DateTime::now()},
+            )
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<ApiKey>(API_KEYS)
+                .find_one(doc! {"_id": &key_id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let use_token = || ReplyTokenUse {
+            id: uuid::Uuid::new_v4().to_string(),
+            exp_at: Utc::now() + chrono::Duration::minutes(1),
+            api_key_id: key_id.clone(),
+            conversation_id: "synthetic-conversation".into(),
+            consumed_at: Utc::now(),
+        };
+        let first = use_token();
+        consume_reply_token_use(&db, &first, &owner).await.unwrap();
+        assert!(matches!(
+            consume_reply_token_use(&db, &first, &owner).await,
+            Err(AppError::Unauthorized(_))
+        ));
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        super::super::personal_erasure_service::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        let held = use_token();
+        assert!(matches!(
+            consume_reply_token_use(&db, &held, &owner).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(
+            db.collection::<ReplyTokenUse>(TOKEN_USES)
+                .find_one(doc! {"_id": &held.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn native_event_id_uses_update_identity_and_rejects_invalid_telegram_ids() {
@@ -1300,6 +1477,47 @@ mod tests {
         );
 
         db.drop().await.expect("drop test database");
+    }
+
+    #[tokio::test]
+    async fn late_meta_outbound_result_cannot_repopulate_erased_inbox() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "channel_relay_meta_erasure_fence",
+        )
+        .await;
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &bot_id, "platform": "instagram", "is_active": true})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>("channel_meta_erasure_fences")
+            .insert_one(doc! {"_id": &bot_id, "requested_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        let result = store_outbound_message(
+            &db,
+            &bot_id,
+            "conversation",
+            &owner,
+            "instagram",
+            "route-key",
+            None,
+            Some("late-provider-id"),
+            Some("asset:sender"),
+            "text",
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(
+            db.collection::<ChannelMessage>(COLLECTION_NAME)
+                .count_documents(doc! {"channel_bot_id": &bot_id})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1658,6 +1876,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,

@@ -143,7 +143,7 @@ pub fn describe(adapter: &dyn PlatformAdapter) -> Descriptor {
             inbound_text: inbound,
             outbound_text: outbound,
             edit: out.edit,
-            max_text_bytes: None,
+            max_text_bytes: (adapter.platform_id() == "instagram").then_some(1000),
             delivery: if outbound {
                 Evidence::Accepted
             } else {
@@ -175,7 +175,7 @@ pub fn describe(adapter: &dyn PlatformAdapter) -> Descriptor {
             provider_prompt_replacement: InstructionTiming::Unsupported,
         },
         lifecycle: Lifecycle {
-            reconnect: false,
+            reconnect: super::channel_adapters::meta::is_meta(adapter.platform_id()),
             automatic_effect_replay: false,
             durable_ingress_dedup: adapter.atomic_inbound_admission(),
             max_session_seconds: None,

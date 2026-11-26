@@ -52,6 +52,13 @@ pub(crate) async fn guest_grants_ready(db: &Database) -> AppResult<bool> {
     }
 }
 
+/// Frozen bindings keep their original permission digests until Grants adoption.
+fn guest_delegation_current(agent: &AssistantAgent, policy: &GuestPolicy) -> bool {
+    policy.service_authority.iter().all(|(id, digest)| {
+        agent.grants.service_ids.contains(id) && management::service_digest(agent, id) == *digest
+    })
+}
+
 /// Binding selection only: operation/guest classification remains in the shared
 /// operation-scope evaluators. A legacy digest mismatch never widens a key.
 pub(crate) fn guest_service_selected(
@@ -219,8 +226,19 @@ pub(crate) async fn link_target(
         version: 1,
         org_id: agent.user_id.clone(),
         revision: uuid::Uuid::new_v4().to_string(),
-        guests: new_guest_policy(guest_grants_ready(db).await?),
+        guests: initial_guest_policy(guest_grants_ready(db).await?, &bot.platform),
     }))
+}
+
+/// Meta assignment requires a separate customer-access confirmation. Ordinary
+/// channels retain their established open default; restored policies supersede
+/// this initial choice through the shared continuity path.
+pub(crate) fn initial_guest_policy(grants_ready: bool, platform: &str) -> GuestPolicy {
+    let mut policy = new_guest_policy(grants_ready);
+    if super::channel_adapters::meta::is_meta(platform) {
+        policy.enabled = false;
+    }
+    policy
 }
 
 pub(crate) fn new_guest_policy(grants_ready: bool) -> GuestPolicy {
@@ -247,10 +265,9 @@ pub(crate) async fn require_target(
         return Err(AppError::organization_agent_channels_disabled());
     }
     enabled(db, actor).await?;
-    if !matches!(
-        super::org_agent_service::access(db, actor, &agent.user_id).await?,
-        super::org_service::OwnerAccess::AsOrgAdmin { .. }
-    ) {
+    let acl = super::org_agent_service::access(db, actor, &agent.user_id).await?;
+    let rights = super::org_agent_service::specialist_rights(actor, agent, &acl);
+    if !rights.can_govern || !rights.can_maintain {
         return Err(AppError::Forbidden(
             "Only an organization admin can connect this specialist to a channel bot".into(),
         ));
@@ -290,14 +307,26 @@ pub(crate) async fn sender(
         .collection::<SenderLink>(LINKS)
         .find_one(doc! {"channel_id":&row.id,"sender_hash":&hash})
         .await?;
-    let (actor, link_id, link_revision, admin, guest) = match link {
+    let (actor, link_id, link_revision, admin, guest, org_use_revision) = match link {
         Some(link) => {
             // A removed member is never silently downgraded to an org-paid guest.
             if !eligible || !link.active || link.binding_revision != binding.revision {
                 return Err(denied());
             }
+            if super::channel_adapters::meta::is_meta(&row.platform) {
+                let grant = link
+                    .meta_grant
+                    .as_ref()
+                    .filter(|grant| grant.bot_id == row.channel_bot_id)
+                    .ok_or_else(denied)?;
+                if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&grant.bot_id,"is_active":true,"meta_binding.grant_id":&grant.grant_id})
+                    .projection(doc! {"_id":1}).await?.is_none() {return Err(denied());}
+            }
             let acl = super::org_agent_service::access(db, &link.user_id, &binding.org_id).await?;
-            if !super::org_agent_service::can_use(&acl) {
+            let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(doc! {"_id":agent_id,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null}).await?.ok_or_else(denied)?;
+            if !super::org_agent_service::specialist_rights(&link.user_id, &agent, &acl).can_use {
                 return Err(denied());
             }
             let admin = matches!(acl, super::org_service::OwnerAccess::AsOrgAdmin { .. });
@@ -307,6 +336,7 @@ pub(crate) async fn sender(
                 Some(link.revision),
                 admin,
                 false,
+                agent.org_use_revision,
             )
         }
         None if binding.guests.enabled => {
@@ -320,12 +350,13 @@ pub(crate) async fn sender(
             {
                 return Err(denied());
             }
-            (binding.org_id.clone(), None, None, false, true)
+            (binding.org_id.clone(), None, None, false, true, 0)
         }
         None => return Err(denied()),
     };
     Ok((
         Execution {
+            org_use_revision,
             version: 1,
             org_id: binding.org_id.clone(),
             revision: binding.revision.clone(),
@@ -590,10 +621,7 @@ fn check_audience<'a>(
             }
             if executing
                 && !(guest_grants_ready && policy.follows_agent_grants)
-                && policy.service_authority.iter().any(|(id, digest)| {
-                    !agent.grants.service_ids.contains(id)
-                        || management::service_digest(&agent, id) != *digest
-                })
+                && !guest_delegation_current(&agent, policy)
             {
                 return Err(denied());
             }
@@ -609,7 +637,7 @@ fn check_audience<'a>(
                 fence,
             )
             .await?;
-            live_doc(
+            let member = live_doc(
                 db,
                 session,
                 "org_memberships",
@@ -618,8 +646,27 @@ fn check_audience<'a>(
                 fence,
             )
             .await?;
-            live_doc(db, session, LINKS, doc!{"_id":&execution.link_id,"channel_id":&channel.id,"user_id":actor,
+            let role = bson::from_bson(member.get("role").cloned().ok_or_else(denied)?)
+                .map_err(|_| denied())?;
+            if execution.org_use_revision != agent.org_use_revision
+                || !super::org_agent_service::member_rights(actor, &agent, role).can_use
+            {
+                return Err(denied());
+            }
+            let link = live_doc(db, session, LINKS, doc!{"_id":&execution.link_id,"channel_id":&channel.id,"user_id":actor,
             "active":true,"revision":&execution.link_revision,"binding_revision":&execution.revision,"sender_hash":&execution.sender_hash}, fence).await?;
+            if super::channel_adapters::meta::is_meta(&channel.platform) {
+                let grant: crate::models::channel_meta::GrantRef =
+                    bson::from_bson(link.get("meta_grant").cloned().ok_or_else(denied)?)
+                        .map_err(|_| denied())?;
+                if grant.bot_id != channel.channel_bot_id {
+                    return Err(denied());
+                }
+                // The existing route fence below serializes this same parent
+                // with cutover; retain one bot write in this transaction.
+                live_doc(db,session,crate::models::channel_bot::COLLECTION_NAME,
+                    doc! {"_id":&grant.bot_id,"is_active":true,"meta_binding.grant_id":&grant.grant_id},false).await?;
+            }
         }
         // Routes and keys are transport authority even for native sources. Fence
         // their revocation in the same transaction as a turn or billed admission.
@@ -941,6 +988,47 @@ pub(crate) async fn fence_management(
     row: &NyxbotChannel,
     actor: &str,
 ) -> AppResult<()> {
+    fence_binding_authority(db, tx, row, actor, true).await
+}
+
+/// The calling transaction fences the actor's Admin membership on the channel.
+pub(crate) async fn fence_binding_agent(
+    db: &Database,
+    tx: &mut ClientSession,
+    org: &str,
+    agent_id: &str,
+    manager: Option<&str>,
+) -> AppResult<()> {
+    let target = live_doc(
+        db,
+        tx,
+        crate::models::assistant_agent::COLLECTION_NAME,
+        doc! {"_id":agent_id,"user_id":org,"kind":"specialist","destroyed_at":null},
+        true,
+    )
+    .await?;
+    if let Some(actor) = manager {
+        let agent = bson::from_document(target).map_err(|_| denied())?;
+        if !super::org_agent_service::member_rights(
+            actor,
+            &agent,
+            crate::models::org_membership::OrgRole::Admin,
+        )
+        .can_maintain
+        {
+            return Err(denied());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn fence_binding_authority(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &NyxbotChannel,
+    actor: &str,
+    maintenance: bool,
+) -> AppResult<()> {
     let b = row.org_specialist.as_ref().ok_or_else(denied)?;
     enabled(db, &row.user_id).await?;
     live_doc(
@@ -970,14 +1058,33 @@ pub(crate) async fn fence_management(
         true,
     )
     .await?;
+    fence_binding_agent(
+        db,
+        tx,
+        &b.org_id,
+        row.agent_id.as_deref().ok_or_else(denied)?,
+        maintenance.then_some(actor),
+    )
+    .await?;
+    fence_binding(db, tx, row).await
+}
+
+/// Revalidate old/new binding identity without reacquiring actor/org writes
+/// already held by the encompassing assignment transaction.
+pub(crate) async fn fence_binding(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &NyxbotChannel,
+) -> AppResult<()> {
+    let b = row.org_specialist.as_ref().ok_or_else(denied)?;
     live_doc(
         db,
         tx,
-        "assistant_agents",
-        doc! {"_id":&row.agent_id,"user_id":&b.org_id,"kind":"specialist","destroyed_at":null},
+        "nyxbot_channels",
+        doc! {"_id":&row.id,"agent_id":&row.agent_id,
+        "org_specialist.revision":&b.revision,"status":{"$in":["active","pending"]}},
         true,
     )
     .await?;
-    live_doc(db,tx,"nyxbot_channels",doc!{"_id":&row.id,"org_specialist.revision":&b.revision,"status":{"$in":["active","pending"]}},true).await?;
     Ok(())
 }

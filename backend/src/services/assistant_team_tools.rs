@@ -449,9 +449,18 @@ pub fn schema(name: &str) -> Value {
         ),
         "remember" => (
             json!({"text": {"type": "string", "minLength": 1, "maxLength": 500,
-                    "description": "A durable fact worth keeping; never secrets"},
-                "replace_id": {"type": "string", "minLength": 1, "maxLength": 64,
-                    "description": "Update this note instead of adding one"}}),
+                "description": "A durable fact worth keeping; never secrets"},
+            "replace_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "Update this note instead of adding one"},
+            "recovery": {"type": "object", "additionalProperties": false,
+                "description": "Link this write to a rejected remember call on the same agent in this turn.",
+                "required": ["failed_activity_id", "part", "total"],
+                "properties": {
+                    "failed_activity_id": string(36),
+                    "part": {"type": "integer", "minimum": 1, "maximum": super::assistant_memory_recovery::MAX_PARTS},
+                    "total": {"type": "integer", "minimum": 1, "maximum": super::assistant_memory_recovery::MAX_PARTS}
+                }}
+            }),
             vec!["text"],
         ),
         "forget" => (json!({"note_id": string(64)}), vec!["note_id"]),
@@ -883,8 +892,13 @@ pub(crate) fn description(name: &str) -> &'static str {
             they like things done) so you recall it in every thread and chat app. Never store \
             secrets. Each note must contain 1–500 characters; memory holds 50 notes. Pass replace_id to update a note. \
             On error follow details.reason; only a successful remembered receipt confirms a save. \
-            Later saves do not prove an earlier rejected fact was saved. Report any unresolved facts; \
-            inspect current notes before retrying an unconfirmed storage write."
+            If details.failed_activity_id is returned and you retry that intent in this turn, pass it in recovery. \
+            Use part:1,total:1 for one note. For a split use one write per part, starting at 1, with the same total \
+            on each call. A split requires a failed new note. Retrying a replacement must use the original replace_id and one part. \
+            Use the same agent and link only writes meant to recover the original fact. \
+            Retry an approved call with the same arguments and its acknowledgement_id. If the receipt has \
+            recovery_status:unlinked_after_approval, report that save independently. \
+            Report which parts were saved and any unresolved parts. Inspect current notes before repeating an unconfirmed write."
         }
         "forget" => "Delete one of your memory notes by id.",
         "post_to_chat" => {

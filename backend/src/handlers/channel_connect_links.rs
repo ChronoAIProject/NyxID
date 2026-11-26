@@ -292,7 +292,15 @@ fn bind_input(
 
 async fn finish<T>(state: &AppState, claim: &links::Claim, result: AppResult<T>) -> AppResult<T> {
     let incomplete = if result.is_ok() {
-        match links::complete(&state.db, &claim.link.id).await {
+        let completion = if claim.link.flow.as_deref() == Some("meta_oauth") {
+            let pinned = claim.link.connection_id.as_deref().ok_or_else(|| {
+                AppError::Conflict("Restart inbox setup to pin an OAuth session".into())
+            })?;
+            links::complete_meta(&state.db, &claim.link.id, pinned).await
+        } else {
+            links::complete(&state.db, &claim.link.id).await
+        };
+        match completion {
             Ok(()) => false,
             Err(error) => {
                 tracing::warn!(channel_connect_link_id = %claim.link.id, %error, "Channel setup result saved; completion will reconcile");

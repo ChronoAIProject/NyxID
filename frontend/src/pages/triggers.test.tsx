@@ -1,7 +1,7 @@
 import type { ComponentProps } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const trigger = {
   id: "80c7e6d9-41d5-48c3-bfd7-2bf9c92fa288",
@@ -40,6 +40,12 @@ vi.mock("@/hooks/use-triggers", () => ({
 }));
 
 import { TriggersPage } from "./triggers";
+import { appI18n } from "@/i18n";
+
+afterEach(async () => {
+  cleanup();
+  await appI18n.changeLanguage("en");
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -77,6 +83,10 @@ describe("TriggersPage", () => {
         delivery: { type: "notification" },
       }),
     );
+    expect(screen.getByRole("dialog", { name: "Save Trigger Credentials" })).toBeInTheDocument();
+    await act(() => appI18n.changeLanguage("zh-CN").then(() => undefined));
+    expect(screen.getByRole("dialog", { name: "保存触发器凭据" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制 入站密钥" })).toBeInTheDocument();
     expect(screen.getByText(trigger.inbound_url)).toBeInTheDocument();
     expect(screen.getByText("nyx_trg_once")).toBeInTheDocument();
   });

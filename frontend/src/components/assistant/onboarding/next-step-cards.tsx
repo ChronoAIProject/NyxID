@@ -1,3 +1,4 @@
+import { onboardingText } from "../../../../../shared/onboardingCopy";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
@@ -23,7 +24,8 @@ export function NextStepCards({
   readonly disabled?: boolean;
   readonly className?: string;
 }) {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
+  const text = (source: string) => onboardingText(i18n.resolvedLanguage, source);
 
   const [connecting, setConnecting] = useState<NextStep>();
   // OAuth completion can remove this recommendation during a Home refresh.
@@ -50,7 +52,10 @@ export function NextStepCards({
                 <button
                   type="button"
                   disabled={disabled}
-                  onClick={() => step.connect ? setConnecting(step) : onStart(step)}
+                  onClick={() => {
+                    if (step.connect) setConnecting(step);
+                    else onStart({ ...step, prompt: text(step.prompt) });
+                  }}
                   className={cn(
                     "flex w-full items-center gap-3 text-left transition-colors",
                     "disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none",
@@ -67,10 +72,10 @@ export function NextStepCards({
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block break-words type-row-title text-foreground">
-                      {step.title}
+                      {text(step.title)}
                     </span>
                     <span className="block type-secondary text-muted-foreground">
-                      {step.description}
+                      {text(step.description)}
                     </span>
                   </span>
                   <ArrowRight

@@ -1,9 +1,8 @@
 //! Serialize draft generations without holding a transaction across Ornn reads.
 use super::*;
 use crate::{
-    models::{
-        assistant_agent_learning::{AUTHORED_CLAIMS_COLLECTION_NAME as CLAIMS, AuthoredDraftClaim},
-        assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
+    models::assistant_agent_learning::{
+        AUTHORED_CLAIMS_COLLECTION_NAME as CLAIMS, AuthoredDraftClaim,
     },
     services::api_key_mutation_service as mutations,
 };
@@ -114,6 +113,134 @@ fn reusable_card(card: &AssistantAcknowledgement) -> bool {
         || (card.status == "allowed" && card.kind == "action")
 }
 
+pub(super) fn origin(claim: &AuthoredDraftClaim) -> acks::RequestOrigin {
+    acks::RequestOrigin {
+        initiating_input_id: claim.initiating_input_id.clone(),
+        meta_contexts: claim.meta_contexts.clone(),
+        invocation_id: claim.invocation_id.clone(),
+        creation_turn_id: claim.creation_turn_id.clone(),
+        requested_turn_id: claim.requested_turn_id.clone(),
+        voice_request_id: claim.voice_request_id.clone(),
+        trigger_run_id: claim.trigger_run_id.clone(),
+        routing: claim.routing.clone(),
+    }
+}
+
+/// Persist before replacing the reusable content claim, including a legacy
+/// claim whose key is no longer usable. This source never migrates to its heir.
+async fn retain_origin(
+    db: &Database,
+    tx: &mut ClientSession,
+    owner: &str,
+    agent: &str,
+    claim: &AuthoredDraftClaim,
+) -> AppResult<()> {
+    let rows = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
+    let Some(proposal) = rows
+        .find_one(doc! {"_id":&claim.proposal_id})
+        .session(&mut *tx)
+        .await?
+    else {
+        return Ok(());
+    };
+    if proposal.owner_id != owner
+        || proposal.agent_id != agent
+        || proposal.source != ProposalSource::Authored
+    {
+        return Err(conflict());
+    }
+    if let Some(saved)=proposal.authoring_origin {
+        if bson::to_bson(&saved).map_err(|_|conflict())? != bson::to_bson(claim).map_err(|_|conflict())? {return Err(conflict())}
+    } else if db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+        doc! {"_id":&claim.proposal_id,"owner_id":owner,"agent_id":agent,"source":"authored","authoring_origin":bson::Bson::Null},
+        doc! {"$set":{"authoring_origin":bson::to_bson(claim).map_err(|_|conflict())?}}).session(tx).await?.matched_count!=1 {return Err(conflict())}
+    Ok(())
+}
+
+pub(crate) async fn saved_origin(
+    db: &Database,
+    tx: &mut ClientSession,
+    proposal: &AssistantAgentLearningProposal,
+) -> AppResult<Option<AuthoredDraftClaim>> {
+    if let Some(origin) = &proposal.authoring_origin {
+        if origin.proposal_id != proposal.id {
+            return Err(conflict());
+        }
+        return Ok(Some(origin.clone()));
+    }
+    let row=db.collection::<bson::Document>(CLAIMS).find_one(doc! {"claim.proposal_id":&proposal.id,"owner_id":&proposal.owner_id,"agent_id":&proposal.agent_id})
+        .session(tx).await?;
+    row.map(|row| {
+        bson::from_document(row.get_document("claim").map_err(|_| conflict())?.clone())
+            .map_err(|_| conflict())
+    })
+    .transpose()
+}
+
+/// Renew the saved review, even while another inbox is using its home. The
+/// original card, claim, proposal and source are checked in one transaction.
+pub async fn renew(
+    db: &Database,
+    chat: &ChatAuthority,
+    original_id: &str,
+    binding: &Value,
+) -> AppResult<AssistantAcknowledgement> {
+    acks::expire(db, &chat.user_id, &chat.conversation_id).await?;
+    let db = db.clone();
+    let chat = chat.clone();
+    let original_id = original_id.to_owned();
+    let binding = binding.clone();
+    let mut session = db.client().start_session().await?;
+    let (card, activity) = session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<_> = Box::pin(async {
+            let origin=renewal_origin_in_session(&db,&chat,&original_id,&binding,session).await?;
+            acks::request_in_session(&db,&chat,acks::Request {
+                kind:"action",service:None,tool:Some(review::TOOL),arguments:Some(&binding),
+                summary:"Publish this reviewed private Ornn skill and attach its exact pinned version to the agent.",platform:false,
+            },Some(&origin),chat.approval_options(),session).await
+        }).await;
+        mutations::transaction_result(result)
+    }).await.map_err(mutations::map_transaction_error)?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
+    Ok(card)
+}
+
+/// First dispatch and erasure contend on the original grant and proposal.
+/// Already-dispatched publication continues its independent reconciliation.
+pub(crate) async fn fence_proposal_in_session(
+    db: &Database,
+    tx: &mut ClientSession,
+    proposal: &AssistantAgentLearningProposal,
+) -> AppResult<()> {
+    if proposal.source != ProposalSource::Authored
+        || proposal
+            .publication
+            .as_ref()
+            .is_some_and(|p| p.started || p.uncertain_dispatch || p.verified_at.is_some())
+    {
+        return Ok(());
+    }
+    let Some(claim) = saved_origin(db, tx, proposal).await? else {
+        return Ok(());
+    };
+    if claim.meta_contexts.is_empty() {
+        return Ok(());
+    }
+    let chat = source_authority(
+        db,
+        &proposal.owner_id,
+        &claim.api_key_id,
+        &claim.conversation_id,
+    )
+    .await?;
+    let (conversation, _, _) = acks::fence(db, &chat, tx).await?;
+    let source =
+        acks::source::select(db, tx, &chat, &conversation, Some(&origin(&claim)), false).await?;
+    acks::source::fence_selection(db, tx, &source).await
+}
+
 async fn reuse(
     db: &Database,
     claim_id: &str,
@@ -137,7 +264,17 @@ async fn reuse(
         return Ok(None);
     };
     // Serialize against key replacement, conversation deletion and publication.
-    acks::fence(db, &chat, session).await?;
+    let (conversation, _, _) = acks::fence(db, &chat, session).await?;
+    let source = acks::source::select(
+        db,
+        session,
+        &chat,
+        &conversation,
+        Some(&origin(&claim)),
+        false,
+    )
+    .await?;
+    acks::source::fence_selection(db, session, &source).await?;
     touch_proposal(db, &proposal, session).await?;
     Ok(Some(Reservation {
         claim_id: claim_id.into(),
@@ -181,6 +318,7 @@ pub(super) async fn reserve(
             let proposals = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME);
             if let Ok(value) = current.get_document("claim") {
                 let claim: AuthoredDraftClaim = bson::from_document(value.clone()).map_err(|_| conflict())?;
+                retain_origin(db,session,&chat.user_id,&candidate.agent_id,&claim).await?;
                 let mut filter = unstarted();
                 filter.insert("_id", &claim.proposal_id);
                 filter.insert("owner_id", &chat.user_id);
@@ -203,6 +341,7 @@ pub(super) async fn reserve(
                     let card = latest_card(db, &proposal, session).await?.ok_or_else(||
                         AppError::Conflict("Review or discard the interrupted draft before creating another; its original review conversation was not recorded".into()))?;
                     let claim = AuthoredDraftClaim {
+                        initiating_input_id:None,meta_contexts:card.meta_contexts.clone(),
                         invocation_id:card.invocation_id.clone(),
                         proposal_id: proposal.id.clone(), conversation_id: card.conversation_id.clone(),
                         api_key_id: card.api_key_id.clone(), turn_id: card.requested_turn_id.clone().unwrap_or_default(),
@@ -226,26 +365,24 @@ pub(super) async fn reserve(
             let (conversation, _, _) = acks::fence(db, chat, session).await?;
             let turn = conversation.active_turn.as_ref().filter(|t| &t.turn_id == turn_id && !t.stop_requested)
                 .ok_or_else(|| AppError::Forbidden("Draft from an active owner turn".into()))?;
-            let mut initiating = doc! {"conversation_id":&conversation.id,"user_id":&chat.user_id,
-                "role":{"$in":["user","orchestrator"]},"steering":bson::Bson::Null,"execution_pending":{"$ne":true}};
-            if let Some(seq) = turn.initiating_message_seq {
-                initiating.insert("seq", doc! {"$lte":seq});
-            }
-            let started_by = db.collection::<AssistantMessage>(MESSAGES).find_one(initiating)
-                .sort(doc! {"seq":-1}).session(&mut *session).await?;
+            let source=acks::source::select(db,session,chat,&conversation,None,false).await?;
+            acks::source::fence_selection(db,session,&source).await?;
             let claim = AuthoredDraftClaim {
+                initiating_input_id:source.input_id,meta_contexts:source.contexts,
                 invocation_id:chat.invocation_id.clone(),
                 proposal_id: candidate.id.clone(), conversation_id: chat.conversation_id.clone(),
                 api_key_id: chat.api_key_id.clone(), turn_id: turn_id.clone(),
-                creation_turn_id: Some(turn_id.clone()),
-                requested_turn_id: if turn.trigger_run_id.is_some() { Some(turn_id.clone()) } else { started_by.map(|m| m.turn_id) },
+                creation_turn_id: source.creation_turn_id,
+                requested_turn_id: source.requested_turn_id,
                 voice_request_id: turn.voice_request_id.clone(), trigger_run_id: turn.trigger_run_id.clone(),
                 // Recovery re-raises the card with the drafting turn's routing, not a later turn's.
                 routing: Some(super::super::assistant_access_policy::routing_for(chat, &conversation)),
             };
-            proposals.insert_one(candidate).session(&mut *session).await?;
+            let mut candidate=candidate.clone();
+            candidate.authoring_origin=Some(claim.clone());
+            proposals.insert_one(&candidate).session(&mut *session).await?;
             save_claim(db, &claim_id, &claim, session).await?;
-            Ok(Reservation { claim_id: claim_id.clone(), claim, proposal: candidate.clone(), card: None })
+            Ok(Reservation { claim_id: claim_id.clone(), claim, proposal: candidate, card: None })
         }).await;
         mutations::transaction_result(result)
     }).await.map_err(mutations::map_transaction_error)
@@ -257,6 +394,20 @@ async fn save_claim(
     claim: &AuthoredDraftClaim,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    let row = db
+        .collection::<bson::Document>(CLAIMS)
+        .find_one(doc! {"_id":id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(conflict)?;
+    retain_origin(
+        db,
+        session,
+        row.get_str("owner_id").map_err(|_| conflict())?,
+        row.get_str("agent_id").map_err(|_| conflict())?,
+        claim,
+    )
+    .await?;
     db.collection::<bson::Document>(CLAIMS)
         .update_one(
             doc! {"_id":id},
@@ -277,7 +428,7 @@ pub(super) async fn finalize(
     let reservation = reservation.clone();
     let binding = binding.clone();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    let (card, activity) = session.start_transaction().and_run2(async move |session| {
         let db = &db;
         let reservation = &reservation;
         let binding = &binding;
@@ -292,17 +443,20 @@ pub(super) async fn finalize(
             touch_proposal(db, &reservation.proposal, session).await?;
             let claim = &reservation.claim;
             let chat = source_authority(db, &reservation.proposal.owner_id, &claim.api_key_id, &claim.conversation_id).await?;
-            acks::fence(db, &chat, session).await?;
+            let (conversation,_,_)=acks::fence(db, &chat, session).await?;
             if let Some(card) = latest_card(db, &reservation.proposal, session).await? {
                 if reusable_card(&card)
                     && card.api_key_id == claim.api_key_id && card.conversation_id == claim.conversation_id
                     && card.authored_skill.as_ref().is_some_and(|r| r.revision == reservation.proposal.revision)
                 {
-                    return Ok(card);
+                    let source=acks::source::select(db,session,&chat,&conversation,Some(&origin(claim)),false).await?;
+                    acks::source::fence_selection(db,session,&source).await?;
+                    return Ok((card, None));
                 }
                 return Err(conflict());
             }
             let origin = acks::RequestOrigin {
+                initiating_input_id:claim.initiating_input_id.clone(),meta_contexts:claim.meta_contexts.clone(),
                 invocation_id:claim.invocation_id.clone(),
                 creation_turn_id: claim.creation_turn_id.clone(),
                 requested_turn_id: claim.requested_turn_id.clone(), voice_request_id: claim.voice_request_id.clone(),
@@ -317,5 +471,95 @@ pub(super) async fn finalize(
             }, Some(&origin), approval, session).await
         }).await;
         mutations::transaction_result(result)
-    }).await.map_err(mutations::map_transaction_error)
+    }).await.map_err(mutations::map_transaction_error)?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
+    Ok(card)
+}
+
+async fn renewal_origin_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    original_id: &str,
+    binding: &Value,
+    session: &mut ClientSession,
+) -> AppResult<acks::RequestOrigin> {
+    let original = db.collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&original_id,"user_id":&chat.user_id,
+                    "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,"tool_name":review::TOOL})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+    review::require_renewal_of(&original, binding)?;
+    let reference = original.authored_skill.as_ref().ok_or_else(conflict)?;
+    let proposal = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+                .find_one(doc! {"_id":&reference.proposal_id,"owner_id":&chat.user_id,"agent_id":&reference.agent_id,
+                    "source":"authored","revision":reference.revision})
+                .session(&mut *session).await?.ok_or_else(conflict)?;
+    let skills_revision = binding["skills_revision"].as_i64().ok_or_else(conflict)?;
+    if super::super::assistant_learning_publication::binding(
+        &proposal,
+        proposal.publication.as_ref().ok_or_else(conflict)?,
+        skills_revision,
+    ) != *binding
+    {
+        return Err(conflict());
+    }
+    if !review::renewal_eligible(&proposal, &original, skills_revision, Utc::now()) {
+        return Err(conflict());
+    }
+    if db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(
+                doc! {"_id":&proposal.agent_id,"user_id":&proposal.owner_id,"destroyed_at":bson::Bson::Null,"skills_revision":skills_revision},
+                doc! {"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+    if db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+                doc! {"_id":&proposal.id,"owner_id":&proposal.owner_id,"source":"authored","revision":proposal.revision},
+                doc! {"$inc":{"authoring_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+    let origin = if let Some(claim) = saved_origin(db, session, &proposal).await? {
+        if claim.conversation_id != original.conversation_id
+            || claim.api_key_id != original.api_key_id
+            || claim.creation_turn_id != original.creation_turn_id
+            || claim.requested_turn_id != original.requested_turn_id
+            || bson::to_bson(&claim.meta_contexts).map_err(|_| conflict())?
+                != bson::to_bson(&original.meta_contexts).map_err(|_| conflict())?
+        {
+            return Err(conflict());
+        }
+        origin(&claim)
+    } else {
+        // Retained legacy cards still require their actual original
+        // input; absence of a claim does not borrow today's turn.
+        acks::RequestOrigin {
+            initiating_input_id: None,
+            meta_contexts: original.meta_contexts.clone(),
+            invocation_id: original.invocation_id.clone(),
+            creation_turn_id: original.creation_turn_id.clone(),
+            requested_turn_id: original.requested_turn_id.clone(),
+            voice_request_id: original.voice_request_id.clone(),
+            trigger_run_id: original.trigger_run_id.clone(),
+            routing: original.routing.clone(),
+        }
+    };
+    Ok(origin)
+}
+
+pub(super) async fn prepare_automatic_renewal(
+    db: &Database,
+    chat: &ChatAuthority,
+    original_id: &str,
+    binding: &Value,
+) -> AppResult<acks::RequestOrigin> {
+    super::super::transaction_service::run_db_only(
+        db,
+        &(db, chat, original_id, binding),
+        |tx, &(db, chat, original_id, binding)| {
+            Box::pin(async move {
+                let origin = renewal_origin_in_session(db, chat, original_id, binding, tx).await?;
+                let (conversation, _, _) = acks::fence(db, chat, tx).await?;
+                let source =
+                    acks::source::select(db, tx, chat, &conversation, Some(&origin), false).await?;
+                acks::source::fence_selection(db, tx, &source).await?;
+                Ok(origin)
+            })
+        },
+    )
+    .await
 }

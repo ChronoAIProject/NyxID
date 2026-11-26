@@ -43,7 +43,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   },
   {
     key: "owners",
-    label: "Users / organizations",
+    get label() { return translateUi("Users / organizations"); },
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -51,7 +51,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   },
   {
     key: "actors",
-    label: "Users",
+    get label() { return translateUi("Users"); },
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -176,10 +176,10 @@ export function FilterBar({
             })
           }
           options={[
-            { value: "24h", label: "Last 24 hours" },
-            { value: "7d", label: "Last 7 days" },
-            { value: "30d", label: "Last 30 days" },
-            { value: "custom", label: "Custom range" },
+            { value: "24h", label: translateUi("Last 24 hours") },
+            { value: "7d", label: translateUi("Last 7 days") },
+            { value: "30d", label: translateUi("Last 30 days") },
+            { value: "custom", label: translateUi("Custom range") },
           ]}
         />
       }
@@ -309,12 +309,12 @@ export function PanelControls({
           (value) => value !== "combo" || panel.measure !== "requests",
         ).map((value) => ({
           value,
-          label: {
+          label: translateUi({
             line: "Line",
             bar: "Bar",
             pie: "Donut / pie",
             combo: "Combined bar + line",
-          }[value],
+          }[value]),
         }))}
       />
       <AnalyticsSelect
@@ -327,8 +327,8 @@ export function PanelControls({
           })
         }
         options={[
-          { value: "always", label: "Always open" },
-          { value: "accordion", label: "Accordion" },
+          { value: "always", label: translateUi("Always open") },
+          { value: "accordion", label: translateUi("Accordion") },
         ]}
       />
       <AnalyticsSelect
@@ -352,10 +352,10 @@ export function PanelControls({
           onChange({ ...panel, top: Number(top) as AnalyticsPanel["top"] })
         }
         options={[
-          { value: "5", label: "Top 5 + Other" },
-          { value: "10", label: "Top 10 + Other" },
-          { value: "20", label: "Top 20 + Other" },
-          { value: "0", label: "Aggregated total" },
+          { value: "5", label: translateUi("Top 5 + Other") },
+          { value: "10", label: translateUi("Top 10 + Other") },
+          { value: "20", label: translateUi("Top 20 + Other") },
+          { value: "0", label: translateUi("Aggregated total") },
         ]}
       />
       {(panel.chart === "line" || panel.chart === "combo") && (

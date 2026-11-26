@@ -5,7 +5,7 @@ use super::{
 use crate::{
     models::{
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
-        assistant_conversation::AssistantConversation,
+        assistant_conversation::{AssistantConversation, TurnOrigin},
         user::UserType,
     },
     mw::auth::{ASSISTANT_ACCOUNT_SCOPE, AuthMethod, AuthUser},
@@ -43,6 +43,40 @@ impl Fixture {
             node_manager: &self.state.node_ws_manager,
         }
     }
+    pub(crate) async fn finish_turn(&self, row: &AssistantConversation) {
+        engine::finish_turn(
+            &self.state.db,
+            row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Done".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    pub(crate) async fn begin_turn(&self, origin: TurnOrigin, text: &str) -> AssistantConversation {
+        let request: engine::TurnRequest = serde_json::from_value(json!({
+            "conversation_id": &self.row.id, "text": text
+        }))
+        .unwrap();
+        let mut start = engine::TurnStart::from(&request);
+        start.origin = origin;
+        engine::begin_turn(
+            &self.state.db,
+            &self.owner,
+            start,
+            &self.state.encryption_keys,
+        )
+        .await
+        .unwrap()
+    }
+
     pub async fn allow_account(&self) {
         let refusal = account_gate(&self.state.db, &self.chat)
             .await
@@ -247,8 +281,8 @@ async fn specialist_fixture(name: &str, assigned: bool) -> Fixture {
 
 /// Pin the report snapshot of a thread's live turn (issue #1883): `Some`
 /// marks the turn as work assigned from that NyxBot thread, `None` makes it
-/// direct work again. A thread without a live turn gets a synthetic one, in
-/// the shape `begin_turn` writes. Returns the refreshed row; refresh the
+/// direct work again. A thread without a live turn starts with its assignment
+/// recorded as the initiating input. Returns the refreshed row; refresh the
 /// chat with [`chat_for_row`].
 pub(crate) async fn pin_assignment(
     db: &Database,
@@ -264,32 +298,30 @@ pub(crate) async fn pin_assignment(
         .await
         .unwrap()
         .is_some();
-    let report_to = report_to.map(bson::Bson::from).unwrap_or(bson::Bson::Null);
-    if live {
-        conversations
-            .update_one(
-                doc! {"_id": conversation_id, "user_id": owner},
-                doc! {"$set": {"active_turn.report_to": report_to, "active_turn.with_nyxbot": false}},
-            )
-            .await
-            .unwrap();
-    } else {
-        conversations
-            .update_one(
-                doc! {"_id": conversation_id, "user_id": owner},
-                doc! {"$set": {"active_turn": {
-                    "turn_id": Uuid::new_v4().to_string(),
-                    "origin": "orchestrator",
-                    "started_at": bson::DateTime::now(),
-                    "lease_expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(30)),
-                    "stop_requested": false,
-                    "report_to": report_to,
-                    "with_nyxbot": false,
-                }}},
-            )
-            .await
-            .unwrap();
+    if !live {
+        let request: engine::TurnRequest = serde_json::from_value(json!({
+            "conversation_id": conversation_id, "text": "Carry out the assignment"
+        }))
+        .unwrap();
+        let mut start = engine::TurnStart::from(&request);
+        start.origin = TurnOrigin::Orchestrator;
+        start.report_to = report_to.map(str::to_owned);
+        return engine::begin_turn(
+            db,
+            owner,
+            start,
+            &std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
+        )
+        .await
+        .unwrap();
     }
+    conversations
+        .update_one(
+            doc! {"_id": conversation_id, "user_id": owner},
+            doc! {"$set": {"active_turn.report_to": report_to, "active_turn.with_nyxbot": false}},
+        )
+        .await
+        .unwrap();
     engine::get(db, owner, conversation_id).await.unwrap()
 }
 
@@ -541,26 +573,24 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     // A following event turn of the same assignment must retain the
     // initiating user turn's denial. Each turn's tool calls authenticate
     // afresh (issue #1883: a request is fenced to the exact live turn).
-    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {
-                "active_turn.turn_id": "following-event", "active_turn.origin": "event",
-            }},
-        )
+    f.finish_turn(&f.row).await;
+    let notice = super::assistant_team_service::bound_event(
+        "notice",
+        "Continue the assignment".into(),
+        None,
+        Some(&f.nyxbot_thread),
+    );
+    engine::push_events(db, &f.owner, &f.row.id, vec![notice])
         .await
+        .unwrap()
         .unwrap();
+    let event = f.begin_turn(TurnOrigin::Event, "").await;
     let stale = service_gate(db, &f.chat, &service, "github", "GitHub", false).await;
     assert!(
         matches!(stale, Err(crate::errors::AppError::Conflict(_))),
         "a chat authenticated for the previous turn cannot ask"
     );
-    let event_chat = chat_for_row(
-        &f.state,
-        &f.owner,
-        &engine::get(db, &f.owner, &f.row.id).await.unwrap(),
-    )
-    .await;
+    let event_chat = chat_for_row(&f.state, &f.owner, &event).await;
     assert!(event_chat.involved());
     let event_denial = service_gate(db, &event_chat, &service, "github", "GitHub", false)
         .await
@@ -568,18 +598,21 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         .unwrap();
     assert_eq!(event_denial["acknowledgement_id"], id);
     assert_eq!(event_denial["error"], "acknowledgement_denied");
+    f.finish_turn(&event).await;
+    let trigger = f
+        .begin_turn(TurnOrigin::Trigger, "Run the scheduled task")
+        .await;
     db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
         .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {
-                "active_turn.turn_id": "trigger-turn", "active_turn.trigger_run_id": "trigger-run",
-            }},
+            doc! {"_id": &trigger.id},
+            doc! {"$set": {"active_turn.trigger_run_id": "trigger-run"}},
         )
         .await
         .unwrap();
+    let trigger_chat = chat_for_row(&f.state, &f.owner, &trigger).await;
     let trigger_card = acks::request(
         db,
-        &f.chat,
+        &trigger_chat,
         acks::Request {
             kind: "action",
             service: None,
@@ -593,30 +626,10 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     .unwrap();
     assert_eq!(
         trigger_card.requested_turn_id.as_deref(),
-        Some("trigger-turn")
+        Some(trigger.active_turn.as_ref().unwrap().turn_id.as_str())
     );
     assert_eq!(trigger_card.trigger_run_id.as_deref(), Some("trigger-run"));
-    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": bson::to_bson(&f.row.active_turn).unwrap()}},
-        )
-        .await
-        .unwrap();
-    engine::finish_turn(
-        db,
-        &f.row,
-        &f.chat.api_key_id,
-        &Uuid::new_v4().to_string(),
-        &engine::TurnResult {
-            text: "Access denied".into(),
-            session_id: None,
-            response_id: None,
-            error: None,
-        },
-    )
-    .await
-    .unwrap();
+    f.finish_turn(&trigger).await;
     // With the turn settled there is no live assignment: a late call is not
     // NyxBot's work, so it is told what is missing and raises no new card.
     let cards_before = db
@@ -1252,6 +1265,53 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
 }
 
 #[tokio::test]
+async fn assistant_meta_delete_reports_local_stop_and_remote_cleanup() {
+    let f = orchestrator_fixture("assistant_meta_delete_cleanup").await;
+    let (_, _, _, mut bot) = super::channel_adapters::meta::tests::fixture("messenger").await;
+    bot.user_id = f.owner.clone();
+    bot.meta_binding.as_mut().unwrap().grant_actor_id = f.owner.clone();
+    // Unusable local credentials deterministically leave the unsubscribe pending.
+    bot.bot_token_encrypted.clear();
+    let bots = f
+        .state
+        .db
+        .collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        );
+    bots.insert_one(&bot).await.unwrap();
+    let args = json!({"bot_id": &bot.id});
+    let summary = f
+        .tools()
+        .action_summary(&f.owner, "delete_channel_bot", &args)
+        .await
+        .unwrap();
+    assert!(summary.contains("guest conversations, message records and delivery history"));
+    let failed = call(&f, "delete_channel_bot", args.clone()).await;
+    assert_eq!(
+        failed,
+        json!({"local_delivery_stopped": true, "webhook_cleanup": "failed",
+            "next_step": "NyxID has stopped delivery and will retry removing the inbox subscription."})
+    );
+    let stopped = bots.find_one(doc! {"_id": &bot.id}).await.unwrap().unwrap();
+    assert!(!stopped.is_active);
+    assert_eq!(
+        stopped.meta_binding.unwrap().subscription,
+        "removal_pending"
+    );
+    // Provider revocation confirms that retry no longer needs a remote token.
+    bots.update_one(
+        doc! {"_id": &bot.id},
+        doc! {"$set": {"meta_binding.provider_revoked": true}},
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call(&f, "delete_channel_bot", args).await,
+        json!({"local_delivery_stopped": true, "webhook_cleanup": "removed"})
+    );
+}
+
+#[tokio::test]
 async fn orchestrator_confirms_destructive_actions_by_default_and_audits_every_tool() {
     native_inventory(false).await;
 }
@@ -1373,7 +1433,10 @@ async fn native_inventory(full: bool) {
     )
     .await;
     call(&f, "delete_channel_route", json!({"route_id": route["id"]})).await;
-    call(&f, "delete_channel_bot", json!({"bot_id": bot})).await;
+    assert_eq!(
+        call(&f, "delete_channel_bot", json!({"bot_id": bot})).await,
+        json!({"deleted": true})
+    );
     call(
         &f,
         "set_service_enabled",

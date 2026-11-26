@@ -82,10 +82,29 @@ UUID v4; Sandbox IDs use CMA's `sbx_` plus 32 lowercase hexadecimal characters.
 ```
 
 The response contains `quote_id`, owner/Sandbox/catalog identities,
-`maximum_allocation`, `rate_card_id`, `rate_card_version`, the three exact decimal
-`credits_per_unit` strings and
+`maximum_allocation`, `rate_card_id`, `rate_card_version`, a `prices` array with
+one `{metric, credits_per_unit}` entry per metric (`credits_per_unit` is an exact
+decimal string without trailing zeros) and
 `accept_before` (15 minutes). The quote alone reserves no money. Each dimension
-of the full profile must be positive.
+of the full profile must be positive. With the initial rate card:
+
+```json
+{
+  "quote_id": "<quote UUID>",
+  "owner_id": "<owner UUID>",
+  "sandbox_id": "<CMA Sandbox ID>",
+  "service_id": "<CMA catalog service ID>",
+  "maximum_allocation": {"cpu_millis": 2000, "memory_mib": 8192, "disk_gib": 64},
+  "prices": [
+    {"metric": "sandbox_cpu_millis_seconds", "credits_per_unit": "0.00000001"},
+    {"metric": "sandbox_memory_mib_seconds", "credits_per_unit": "0.000000001"},
+    {"metric": "sandbox_disk_gib_seconds", "credits_per_unit": "0.00000004"}
+  ],
+  "accept_before": "<RFC 3339 time 15 minutes after the quote>",
+  "rate_card_id": "<rate card ID>",
+  "rate_card_version": 1
+}
+```
 
 `POST /windows` accepts:
 
@@ -373,6 +392,13 @@ Failed provider readback schedules durable synchronization repair for the same
 immutable version. A shared transaction fence serializes price publication with funded admission;
 the notice period exceeds the maximum funded window and windows stop at the
 next price cutoff. Existing receipts remain valid at their original prices.
+
+Each card stores the `LAGO_PLAN_CODE` configured when it was seeded or
+published, and a quote requires the effective card's plan to equal the
+configured plan. The seed only inserts version 1 when it is absent, so changing
+`LAGO_PLAN_CODE` does not reseed. After a plan change, publish a replacement card
+(at least 301 seconds ahead); quotes return 402 `billing_provider_unavailable`
+until that card is effective and synchronized.
 
 The initial seed asset is `backend/assets/cma-sandbox-rates.json`. Its exact
 rates correspond to $0.036/vCPU-hour, $0.0036864/GiB RAM-hour and

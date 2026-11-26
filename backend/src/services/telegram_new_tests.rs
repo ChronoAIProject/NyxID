@@ -622,6 +622,9 @@ async fn telegram_new_failed_webhook_resumes_same_saved_bot_after_expiry() {
     let saved = super::channel_bot_service::get_bot(&state.db, &ready.id)
         .await
         .unwrap();
+    for field in ["bot_token_encrypted", "webhook_secret_encrypted"] {
+        assert_eq!(saved.secret_context_versions.get(field), Some(&3));
+    }
     assert_eq!(saved.status, "pending");
     state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &ready.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::hours(1))}}).await.unwrap();
     assert_eq!(
@@ -3034,3 +3037,33 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
 
 #[path = "telegram_new_delivery_tests.rs"]
 mod delivery_tests;
+
+pub(crate) async fn mixed_telegram_record(
+    keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+) -> bson::Document {
+    let (mut state, actor, server) = fixture().await;
+    state.encryption_keys = keys;
+    let pending = waiting_consent(&state, &actor, &server).await;
+    let ready = approve(&state, &actor, &server, &pending.id, 700).await;
+    provider_connection(&server, &ready.id, 200).await;
+    let base = server.uri();
+    service(&state, &base)
+        .connect(&actor, &ready.id, 900, ready.revision)
+        .await
+        .unwrap();
+    let row = state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .find_one(doc! {"_id": &ready.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let sent = server.received_requests().await.unwrap();
+    let hook: Value = sent
+        .iter()
+        .find(|r| r.url.path() == format!("/bot{CHILD}/setWebhook"))
+        .unwrap()
+        .body_json()
+        .unwrap();
+    doc! {"row":row,"expected":{"bot_token_encrypted":CHILD,"webhook_secret_encrypted":hook["secret_token"].as_str().unwrap()}}
+}

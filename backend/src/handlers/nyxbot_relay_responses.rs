@@ -78,12 +78,9 @@ pub(super) async fn prepare(
         });
     }
     let binding = row.binding_id.as_deref().expect("checked binding");
-    let identity = format!(
-        "nyxbot_{}",
-        &sha256_hex(format!("{}:{binding}:{}", row.id, event.partition))[..32]
-    );
+    let identity = recovery::conversation_identity(&row.id, binding, &event.partition);
     let payload = recovery::Payload::new(response_id, &identity, metadata);
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: response_id.into(),
         user_id: row.user_id.clone(),
@@ -96,10 +93,12 @@ pub(super) async fn prepare(
         terminal: false,
         answer_delivery: None,
         revision: 0,
-        payload_ciphertext: payload.seal(&state.encryption_keys).await?,
+        payload_context_version: None,
+        payload_ciphertext: Vec::new(),
         created_at: event.created_at,
         expires_at: event.created_at + ChronoDuration::hours(recovery::RETENTION_HOURS),
     };
+    recovery::storage::install(&state.encryption_keys, &mut stored, &payload).await?;
     let db = state.db.clone();
     let admitted = stored.clone();
     let mut session = db.client().start_session().await?;

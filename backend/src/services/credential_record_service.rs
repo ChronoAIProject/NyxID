@@ -330,6 +330,8 @@ pub(crate) fn exact_source_filter(
         "gateway_url",
         "credential_source",
         "oauth_app_observation",
+        super::channel_signing_migration::SIGNING_PREPARATION_FIELD,
+        "slug",
         "source_id",
         "metadata",
         VERSIONS,
@@ -397,7 +399,7 @@ fn stored_versions(row: &bson::Document) -> AppResult<BTreeMap<String, u8>> {
         Some(value) => bson::from_bson(value.clone()).map_err(|_| invalid()),
     }
 }
-fn stored_bytes(value: &bson::Bson) -> AppResult<Option<Vec<u8>>> {
+pub(super) fn stored_bytes(value: &bson::Bson) -> AppResult<Option<Vec<u8>>> {
     #[derive(serde::Deserialize)]
     struct Bytes {
         #[serde(with = "crate::models::bson_bytes::optional")]
@@ -570,6 +572,12 @@ pub(crate) async fn migrate_snapshot(
     let result: AppResult<bool> = async {
         // Read/CAS before the owner revision: an obsolete migration attempt
         // never invalidates otherwise current dependency preparation.
+        if collection == crate::models::provider_config::COLLECTION_NAME {
+            super::channel_signing_migration::authorize_rewrap(
+                &db, &mut tx, collection, source, &mut set,
+            )
+            .await?;
+        }
         let changed = db
             .collection::<bson::Document>(collection)
             .update_one(

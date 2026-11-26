@@ -174,3 +174,15 @@ it.each(["telegram", "telegram-new"])("shows connection health to the personal o
   expect(screen.getByText("Bot health")).toBeVisible();
   expect(screen.getByRole("button", { name: "Verify Bot" })).toBeVisible();
 });
+
+vi.mock("@/components/channels/meta-customer-setup", () => ({ MetaCustomerSetup: () => null }));
+
+it.each(["messenger", "instagram"])("guides manual %s credential repair according to the delivery hold", (platform) => {
+  Object.assign(botFixture, { platform, owner: "member", status: "suspended" });
+  const page = render(<ChannelBotDetailPage />);
+  expect(screen.getByText(/nyxid channel-bot delivery org-bot --resume/)).toBeVisible();
+  botFixture.status = "pending_webhook";
+  page.rerender(<ChannelBotDetailPage />);
+  expect(screen.queryByText(/nyxid channel-bot delivery org-bot --resume/)).toBeNull();
+  expect(screen.getByText(/Run Verify Bot to check the saved credentials/)).toBeVisible();
+});

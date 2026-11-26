@@ -441,6 +441,7 @@ pub fn base_prompt(
         prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot. Keep unanswered onboarding questions pending across setup links and resumes. Creating or linking a bot is not customer readiness or consent to open access. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Model readiness alone and field presence do not prove this. An explicit owner choice can open access now; disclose audience_readiness facts and unresolved questions without another confirmation.");
     }
     prompt.push_str(WEB_RESEARCH_PROMPT);
+    prompt.push_str("When citing a source in a reply or in content written through a tool, use its verified URL and omit internal citation markers.");
     prompt.push_str(CLI_PROMPT);
     if let Some(agent) = agent {
         if !row.guest_turn {
@@ -749,23 +750,46 @@ pub const QUESTION_EXCERPT_CHARS: usize = 200;
 /// Chats that may wait for one running answer besides the one that asked.
 pub const MAX_ALSO_DELIVER: usize = 4;
 
-/// Take the chats still owed the newest turn's answer (once).
-pub async fn take_deliveries(
+#[derive(Deserialize)]
+pub(crate) struct PostTurnReply {
+    pub text: String,
+    pub status: String,
+    #[serde(default)]
+    pub post_turn_deliver_also: Vec<ChannelOrigin>,
+}
+
+/// Read the result and additional destinations committed by the winning settler.
+pub(crate) async fn post_turn_reply(
     db: &Database,
     user_id: &str,
-    id: &str,
-) -> AppResult<Vec<ChannelOrigin>> {
+    conversation_id: &str,
+    turn_id: &str,
+) -> AppResult<Option<PostTurnReply>> {
     Ok(db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {"_id": id, "user_id": user_id,
-            "deliver_also.0": {"$exists": true}},
-            doc! {"$set": {"deliver_also": []}},
-        )
-        .return_document(mongodb::options::ReturnDocument::Before)
-        .await?
-        .map(|row| row.deliver_also)
-        .unwrap_or_default())
+        .collection::<PostTurnReply>(MESSAGES)
+        .find_one(super::channel_supplemental_delivery::settled_reply_filter(
+            user_id,
+            conversation_id,
+            turn_id,
+        ))
+        .projection(doc! {"text": 1, "status": 1, "post_turn_deliver_also": 1})
+        .await?)
+}
+
+fn post_turn_reply_document(
+    message: &AssistantMessage,
+    additional: &[ChannelOrigin],
+) -> AppResult<bson::Document> {
+    let mut saved = bson::to_document(message)
+        .map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
+    if !additional.is_empty() {
+        saved.insert(
+            "post_turn_deliver_also",
+            bson::to_bson(&additional)
+                .map_err(|_| AppError::Internal("Failed to encode channel destinations".into()))?,
+        );
+    }
+    Ok(saved)
 }
 
 /// The owner's chat that asynchronous replies of their own thread go to.
@@ -780,7 +804,7 @@ pub async fn set_reply_channel(
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": id, "user_id": user_id},
-            doc! {"$set": {"reply_channel": origin}},
+            doc! {"$set": {"reply_channel": origin}, "$unset": {"reply_channel_meta_grant": ""}},
         )
         .await?;
     Ok(())
@@ -1203,7 +1227,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
         .collection::<bson::Document>(CONVERSATIONS)
         .update_many(
             doc! {"reply_channel.partition": {"$regex": "^direct_"}},
-            doc! {"$unset": {"reply_channel": ""}},
+            doc! {"$unset": {"reply_channel": "", "reply_channel_meta_grant": ""}},
         )
         .await?
         .modified_count;
@@ -1382,6 +1406,10 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             doc! {"conversation_id": 1, "turn_id": 1, "role": 1},
             false,
         ),
+        // Legacy saved-result erasure resolves one exact server-authored turn,
+        // including org bots linked to a person's specialist. Bound this read
+        // independently of the historical conversation owner.
+        (MESSAGES, doc! {"turn_id": 1, "role": 1}, false),
         (
             CONVERSATIONS,
             doc! {"user_id": 1, "agent_id": 1, "updated_at": -1},
@@ -1801,13 +1829,28 @@ pub(crate) async fn authorize_thread_read(
         return Ok(Some(access));
     }
     let user_id = row.user_id.as_str();
-    if let Some(owner) = row.agent_owner_id.as_deref() {
-        let access = Box::pin(super::org_agent_service::resolve_key_access(
-            db,
-            user_id,
-            Some(owner),
-        ))
-        .await?;
+    if let Some(owner) = row.agent_owner_id.as_deref().filter(|id| *id != user_id) {
+        let access = if let Some(id) = row.agent_id.as_deref() {
+            let agent = db
+                .collection::<crate::models::assistant_agent::AssistantAgent>(
+                    crate::models::assistant_agent::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id":id,"user_id":owner,"kind":"specialist"})
+                .await?
+                .ok_or_else(not_found)?;
+            Box::pin(super::org_agent_service::resolve_agent_access(
+                db, user_id, &agent,
+            ))
+            .await?
+        } else {
+            // Legacy threads without a specialist binding retain their membership-based history.
+            Box::pin(super::org_agent_service::resolve_key_access(
+                db,
+                user_id,
+                Some(owner),
+            ))
+            .await?
+        };
         if row.group_id.is_some()
             && let Some(access) = access.as_ref()
         {
@@ -1865,24 +1908,51 @@ pub async fn list(
         .try_collect()
         .await?;
     // Request-local checks only for organization threads. Personal lists add no reads.
-    let mut access = std::collections::HashMap::new();
-    for row in &rows {
-        if let Some(owner) = row.agent_owner_id.as_deref()
-            && !row.shared_agent_thread
-            && !access.contains_key(owner)
-        {
-            let allowed = super::org_agent_service::can_use(
-                &super::org_agent_service::access(db, user_id, owner).await?,
-            );
-            access.insert(owner.to_owned(), allowed);
-        }
-    }
+    let org_rows = rows.iter().filter(|r| {
+        !r.shared_agent_thread && r.agent_owner_id.as_deref().is_some_and(|id| id != user_id)
+    });
+    let owners = super::org_agent_service::owners_for_page(
+        db,
+        user_id,
+        org_rows
+            .clone()
+            .filter_map(|r| r.agent_owner_id.as_deref())
+            .collect(),
+    )
+    .await?;
+    let ids: Vec<_> = org_rows.filter_map(|r| r.agent_id.as_ref()).collect();
+    let usable: std::collections::HashMap<_, _> = if ids.is_empty() {
+        Default::default()
+    } else {
+        let targets = db
+            .collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .find(doc! {"_id":{"$in":ids},"kind":"specialist"})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        targets
+            .into_iter()
+            .filter(|a| {
+                owners.get(&a.user_id).is_some_and(|(acl, _)| {
+                    super::org_agent_service::specialist_rights(user_id, a, acl).can_use
+                })
+            })
+            .map(|a| (a.id, a.user_id))
+            .collect()
+    };
     rows.retain(|row| {
         row.shared_agent_thread
-            || row
-                .agent_owner_id
-                .as_ref()
-                .is_none_or(|owner| access.get(owner).copied().unwrap_or(false))
+            || row.agent_owner_id.as_deref().is_none_or(|org| {
+                org == user_id
+                    || match &row.agent_id {
+                        Some(agent) => usable.get(agent).is_some_and(|owner| owner == org),
+                        None => owners
+                            .get(org)
+                            .is_some_and(|(acl, _)| super::org_agent_service::can_use(acl)),
+                    }
+            })
     });
     Ok(rows)
 }
@@ -2129,7 +2199,15 @@ pub(crate) async fn write_checkpoint_in_session(
             .filter(|goal| !goal.is_empty()),
         _ => None,
     };
+    let goal_turn_id = if request.is_some() {
+        Some(reply.turn_id.clone())
+    } else {
+        previous
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.goal_turn_id.clone())
+    };
     let goal = request.or_else(|| previous.as_ref().and_then(|p| p.goal.clone()));
+    let goal_turn_id = goal_turn_id.filter(|_| goal.is_some());
     // A failed turn continues the open window of a previous failure; a
     // successful turn closes it and records only its own actions.
     let open = previous
@@ -2153,7 +2231,33 @@ pub(crate) async fn write_checkpoint_in_session(
     keep_newest(&mut completed_actions);
     keep_newest(&mut failed_actions);
     let succeeded = reply.status == "completed";
+    let output = Some(excerpt(
+        &super::voice::links::message_text(reply, &reply.text),
+        CHECKPOINT_OUTPUT_CHARS,
+    ))
+    .filter(|text| !text.is_empty());
+    let source_turn_ids = if goal.is_none() || goal_turn_id.is_some() {
+        Some(
+            output
+                .iter()
+                .map(|_| reply.turn_id.clone())
+                .chain(goal_turn_id.iter().cloned())
+                .chain(
+                    completed_actions
+                        .iter()
+                        .chain(&failed_actions)
+                        .map(|action| action.turn_id.clone()),
+                )
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        None
+    };
     let mut checkpoint = AssistantCheckpoint {
+        source_turn_ids,
+        goal_turn_id,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: reply.turn_id.clone(),
@@ -2162,11 +2266,7 @@ pub(crate) async fn write_checkpoint_in_session(
         goal,
         completed_actions,
         failed_actions,
-        output: Some(excerpt(
-            &super::voice::links::message_text(reply, &reply.text),
-            CHECKPOINT_OUTPUT_CHARS,
-        ))
-        .filter(|text| !text.is_empty()),
+        output,
         last_successful_turn_id: if succeeded {
             Some(reply.turn_id.clone())
         } else {
@@ -2415,6 +2515,22 @@ impl OwnerTurnClaim {
     }
 }
 
+pub(crate) fn turn_meta_grants(turn: &ActiveTurn) -> Vec<crate::models::channel_meta::GrantRef> {
+    let mut grants = Vec::new();
+    for context in turn
+        .channel_context
+        .iter()
+        .chain(turn.events.iter().flat_map(|event| &event.channel_contexts))
+    {
+        if let Some(grant) = &context.meta_grant
+            && !grants.contains(grant)
+        {
+            grants.push(grant.clone());
+        }
+    }
+    grants
+}
+
 /// Shared owner admission. Platform callers join binding and receipt fences in
 /// the same transaction, then pass the complete server-authored origin here.
 #[allow(clippy::too_many_arguments)]
@@ -2444,6 +2560,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             "Invocation confirmation continuation is already queued".into(),
         ));
     }
+    let direct_meta = start
+        .channel_context
+        .as_ref()
+        .is_some_and(|context| context.meta_grant.is_some());
     let id = ids.conversation_id.clone();
     let turn_id = ids.turn_id.clone();
     let voice_request_id = voice_request_id.map(str::to_owned);
@@ -2469,6 +2589,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            meta_grant: None,
             title_language: None,
             automation_v2: false,
             artifact_head: None,
@@ -2485,15 +2606,23 @@ pub(crate) async fn begin_owner_turn_in_session(
             automation_thread: false,
             voice_parent_conversation_id: None,
             guest_model_setup: false,
+            org_use_revision: 0,
             shared_agent_thread: false,
             agent_owner_id: (agent.user_id != user_id).then(|| agent.user_id.clone()),
             id: id.clone(),
             user_id: user_id.into(),
-            title: start
-                .title
-                .clone()
-                .unwrap_or_else(|| super::assistant_title_service::provisional(&start.text)),
-            title_source: if start.title.is_some() || start.guest || start.channel.is_some() {
+            title: start.title.clone().unwrap_or_else(|| {
+                if direct_meta {
+                    "New chat".to_owned()
+                } else {
+                    super::assistant_title_service::provisional(&start.text)
+                }
+            }),
+            title_source: if start.title.is_some()
+                || start.guest
+                || start.channel.is_some()
+                || direct_meta
+            {
                 crate::models::assistant_conversation::TitleSource::User
             } else {
                 crate::models::assistant_conversation::TitleSource::Provisional
@@ -2522,6 +2651,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             event_streak: 0,
             channel: start.channel.clone(),
             reply_channel: None,
+            reply_channel_meta_grant: None,
             deliver_also: Vec::new(),
             group_id: start.group_id.clone(),
             group_request_id: None,
@@ -2622,6 +2752,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         .is_some_and(|o| o.org_execution.is_some())
     {
         row.reply_channel = start.reply_channel.clone();
+        row.reply_channel_meta_grant = start
+            .channel_context
+            .as_ref()
+            .and_then(|context| context.meta_grant.clone());
     } else if start.origin == TurnOrigin::User
         && row
             .reply_channel
@@ -2629,6 +2763,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .is_some_and(|o| o.org_execution.is_some())
     {
         row.reply_channel = None;
+        row.reply_channel_meta_grant = None;
     }
     // Org channel authority binds the next turn's guest/member lane. A new
     // conversation starts with guest_turn=false, so project the authenticated
@@ -2644,6 +2779,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         &row,
         &mut *session,
         start.org_access.as_ref(),
+        true,
     )
     .await?;
     row.shared_agent_thread = authority.is_shared();
@@ -2679,9 +2815,23 @@ pub(crate) async fn begin_owner_turn_in_session(
         if start.origin != TurnOrigin::Group {
             return Err(AppError::Forbidden("Invalid group request".into()));
         }
-        let claimed = db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
-            .update_one(doc! {"_id":request,"group_id":&row.group_id,"actor_user_id":user_id,"pending_agent_ids":&row.agent_id},
-                doc! {"$pull":{"pending_agent_ids":&row.agent_id}}).session(&mut *session).await?;
+        let mut filter = doc! {"_id":request,"group_id":&row.group_id,"actor_user_id":user_id,"pending_agent_ids":&row.agent_id};
+        if let Some(id) = row.agent_id.as_ref() {
+            let field = format!("org_use_revisions.{id}");
+            if authority.org_use_revision() == 0 {
+                filter.insert(
+                    "$or",
+                    bson::bson!([{&field:0},{"org_use_revisions":{"$exists":false}}]),
+                );
+            } else {
+                filter.insert(field, authority.org_use_revision());
+            }
+        }
+        let claimed = db
+            .collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
+            .update_one(filter, doc! {"$pull":{"pending_agent_ids":&row.agent_id}})
+            .session(&mut *session)
+            .await?;
         if claimed.modified_count != 1 {
             return Err(AppError::NotFound("Queued group request not found".into()));
         }
@@ -2691,8 +2841,16 @@ pub(crate) async fn begin_owner_turn_in_session(
         if start.origin != TurnOrigin::Trigger || start.guest {
             return Err(AppError::Forbidden("Invalid trigger turn".into()));
         }
-        automation_work =
-            super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
+        automation_work = super::trigger_schedule::admit_turn(
+            db,
+            user_id,
+            claim,
+            &id,
+            &turn_id,
+            authority.org_use_revision(),
+            session,
+        )
+        .await?;
     }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
@@ -2722,6 +2880,63 @@ pub(crate) async fn begin_owner_turn_in_session(
             )
             .session(&mut *session)
             .await?;
+    }
+    let before = row.pending_events.len();
+    if super::org_agent_service::ordinary_member_org(&row).is_some() {
+        row.pending_events
+            .retain(|e| e.org_use_revision == authority.org_use_revision());
+    }
+    if row.pending_events.iter().any(|e| {
+        e.source_owner_id.is_some()
+            || matches!(e.kind.as_str(), "subagent_settled" | "permission_requested")
+    }) {
+        let mut live = Vec::with_capacity(row.pending_events.len());
+        for event in std::mem::take(&mut row.pending_events) {
+            if (event.source_owner_id.is_none()
+                && event
+                    .agent_id
+                    .as_deref()
+                    .is_some_and(|id| row.owns_agent(id)))
+                || Box::pin(super::org_agent_service::event_source_is_live(
+                    db, session, user_id, &event,
+                ))
+                .await?
+            {
+                live.push(event);
+            }
+        }
+        row.pending_events = live;
+    }
+    if row.pending_events.iter().any(|event| {
+        event.kind == super::async_service_operation::EVENT_KIND
+            && event
+                .channel_contexts
+                .iter()
+                .any(|context| context.meta_grant.is_some())
+    }) {
+        row.pending_events = Box::pin(
+            super::async_service_operation::meta_lineage::prune_pending_in_session(
+                db,
+                session,
+                user_id,
+                &id,
+                std::mem::take(&mut row.pending_events),
+            ),
+        )
+        .await?;
+    }
+    if row.pending_events.len() != before {
+        collection
+            .update_one(
+                owner_filter(user_id, &id)?,
+                doc! {"$set":{"pending_events":bson::to_bson(&row.pending_events)
+                .map_err(|_|AppError::Internal("Invalid events".into()))?}},
+            )
+            .session(&mut *session)
+            .await?;
+        if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+            return Ok(OwnerTurnAdmission::Drained);
+        }
     }
     if row
         .pending_events
@@ -2805,6 +3020,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.pending_events = remaining;
         selected
     } else if start.invocation_id.is_some()
+        || direct_meta
         || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
@@ -2985,6 +3201,19 @@ pub(crate) async fn begin_owner_turn_in_session(
     // generation at invocation boundaries so an old worker cannot authenticate
     // against a later turn's live authority. Continuations of the same family
     // retain their card/watch binding; ordinary untouched threads keep theirs.
+    let previous_use_revision = row.org_use_revision;
+    if authority.org_use_revision() != previous_use_revision {
+        if !row.credential_api_key_id.is_empty() {
+            super::api_key_mutation_service::update_one(
+                db,
+                doc! {"_id":&row.credential_api_key_id,"user_id":user_id},
+                doc! {"$set":{"is_active":false}},
+                Some(&mut *session),
+            )
+            .await?;
+        }
+        row.org_use_revision = authority.org_use_revision();
+    }
     if (row.invocation_controlled || next_invocation.is_some())
         && row.credential_invocation_id != next_invocation
         && !row.credential_api_key_id.is_empty()
@@ -3018,6 +3247,21 @@ pub(crate) async fn begin_owner_turn_in_session(
         ),
     )
     .await?;
+    if credential.newly_provisioned
+        && let Some(org) = super::org_agent_service::ordinary_member_org(&row)
+    {
+        let changed = db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.agent_id,"user_id":org,"destroyed_at":null},
+                doc! {"$inc":{"thread_fence":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(not_found());
+        }
+    }
     let replace_stopped = row
         .stopped_window
         .as_ref()
@@ -3102,6 +3346,18 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
+        let lost_grants = turn_meta_grants(&lost_turn);
+        for grant in &lost_grants {
+            super::channel_meta_service::scopes::fence_reference(db, session, grant, false)
+                .await
+                .map_err(|error| match error {
+                    AppError::Conflict(_) => AppError::Conflict(
+                        "The previous inbox reply is unavailable. Try again after inbox cleanup."
+                            .into(),
+                    ),
+                    other => other,
+                })?;
+        }
         let mut lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
         lost_metadata.work = Some(super::assistant_real_work::evidence(
             &row,
@@ -3127,7 +3383,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
         row.message_count += 1;
-        let message = AssistantMessage {
+        let mut message = AssistantMessage {
             supplemental_result_claims: Vec::new(),
             automation_work: lost.automation_work.clone(),
             execution_task: lost.execution_task.clone(),
@@ -3154,11 +3410,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             seq: row.message_count,
             turn_id: lost.turn_id.clone(),
             role: "assistant".into(),
-            text: lost
-                .reply
-                .as_ref()
-                .map(|reply| reply.text.clone())
-                .unwrap_or_default(),
+            text: checkpoint_reply_text(&lost),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
@@ -3192,6 +3444,21 @@ pub(crate) async fn begin_owner_turn_in_session(
             via: None,
             report_to: lost_turn.report_to.clone(),
         };
+        if super::org_agent_service::ordinary_member_org(&row).is_some()
+            && super::assistant_delegated_images::text_report_target(&row, &lost_turn).is_some()
+        {
+            message.delegated_images.text_report_in_settlement = true;
+            if previous_use_revision == row.org_use_revision {
+                message.delegated_images.publication_refusal =
+                    Box::pin(super::assistant_delegated_images::publish_in_session(
+                        db, session, &row, &message, &lost_turn,
+                    ))
+                    .await?
+                    .map(str::to_owned);
+            } else {
+                message.report_to = None;
+            }
+        }
         Box::pin(write_checkpoint_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
@@ -3208,10 +3475,24 @@ pub(crate) async fn begin_owner_turn_in_session(
             ),
         )
         .await?;
-        db.collection::<AssistantMessage>(MESSAGES)
-            .insert_one(message)
-            .session(&mut *session)
-            .await?;
+        if lost_grants.is_empty() {
+            db.collection::<AssistantMessage>(MESSAGES)
+                .insert_one(message)
+                .session(&mut *session)
+                .await?;
+        } else {
+            let mut source = bson::to_document(&message)
+                .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?;
+            source.insert(
+                "meta_grants",
+                bson::to_bson(&lost_grants)
+                    .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
+            );
+            db.collection::<bson::Document>(MESSAGES)
+                .insert_one(source)
+                .session(&mut *session)
+                .await?;
+        }
         row.nyxagent_session_id = None;
         row.nyxagent_instruction_binding = None;
         row.nyxagent_last_response_id = None;
@@ -3687,9 +3968,16 @@ pub(crate) async fn begin_owner_turn_in_session(
     // The owner's own thread follows them between the app and their
     // chat apps: asynchronous replies go where they last wrote.
     match start.origin {
-        TurnOrigin::User => row.reply_channel = None,
+        TurnOrigin::User => {
+            row.reply_channel = None;
+            row.reply_channel_meta_grant = None;
+        }
         TurnOrigin::Channel if start.reply_channel.is_some() => {
             row.reply_channel = start.reply_channel.clone();
+            row.reply_channel_meta_grant = start
+                .channel_context
+                .as_ref()
+                .and_then(|context| context.meta_grant.clone());
         }
         _ => {}
     }
@@ -3744,6 +4032,51 @@ pub(crate) async fn begin_owner_turn_in_session(
             )
             .await?;
         }
+    }
+    let admitted_meta_grants = row
+        .active_turn
+        .as_ref()
+        .map(turn_meta_grants)
+        .unwrap_or_default();
+    for grant in &admitted_meta_grants {
+        super::channel_meta_service::scopes::fence_reference(db, session, grant, true).await?;
+    }
+    if let Some(grant) = admitted_meta_grants.first() {
+        if start.guest {
+            if admitted_meta_grants
+                .iter()
+                .any(|source| source.bot_id != grant.bot_id || source.grant_id != grant.grant_id)
+            {
+                return Err(AppError::Conflict(
+                    "Visitor turn contains different provider grants".into(),
+                ));
+            }
+            if row.meta_grant.is_none()
+                && start.conversation_id.is_some()
+                && db
+                    .collection::<bson::Document>(MESSAGES)
+                    .find_one(doc! {"conversation_id":&row.id,"user_id":&row.user_id})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "Visitor history needs verified grant attribution before reuse".into(),
+                ));
+            }
+            if row.meta_grant.as_ref().is_some_and(|prior| {
+                prior.bot_id != grant.bot_id || prior.grant_id != grant.grant_id
+            }) {
+                return Err(AppError::Conflict(
+                    "Visitor session belongs to an earlier provider grant".into(),
+                ));
+            }
+            row.meta_grant = Some(grant.clone());
+        }
+    } else if start.guest && row.meta_grant.is_some() {
+        return Err(AppError::Conflict(
+            "Visitor session requires its original provider grant".into(),
+        ));
     }
     if start.conversation_id.is_some() {
         collection
@@ -3997,10 +4330,31 @@ pub(crate) async fn begin_owner_turn_in_session(
         report_to: None,
     };
     if voice_request.is_none() || hidden_voice {
-        db.collection::<AssistantMessage>(MESSAGES)
-            .insert_one(message)
-            .session(&mut *session)
-            .await?;
+        if !admitted_meta_grants.is_empty() {
+            let mut document = bson::to_document(&message)
+                .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?;
+            document.insert(
+                "meta_grants",
+                bson::to_bson(&admitted_meta_grants)
+                    .map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
+            );
+            document.insert(
+                "meta_contexts",
+                bson::to_bson(&super::async_service_operation::meta_lineage::contexts(
+                    &row,
+                )?)
+                .map_err(|_| AppError::AssistantTurnRequired)?,
+            );
+            db.collection::<bson::Document>(MESSAGES)
+                .insert_one(document)
+                .session(&mut *session)
+                .await?;
+        } else {
+            db.collection::<AssistantMessage>(MESSAGES)
+                .insert_one(message)
+                .session(&mut *session)
+                .await?;
+        }
     }
     if voice_request.is_some() {
         let source_conversation = voice_request
@@ -4276,6 +4630,19 @@ pub async fn append_events_in_session(
     else {
         return Ok(false);
     };
+    let target_revision = if let Some(org) = super::org_agent_service::ordinary_member_org(&row) {
+        super::org_agent_service::fence_member_use(
+            db,
+            session,
+            user_id,
+            org,
+            row.agent_id.as_deref().ok_or_else(not_found)?,
+            false,
+        )
+        .await?
+    } else {
+        0
+    };
     for event in events {
         if !super::assistant_invocation_service::fence_in_session(
             db,
@@ -4324,7 +4691,14 @@ pub async fn append_events_in_session(
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
-        row.pending_events.push(event.clone());
+        if row.org_use_revision != target_revision
+            && super::org_agent_service::ordinary_member_org(&row).is_some()
+        {
+            return Err(AppError::Forbidden("Specialist use access changed".into()));
+        }
+        let mut queued = event.clone();
+        queued.org_use_revision = target_revision;
+        row.pending_events.push(queued);
     }
     rows.update_one(
         doc! {"_id": id, "user_id": user_id},
@@ -4956,6 +5330,12 @@ pub async fn stop_requested(
         .is_none_or(|turn| turn.turn_id != turn_id || turn.stop_requested))
 }
 
+fn checkpoint_reply_text(turn: &ActiveTurn) -> String {
+    turn.reply.as_ref().map_or_else(String::new, |reply| {
+        super::assistant_citation_markers::sanitize(&reply.text).into_owned()
+    })
+}
+
 #[derive(Clone)]
 pub struct TurnResult {
     pub text: String,
@@ -5122,7 +5502,17 @@ artifact_recovery_target: None,
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
-                let error = if current
+                let meta_grants = current.active_turn.as_ref().map(turn_meta_grants).unwrap_or_default();
+                for grant in &meta_grants {super::channel_meta_service::scopes::fence_reference(&db,session,grant,false).await?;}
+                let mut use_revoked = false;
+                if let Some(org) = super::org_agent_service::ordinary_member_org(&current) {
+                    use_revoked = !Box::pin(super::org_agent_service::settlement_use_is_live(
+                        &db,session,&current.user_id,org,current.agent_id.as_deref().ok_or_else(not_found)?,current.org_use_revision
+                    )).await?;
+                }
+                let error = if use_revoked {
+                    Some(TurnError::internal("credential_revoked","specialist_access"))
+                } else if current
                     .active_turn
                     .as_ref()
                     .is_some_and(|t| t.stop_requested)
@@ -5231,12 +5621,6 @@ artifact_recovery_target: None,
                     let source = super::channel_supplemental_delivery::managed_source(turn)?;
                     Some(super::channel_supplemental_delivery::saved_destinations(&current, turn, source, error.is_some()))
                 });
-                current.deliver_also = current
-                    .active_turn
-                    .as_ref()
-                    .filter(|_| saved_destinations.is_none())
-                    .map(|turn| turn.also_deliver.clone())
-                    .unwrap_or_default();
                 super::generated_artifacts::associate_in_session(&db, &mut current, &message_id, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
@@ -5317,7 +5701,7 @@ artifact_recovery_target: None,
                     automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
-                        text_report_in_settlement: settled_turn.as_ref().and_then(|turn|turn.restart_admission.as_ref()).is_some_and(|source|matches!(source.team_source,Some(crate::models::assistant_conversation::TeamRestartSource::Assignment { .. }))),
+                        text_report_in_settlement: settled_turn.as_ref().and_then(|turn| super::assistant_delegated_images::text_report_target(&current, turn)).is_some(),
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,
                         references: if error.is_none() { settled_turn.as_ref().map(|t| t.delegated_images.references.clone()).unwrap_or_default() } else { Vec::new() },
@@ -5344,8 +5728,8 @@ artifact_recovery_target: None,
                     seq: current.message_count,
                     turn_id: turn_id.clone(),
                     role: "assistant".into(),
-                    text: if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
-                        settled_turn.as_ref().and_then(|turn| turn.reply.as_ref()).map(|reply| reply.text.clone()).unwrap_or_default()
+                    text: if use_revoked { String::new() } else if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
+                        settled_turn.as_ref().map(checkpoint_reply_text).unwrap_or_default()
                     } else {
                         result.text.clone()
                     },
@@ -5406,9 +5790,13 @@ artifact_recovery_target: None,
                     }
                 }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
-                if let Some(turn) = settled_turn.as_ref() {
+                if use_revoked {
+                    message.report_to = None;
+                    message.delegated_images.publication_refusal = Some("authority_changed".into());
+                    message.attachments.clear();
+                } else if let Some(turn) = settled_turn.as_ref() {
                     message.delegated_images.publication_refusal =
-                        Box::pin(super::assistant_delegated_images::publish_in_session(&db, session, &message, turn)).await?.map(str::to_owned);
+                        Box::pin(super::assistant_delegated_images::publish_in_session(&db, session, &current, &message, turn)).await?.map(str::to_owned);
                 }
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::assistant_notification_service::record_turn_settled_in_session(
@@ -5416,12 +5804,23 @@ artifact_recovery_target: None,
                     ))
                     .await?;
                 }
-                if let Some(attempt) = attempt {
-                    let mut saved = bson::to_document(&message).map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
-                    saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
-                    if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
-                        saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});
-                        saved.insert("handoff_delivery_due_at", bson::DateTime::from_chrono(now));
+                let additional = settled_turn.as_ref()
+                    .filter(|_| saved_destinations.is_none())
+                    .map_or(&[][..], |turn| turn.also_deliver.as_slice());
+                if attempt.is_some() || !additional.is_empty() || !meta_grants.is_empty() {
+                    let mut saved = post_turn_reply_document(&message, additional)?;
+                    if !meta_grants.is_empty() {
+                        saved.insert(
+                            "meta_grants",
+                            bson::to_bson(&meta_grants).map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
+                        );
+                    }
+                    if let Some(attempt) = attempt {
+                        saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
+                        if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
+                            saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});
+                            saved.insert("handoff_delivery_due_at", bson::DateTime::from_chrono(now));
+                        }
                     }
                     db.collection::<bson::Document>(MESSAGES).insert_one(saved).session(&mut *session).await?;
                 } else {
@@ -7192,7 +7591,6 @@ pub async fn rename(
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let title = title.trim().to_owned();
-    let user_id = user_id.to_owned();
     session
         .start_transaction()
         .and_run2(async move |session| {
@@ -7203,12 +7601,7 @@ pub async fn rename(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
-                super::org_agent_service::validate_key(
-                    &db,
-                    &user_id,
-                    row.agent_owner_id.as_deref(),
-                )
-                .await?;
+                authorize_thread_read(&db, &row).await?;
                 collection
                     .find_one_and_update(
                         filter.clone(),
@@ -7225,6 +7618,32 @@ pub async fn rename(
         .await
         .map_err(transactions::map_transaction_error)
 }
+/// Payload inventories shared by ordinary conversation retirement and the
+/// bounded Meta guest eraser. Credentials remain until parent retirement.
+pub(crate) const CONVERSATION_CHILD_COLLECTIONS: &[&str] = &[
+    crate::models::async_service_operation::COLLECTION_NAME,
+    crate::models::generated_artifact::COLLECTION_NAME,
+    crate::models::generated_artifact::DELIVERIES,
+    crate::models::generated_artifact::SERIES,
+    crate::models::cma_session_origin::COLLECTION_NAME,
+    crate::models::assistant_voice::REQUESTS,
+    crate::models::assistant_voice_session::COLLECTION_NAME,
+    crate::models::assistant_voice_announcement::COLLECTION_NAME,
+    crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    super::assistant_service_execution::COLLECTION,
+    crate::models::assistant_attachment::COLLECTION_NAME,
+    crate::models::assistant_resource::COLLECTION_NAME,
+    crate::models::assistant_tool_result::COLLECTION_NAME,
+    crate::models::nyxbot_gateway_response::COLLECTION_NAME,
+    crate::models::nyxbot_image_delivery::COLLECTION_NAME,
+    crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
+    crate::models::execution_permission_channel::COLLECTION_NAME,
+    crate::models::assistant_upload_retention::TOMBSTONES,
+    crate::models::assistant_agent_credential::COLLECTION_NAME,
+    MESSAGES,
+    crate::models::assistant_message_feedback::COLLECTION_NAME,
+];
+
 /// Delete one thread with its key, credential, cards, attachments and
 /// transcript in one transaction. The agent itself remains.
 pub async fn delete(
@@ -7390,29 +7809,7 @@ pub(crate) async fn delete_with_retirement_in_session(
             Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
-        for collection in [
-            crate::models::async_service_operation::COLLECTION_NAME,
-            crate::models::generated_artifact::COLLECTION_NAME,
-            crate::models::generated_artifact::DELIVERIES,
-            crate::models::generated_artifact::SERIES,
-            crate::models::cma_session_origin::COLLECTION_NAME,
-            crate::models::assistant_voice::REQUESTS,
-            crate::models::assistant_voice_session::COLLECTION_NAME,
-            crate::models::assistant_voice_announcement::COLLECTION_NAME,
-            crate::models::assistant_acknowledgement::COLLECTION_NAME,
-            super::assistant_service_execution::COLLECTION,
-            crate::models::assistant_attachment::COLLECTION_NAME,
-            crate::models::assistant_resource::COLLECTION_NAME,
-            crate::models::assistant_tool_result::COLLECTION_NAME,
-            crate::models::nyxbot_gateway_response::COLLECTION_NAME,
-            crate::models::nyxbot_image_delivery::COLLECTION_NAME,
-            crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
-            crate::models::execution_permission_channel::COLLECTION_NAME,
-            crate::models::assistant_upload_retention::TOMBSTONES,
-            crate::models::assistant_agent_credential::COLLECTION_NAME,
-            MESSAGES,
-            crate::models::assistant_message_feedback::COLLECTION_NAME,
-        ] {
+        for &collection in CONVERSATION_CHILD_COLLECTIONS {
             db.collection::<bson::Document>(collection)
                 .delete_many(doc! {"conversation_id": id, "user_id": user_id})
                 .session(&mut *session)
@@ -7432,14 +7829,21 @@ pub(crate) async fn delete_with_retirement_in_session(
         db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
             .update_many(doc!{"user_id":user_id,"conversation_id":id,"delivery.execution_source_bound":true},
                 doc!{"$set":{"delivery.execution_source_bound":false},"$unset":{
-                    "event_context_ciphertext":"","delivery.target_ciphertext":"","delivery.target_expires_at":""
+                    "event_context_ciphertext": "",
+                    "event_context_version": "",
+                    "delivery.target_ciphertext": "",
+                    "delivery.target_context_version": "",
+                    "delivery.target_expires_at": "",
                 }})
             .session(&mut *session).await?;
         // Pending guest input has not yet been bound to a turn.
         // Revoke its resumability with the conversation, preserving dedup metadata.
         db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
             .update_many(doc!{"user_id":user_id,"guest_setup_conversation_id":id,"turn_id":bson::Bson::Null},
-                doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}})
+                doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset": {
+                    "guest_setup_payload": "",
+                    "guest_setup_context_version": "",
+                }})
             .session(&mut *session).await?;
         db.collection::<bson::Document>(CHECKPOINTS)
             .delete_one(doc! {"_id": id, "user_id": user_id})

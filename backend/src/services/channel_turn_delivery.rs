@@ -28,11 +28,19 @@ pub(crate) async fn bind_in_session(
         .find_one_and_update(
             doc! {"_id":event,"$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],"status":{"$in":["running","resuming","queued"]},
             "turn_id":bson::Bson::Null,"media.interrupted":{"$ne":true},"delivery.version":1},
-            doc! {"$set":{"conversation_id":conversation,"resolved_conversation_id":conversation,"turn_id":turn},"$unset":{"guest_setup_payload":""}},
+            doc! {"$set":{"conversation_id":conversation,"resolved_conversation_id":conversation,"turn_id":turn},"$unset": {
+                "guest_setup_payload": "",
+                "guest_setup_context_version": "",
+            }},
         )
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
+    if let Some(value) = bound.get("meta_grant") {
+        let grant: crate::models::channel_meta::GrantRef = bson::from_bson(value.clone())
+            .map_err(|_| super::channel_meta_service::grants::incomplete())?;
+        super::channel_meta_service::scopes::fence_reference(db, session, &grant, true).await?;
+    }
     super::nyxbot_admission_service::bind_in_session(db, session, &bound, turn).await?;
     let replay = bound
         .get_document("delivery")
@@ -313,7 +321,9 @@ pub async fn silence(db: &Database, event: &str) -> AppResult<bool> {
             // capability. Never reopen the terminal delivery claim itself.
             vec![doc! {"$set": {"delivery.state": "silent", "status": "completed",
                 "event_context_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_ciphertext","$$REMOVE"]},
-                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]}
+                "event_context_version":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_version","$$REMOVE"]},
+                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]},
+                "delivery.target_context_version":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_context_version","$$REMOVE"]}
             }}],
         )
         .await?
@@ -330,6 +340,7 @@ pub async fn enqueue(
     conversation: &str,
     event: crate::models::assistant_conversation::AgentEvent,
     public_text: Option<&str>,
+    remember_reply: bool,
 ) -> AppResult<bool> {
     use super::api_key_mutation_service as transactions;
     let db = db.clone();
@@ -340,8 +351,8 @@ pub async fn enqueue(
     let admission = session
         .start_transaction()
         .and_run2(async move |session| {
-            transactions::transaction_result(
-                Box::pin(enqueue_in_session(
+            let result = async {
+                let admission = Box::pin(enqueue_in_session(
                     &db,
                     &owner,
                     &conversation,
@@ -349,8 +360,32 @@ pub async fn enqueue(
                     public_text.as_deref(),
                     session,
                 ))
-                .await,
-            )
+                .await?;
+                if admission.accepted && remember_reply {
+                    let origin = event
+                        .reply_to
+                        .first()
+                        .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let source = event.source_event_ids.first().ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let grant = event.channel_contexts.iter().find(|context| &context.source_event_id == source).and_then(|context| context.meta_grant.as_ref())
+                        .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    let grant = bson::to_bson(grant).map_err(|_| super::channel_meta_service::grants::incomplete())?;
+                    let preference = bson::to_bson(origin)
+                        .map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+                    db.collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {"_id": &conversation, "user_id": &owner},
+                        doc! {"$set": {"reply_channel": preference, "reply_channel_meta_grant": grant}},
+                    )
+                    .session(session)
+                    .await?;
+                }
+                Ok(admission)
+            }
+            .await;
+            transactions::transaction_result(result)
         })
         .await
         .map_err(transactions::map_transaction_error)?;
@@ -395,6 +430,14 @@ pub(crate) async fn enqueue_in_session(
     // Transaction retries must revalidate the original unaccepted
     // origin. Never leak queued=true from an aborted attempt.
     let mut event = incoming.clone();
+    if let Some(member) = event
+        .reply_to
+        .first()
+        .and_then(|o| o.org_execution.as_deref())
+        .filter(|e| !e.guest)
+    {
+        event.org_use_revision = member.org_use_revision;
+    }
     let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
     let mut row = rows
         .find_one(doc! {"_id": &conversation, "user_id": &owner})
@@ -418,6 +461,12 @@ pub(crate) async fn enqueue_in_session(
                 && turn.channel_adapter_origin.is_none()
                 && turn.trigger_run_id.is_none()
                 && matching(turn.question_key.as_deref())
+                && compatible_grants(
+                    turn.channel_context
+                        .iter()
+                        .chain(turn.events.iter().flat_map(|event| &event.channel_contexts)),
+                    &event.channel_contexts,
+                )
                 && (if turn.origin == crate::models::assistant_conversation::TurnOrigin::User {
                     // A personal channel repeat may join the owner's app/home
                     // answer without changing its primary destination or turn.
@@ -476,6 +525,7 @@ pub(crate) async fn enqueue_in_session(
             && !e.source_event_ids.is_empty()
             && matching(e.question_key.as_deref())
             && compatible_sources(e.reply_to.first(), event.reply_to.first())
+            && compatible_grants(e.channel_contexts.iter(), &event.channel_contexts)
     }) {
         if pending.source_event_ids.len() > engine::MAX_ALSO_DELIVER {
             return Ok(EnqueueAdmission::default());
@@ -542,6 +592,24 @@ pub(crate) async fn enqueue_in_session(
             .await?
             .trace_request
     } else {
+        if super::channel_adapters::meta::is_meta(&accepted_origin.platform) {
+            let grant: crate::models::channel_meta::GrantRef = bson::from_bson(
+                source_row
+                    .get("meta_grant")
+                    .cloned()
+                    .ok_or_else(super::channel_meta_service::grants::incomplete)?,
+            )
+            .map_err(|_| super::channel_meta_service::grants::incomplete())?;
+            let supplied = incoming
+                .channel_contexts
+                .iter()
+                .find(|context| context.source_event_id == source)
+                .and_then(|context| context.meta_grant.as_ref());
+            if supplied != Some(&grant) {
+                return Err(super::channel_meta_service::grants::incomplete());
+            }
+            super::channel_meta_service::scopes::fence_reference(db, session, &grant, true).await?;
+        }
         rows.update_one(
             doc! {"_id": &conversation, "user_id": &owner},
             doc! {"$set": {"pending_events": bson::to_bson(&row.pending_events)
@@ -583,6 +651,25 @@ pub(crate) async fn enqueue_in_session(
 
 /// Home owner chats can share work across destinations. Native children retain
 /// their exact agent/generation/child authority, never a text-only match.
+fn compatible_grants<'a>(
+    existing: impl Iterator<Item = &'a crate::models::assistant_conversation::ChannelTurnContext>,
+    incoming: &'a [crate::models::assistant_conversation::ChannelTurnContext],
+) -> bool {
+    let scope = |context: &'a crate::models::assistant_conversation::ChannelTurnContext| {
+        context
+            .meta_grant
+            .as_ref()
+            .map(|grant| (grant.bot_id.as_str(), grant.grant_id.as_str()))
+    };
+    let expected = incoming.first().and_then(scope);
+    let mut existing = existing.map(scope).peekable();
+    if existing.peek().is_none() && expected.is_some() {
+        return false;
+    }
+    existing.all(|item| item == expected)
+        && incoming.iter().all(|context| scope(context) == expected)
+}
+
 fn compatible_sources(
     a: Option<&crate::models::assistant_conversation::ChannelOrigin>,
     b: Option<&crate::models::assistant_conversation::ChannelOrigin>,
@@ -1035,4 +1122,33 @@ async fn target_in_session(
         && row.group_id.is_none()
         && row.platform_thread.is_none();
     Ok((own_chat || private_home).then_some((channel, thread)))
+}
+
+#[cfg(test)]
+mod grant_compatibility_tests {
+    use super::compatible_grants;
+    use crate::models::{assistant_conversation::ChannelTurnContext, channel_meta::GrantRef};
+
+    #[test]
+    fn identical_questions_from_independently_erasable_inboxes_stay_separate() {
+        fn context(bot: &str, grant: Option<&str>) -> ChannelTurnContext {
+            bson::from_document(bson::doc! {
+                "meta_grant": grant.map(|grant| bson::to_bson(&GrantRef {
+                    bot_id:bot.to_owned(), grant_id: grant.to_owned(), generation:1
+                }).unwrap()),
+                "source_event_id":"event","channel_id":"home","channel_bot_id":bot,
+                "conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true,
+            }).unwrap()
+        }
+        let first = [context("first", Some("a"))];
+        let second = [context("second", Some("b"))];
+        let successor = [context("first", Some("b"))];
+        let ordinary = [context("other", None)];
+        assert!(compatible_grants(first.iter(), &first));
+        assert!(compatible_grants(ordinary.iter(), &ordinary));
+        assert!(!compatible_grants(first.iter(), &second));
+        assert!(!compatible_grants(first.iter(), &successor));
+        assert!(!compatible_grants(first.iter(), &ordinary));
+        assert!(!compatible_grants([].iter(), &first));
+    }
 }

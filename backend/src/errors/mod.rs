@@ -3,6 +3,7 @@ pub mod memory_write;
 pub mod refresh;
 mod refusal_throttle;
 pub mod skill_draft;
+pub mod skill_publication;
 pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -101,6 +102,7 @@ pub struct PoolAttemptSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolAttemptTransportKind {
     Connect,
+    ResolutionUnavailable,
     Timeout,
     AfterDispatch,
     NodeUnsent,
@@ -153,6 +155,12 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error(transparent)]
+    SkillPublication(#[from] skill_publication::SkillPublicationFailure),
+
+    #[error("Conflict: trigger_overlap_skip")]
+    TriggerOverlapSkip { blocking_run_id: String },
 
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
@@ -213,6 +221,9 @@ pub enum AppError {
         "Your access settings or model connection changed during this task; review the completed actions and try again"
     )]
     AssistantModelAuthorityChanged,
+
+    #[error("Organization specialist access authoring is unavailable")]
+    OrgAgentAccessAuthoringUnavailable,
 
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
@@ -934,7 +945,10 @@ impl AppError {
             Self::CrashReportingUnavailable => StatusCode::NOT_FOUND,
             Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
-            Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::Conflict(_)
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. }
+            | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
                 StatusCode::CONFLICT
             }
@@ -948,6 +962,7 @@ impl AppError {
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
+            Self::OrgAgentAccessAuthoringUnavailable => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1151,6 +1166,9 @@ impl AppError {
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
+            Self::PoolAttemptTransport(PoolAttemptTransportKind::ResolutionUnavailable) => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -1175,7 +1193,7 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) => 1004,
+            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1193,6 +1211,7 @@ impl AppError {
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantModelAuthorityChanged => 12104,
+            Self::OrgAgentAccessAuthoringUnavailable => 12105,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
@@ -1470,7 +1489,9 @@ impl AppError {
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "conflict",
+            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => {
+                "conflict"
+            }
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1486,6 +1507,7 @@ impl AppError {
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
             Self::AssistantModelAuthorityChanged => "model_authority_changed",
+            Self::OrgAgentAccessAuthoringUnavailable => "org_agent_access_authoring_unavailable",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -1791,6 +1813,7 @@ impl AppError {
                 request_id,
                 approve_url,
             )),
+            AppError::SkillPublication(failure) => Some(serde_json::json!(failure)),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }

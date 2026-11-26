@@ -10,7 +10,10 @@ use crate::services::{
 };
 use serde_json::Value;
 
-async fn channel_turn(name: &str, native: bool) -> (Fixture, AssistantConversation, String) {
+pub(super) async fn channel_turn(
+    name: &str,
+    native: bool,
+) -> (Fixture, AssistantConversation, String) {
     channel_turn_transport(name, if native { "native" } else { "gateway" }).await
 }
 async fn channel_turn_transport(
@@ -91,6 +94,7 @@ async fn channel_turn_transport(
         stream_deadline: Utc::now() + chrono::Duration::seconds(570),
         checked_at: Utc::now(),
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     };
@@ -251,7 +255,8 @@ async fn migration_channel_review_resume_and_result_occurrence_keep_original_sou
             &f.state.db,
             &f.owner,
             &row.id,
-            "yes"
+            "yes",
+            None,
         )
         .await
         .unwrap()

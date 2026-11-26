@@ -118,16 +118,25 @@ export function DeviceCodeScanner({
       const scan = scanGeneration.current;
       const session = authSessionGeneration();
       const profile = await mobileApi.getAccountProfile().catch(() => null);
-      if (scan !== scanGeneration.current) return;
-      if (session === authSessionGeneration() &&
-          profile?.capabilities?.enabled_features?.includes("auth:staging-qr-login")) {
-        onCode(request.userCode, request.kind);
+      if (scan !== scanGeneration.current || session !== authSessionGeneration()) return;
+      if (!profile) {
+        setScanError(
+          () => (translateApp("Could not check your staging sign-in access. Try scanning again.")),
+        );
         return;
       }
+      if (!profile.capabilities?.enabled_features?.includes("auth:staging-qr-login")) {
+        setScanError(
+          () => (translateApp("Staging sign-in is not enabled for this account. Ask your administrator for access.")),
+        );
+        return;
+      }
+      onCode(request.userCode, request.kind);
+      return;
     }
     if (!request || request.kind === "staging-device") {
       setScanError(
-        () => (translateApp("This QR code is not a valid NyxID login request.")),
+        () => (translateApp("This QR code cannot be used to sign in to NyxID. Scan the sign-in QR code shown on the NyxID website or in your terminal.")),
       );
       return;
     }

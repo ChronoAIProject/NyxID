@@ -257,6 +257,13 @@ const ORG_SPECIALIST_CHANNELS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ORG_AGENT_ACCESS_FLAG_KEY: &str = "assistant:org-agent-access-lists-v1";
+const ORG_AGENT_ACCESS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ORG_AGENT_ACCESS_FLAG_KEY,
+    description: "Allow organization Admins to edit specialist access lists after fleet readiness.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
@@ -528,6 +535,16 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG,
+    FeatureFlagDef {
+        key: "channels:messenger",
+        description: "Allow the acting person to connect Messenger inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
+    FeatureFlagDef {
+        key: "channels:instagram",
+        description: "Allow the acting person to connect Instagram professional inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
     INVITATION_CODE_FLAG,
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
@@ -562,6 +579,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_LEARNING_FLAG,
     ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_AGENT_ACCESS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -598,6 +616,16 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG,
+    FeatureFlagDef {
+        key: "channels:messenger",
+        description: "Allow the acting person to connect Messenger inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
+    FeatureFlagDef {
+        key: "channels:instagram",
+        description: "Allow the acting person to connect Instagram professional inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
     INVITATION_CODE_FLAG,
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
@@ -632,6 +660,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_LEARNING_FLAG,
     ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_AGENT_ACCESS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -736,6 +765,30 @@ pub async fn get_definition(db: &mongodb::Database, key: &str) -> AppResult<Flag
         .await?
         .map(Into::into)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{key}'")))
+}
+
+/// Serialize Meta enrollment changes with OAuth installation commits.  The
+/// channel flags are built-ins and therefore have no definition row to lock;
+/// this one shared platform fence is the mutation row used by both the admin
+/// flag writer and the installer.  It is intentionally platform-wide rather
+/// than per-person, so a disable cannot race one actor's final commit.
+pub(crate) async fn fence_meta_enrollment_in_session(
+    db: &mongodb::Database,
+    platform: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if !matches!(platform, "messenger" | "instagram") {
+        return Ok(());
+    }
+    db.collection::<bson::Document>("feature_flag_enrollment_fences")
+        .update_one(
+            doc! {"_id": format!("channels:{platform}")},
+            doc! {"$inc": {"revision": 1_i64}},
+        )
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    Ok(())
 }
 
 pub fn validate_flag_key(key: &str) -> AppResult<()> {
@@ -1109,6 +1162,55 @@ pub async fn resolve_enabled_features(
         member_user_id,
         role,
     ))
+}
+
+/// A cleared deny must pass readiness if it restores an enabled parent.
+pub(super) async fn org_access_clear_enables(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    kind: FlagTargetKind,
+    target: Option<&str>,
+) -> AppResult<bool> {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERS, OrgMembership};
+    let rows = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
+    let key = ORG_AGENT_ACCESS_FLAG_KEY;
+    let global = rows
+        .find_one(
+            doc! {"flag_key":key,"definition_id":null,"org_user_id":null,
+            "target_kind":"global","enabled":true},
+        )
+        .session(&mut *session)
+        .await?
+        .is_some();
+    if kind != FlagTargetKind::User {
+        return Ok(kind == FlagTargetKind::Org && global);
+    }
+    let actor = target.ok_or_else(|| AppError::BadRequest("Missing user target".into()))?;
+    let mut cursor = db
+        .collection::<OrgMembership>(MEMBERS)
+        .find(doc! {"member_user_id":actor,"revoked_at":null})
+        .session(&mut *session)
+        .await?;
+    let memberships: Vec<OrgMembership> = cursor.stream(&mut *session).try_collect().await?;
+    if memberships.is_empty() {
+        return Ok(global);
+    }
+    let orgs: Vec<_> = memberships.iter().map(|m| &m.org_user_id).collect();
+    let mut cursor = rows
+        .find(doc! {"flag_key":key,"definition_id":null,"org_user_id":{"$in":orgs}})
+        .session(&mut *session)
+        .await?;
+    let mut by_org: HashMap<String, Vec<FeatureFlagOverride>> = HashMap::new();
+    while let Some(row) = cursor.next(&mut *session).await.transpose()? {
+        if let Some(org) = &row.org_user_id {
+            by_org.entry(org.clone()).or_default().push(row);
+        }
+    }
+    Ok(memberships.iter().any(|m| {
+        let overrides = by_org.get(&m.org_user_id).map_or(&[][..], Vec::as_slice);
+        !resolve_definitions_from_overrides([(key, global, None)], &[], overrides, actor, m.role)
+            .is_empty()
+    }))
 }
 
 /// Resolve enabled-flag keys for a user in the personal (non-org) context.
@@ -3454,6 +3556,8 @@ mod tests {
             shipped,
             vec![
                 "auth:oauth-refresh-client-auth-v1",
+                "channels:messenger",
+                "channels:instagram",
                 "auth:invitation-code",
                 "auth:oauth-exact-redirects-v1",
                 "auth:app-token-management-v1",
@@ -3488,6 +3592,7 @@ mod tests {
                 "assistant:agent-learning",
                 "assistant:notifications",
                 "assistant:org-agents",
+                "assistant:org-agent-access-lists-v1",
                 "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",
                 "assistant:voice",

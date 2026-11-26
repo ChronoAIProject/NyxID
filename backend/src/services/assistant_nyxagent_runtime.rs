@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 #[path = "assistant_nyxagent_subscriber.rs"]
 mod subscriber;
-pub(crate) use subscriber::cancel_background;
+pub(crate) use subscriber::{cancel_background, record as window_record};
 
 /// HTTP composition supplies existing reporting and queue wake-up behavior.
 /// Called only with a confirmed durable reply, never a candidate stream result.
@@ -1329,8 +1329,7 @@ async fn drive_owner_turn(
         }
     }
     // Never echo the system-managed credential, even if an upstream reflects it.
-    result.text = result
-        .text
+    result.text = super::assistant_citation_markers::sanitize(&result.text)
         .replace(credential.raw_key.as_str(), "[redacted]");
     // A voice task's model-authored reply cannot reconstruct private URLs.
     // Sanitize before checkpoint/settlement as well as at visible publication.

@@ -159,14 +159,18 @@ async fn accept(
         event_id: event_id.into(),
         relay_message_id: None,
         custom_binding_id: None,
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(
-            state
-                .encryption_keys
-                .encrypt(
-                    &serde_json::to_vec(context)
-                        .map_err(|_| AppError::OAuthAuthorityUnavailable)?,
-                )
-                .await?,
+            event_record::seal(
+                &state.encryption_keys,
+                &event_key,
+                &row.user_id,
+                &[event_record::CONTEXT, &row.id],
+                &Zeroizing::new(
+                    serde_json::to_vec(context).map_err(|_| AppError::OAuthAuthorityUnavailable)?,
+                ),
+            )
+            .await?,
         ),
         status: if notification {
             "silent"
@@ -192,15 +196,12 @@ async fn accept(
         resolved_thread_id: None,
         resolved_conversation_id: None,
     };
-    let identity = format!(
-        "nyxbot_{}",
-        &sha256_hex(format!("{}:{binding}:{partition}", row.id))[..32]
-    );
+    let identity = recovery::conversation_identity(&row.id, binding, partition);
     let mut payload = recovery::Payload::new(&response_id, &identity, metadata);
     if claim.is_none() {
         payload.finish(None, false);
     }
-    let stored = StoredResponse {
+    let mut stored = StoredResponse {
         id: Uuid::new_v4().to_string(),
         response_id,
         user_id: row.user_id.clone(),
@@ -213,10 +214,12 @@ async fn accept(
         terminal: claim.is_none(),
         answer_delivery: None,
         revision: 0,
-        payload_ciphertext: payload.seal(&state.encryption_keys).await?,
+        payload_context_version: None,
+        payload_ciphertext: Vec::new(),
         created_at: now,
         expires_at: event.expires_at,
     };
+    recovery::storage::install(&state.encryption_keys, &mut stored, &payload).await?;
     let db = state.db.clone();
     let inserted = stored.clone();
     let event = event.clone();
@@ -811,7 +814,7 @@ pub(super) fn send_update<'a>(
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     Box::pin(async move {
         match send_update_impl(state, row, origin, conversation, text, None, None).await? {
-            "confirmed" => Ok(()),
+            Some("confirmed") => Ok(()),
             _ => Err(AppError::NotFound("Native reply source unavailable".into())),
         }
     })
@@ -823,8 +826,8 @@ pub(super) async fn send_supplemental(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
-    saved_turn: Option<&str>,
-) -> AppResult<&'static str> {
+    decision: &mut super::supplemental::Decision,
+) -> AppResult<Option<&'static str>> {
     Box::pin(send_update_impl(
         state,
         row,
@@ -832,7 +835,7 @@ pub(super) async fn send_supplemental(
         conversation,
         text,
         None,
-        saved_turn,
+        Some(decision),
     ))
     .await
 }
@@ -855,7 +858,8 @@ pub(super) async fn send_occurrence(
         Some(occurrence),
         None,
     )
-    .await
+    .await?
+    .ok_or_else(|| AppError::NotFound("Native reply source unavailable".into()))
 }
 
 async fn send_update_impl(
@@ -865,8 +869,8 @@ async fn send_update_impl(
     conversation: &str,
     text: &str,
     occurrence: Option<&str>,
-    saved_turn: Option<&str>,
-) -> AppResult<&'static str> {
+    decision: Option<&mut super::supplemental::Decision>,
+) -> AppResult<Option<&'static str>> {
     let unavailable = || AppError::NotFound("Native reply source unavailable".into());
     if !source::ready(row) {
         return Err(unavailable());
@@ -892,7 +896,7 @@ async fn send_update_impl(
         .and_then(crate::turn_trace::TurnContext::for_turn);
     let mut operation =
         crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Channel);
-    let result: AppResult<&'static str> = crate::turn_trace::scope(operation.context(), async {
+    let result: AppResult<Option<&'static str>> = crate::turn_trace::scope(operation.context(), async {
         if event
             .delivery
             .as_ref()
@@ -921,7 +925,7 @@ async fn send_update_impl(
             .event_context_ciphertext
             .as_ref()
             .ok_or_else(unavailable)?;
-        let context: Value = serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
+        let context: Value = serde_json::from_slice(&crate::services::nyxbot_event_record::event_context(&state.encryption_keys, &event, ciphertext).await?)
         .map_err(|_| unavailable())?;
         if !source::provider_context(row, &context) {
             return Err(unavailable());
@@ -950,10 +954,31 @@ async fn send_update_impl(
                 metadata: None,
             }]
         };
+        let saved_turn = decision
+            .as_ref()
+            .filter(|decision| decision.saved_result)
+            .and_then(|decision| decision.turn.clone());
+        if let Some(decision) = decision
+            && decision.needs_post_turn_claim()
+        {
+            if !decision.claim_result(state, &history.user_id, conversation, origin).await? {
+                return Ok(None);
+            }
+            decision.dispatch(super::supplemental::Egress::GatewayEvent);
+        }
         use crate::services::{channel_text_preparation as preparation,channel_text_delivery as journal};
-        let saved_plan = if let Some(turn) = saved_turn {
+        let saved_plan = if let Some(turn) = saved_turn.as_deref() {
             let key = crate::services::channel_supplemental_delivery::saved_key(turn,origin);
-            Some(journal::begin(&state.db,&key,&row.user_id,&event.id,&crate::services::channel_reply_plan::fingerprint(&reply_parts),reply_parts.len()).await?)
+            let bot = crate::services::channel_bot_service::get_bot_for_user(
+                &state.db,
+                &row.channel_bot_id,
+                row.bot_owner_id.as_deref().unwrap_or(&row.user_id),
+            ).await?;
+            Some(journal::begin_parented(
+                &state.db, &key, &row.user_id, &event.id,
+                &crate::services::channel_reply_plan::fingerprint(&reply_parts),
+                reply_parts.len(), &bot,
+            ).await?)
         } else {None};
         let mut outcome = "reply_confirmed";
         for (index, part) in reply_parts.into_iter().enumerate() {
@@ -1021,19 +1046,20 @@ async fn send_update_impl(
             doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
             doc! {"$set":{"gateway_native_delivery":outcome}},
         ).await?;
-        Ok(match outcome {
+        Ok(Some(match outcome {
             "reply_confirmed" => "confirmed",
             "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
                 "rejected"
             }
             _ => "unknown",
-        })
+        }))
     })
     .await;
     operation.finish(
         match &result {
-            Ok("confirmed") => crate::turn_trace::Outcome::Confirmed,
-            Ok("rejected") => crate::turn_trace::Outcome::Rejected,
+            Ok(Some("confirmed")) => crate::turn_trace::Outcome::Confirmed,
+            Ok(Some("rejected")) => crate::turn_trace::Outcome::Rejected,
+            Ok(None) => crate::turn_trace::Outcome::Silent,
             _ => crate::turn_trace::Outcome::Unknown,
         },
         None,
