@@ -1211,6 +1211,8 @@ export function ChannelBotDetailPage() {
 
       {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
 
+      {(bot.platform === "telegram" || bot.platform === "telegram-new") && <ChannelBotHealthCard botId={bot.id} />}
+
       {/* Bot Information */}
       <DetailSection
         title={translateUi("Bot Information")}
