@@ -559,7 +559,10 @@ mod tests {
             ],
             "legacy_unrestricted": false
         });
-        assert_eq!(format_consent_service_access(&consent), "2 services: #1, #2");
+        assert_eq!(
+            format_consent_service_access(&consent),
+            "2 services: #1, #2"
+        );
     }
 
     #[test]
