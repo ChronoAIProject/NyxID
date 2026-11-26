@@ -8990,6 +8990,8 @@ GET and successful PUT return the same object. For example, a config that inheri
   "revision": 0,
   "approver_user_ids": null,
   "authoring_available": true,
+  "authoring_unavailable_reason": null,
+  "unavailable": [],
   "eligible_candidates": [
     {"user_id": "bc398c50-3b4e-4b5e-b141-973ef5bda829", "display_name": "Alex"}
   ]
@@ -8997,6 +8999,10 @@ GET and successful PUT return the same object. For example, a config that inheri
 ```
 
 Candidates are live Admins entitled to the config. For a shared catalog config this includes Admins scoped to any active sibling. Each decision still requires entitlement to the requested connection. A candidate's display name can be null. The saved list can contain a person who has since lost eligibility. A stored empty list means pruning removed every named approver and required review fails closed.
+
+The additive `unavailable` array describes up to 128 saved IDs absent from `eligible_candidates`. Each entry contains `user_id`, nullable `display_name` and `reason`. Only a current or revoked membership in this organization permits a display-name lookup. A revoked or absent membership yields `not_member`. A membership with no matching person yields `unknown`. Among current members, an inactive or deleting account yields `inactive`, a Member or Viewer yields `not_admin`, and an otherwise eligible Admin outside the service scope yields `out_of_scope`.
+
+For an authorized reader, `authoring_unavailable_reason` is `flag_off` when the effective flag is off, `readiness_missing` when activation or live server support is missing, and `null` when editing is available. A caller without management permission receives HTTP 403 and no policy or person data.
 
 PUT requires all three fields below. Send `null` to restore inheritance, or 1–128 distinct, currently eligible person UUIDs to select approvers. The calling Admin may select themselves.
 
