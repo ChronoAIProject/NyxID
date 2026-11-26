@@ -656,70 +656,79 @@ fn slack_bare_urls_preserve_backslash_runs_and_hard_breaks() {
 
 #[test]
 fn slack_rich_text_splits_without_losing_styles_or_reducing_text_only_capacity() {
-    let source = format!("**{}\\*{}**", "a".repeat(8_000), "b".repeat(4_500));
+    let source = format!("**\\*{}{}**", "a".repeat(39_999), "b".repeat(501));
     let parts = assistant_parts(&source, "slack", "");
-    assert_eq!(parts.len(), 3);
+    assert_eq!(parts.len(), 2);
+    let expected_first = format!("*{}", "a".repeat(39_999));
+    assert_eq!(parts[0].text.as_deref(), Some(expected_first.as_str()));
+    let blocks = &parts[0].metadata.as_ref().unwrap()["blocks"];
     assert_eq!(
-        parts[0].text.as_deref(),
-        Some(format!("*{}*", "a".repeat(8_000)).as_str())
+        blocks,
+        &serde_json::json!([{"type":"rich_text","elements":[{
+            "type":"rich_text_section","elements":[{"type":"text","text":expected_first,"style":{"bold":true}}]
+        }]}])
     );
     assert_eq!(
         parts[1].text.as_deref(),
-        Some(format!("*{}", "b".repeat(3_999)).as_str())
-    );
-    let blocks = &parts[1].metadata.as_ref().unwrap()["blocks"];
-    assert_eq!(
-        blocks[0]["elements"][0]["elements"][0]["style"],
-        serde_json::json!({"bold":true})
-    );
-    assert_eq!(
-        parts[2].text.as_deref(),
         Some(format!("*{}*", "b".repeat(501)).as_str())
     );
+    assert!(parts[1].metadata.as_ref().unwrap().get("blocks").is_none());
 
     let dense = r"a \* **b** ".repeat(300);
     let parts = assistant_parts(&dense, "slack", "");
-    assert_eq!(parts.len(), 2);
-    let display: String = parts
-        .iter()
-        .map(|part| part.text.as_deref().unwrap())
-        .collect();
-    assert_eq!(display, "a * b ".repeat(300).trim_end());
-    for part in parts {
-        let sections = &part.metadata.unwrap()["blocks"][0]["elements"];
-        let count: usize = sections
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|section| section["elements"].as_array().unwrap().len())
-            .sum();
-        assert!(count <= 500);
-    }
+    assert_eq!(parts.len(), 1);
+    assert_eq!(
+        parts[0].text.as_deref(),
+        Some("a * b ".repeat(300).trim_end())
+    );
+    let metadata = parts[0].metadata.as_ref().unwrap();
+    let elements = metadata["blocks"][0]["elements"][0]["elements"]
+        .as_array()
+        .unwrap();
+    assert_eq!(elements.len(), 600);
 }
 
 #[test]
 fn slack_rich_text_keeps_keycaps_whole_and_uses_the_existing_overflow_notice() {
-    let source = format!("\\*️⃣x\\*️⃣ {}", "界".repeat(4_000));
-    let parts = assistant_parts(&source, "slack", "");
+    let url = "https://nyxid.test/thread";
+    let source = format!("\\*️⃣x\\*️⃣ {}", "界".repeat(40_000));
+    let parts = assistant_parts(&source, "slack", url);
     assert_eq!(parts.len(), 2);
     let wire: String = parts.into_iter().filter_map(|part| part.text).collect();
-    assert_eq!(wire, format!("*️⃣x*️⃣ {}", "界".repeat(4_000)));
+    assert_eq!(wire, format!("*️⃣x*️⃣ {}", "界".repeat(40_000)));
 
-    let source = r"\* ".repeat(90_000);
-    let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
-    assert!(parts.len() > 1);
-    assert!(parts.len() <= 64);
-    assert_eq!(
-        parts.last().unwrap().metadata.as_ref().unwrap()["text_overflow"],
-        serde_json::Value::Null
-    );
-    let source = "a".repeat(40_000 * 65);
-    let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
-    assert_eq!(parts.len(), 64);
-    assert_eq!(
-        parts.last().unwrap().metadata.as_ref().unwrap()["text_overflow"],
-        true
-    );
+    let snake_case = r"Set the my\_config\_value flag before deploying the service now. ";
+    for (scalars, expected) in [(40_000, 1), (160_000, 4), (280_000, 7)] {
+        let source = snake_case.repeat(scalars / snake_case.len() + 1);
+        let legacy = recorded_assistant_parts(&source, "slack", url, None).unwrap();
+        let rich = assistant_parts(&source, "slack", url);
+        assert_eq!(rich.len(), expected, "{scalars} input scalars");
+        assert_eq!(rich.len(), legacy.len());
+        for (old, new) in legacy.iter().zip(&rich) {
+            assert_eq!(new.text, old.text);
+            assert!(new.metadata.as_ref().unwrap()["blocks"].is_array());
+        }
+    }
+
+    let limit = TextLimit::for_platform("slack").budget();
+    for total in [64 * limit, 64 * limit + 1] {
+        let source = format!(r"\*{}", "a".repeat(total - 1));
+        let legacy = recorded_assistant_parts(&source, "slack", url, None).unwrap();
+        let rich = assistant_parts(&source, "slack", url);
+        assert_eq!(rich.len(), 64);
+        assert_eq!(rich.len(), legacy.len());
+        assert_eq!(
+            rich.last().unwrap().metadata.as_ref().unwrap()["text_overflow"],
+            if total > 64 * limit {
+                serde_json::json!(true)
+            } else {
+                serde_json::Value::Null
+            }
+        );
+        for (old, new) in legacy.iter().zip(&rich) {
+            assert_eq!(new.text, old.text);
+        }
+    }
 }
 
 #[test]

@@ -3,27 +3,8 @@ use super::{slack, supported_link_target};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const MAX_DISPLAY_SCALARS: usize = 4_000;
-const MAX_INLINE_ELEMENTS: usize = 500;
-
-pub(super) fn first_trigger(text: &str, entities: &[Value]) -> Option<usize> {
-    let escaped = entities
-        .iter()
-        .filter(|e| e["type"] == "slack_literal")
-        .filter_map(|e| e["offset"].as_u64())
-        .min()
-        .map(|at| slack::scalar_offset(text, at as usize));
-    let backtick = text.find('`').map(|at| text[..at].chars().count());
-    escaped.into_iter().chain(backtick).min()
-}
-
-pub(super) fn display_budget(text: &str, trigger: usize) -> Option<usize> {
-    if text.chars().count() <= MAX_DISPLAY_SCALARS {
-        None
-    } else {
-        // Keep a long literal-free prefix eligible for the ordinary text budget.
-        Some(trigger.max(MAX_DISPLAY_SCALARS))
-    }
+pub(super) fn needs_block(text: &str, entities: &[Value]) -> bool {
+    text.contains('`') || entities.iter().any(|e| e["type"] == "slack_literal")
 }
 
 pub(super) fn supported_target(target: &str) -> bool {
@@ -32,10 +13,19 @@ pub(super) fn supported_target(target: &str) -> bool {
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "mailto"))
 }
 
+pub(super) fn fallback_scalars(text: &str) -> usize {
+    text.chars()
+        .map(|ch| match ch {
+            '&' => 5,
+            '<' | '>' => 4,
+            _ => 1,
+        })
+        .sum()
+}
+
 pub(super) struct Rendered {
     pub blocks: Value,
     pub fallback: String,
-    pub split_at: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,16 +187,7 @@ pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
         if (byte == text.len() || prior != Some(current) || visible_suffix)
             && let Some(prior) = prior
         {
-            if !render.push(prior, &text[range_start..byte]) {
-                let before = text[..range_start].chars().count();
-                return split(if render.count == MAX_INLINE_ELEMENTS {
-                    before
-                } else {
-                    before
-                        + (MAX_DISPLAY_SCALARS
-                            - (render.display - text[range_start..byte].chars().count()))
-                });
-            }
+            render.push(prior, &text[range_start..byte]);
             range_start = byte;
         }
         if let Some(suffix) = suffix {
@@ -220,9 +201,7 @@ pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
                         target: None,
                         ..prior
                     };
-                    if !render.push(run, &extra) {
-                        return split(text[..byte].chars().count().saturating_sub(1));
-                    }
+                    render.push(run, &extra);
                 }
             }
         }
@@ -235,40 +214,24 @@ pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
     render.finish()
 }
 
-fn split(scalars: usize) -> Rendered {
-    Rendered {
-        blocks: Value::Null,
-        fallback: String::new(),
-        split_at: Some(scalars),
-    }
-}
-
 #[derive(Default)]
 struct BlockBuilder {
     sections: Vec<Value>,
     inline: Vec<Value>,
     preformatted: bool,
-    count: usize,
-    display: usize,
     fallback: String,
 }
 
 impl BlockBuilder {
-    fn push(&mut self, run: Run<'_>, text: &str) -> bool {
+    fn push(&mut self, run: Run<'_>, text: &str) {
         if text.is_empty() {
-            return true;
-        }
-        self.display += text.chars().count();
-        if self.count == MAX_INLINE_ELEMENTS || self.display > MAX_DISPLAY_SCALARS {
-            return false;
+            return;
         }
         if run.preformatted != self.preformatted {
             self.close_section();
             self.preformatted = run.preformatted;
         }
         self.inline.push(run.element(text));
-        self.count += 1;
-        true
     }
 
     fn close_section(&mut self) {
@@ -288,7 +251,6 @@ impl BlockBuilder {
         Rendered {
             blocks: json!([{"type":"rich_text","elements":self.sections}]),
             fallback: self.fallback,
-            split_at: None,
         }
     }
 }

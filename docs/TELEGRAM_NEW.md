@@ -343,8 +343,8 @@ adds a refusal; URLs exceeding one message retain the existing split behavior.
 New Slack assistant text plans use renderer v3. A plan uses rich text when
 CommonMark-escaped `*`, `_` or `~` survives as display text outside code and
 link labels. In such a plan, each part containing an escaped delimiter or
-a literal backtick sends one `rich_text` block with at most 4,000 display
-scalars and 500 inline elements. Other parts use ordinary Slack text
+a literal backtick sends one `rich_text` block within the ordinary
+40,000-scalar fallback text budget. Other parts use ordinary Slack text
 formatting. The block retains authored styles, preformatted code and
 supported HTTP, HTTPS and mailto links. Link labels retain their text and
 style. Inline code inside a label is a text run and surrounding label

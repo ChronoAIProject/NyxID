@@ -358,16 +358,8 @@ fn assistant_parts_impl(
             let mut rendered = if modern {
                 format::render(chunk, &local, platform)
             } else if slack_format {
-                if let Some(trigger) = slack_rich::first_trigger(chunk, &local) {
-                    if let Some(next) = slack_rich::display_budget(chunk, trigger) {
-                        budget = next;
-                        continue;
-                    }
+                if slack_rich::needs_block(chunk, &local) {
                     let rendered = slack_rich::render(chunk, &local);
-                    if let Some(next) = rendered.split_at {
-                        budget = next;
-                        continue;
-                    }
                     blocks = Some(rendered.blocks);
                     rendered.fallback
                 } else {
@@ -485,18 +477,14 @@ fn expand_long_links(
                         .as_str()
                         .is_some_and(|url| !supported_link_target(url))
                     || e["url"].as_str().is_some_and(|url| {
-                        if preserve_urls
-                            && !slack_rich::supported_target(url)
-                            && limit.measure(url) > slack_rich::MAX_DISPLAY_SCALARS / 2
-                        {
-                            return true;
-                        }
                         let target = if markdown {
                             markdown_link_url(url)
                         } else {
                             url.to_owned()
                         };
                         limit.measure(&target) > limit.budget() / 2
+                            || preserve_urls
+                                && slack_rich::fallback_scalars(url) > limit.budget() / 2
                     })
                     || entities.iter().enumerate().any(|(other_index, other)| {
                         other_index != *index
