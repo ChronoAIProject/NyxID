@@ -110,6 +110,11 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
         {
             end = close;
         }
+        // Linkify can stop between a CommonMark escape slash and trailing
+        // punctuation. Leave the whole escape outside the autolink.
+        if end > start && escape_slashes.binary_search(&(end - 1)).is_ok() {
+            end -= 1;
+        }
         let first_opaque = opaque.partition_point(|range| range.end <= start);
         if opaque
             .get(first_opaque)
