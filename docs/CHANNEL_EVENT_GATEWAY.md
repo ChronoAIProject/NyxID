@@ -1277,21 +1277,14 @@ The agent-key presence check and every live delivery-authority check remain.
 Checking, capacity and machine-control progress keep their existing reference
 window (29 minutes); permission occurrences keep their existing event/target gates.
 
-Only these widened result paths atomically claim the settled assistant message
-for their stable destination before text dispatch (#2462). Primary and additional
-results to the same destination share the claim. A repeated attempt skips with
-`already_claimed`; database errors authorize no send. Confirmed, rejected,
-unknown and interrupted attempts keep the claim, with no retry or preparation
-lease. A crash after claiming but before sending can lose text. Claims contain
-only destination digests, never appear in APIs/logs/audit, and leave with the
-message on purge. Missing settled replies authorize no send. New replicas share
-the serde-defaulted list; old replicas ignore it and retain their 29-minute
-behavior until drained, including on rollback. This cannot retroactively fence
-pre-upgrade sends or old writers; there is no readiness gate. Missing or expired
-sources do not redirect replies. A missing permission source finishes refused;
-other supplemental text is skipped while the transcript remains available.
-Direct and relay-era replies, images and multipart receipts retain their prior
-paths. Primary final and durable late replies retain their original barriers.
+The post-turn text claim applies to relay-source and native gateway team and
+additional-chat results, including followed threads. The hook reads the exact
+settled reply and its saved additional destinations. The rules for a missing
+reply, destination privacy, direct relay claims and rolling upgrades are in the [NyxBot
+delivery contract](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
+Missing or expired sources skip delivery to that destination. A missing
+permission source finishes refused. Image claims, multipart receipts, primary
+final replies and durable late replies use their existing delivery paths.
 
 Native-source progress is suppressed. Genuine independent native team results,
 followed results and permission occurrences retain their existing event replies

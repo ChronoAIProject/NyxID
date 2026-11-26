@@ -1,6 +1,6 @@
 use super::*;
 use crate::models::assistant_message::COLLECTION_NAME as MESSAGES;
-use crate::services::channel_supplemental_delivery::SavedDestination;
+use crate::services::channel_supplemental_delivery::{self as sources, SavedDestination};
 
 #[derive(serde::Deserialize)]
 struct SavedReply {
@@ -111,12 +111,38 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
-pub(crate) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<()> {
+pub(crate) async fn after_turn(
+    state: &AppState,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    reply_id: &str,
+) -> AppResult<()> {
+    if !deliver(state, reply_id).await? {
+        for target in
+            sources::finished_handoff_targets(&state.db, owner, conversation, turn, reply_id)
+                .await?
+        {
+            if target.source.turn_id != turn {
+                continue;
+            }
+            let mut decision = supplemental::Decision::new(target.purpose());
+            decision.event = target.source.event_id;
+            decision.skip(supplemental::Reason::AlreadyClaimed);
+            decision
+                .record_ids(state, owner, conversation, Some(turn))
+                .await;
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<bool> {
     let lease = Uuid::new_v4().to_string();
     let Some(reply) = state.db.collection::<SavedReply>(MESSAGES).find_one_and_update(
         doc! {"_id":reply_id,"role":"assistant","handoff_delivery_due_at":{"$type":"date","$lte":bson::DateTime::now()}},
         doc! {"$set":{"handoff_delivery_lease":&lease,"handoff_delivery_due_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::minutes(2))}}
-    ).await? else { return Ok(()) };
+    ).await? else { return Ok(false) };
     let messages = state.db.collection::<bson::Document>(MESSAGES);
     let mut retry = false;
     let current = engine::get(&state.db, &reply.user_id, &reply.conversation_id).await;
@@ -152,11 +178,7 @@ pub(crate) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<()> {
                 if target.source.turn_id != reply.turn_id {
                     continue;
                 }
-                let purpose = if target.additional {
-                    supplemental::Purpose::TeamAdditionalResult
-                } else {
-                    supplemental::Purpose::TeamResult
-                };
+                let purpose = target.purpose();
                 let text = if failed {
                     "I couldn't finish answering that question. Please ask again."
                 } else {
@@ -196,7 +218,7 @@ pub(crate) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<()> {
         }
     }
     if retry {
-        return Ok(());
+        return Ok(true);
     }
     messages
         .update_one(
@@ -204,5 +226,5 @@ pub(crate) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<()> {
             doc! {"$unset":{"handoff_delivery_due_at":"","handoff_delivery_lease":""}},
         )
         .await?;
-    Ok(())
+    Ok(true)
 }

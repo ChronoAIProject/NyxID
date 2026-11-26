@@ -970,8 +970,8 @@ pub struct AssistantConversation {
     /// The consent that selected the current asynchronous reply destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_channel_meta_grant: Option<super::channel_meta::GrantRef>,
-    /// Chats still owed the newest turn's answer (they asked the same
-    /// question while it ran); taken once by the settlement hook.
+    /// Legacy slot for older delivery hooks. Current settlements preserve it
+    /// and publish their own destinations on the exact reply.
     #[serde(default)]
     pub deliver_also: Vec<ChannelOrigin>,
     /// Set on a member's hidden thread in a group chat: the agent speaks in

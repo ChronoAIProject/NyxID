@@ -898,6 +898,16 @@ async fn send_impl(
     }
     if let Some(decision) = decision.as_mut() {
         decision.anchor = super::supplemental::Anchor::ThreadBinding;
+        if decision.needs_post_turn_claim() {
+            bound_image_audience(state, &channel, owner, origin, conversation).await?;
+            super::supplemental::prepare_result_text(&text, &channel.platform, "")?;
+            if !decision
+                .claim_result(state, owner, conversation, origin)
+                .await?
+            {
+                return Ok(());
+            }
+        }
         decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
     }
     let outcome = send_bound_reply(

@@ -750,23 +750,46 @@ pub const QUESTION_EXCERPT_CHARS: usize = 200;
 /// Chats that may wait for one running answer besides the one that asked.
 pub const MAX_ALSO_DELIVER: usize = 4;
 
-/// Take the chats still owed the newest turn's answer (once).
-pub async fn take_deliveries(
+#[derive(Deserialize)]
+pub(crate) struct PostTurnReply {
+    pub text: String,
+    pub status: String,
+    #[serde(default)]
+    pub post_turn_deliver_also: Vec<ChannelOrigin>,
+}
+
+/// Read the result and additional destinations committed by the winning settler.
+pub(crate) async fn post_turn_reply(
     db: &Database,
     user_id: &str,
-    id: &str,
-) -> AppResult<Vec<ChannelOrigin>> {
+    conversation_id: &str,
+    turn_id: &str,
+) -> AppResult<Option<PostTurnReply>> {
     Ok(db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {"_id": id, "user_id": user_id,
-            "deliver_also.0": {"$exists": true}},
-            doc! {"$set": {"deliver_also": []}},
-        )
-        .return_document(mongodb::options::ReturnDocument::Before)
-        .await?
-        .map(|row| row.deliver_also)
-        .unwrap_or_default())
+        .collection::<PostTurnReply>(MESSAGES)
+        .find_one(super::channel_supplemental_delivery::settled_reply_filter(
+            user_id,
+            conversation_id,
+            turn_id,
+        ))
+        .projection(doc! {"text": 1, "status": 1, "post_turn_deliver_also": 1})
+        .await?)
+}
+
+fn post_turn_reply_document(
+    message: &AssistantMessage,
+    additional: &[ChannelOrigin],
+) -> AppResult<bson::Document> {
+    let mut saved = bson::to_document(message)
+        .map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
+    if !additional.is_empty() {
+        saved.insert(
+            "post_turn_deliver_also",
+            bson::to_bson(&additional)
+                .map_err(|_| AppError::Internal("Failed to encode channel destinations".into()))?,
+        );
+    }
+    Ok(saved)
 }
 
 /// The owner's chat that asynchronous replies of their own thread go to.
@@ -5598,12 +5621,6 @@ artifact_recovery_target: None,
                     let source = super::channel_supplemental_delivery::managed_source(turn)?;
                     Some(super::channel_supplemental_delivery::saved_destinations(&current, turn, source, error.is_some()))
                 });
-                current.deliver_also = current
-                    .active_turn
-                    .as_ref()
-                    .filter(|_| saved_destinations.is_none())
-                    .map(|turn| turn.also_deliver.clone())
-                    .unwrap_or_default();
                 super::generated_artifacts::associate_in_session(&db, &mut current, &message_id, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
@@ -5787,10 +5804,18 @@ artifact_recovery_target: None,
                     ))
                     .await?;
                 }
-                if attempt.is_some() || !meta_grants.is_empty() {
-                    let mut saved = bson::to_document(&message).map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
-                    if !meta_grants.is_empty() {saved.insert("meta_grants",bson::to_bson(&meta_grants).map_err(|_|AppError::Internal("Message metadata unavailable".into()))?);}
-                    if let Some(attempt)=attempt {
+                let additional = settled_turn.as_ref()
+                    .filter(|_| saved_destinations.is_none())
+                    .map_or(&[][..], |turn| turn.also_deliver.as_slice());
+                if attempt.is_some() || !additional.is_empty() || !meta_grants.is_empty() {
+                    let mut saved = post_turn_reply_document(&message, additional)?;
+                    if !meta_grants.is_empty() {
+                        saved.insert(
+                            "meta_grants",
+                            bson::to_bson(&meta_grants).map_err(|_| AppError::Internal("Message metadata unavailable".into()))?,
+                        );
+                    }
+                    if let Some(attempt) = attempt {
                         saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
                         if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
                             saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});

@@ -518,17 +518,8 @@ pub(crate) async fn after_turn(
             wake(state, owner, &other.id).await;
         }
     }
-    // Chats that asked the same question while it was being answered get the
-    // answer too (taken once, whatever the outcome).
     let managed_delivery =
         crate::services::channel_supplemental_delivery::managed_source(turn).is_some();
-    let also = if !managed_delivery {
-        engine::take_deliveries(&state.db, owner, &row.id)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
     if turn
         .execution_task
         .as_ref()
@@ -545,29 +536,65 @@ pub(crate) async fn after_turn(
     }
     if managed_delivery {
         if let Some(admission) = &turn.restart_admission
-            && super::nyxbot::handoff_delivery::deliver(state, &admission.reply_id)
-                .await
-                .is_err()
+            && Box::pin(super::nyxbot::handoff_delivery::after_turn(
+                state,
+                owner,
+                &row.id,
+                &turn.turn_id,
+                &admission.reply_id,
+            ))
+            .await
+            .is_err()
         {
             tracing::warn!(turn_id = %turn.turn_id, "Saved channel reply delivery deferred");
         }
         let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
     }
-    if error.is_some() {
+    Box::pin(deliver_settled_channel_result(state, row, turn)).await;
+    let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+}
+
+async fn deliver_settled_channel_result(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) {
+    use super::nyxbot::supplemental::{Decision, Purpose, Reason};
+    let owner = row.user_id.as_str();
+    let primary = engine::answer_routing(row, turn).primary;
+    let reply = engine::post_turn_reply(&state.db, owner, &row.id, &turn.turn_id).await;
+    let Ok(Some(reply)) = reply else {
+        if let engine::PrimaryDestination::ChatUpdate { origins } = primary {
+            for origin in origins {
+                let mut decision = Decision::new(Purpose::TeamResult);
+                decision.event =
+                    crate::services::channel_supplemental_delivery::ResultSource::capture(
+                        turn, &origin,
+                    )
+                    .event_id
+                    .or(origin.native_event_id);
+                decision.skip(Reason::SourceUnavailable);
+                decision
+                    .record_ids(state, owner, &row.id, Some(&turn.turn_id))
+                    .await;
+            }
+        }
+        return;
+    };
+    if reply.status != "completed" {
         // They were told an answer would come: say it did not.
-        for origin in &also {
+        for origin in &reply.post_turn_deliver_also {
             super::nyxbot::deliver_to_for(
                 state,
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
                 None,
-                super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
+                Purpose::TeamAdditionalResult,
             )
             .await;
         }
-        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
     }
     let plan =
@@ -580,33 +607,22 @@ pub(crate) async fn after_turn(
     // Keep the answer destination in lockstep with the model note and image
     // delivery. Channel turns answer their admitted event; event turns wake
     // their bound chats (or the configured home chat).
-    match engine::answer_routing(row, turn).primary {
-        engine::PrimaryDestination::ChatUpdate { origins } => {
-            if origins.len() == 1 && origins[0].thread.is_none() {
-                super::nyxbot::deliver_update(state, row, text, Some(&plan)).await;
-            } else {
-                for origin in origins {
-                    super::nyxbot::deliver_to(state, row, &origin, text, Some(&plan)).await;
-                }
-            }
+    if let engine::PrimaryDestination::ChatUpdate { origins } = primary {
+        for origin in origins {
+            super::nyxbot::deliver_to(state, row, &origin, &reply.text, Some(&plan)).await;
         }
-        engine::PrimaryDestination::ChannelEvent { .. }
-        | engine::PrimaryDestination::App
-        | engine::PrimaryDestination::Group { .. }
-        | engine::PrimaryDestination::Trigger { .. } => {}
     }
-    for origin in &also {
+    for origin in &reply.post_turn_deliver_also {
         super::nyxbot::deliver_to_for(
             state,
             row,
             origin,
-            text,
+            &reply.text,
             Some(&plan),
-            super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
+            Purpose::TeamAdditionalResult,
         )
         .await;
     }
-    let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }
 
 async fn wake_settled_report(
