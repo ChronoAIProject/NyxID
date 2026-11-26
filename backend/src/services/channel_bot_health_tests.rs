@@ -2,6 +2,14 @@ use super::*;
 use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole};
 use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 
+async fn record_connection(
+    db: &mongodb::Database,
+    row: &crate::models::nyxbot_channel::NyxbotChannel,
+    body: &serde_json::Value,
+) -> crate::errors::AppResult<()> {
+    crate::services::nyxbot_gateway_source::record_discord_connection(db, row, body).await
+}
+
 fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
     HealthFacts {
         answer_delivery: None,
@@ -776,4 +784,280 @@ fn gateway_answer_failure_recommendations_do_not_render_as_healthy() {
     facts.thread_reason = None;
     facts.outbound_reason = Some("gateway_reply_unconfirmed");
     assert_ne!(recommend(&facts).action, "none");
+}
+
+#[tokio::test]
+async fn discord_2945_connection_observations_are_monotonic_and_notify_each_transition() {
+    use crate::models::nyxbot_channel::{COLLECTION_NAME as CHANNELS, NyxbotChannel};
+    use serde_json::json;
+    for organization in [false, true] {
+        let db = crate::test_utils::connect_test_database("discord_2945_notices")
+            .await
+            .unwrap();
+        let mut bot = discord_bot();
+        bot.id = uuid::Uuid::new_v4().to_string();
+        bot.user_id = uuid::Uuid::new_v4().to_string();
+        let owner = if organization {
+            db.collection(USERS)
+                .insert_one(crate::test_utils::test_user(&bot.user_id, UserType::Org))
+                .await
+                .unwrap();
+            let admins: Vec<String> = (0..2).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+            let viewer = uuid::Uuid::new_v4().to_string();
+            for (member, role) in [
+                (&admins[0], OrgRole::Admin),
+                (&admins[1], OrgRole::Admin),
+                (&viewer, OrgRole::Viewer),
+            ] {
+                db.collection(USERS)
+                    .insert_one(crate::test_utils::test_user(member, UserType::Person))
+                    .await
+                    .unwrap();
+                db.collection(MEMBERSHIPS)
+                    .insert_one(crate::test_utils::test_membership(
+                        &bot.user_id,
+                        member,
+                        role,
+                        None,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            admins
+        } else {
+            vec![bot.user_id.clone()]
+        };
+        db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(&bot)
+            .await
+            .unwrap();
+        let row: NyxbotChannel = bson::from_document(doc! {
+            "_id":"channel", "user_id": &owner[0], "channel_bot_id": &bot.id,
+            "bot_owner_id": organization.then_some(&bot.user_id),
+            "platform":"discord", "bot_label":"Bot", "transport":"gateway", "status":"active",
+            "route_api_key_id":"route", "binding_id":"binding", "gateway_channel_id":"remote",
+            "gateway_native_phase":"ready", "gateway_source":{"type":"discord", "bot_id":"100"},
+            "delivery_status":"failing", "delivery_error":"not_received",
+            "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+        })
+        .unwrap();
+        let channels = db.collection::<NyxbotChannel>(CHANNELS);
+        channels.insert_one(&row).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        TEST_NOTICES.lock().unwrap().insert(bot.id.clone(), tx);
+        let base = Utc::now() - chrono::Duration::minutes(1);
+        let report = |seconds: i64, ready: bool| {
+            json!({"native_discord_activation": {"state":"selected", "connection": {
+                "scope":"serving_instance", "stage":"ready", "outcome":"ok", "lease":"acquired", "identify":"resume_sent",
+                "connected":ready, "authenticated":ready, "ready":ready, "stale":false,
+                "observed_at":(base + chrono::Duration::seconds(seconds)).to_rfc3339(), "retry_at":null
+            }}})
+        };
+        let mut nonowner = report(20, false);
+        nonowner["native_discord_activation"]["connection"] = json!({"scope":"serving_instance", "stage":"resolve", "outcome":"retrying", "lease":"unknown", "identify":"not_attempted", "last_failure_code":"authority_refused", "observed_at":Utc::now().to_rfc3339(), "stale":false, "connected":null,"authenticated":null,"ready":null,"retry_at":Utc::now().to_rfc3339()});
+        let mut released = report(21, false);
+        released["native_discord_activation"]["connection"]["lease"] = json!("released");
+        let mut lost = report(22, true);
+        lost["native_discord_activation"]["connection"]["lease"] = json!("lost");
+        lost["native_discord_activation"]["connection"]["last_ready_at"] = json!(base.to_rfc3339());
+        let mut wrong_remote = report(23, false);
+        wrong_remote["channel_id"] = json!("other-remote");
+        let mut malformed = report(21, false);
+        malformed["native_discord_activation"]["connection"]["ready"] = json!("false");
+        let intake = || async {
+            discord::load(&db, std::slice::from_ref(&bot))
+                .await
+                .unwrap()
+                .remove(&bot.id)
+                .unwrap()
+        };
+        let ready = report(0, true);
+        record_connection(&db, &row, &ready).await.unwrap();
+        assert_eq!(intake().await.code, Some(discord::NATIVE_UNCONFIRMED));
+        let mut future_retry = report(1, false);
+        future_retry["native_discord_activation"]["connection"]["retry_at"] =
+            json!((Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
+        record_connection(&db, &row, &future_retry).await.unwrap();
+        assert_eq!(
+            intake().await.code,
+            Some(discord::NATIVE_UNCONFIRMED),
+            "future retry stays inconclusive"
+        );
+        let prior = bson::DateTime::from_chrono(base - chrono::Duration::days(3));
+        channels.update_one(doc!{"_id":&row.id}, doc!{"$set":{"gateway_intake":{"binding_id":"binding","handed_over_at":prior,"last_inbound_at":prior}}}).await.unwrap();
+        assert_eq!(intake().await.state, "event_observed");
+        for unknown in [
+            &nonowner,
+            &released,
+            &lost,
+            &malformed,
+            &wrong_remote,
+            &json!({"native_discord_activation":{"state":"selected"}}),
+        ] {
+            record_connection(&db, &row, unknown).await.unwrap();
+            assert_eq!(intake().await.code, None);
+        }
+        let mut stale = ready.clone();
+        let connection = &mut stale["native_discord_activation"]["connection"];
+        connection["stale"] = json!(true);
+        connection["outcome"] = json!("unknown");
+        connection["valid_until"] = json!((base - chrono::Duration::hours(1)).to_rfc3339());
+        for field in ["connected", "authenticated", "ready"] {
+            connection[field] = serde_json::Value::Null;
+        }
+        // A stale projection has the original timestamp. Concurrent repeats
+        // make one transition, and an equally old ready report cannot clear it.
+        let mut retrying = report(2, false);
+        retrying["native_discord_activation"]["connection"]["retry_at"] =
+            json!((base + chrono::Duration::seconds(1)).to_rfc3339());
+        for down in [stale, retrying] {
+            let (first, second) = tokio::join!(
+                record_connection(&db, &row, &down),
+                record_connection(&db, &row, &down)
+            );
+            first.unwrap();
+            second.unwrap();
+            assert_eq!(intake().await.code, Some(discord::NATIVE_CONNECTION_DOWN));
+            record_connection(&db, &row, &ready).await.unwrap();
+            for unknown in [&nonowner, &released, &lost, &malformed, &wrong_remote] {
+                record_connection(&db, &row, unknown).await.unwrap();
+            }
+            assert_eq!(intake().await.code, Some(discord::NATIVE_CONNECTION_DOWN));
+            let mut recipients = Vec::new();
+            for _ in &owner {
+                let (recipient, notice) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(notice.recommended_action, "contact_admin");
+                recipients.push(recipient);
+            }
+            recipients.sort();
+            let mut expected = owner.clone();
+            expected.sort();
+            assert_eq!(recipients, expected);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                    .await
+                    .is_err()
+            );
+            let seconds = if down["native_discord_activation"]["connection"]["stale"] == true {
+                1
+            } else {
+                // A later stranded report continues the same outage despite
+                // the retry disappearing; the owner gets no duplicate notice.
+                record_connection(&db, &row, &report(3, false))
+                    .await
+                    .unwrap();
+                assert_eq!(intake().await.code, Some(discord::NATIVE_CONNECTION_DOWN));
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                        .await
+                        .is_err()
+                );
+                4
+            };
+            record_connection(&db, &row, &report(seconds, true))
+                .await
+                .unwrap();
+            assert_eq!(
+                intake().await.state,
+                "event_observed",
+                "quiet recovery uses the prior event"
+            );
+            assert_eq!(intake().await.code, None);
+            record_connection(&db, &row, &down).await.unwrap();
+            assert_eq!(
+                intake().await.code,
+                None,
+                "delayed down cannot undo recovery"
+            );
+        }
+        let saved = channels
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.delivery_error.as_deref(), Some("not_received"));
+        channels
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"binding_id":"replacement","gateway_channel_id":"new-remote","gateway_discord_connection.down":true}},
+            )
+            .await
+            .unwrap();
+        record_connection(&db, &row, &report(5, false))
+            .await
+            .unwrap();
+        assert_eq!(intake().await.code, Some(discord::NATIVE_UNCONFIRMED));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
+        TEST_NOTICES.lock().unwrap().remove(&bot.id);
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn discord_2945_native_outage_is_isolated_from_meta_health() {
+    use crate::models::nyxbot_channel::{COLLECTION_NAME as CHANNELS, NyxbotChannel};
+    use serde_json::json;
+
+    let db = crate::test_utils::connect_test_database("discord_2945_meta_isolation")
+        .await
+        .unwrap();
+    let bot = discord_bot();
+    let row: NyxbotChannel = bson::from_document(doc! {
+        "_id":"discord-channel", "user_id": &bot.user_id, "channel_bot_id": &bot.id,
+        "platform":"discord", "bot_label":"Bot", "transport":"gateway", "status":"active",
+        "route_api_key_id":"route", "binding_id":"binding", "gateway_channel_id":"remote",
+        "gateway_native_phase":"ready", "gateway_source":{"type":"discord", "bot_id": &bot.platform_bot_id},
+        "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+    })
+    .unwrap();
+    db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(&bot)
+        .await
+        .unwrap();
+    db.collection::<NyxbotChannel>(CHANNELS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    record_connection(&db, &row, &json!({"native_discord_activation":{"state":"selected","connection":{
+        "scope":"serving_instance", "lease":"acquired", "connected":false, "authenticated":false,
+        "ready":false, "stale":false, "observed_at":Utc::now().to_rfc3339(), "retry_at":null
+    }}})).await.unwrap();
+
+    for (platform, action) in [("messenger", "verify"), ("instagram", "reconnect")] {
+        let mut meta = bot.clone();
+        meta.id = format!("{platform}-bot");
+        meta.platform = platform.into();
+        meta.diagnostics.failure_reason = Some("meta_inbox_control_lost".into());
+        assert!(
+            discord::load(&db, std::slice::from_ref(&meta))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let intake = discord::load(&db, &[bot.clone(), meta.clone()])
+            .await
+            .unwrap();
+        assert_eq!(intake.len(), 1);
+        assert_eq!(intake[&bot.id].code, Some(discord::NATIVE_CONNECTION_DOWN));
+        assert!(!intake.contains_key(&meta.id));
+        let health = setup_evidence(&db, &meta, false).await.unwrap();
+        assert!(health.get("discord_intake").is_none());
+        assert_eq!(health["failure_reason"], "meta_inbox_control_lost");
+        assert_eq!(health["recommended_action"], action);
+        assert!(
+            !health["recommended_action_text"]
+                .as_str()
+                .unwrap()
+                .contains("Discord")
+        );
+    }
+    db.drop().await.unwrap();
 }

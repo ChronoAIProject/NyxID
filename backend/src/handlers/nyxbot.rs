@@ -2649,8 +2649,16 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
         }
         if let Some(intake) = intake.get(&row.channel_bot_id) {
             value["discord_intake"] = json!(intake);
-            if let Some(advice) = crate::services::channel_bot_health::discord::advice(intake) {
-                value["delivery_status"] = json!(if intake.receiving_side == "native_gateway" {
+            let native_delivery_failure = intake.receiving_side == "native_gateway"
+                && row.delivery_error.as_deref().is_some_and(|code| {
+                    !crate::services::channel_bot_health::discord::is_intake_code(code)
+                });
+            if let Some(advice) = crate::services::channel_bot_health::discord::advice(intake)
+                && !native_delivery_failure
+            {
+                value["delivery_status"] = json!(if intake.code
+                    == Some(crate::services::channel_bot_health::discord::NATIVE_UNCONFIRMED)
+                {
                     "unconfirmed"
                 } else {
                     "failing"

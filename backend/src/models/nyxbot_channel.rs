@@ -68,6 +68,18 @@ pub struct GatewayIntake {
     pub last_inbound_at: Option<DateTime<Utc>>,
 }
 
+/// Last conclusive native Discord connection observation, scoped to the
+/// adopted provider binding and remote channel. No upstream prose is retained.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiscordConnectionObservation {
+    pub binding_id: String,
+    pub gateway_channel_id: String,
+    pub bot_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+    pub down: bool,
+}
+
 /// A channel bot linked to one of the owner's agents (NyxBot or a
 /// specialist). Telegram bots, and bots on platforms whose
 /// `nyxbot:gateway-{platform}` feature flag is on for their linking person, are reached
@@ -101,6 +113,8 @@ pub struct NyxbotChannel {
     pub gateway_native_delivery: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_intake: Option<GatewayIntake>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_discord_connection: Option<DiscordConnectionObservation>,
     #[serde(default)]
     pub gateway_bot_mentions: GatewayBotMentionSupport,
     #[serde(default)]

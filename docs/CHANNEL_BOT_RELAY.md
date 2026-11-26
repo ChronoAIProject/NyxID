@@ -2882,6 +2882,28 @@ folds it into the existing bot fence write.
   no authenticated event for this hand-over. Check CMA intake; `selected` alone
   cannot make the bot healthy. The channel aggregate reports `unconfirmed`,
   rather than preserving an old `ok`.
+- `discord_native_connection_down`: the existing native delivery sweep's
+  bounded `GET /channels/{ref}` reports a disconnected, unauthenticated,
+  unready or stale connection from a serving instance reporting an acquired
+  lease. Released, lost, contended and unknown leases provide no current-holder
+  evidence. A not-ready report with an explicit null or overdue retry is
+  conclusive down evidence. A future retry remains inconclusive and cannot
+  start or re-arm an outage. A ready, authenticated, connected session needs no retry; quiet
+  channels retain their authenticated inbound evidence regardless of message age.
+  The persisted observation is scoped to the current binding, remote channel
+  and Discord bot identity. Only newer conclusive observations replace it,
+  with a down report, including an explicit stale report, winning a tie against
+  ready evidence. Non-2xx,
+  absent or malformed connection data and non-owning instance observations leave
+  the existing observation intact. Proven recovery rearms the next down
+  transition, and a ready report without a current-binding inbound event still
+  shows `discord_native_intake_unconfirmed`. The existing failure notice goes
+  once per down transition to the bot owner or every organization admin, with
+  the `contact_admin` recommendation. Health and channel listings project the
+  persisted evidence without gateway requests, including while the connection
+  is down. The channel listing reports `failing` for a down connection unless
+  an unrelated delivery failure already applies. The native hand-over replaces
+  stale intake-only diagnostics and preserves unrelated delivery failures.
 
 The existing 30-second release sweep repairs up to ten stale direct setup rows
 per pass, rotating by its last repair check. It cleans only failed attempt keys
