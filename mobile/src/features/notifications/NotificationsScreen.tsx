@@ -473,7 +473,12 @@ export function NotificationsScreen({
       unstable_headerRightItems: () => [{ type: "custom", element: button(), hidesSharedBackground: true }],
     };
   }, [enabled, runtime.active, openOptions, colors.textPrimary, t]);
-  useWorkspaceBack({ active: false, defaultRole: "menu", onBack: navigation.goBack, options: headerOptions });
+  useWorkspaceBack({
+    active: false,
+    defaultRole: Platform.OS === "ios" ? "back" : "menu",
+    onBack: navigation.goBack,
+    options: headerOptions,
+  });
 
   const open = useCallback(
     (item: AssistantNotification) => {

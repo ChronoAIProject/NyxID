@@ -305,7 +305,9 @@ animation `none`, then waits for the new page to paint. The new content fades
 in (180ms) while the slab closes (300ms). Reduced motion skips both. Settings
 and quick actions preserve the expanded sidebar behind their animated sheet.
 Sheet owners wait for native dismissal before unmounting; the shell exposes
-sidebar accessibility only at its settled open endpoint.
+sidebar accessibility only at its settled open endpoint. On iOS, opening
+Notifications preserves the current content stack. Its Back button and native
+left-edge swipe return to the page that opened the inbox.
 
 Native reply layout uses 16pt between receipts/activity and prose, 12pt between
 ordinary Markdown blocks, 20pt before h1 and 16pt before other headings, and 8pt
