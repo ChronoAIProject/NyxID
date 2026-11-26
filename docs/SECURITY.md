@@ -203,10 +203,9 @@ NyxID enforces PKCE on two distinct OAuth flows:
 
 ### OAuth State / CSRF Protection
 
-- Each OAuth initiation creates an `oauth_states` record with a unique UUID
-- The state parameter maps to this record
-- State records expire (short TTL) and are consumed atomically via `find_one_and_delete`
-- The callback verifies the session user matches the state's `user_id` to prevent cross-user attacks
+- Each provider OAuth initiation creates a one-time `oauth_states` record and a per-attempt browser launch proof. NyxID stores the proof hash and sends its value in an HttpOnly cookie scoped to the provider callback. Configure `COOKIE_DOMAIN` for split frontend and callback subdomains that share a cookie domain.
+- The callback atomically claims the state before exchange and checks the initiating account against any active callback session. Retaining the claimed row during exchange preserves credential reconciliation.
+- A callback without a matching launch cookie stages the provider code under envelope encryption for up to five minutes within the state lifetime. Only the initiating first-party human account can view and confirm it. Confirmation consumes the staged callback once.
 
 ### Token Exchange Security
 

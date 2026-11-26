@@ -304,6 +304,7 @@ pub async fn create_endpoint(
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
     };
     let _manager = if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
@@ -393,6 +394,7 @@ pub async fn update_endpoint(
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
     };
     let _manager = if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
@@ -487,6 +489,7 @@ pub async fn delete_endpoint(
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
     };
     if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
@@ -534,6 +537,7 @@ pub async fn discover_endpoints(
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
     };
     let tool = service.offering_kind == crate::models::downstream_service::OfferingKind::Tool;
@@ -982,6 +986,7 @@ pub async fn change_publication(
             actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
                 .is_ok(),
+            privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
             admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
         },
         &[endpoint_id],
@@ -1029,6 +1034,7 @@ pub async fn change_publication_bulk(
             actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
                 .is_ok(),
+            privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
             admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
         },
         &ids,

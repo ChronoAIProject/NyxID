@@ -1,3 +1,4 @@
+import * as Crypto from "expo-crypto";
 import { useLaunchInput } from "../../lib/performance/launchPerformance";
 import { localizedToast } from "../../i18n/localizedToast";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
@@ -63,6 +64,10 @@ function resolveAuthError(error: unknown): string {
 
 function resolveSocialAuthError(error: string | undefined): string {
   switch (error) {
+    case "social_auth_update_required":
+      return translateApp("Update NyxID to continue with social sign-in.");
+    case "social_auth_invalid_code":
+      return translateApp("Unable to complete social sign-in.");
     case "social_auth_invalid_mfa":
       return translateApp(
         "Your verification challenge is invalid. Please sign in again.",
@@ -205,7 +210,12 @@ export function AuthHomeScreen({ navigation }: Props) {
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
   const emailLoginLock = useRef(false);
-  const lastHandledSocialUrlRef = useRef<string | null>(null);
+  const socialAttempt = useRef<{
+    provider: SocialProvider;
+    verifier: string;
+    generation: number;
+    completion: Promise<void> | null;
+  } | null>(null);
   const scrollController = useRef<KeyboardScrollViewHandle | null>(null);
   const errorBannerRef = useRef<View>(null);
 
@@ -244,60 +254,53 @@ export function AuthHomeScreen({ navigation }: Props) {
     return () => subscription.remove();
   }, []);
 
-  const resetSocialState = useCallback(() => {
-    if (isMountedRef.current) {
-      setIsSocialAuthPending(false);
-      setPendingSocialProvider(null);
-    }
-  }, []);
-
   const handleSocialCallback = useCallback(
     async (url: string) => {
+      const attempt = socialAttempt.current;
       const callback = parseSocialCallback(url);
-      if (!callback) return;
-      if (lastHandledSocialUrlRef.current === url) {
+      if (!attempt || !callback || (callback.provider && callback.provider !== attempt.provider)) {
         return;
       }
-      lastHandledSocialUrlRef.current = url;
+      if (attempt.completion) return attempt.completion;
 
-      if (callback.status === "error") {
-        setLoginError(() => (resolveSocialAuthError(callback.error)));
-        resetSocialState();
-        return;
-      }
+      const isCurrent = () =>
+        isMountedRef.current && socialAttempt.current === attempt &&
+        authSessionGeneration() === attempt.generation;
+      if (!isCurrent()) return;
 
-      if (callback.status === "mfa_required" && callback.mfaToken) {
-        setMfaProvider(callback.provider ?? "social");
-        setRecoveryMode(false);
-        setMfaChallenge(new MfaChallengeError(callback.mfaToken));
-        setMfaCode("");
-        setLoginError(null);
-        resetSocialState();
-        return;
-      }
+      attempt.completion = (async () => {
+        if (callback.status === "error") {
+          setLoginError(() => resolveSocialAuthError(callback.error));
+          return;
+        }
+        if (callback.status === "mfa_required" && callback.mfaToken) {
+          setMfaProvider(attempt.provider);
+          setRecoveryMode(false);
+          setMfaChallenge(new MfaChallengeError(callback.mfaToken));
+          setMfaCode("");
+          setLoginError(null);
+          return;
+        }
+        if (!callback.code) {
+          setLoginError(() => translateApp("Unable to complete social sign-in."));
+          return;
+        }
 
-      if (!callback.accessToken) {
-        setLoginError(() => (translateApp("Missing social auth access token.")));
-        resetSocialState();
-        return;
-      }
-
-      try {
-        await signInWithSession({
-          accessToken: callback.accessToken,
-          refreshToken: callback.refreshToken,
-          accessTokenExpiresAt:
-            typeof callback.expiresIn === "number"
-              ? Date.now() + Math.floor(callback.expiresIn * 1000)
-              : undefined,
-        });
-      } catch (error) {
-        setLoginError(() => (resolveErrorMessage(error)));
-      } finally {
-        resetSocialState();
-      }
+        try {
+          const session = await mobileApi.redeemSocialCode(callback.code, attempt.verifier);
+          if (!isCurrent()) return;
+          await signInWithSession({
+            accessToken: session.access_token,
+            refreshToken: session.refresh_token,
+            accessTokenExpiresAt: Date.now() + Math.floor(session.expires_in * 1000),
+          });
+        } catch (error) {
+          if (isCurrent()) setLoginError(() => resolveErrorMessage(error));
+        }
+      })();
+      return attempt.completion;
     },
-    [signInWithSession, resetSocialState],
+    [signInWithSession],
   );
 
   useEffect(() => {
@@ -321,15 +324,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     }
     socialLoginLock.current = true;
 
-    // Reset the dedup ref so a fresh attempt can re-process a callback URL
-    // that matches a previous attempt's URL. The backend's mobile error
-    // redirect is deterministic (status=error&error=<code>) so two retries
-    // against the same invite-only gate produce identical URLs; without
-    // this reset the second attempt is silently swallowed and the user
-    // sees no error yet no login. The within-attempt race between
-    // WebBrowser.openAuthSessionAsync and Linking's "url" listener is
-    // still deduped because whichever path fires first sets the ref.
-    lastHandledSocialUrlRef.current = null;
+    const generation = authSessionGeneration();
 
     if (isMountedRef.current) {
       setLoginError(null);
@@ -345,7 +340,17 @@ export function AuthHomeScreen({ navigation }: Props) {
       if (available.error) return;
       requireSocialProvider(available.data, provider);
       capture({ name: "ui.mobile_provider_connect_initiated", props: { provider, method: "oauth" } });
-      const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL);
+      const random = await Crypto.getRandomBytesAsync(32);
+      const verifier = Array.from(random, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      const digest = await Crypto.digestStringAsync(
+        Crypto.CryptoDigestAlgorithm.SHA256,
+        verifier,
+        { encoding: Crypto.CryptoEncoding.BASE64 },
+      );
+      if (!isMountedRef.current || !focusedRef.current || authSessionGeneration() !== generation) return;
+      const challenge = digest.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+      socialAttempt.current = { provider, verifier, generation, completion: null };
+      const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL, challenge);
 
       const result = await WebBrowser.openAuthSessionAsync(
         authorizeUrl,
@@ -355,6 +360,13 @@ export function AuthHomeScreen({ navigation }: Props) {
 
       if (result.type === "success") {
         await handleSocialCallback(result.url);
+        if (!socialAttempt.current?.completion) {
+          setLoginError(() => translateApp("Unable to complete social sign-in."));
+        }
+        return;
+      }
+      if (socialAttempt.current?.completion) {
+        await socialAttempt.current.completion;
         return;
       }
 
@@ -375,6 +387,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     } catch (error) {
       setLoginError(() => (resolveErrorMessage(error)));
     } finally {
+      socialAttempt.current = null;
       socialLoginLock.current = false;
       if (isMountedRef.current) {
         setIsSocialAuthPending(false);

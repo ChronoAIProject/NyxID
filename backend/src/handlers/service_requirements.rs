@@ -119,6 +119,7 @@ fn requirement_authority(
         catalog_base_url: state.config.base_url.clone(),
         actor: audit_service::AuditActor::from_auth_user(auth),
         first_party_human: super::login_client_context::require_first_party_human(auth).is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(state, auth),
         admin_required: true,
     }
 }

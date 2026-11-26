@@ -2156,7 +2156,7 @@ mod tests {
                     change_group_id: Uuid::new_v4().to_string(),
                     operation: "test_request".into(),
                 };
-                let Json(completed) = context::scope(
+                let (launch_headers, Json(completed)) = context::scope(
                     context,
                     // Keep the endpoint future off the smaller test-harness stack.
                     Box::pin(handlers::complete_connect_link(
@@ -2203,9 +2203,19 @@ mod tests {
                     assert_eq!(history.actor.app_id.as_deref(), Some(app_id.as_str()));
                     assert_eq!(history.actor.person_id.as_deref(), Some(actor.as_str()));
                     if attempt == 0 {
+                        let cookie = launch_headers[axum::http::header::SET_COOKIE]
+                            .to_str()
+                            .unwrap()
+                            .split(';')
+                            .next()
+                            .unwrap();
+                        let mut callback_headers = HeaderMap::new();
+                        callback_headers
+                            .insert(axum::http::header::COOKIE, cookie.parse().unwrap());
                         let redirect = Box::pin(user_tokens::generic_oauth_callback(
                             State(state.clone()),
                             crate::mw::auth::OptionalAuthUser(None),
+                            callback_headers,
                             Query(user_tokens::GenericOAuthCallbackQuery {
                                 code: None,
                                 state: Some(params["state"].clone()),

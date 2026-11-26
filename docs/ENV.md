@@ -982,6 +982,30 @@ Use the Play App Signing certificate for store-installed apps; include the uploa
 
 `MOBILE_SOCIAL_REDIRECT_URIS` lists additional exact mobile account sign-in destinations, separated by commas. The released app's `nyxid://auth/social/callback` works by default. Configure a custom app's complete `<scheme>://auth/social/callback` URI on every replica before distribution. In development an explicitly listed Expo URI may use `exp://<host>:<port>/--/auth/social/callback`. Production refuses Expo returns. Malformed configuration fails at startup.
 
+### Platform admin MFA rollout
+
+Set `ADMIN_MFA_ENFORCEMENT` to `off`, `audit`, or `enforce` on every API
+replica. `off` is the default. In `audit`, the administration guards admit
+existing authorized requests and record unverified privileged access.
+In `enforce`, guarded platform actions require MFA enrollment and a verified
+first-party session. Read and write paths that also admit ordinary owner
+authority may continue using that authority.
+
+Deploy the enrollment banner, verify enrollment and account recovery for
+each active privileged user, and exercise the assessed administration paths
+before setting `enforce`. Check audit events across the fleet before cutover.
+
+
+### Legacy email verification cutoff
+
+New email verification tokens expire after 24 hours. An optional RFC 3339
+`AUTH_VERIFICATION_LEGACY_CUTOFF_AT` timestamp sets the end of redemption
+for legacy verification tokens without an expiration. An empty value keeps
+those tokens redeemable. Confirm that affected users have a verification or
+operator-assisted recovery path before setting the cutoff. Password reset and
+email verification use separate five-per-minute source IP limits with the
+existing `TRUSTED_PROXY_IPS` configuration.
+
 ## Crash diagnostics
 
 See [CRASH_REPORTING.md](CRASH_REPORTING.md) for owner acceptance, project

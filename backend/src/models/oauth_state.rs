@@ -6,6 +6,14 @@ use super::bson_datetime;
 pub const COLLECTION_NAME: &str = "oauth_states";
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct PendingOAuthCallback {
+    pub id: String,
+    pub encrypted_code: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthState {
     #[serde(rename = "_id")]
     pub id: String,
@@ -13,6 +21,11 @@ pub struct OAuthState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_context: Option<crate::models::service_change_event::HistoryContext>,
     pub provider_config_id: String,
+    /// Absent for device flows and launches from older replicas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_proof_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_callback: Option<PendingOAuthCallback>,
     pub code_verifier: Option<String>,
     /// Outbound provider authorization parameter; independent of popup correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +107,8 @@ mod tests {
     fn bson_roundtrip() {
         let state = OAuthState {
             history_context: crate::services::service_history::context::current(),
+            launch_proof_hash: None,
+            pending_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -135,6 +150,8 @@ mod tests {
     fn bson_roundtrip_device_code_flow() {
         let state = OAuthState {
             history_context: crate::services::service_history::context::current(),
+            launch_proof_hash: None,
+            pending_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -169,6 +186,8 @@ mod tests {
         let redirect = "/admin/service-accounts/some-sa-id".to_string();
         let state = OAuthState {
             history_context: crate::services::service_history::context::current(),
+            launch_proof_hash: None,
+            pending_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),

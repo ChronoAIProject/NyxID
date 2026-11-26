@@ -3,9 +3,7 @@ export type SocialProvider = "google" | "github" | "apple";
 export const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
 type SocialCallback = {
   status: "success" | "error" | "mfa_required";
-  accessToken?: string;
-  refreshToken?: string;
-  expiresIn?: number;
+  code?: string;
   error?: string;
   provider?: SocialProvider;
   mfaToken?: string;
@@ -55,17 +53,12 @@ export function parseSocialCallback(url: string): SocialCallback | null {
       };
     }
 
-    const expiresInRaw = parsed.searchParams.get("expires_in");
-    const expiresInParsed = expiresInRaw ? Number(expiresInRaw) : NaN;
-
-    return {
-      status: "success",
-      accessToken: parsed.searchParams.get("access_token") ?? undefined,
-      refreshToken: parsed.searchParams.get("refresh_token") ?? undefined,
-      expiresIn:
-        Number.isFinite(expiresInParsed) && expiresInParsed > 0 ? expiresInParsed : undefined,
-      provider,
-    };
+    const codes = parsed.searchParams.getAll("code");
+    const [code] = codes;
+    if (codes.length !== 1 || !code || !/^[a-f0-9]{64}$/i.test(code)) {
+      return { status: "error", error: "social_auth_invalid_code", provider };
+    }
+    return { status: "success", code, provider };
   } catch {
     return {
       status: "error",

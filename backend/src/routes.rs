@@ -962,6 +962,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::user_tokens::generic_oauth_callback_post),
         )
         .route(
+            "/callback/continuation/{id}",
+            post(handlers::user_tokens::preview_connector_continuation),
+        )
+        .route(
+            "/callback/continuation/{id}/confirm",
+            post(handlers::user_tokens::confirm_connector_continuation),
+        )
+        .route(
             "/{provider_id}/services",
             get(handlers::providers::list_linked_services),
         )

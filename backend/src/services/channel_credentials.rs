@@ -253,6 +253,8 @@ pub struct ConnectionStart {
     pub connection_id: String,
     pub authorization_url: String,
     pub attempt_nonce: Option<String>,
+    pub state_id: String,
+    pub launch_proof: Zeroizing<String>,
 }
 
 impl std::fmt::Debug for ConnectionStart {
@@ -353,6 +355,8 @@ pub async fn start_connection(
             connection_id: key.id,
             authorization_url: flow.authorization_url,
             attempt_nonce: flow.attempt_nonce,
+            state_id: flow.state_id,
+            launch_proof: flow.launch_proof,
         }),
         Err(error) => {
             let _ = crate::services::service_history::collection::<UserApiKey>(
