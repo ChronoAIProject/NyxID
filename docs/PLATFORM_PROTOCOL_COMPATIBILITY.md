@@ -35,6 +35,13 @@ JWT keys and local test provider configuration.
   twelve consumption attempts in MongoDB, with zero flow records left.
 - Each version returned HTTP 400 with the same provider-specific
   `invalid_request` for the wrong proof type at `POST /oauth/token`.
+- The candidate's `provider_paths_through_oauth_token` route test used local TLS
+  provider fixtures and a real MongoDB replica set. For each provider a first
+  sign-in created one account and session. A returning user reused that account
+  and received a second session. With mobile MFA required, the next exchange
+  returned HTTP 400 with error code 2002 and a challenge. The session count
+  stayed at two. The test also checked the expected JWKS fetches and GitHub
+  application check, profile and verified email calls in order.
 - For the session handoff, each version registered a synthetic user with a
   test invitation. A browser login cookie opened the same account through
   `GET /api/v1/users/me` on the other version. A mobile email login's bearer
