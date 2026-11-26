@@ -8726,9 +8726,17 @@ async fn channel_turn_timings_count_model_tools_and_preserve_legacy_defaults() {
         assistant_model_observer::ModelRequest, assistant_turn_observability as observe,
     };
     let db = connect_transaction_test_database("channel_turn_timings").await;
-    let mut row = stale_test_row(Utc::now());
+    // Dequeue uses MongoDB's $$NOW; seed the duration from the same clock.
+    let server_now = db
+        .run_command(doc! {"hello": 1})
+        .await
+        .unwrap()
+        .get_datetime("localTime")
+        .unwrap()
+        .to_chrono();
+    let mut row = stale_test_row(server_now);
     let active = row.active_turn.as_mut().unwrap();
-    active.started_at = Utc::now() - chrono::Duration::seconds(1);
+    active.started_at = server_now - chrono::Duration::seconds(1);
     active.queued_at = Some(active.started_at);
     let turn = active.turn_id.clone();
     db.collection::<AssistantConversation>(CONVERSATIONS)
