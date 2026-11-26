@@ -273,6 +273,7 @@ function setup(
     Platform: {OS:"ios"},
     workspaceCornerSensor,
     useDiagnosticsNotice: () => {},
+    useLaunchShell: () => {},
     useAuthSession: () => ({ isAuthenticated: authenticated }),
     getAuthAccountId: () => accountId,
     getAuthEpoch: () => authEpoch,

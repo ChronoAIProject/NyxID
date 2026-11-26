@@ -8,6 +8,8 @@ import { extractAuthDeviceUserCodeFromQr } from "../features/auth/deviceUserCode
 import { loadTestModule } from "./api/apiUrlTestHarness";
 
 type ResolvedProfile = {
+  performanceToken: string;
+  performanceHost: string;
   associatedUrls: string[];
   androidHttpsAppLinks: boolean;
   apiBaseUrl: string;
@@ -739,4 +741,43 @@ test("Expo preserves a valid frontend base path and represents an HTTPS port sep
   assert.equal(config.android.intentFilters.flatMap((filter) => filter.data).some(
     (data) => data.host === "frontend.example:8443",
   ), false);
+});
+
+test("direct performance ingestion requires the active profile's own destination", () => {
+  const env = profileEnv({
+    DEV_PERFORMANCE_POSTHOG_TOKEN: "phc_test_fixture",
+    DEV_PERFORMANCE_POSTHOG_HOST: "https://ingest.example.test",
+  });
+  const dev = resolveProfile("dev", env);
+  const prod = resolveProfile("prod", env);
+  assert.equal(dev.performanceToken, env.DEV_PERFORMANCE_POSTHOG_TOKEN);
+  assert.equal(dev.performanceHost, env.DEV_PERFORMANCE_POSTHOG_HOST);
+  assert.equal(prod.performanceToken, "");
+  assert.equal(prod.performanceHost, "");
+});
+
+test("native launch consent is bound to the same explicitly configured ingestion project as JS", () => {
+  const config = (host: string, token: string) => expoConfig(productionEnv({
+    APP_ENV: "prod", PROD_PERFORMANCE_POSTHOG_HOST: host, PROD_PERFORMANCE_POSTHOG_TOKEN: token,
+  })) as ReturnType<typeof expoConfig> & {
+    extra: { PERFORMANCE_LAUNCH_BINDING: string };
+    ios: { infoPlist: { NyxPerformanceLaunchBinding: string } };
+    plugins: (string | [string, { binding: string }])[];
+  };
+  const choice = (host: string, token: string) => {
+    const result = config(host, token);
+    const expected = result.extra.PERFORMANCE_LAUNCH_BINDING;
+    assert.equal(result.ios.infoPlist.NyxPerformanceLaunchBinding, expected);
+    const plugin = result.plugins.find((v) => Array.isArray(v) && v[0] === "./plugins/withPerformanceLaunchBinding");
+    assert.ok(Array.isArray(plugin));
+    assert.equal(plugin[1].binding, expected);
+    return expected;
+  };
+  const us = choice("https://us.i.posthog.com", "phc_test");
+  assert.match(us, /^[a-f0-9]{64}$/);
+  assert.equal(choice("https://us.i.posthog.com/", "phc_test"), us);
+  assert.notEqual(choice("https://us.i.posthog.com", "phc_other"), us);
+  assert.notEqual(choice("https://eu.i.posthog.com", "phc_test"), us);
+  assert.equal(choice("https://us.i.posthog.com", ""), "");
+  assert.equal(choice("http://us.i.posthog.com", "phc_test"), "");
 });

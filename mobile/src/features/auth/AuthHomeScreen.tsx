@@ -1,3 +1,4 @@
+import { useLaunchInput } from "../../lib/performance/launchPerformance";
 import { localizedToast } from "../../i18n/localizedToast";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Translation } from "../../i18n/Translation";
@@ -445,6 +446,9 @@ export function AuthHomeScreen({ navigation }: Props) {
     ? !/^(?:\d{6}|[A-Za-z0-9_-]{8}|[a-fA-F0-9]{32})$/.test(mfaCode)
     : !email.trim() || !password);
 
+  const launchEmail = useRef<import("react-native").TextInput>(null);
+  const launchInputLayout = useLaunchInput("login_email", focused && !!loginConfig?.emailAuthEnabled &&
+    !mfaChallenge && !isAnyPending && !registrationPending, "auth-email");
   const openRegistration = async () => {
     if (!loginConfig?.emailAuthEnabled || isAnyPending || mfaChallenge || registrationPending || registrationLock.current) return;
     registrationLock.current = true;
@@ -579,6 +583,8 @@ export function AuthHomeScreen({ navigation }: Props) {
               {prompt.showPasswordFields && (
                 <>
                   <AuthTextInput
+                    ref={launchEmail}
+                    onLayout={(event) => launchInputLayout(event, () => launchEmail.current)}
                     frameStyle={styles.field}
                     leading={<Mail size={18} color={colors.textMuted} />}
                     style={styles.input}
