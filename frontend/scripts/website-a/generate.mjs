@@ -253,10 +253,19 @@ function jsx(el) {
   if (
     el.hasAttribute("data-v") &&
     ["catF", "chF", "blogF", "intAv"].includes(el.parentElement?.id)
-  )
+  ) {
+    const group = el.parentElement.id === "catF" ? "catF"
+      : el.parentElement.id === "chF" ? "chF"
+      : el.parentElement.id === "blogF" ? "blogF" : "intAv";
+    const value = el.dataset.v;
+    // Filter identifiers are data, never arbitrary JavaScript source. The
+    // baseline uses only short ASCII identifiers (or an empty reset value).
+    if (typeof value !== "string" || value.length > 64 || /[^a-z0-9_-]/i.test(value))
+      throw new Error("Unexpected baseline filter identifier");
     attrs.push(
-      `onClick={()=>s.setFilter(${q(el.parentElement.id)},${q(el.dataset.v)})} aria-pressed={s.isFilterSelected(${q(el.parentElement.id)},${q(el.dataset.v)})}`,
+      `onClick={()=>s.setFilter("${group}","${value}")} aria-pressed={s.isFilterSelected("${group}","${value}")}`,
     );
+  }
   if (el.parentElement?.id === "solGrid" && el.hasAttribute("data-category"))
     attrs.push(
       `hidden={!s.solutionVisible(${q(el.dataset.category)},${q(el.dataset.channels)})}`,
