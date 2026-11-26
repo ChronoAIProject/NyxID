@@ -2171,6 +2171,23 @@ activation then permit enabling for an admin, without roster/drain declarations.
 
 ### Guest settings and binding recovery
 
+Current organization admins can read retained guest conversations for a
+specialist's current organization channel bindings in first-party NyxID
+clients. This permission follows live organization membership, including for
+admins outside the specialist's use or maintenance lists. It applies to guest
+DMs and guest exchanges in shared chats on the current binding, including
+exchanges retained from earlier guest-policy revisions and while guest execution
+is suspended. The read requires the channel and specialist to retain the same
+organization binding. Source chats use NyxID's opaque chat identifiers.
+
+The read-only transcript contains guest input, retained final reply text, and
+bounded outcome codes. A retained reply is an execution record. Delivery status
+appears separately when a typed delivery outcome is available. Member exchanges,
+working context, tool inputs and results, credentials, attachments, and action
+cards are outside the transcript projection. History pages record a
+metadata-only audit entry for the administrator, organization, and conversation.
+The view follows the existing retention and erasure lifecycle.
+
 Every listed binding has a **Who can talk to this bot** section on web and mobile:
 Allow guests; a localized explanation of guest identity and org payment; named
 service access with a Grants link. Admins also see Organization spend today (this
