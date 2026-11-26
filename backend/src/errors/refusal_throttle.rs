@@ -85,6 +85,7 @@ impl AppError {
             | Self::BillingRecoveryFailed { .. }
             | Self::VoiceStartFailed(_)
             | Self::AssistantTurnRequired
+            | Self::OrgAgentAccessAuthoringUnavailable
             | Self::AssistantModelAuthorityChanged
             | Self::GrantCascadeConfirmationRequired(_)
             | Self::RateLimited

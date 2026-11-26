@@ -27,6 +27,11 @@ pub enum NyxbotCommands {
     Cancel(InvocationArgs),
     /// Discover owned agents and specialist IDs
     Agents(AuthArgs),
+    /// Show or replace an organization specialist's member access policy
+    Access {
+        #[command(subcommand)]
+        command: AccessCommand,
+    },
     /// List conversations, optionally filtered by agent
     Conversations {
         #[arg(long)]
@@ -51,6 +56,103 @@ pub enum NyxbotCommands {
     /// Discover available model IDs
     Models(AuthArgs),
 }
+#[derive(Subcommand)]
+pub enum AccessCommand {
+    /// Show the current access policy and edit revision
+    Show {
+        agent_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Replace both lists using the expected revision in a JSON file
+    Set {
+        agent_id: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct OrgAccess {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    maintainers: Option<Vec<String>>,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    users: Option<Vec<String>>,
+    revision: i64,
+    authoring_available: bool,
+}
+
+impl OrgAccess {
+    fn render(&self, output: OutputFormat) -> Result<String> {
+        if matches!(output, OutputFormat::Json) {
+            return Ok(terminal_json(&serde_json::to_string_pretty(self)?));
+        }
+        let display = |list: &Option<Vec<String>>| match list.as_deref() {
+            None => "Inherit (eligible organization members)".into(),
+            Some([]) => "Nobody".into(),
+            Some(ids) => ids.join(", "),
+        };
+        Ok(terminal_text(&format!(
+            "Maintainers: {}\nUsers: {}\nRevision: {}\nAuthoring available: {}",
+            display(&self.maintainers),
+            display(&self.users),
+            self.revision,
+            self.authoring_available
+        )))
+    }
+}
+
+async fn access(command: AccessCommand) -> Result<()> {
+    let (agent, auth, file) = match command {
+        AccessCommand::Show { agent_id, auth } => (agent_id, auth, None),
+        AccessCommand::Set {
+            agent_id,
+            auth,
+            file,
+        } => (agent_id, auth, Some(file)),
+    };
+    let mut api = ApiClient::from_auth(&auth)?;
+    let path = format!("{ROOT}/agents/{}/org-access", urlencoding::encode(&agent));
+    let result: Result<OrgAccess> = if let Some(file) = file {
+        let reader = std::io::BufReader::new(
+            std::fs::File::open(file).context("Cannot read specialist policy file")?,
+        );
+        let policy: ReplacementFile =
+            serde_json::from_reader(reader).context("Invalid specialist policy file")?;
+        api.put(&path, &policy).await
+    } else {
+        api.get(&path).await
+    };
+    match result {
+        Ok(policy) => {
+            println!("{}", policy.render(auth.output)?);
+            Ok(())
+        }
+        Err(error) => {
+            let mut failure = classify_failure(&error);
+            if failure.http_status == Some(409) {
+                failure.guidance = Some(
+                    "The policy revision is stale. Run nyxid nyxbot access show, review the changes and update your file before submitting again.",
+                );
+            }
+            println!("{}", render_discovery_failure(&failure, auth.output)?);
+            Err(OutcomeExit(failure.exit_code).into())
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReplacementFile {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    maintainers: Option<Vec<String>>,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    users: Option<Vec<String>>,
+    expected_revision: u64,
+}
+
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("input").required(true).args(["text","file"])))]
 pub struct RunArgs {
@@ -624,6 +726,7 @@ pub async fn run(command: NyxbotCommands) -> Result<()> {
         }
         NyxbotCommands::Show(args) => inspect(args, false).await,
         NyxbotCommands::Cancel(args) => inspect(args, true).await,
+        NyxbotCommands::Access { command } => access(command).await,
         NyxbotCommands::Agents(auth) => discovery(auth, format!("{ROOT}/agents")).await,
         NyxbotCommands::Models(auth) => discovery(auth, format!("{ROOT}/models")).await,
         NyxbotCommands::Conversations {

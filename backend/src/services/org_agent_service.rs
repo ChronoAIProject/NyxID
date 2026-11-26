@@ -1,4 +1,6 @@
 //! Live organization-agent ACL. The agent owner and the execution actor differ.
+pub(crate) mod authoring;
+
 use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 

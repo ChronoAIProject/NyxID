@@ -154,6 +154,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::billing::model_tariffs::READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
+    super::feature_flag_service::ORG_AGENT_ACCESS_FLAG_KEY,
     super::org_channel_service::FLAG,
     super::org_channel_service::GUEST_GRANTS_READINESS,
     "assistant:shared-agents",
