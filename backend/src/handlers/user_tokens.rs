@@ -1043,7 +1043,7 @@ async fn finish_connector_callback(
                         // Correlate the hosted tab with the OAuth attempt that completed the link.
                         let receipt = crate::crypto::token::hash_token(&oauth_state.id);
                         let path = format!("/connect/return/{connect_link_id}#flow={receipt}");
-                        return redirect_to_path(frontend_url, path, "success", None);
+                        return redirect_to_path(frontend_url, &path, "success", None);
                     }
                     Err(error) => {
                         crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(
