@@ -36,11 +36,17 @@ pub async fn approve(
 ) -> AppResult<DeviceCodeApprove> {
     let now = Utc::now();
     let collection = db.collection::<DeviceCode>(DEVICE_CODES);
-    let row = collection
+    let source = db
+        .collection::<bson::Document>(DEVICE_CODES)
         .find_one(doc! { "user_code_history.0.code": &input.user_code })
         .await?
         .ok_or(AppError::DeviceUserCodeInvalid)?;
 
+    let mut approval_filter = crate::services::record_storage::source_predicate(
+        &source,
+        &["device_code_hash", "device_pubkey"],
+    );
+    let row: DeviceCode = bson::from_document(source).map_err(mongodb::error::Error::from)?;
     ensure_row_approvable(&collection, &row, now).await?;
 
     let owner_user_id = input
@@ -116,58 +122,49 @@ pub async fn approve(
 
     let refresh_token = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
     let refresh_token_hash = hash_token(refresh_token.as_str());
-    let delivery_api_key_encrypted = match encryption_keys
-        .encrypt(created_key.full_key.as_bytes())
+    let sealed = async {
+        super::record::Binding::new(
+            &row,
+            actor_user_id,
+            input.org_id.as_deref(),
+            &created_key.id,
+            &node.id,
+            &refresh_token_hash,
+        )?
+        .seal_pair(encryption_keys, &created_key.full_key, &refresh_token)
         .await
-    {
-        Ok(encrypted) => encrypted,
+    }
+    .await;
+    let mut set = match sealed {
+        Ok(set) => set,
         Err(error) => {
             cleanup_partial_approval(db, &owner_user_id, Some(&created_key.id), Some(&node.id))
                 .await;
             return Err(error);
         }
     };
-    let delivery_refresh_token_encrypted =
-        match encryption_keys.encrypt(refresh_token.as_bytes()).await {
-            Ok(encrypted) => encrypted,
-            Err(error) => {
-                cleanup_partial_approval(db, &owner_user_id, Some(&created_key.id), Some(&node.id))
-                    .await;
-                return Err(error);
-            }
-        };
     let approved_status = bson::to_bson(&DeviceCodeStatus::Approved)
         .map_err(|e| AppError::Internal(format!("serialize device code status: {e}")))?;
     let now = Utc::now();
     let delivery_expires_at = now + Duration::seconds(DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
-    let update_result = collection
-        .update_one(
-            doc! {
-                "_id": &row.id,
-                "status": "pending",
-                "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
-            },
-            doc! {
-                "$set": {
-                    "status": approved_status,
-                    "approved_by_user_id": actor_user_id,
-                    "approved_org_id": input.org_id.clone(),
-                    "issued_api_key_id": &created_key.id,
-                    "issued_node_id": &node.id,
-                    "delivery_api_key_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: delivery_api_key_encrypted,
-                    },
-                    "delivery_refresh_token_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: delivery_refresh_token_encrypted,
-                    },
-                    "refresh_token_hash": &refresh_token_hash,
-                    "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
-                }
-            },
-        )
-        .await;
+    set.extend(doc! {
+        "status": approved_status,
+        "approved_by_user_id": actor_user_id,
+        "approved_org_id": &input.org_id,
+        "issued_api_key_id": &created_key.id,
+        "issued_node_id": &node.id,
+        "refresh_token_hash": &refresh_token_hash,
+        "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
+    });
+    let mut update = doc! {"$set": set};
+    if !encryption_keys.contextual_record_writes() {
+        update.insert("$unset", doc! {super::record::VERSION: ""});
+    }
+    approval_filter.extend(doc! {
+        "status": "pending",
+        "expires_at": {"$gt": bson::DateTime::from_chrono(now)},
+    });
+    let update_result = collection.update_one(approval_filter, update).await;
 
     let update_result = match update_result {
         Ok(update_result) => update_result,
@@ -205,7 +202,7 @@ async fn ensure_row_approvable(
     if row.expires_at <= now || row.status == DeviceCodeStatus::Expired {
         collection
             .update_one(
-                doc! { "_id": &row.id },
+                doc! { "_id": &row.id, "expires_at": bson::DateTime::from_chrono(row.expires_at) },
                 doc! { "$set": { "status": "expired" } },
             )
             .await?;
@@ -405,28 +402,13 @@ mod tests {
         assert!(row.delivery_refresh_token_encrypted.is_some());
         assert!(row.refresh_token_hash.is_some());
         let encryption_keys = test_encryption_keys();
-        let decrypted_api_key = encryption_keys
-            .decrypt(
-                row.delivery_api_key_encrypted
-                    .as_deref()
-                    .expect("encrypted api key"),
-            )
-            .await
-            .expect("decrypt api key");
-        let decrypted_api_key = std::str::from_utf8(&decrypted_api_key).expect("api key utf8");
-        let decrypted_refresh_token = encryption_keys
-            .decrypt(
-                row.delivery_refresh_token_encrypted
-                    .as_deref()
-                    .expect("encrypted refresh token"),
-            )
-            .await
-            .expect("decrypt refresh token");
-        let decrypted_refresh_token =
-            std::str::from_utf8(&decrypted_refresh_token).expect("refresh token utf8");
+        let (decrypted_api_key, decrypted_refresh_token) =
+            super::super::record::open_pair(&encryption_keys, &row)
+                .await
+                .unwrap();
         assert!(decrypted_api_key.starts_with("nyxid_ag_"));
         assert_eq!(
-            hash_token(decrypted_refresh_token),
+            hash_token(&decrypted_refresh_token),
             row.refresh_token_hash.unwrap()
         );
 
@@ -452,9 +434,9 @@ mod tests {
         else {
             panic!("expected approved");
         };
-        assert_eq!(api_key.as_str(), decrypted_api_key);
+        assert_eq!(api_key.as_str(), decrypted_api_key.as_str());
         assert_eq!(node_id, approval.node_id);
-        assert_eq!(refresh_token.as_str(), decrypted_refresh_token);
+        assert_eq!(refresh_token.as_str(), decrypted_refresh_token.as_str());
         assert_eq!(expires_in, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
         assert_eq!(api_key_expires_at, approval.api_key_expires_at);
         assert!(api_key_expires_at.is_some());
