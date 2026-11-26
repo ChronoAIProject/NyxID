@@ -12,6 +12,7 @@ import {
 } from "@/hooks/use-channel-connect-link";
 import { useAuthStore } from "@/stores/auth-store";
 import type { ChannelConnectLink } from "@/schemas/channel-connect-links";
+import { GuestSetupEditor } from "@/features/channel-guest-access/guest-setup";
 
 export function ChannelConnectLinkPage() {
   useUiTranslation();
@@ -131,6 +132,7 @@ function ConnectSession({
                 ? translateUi("Your bot was saved. Retry setup to finish connecting it.")
                 : translateUi("This connection request is {{value1}}.", { value1: current.status })}
           </p>
+          {current.bot_id && <GuestSetupEditor botId={current.bot_id} />}
           {!terminal && (
             <Button
               variant="primary"

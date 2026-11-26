@@ -111,6 +111,18 @@ pub async fn instructions(reader: &impl OrnnReader, agent: &AssistantAgent, gues
     if !enabled(agent, guest) {
         return String::new();
     }
+    instructions_by_pin(agent, |pin| Box::pin(skills::pinned_files(reader, pin))).await
+}
+
+pub(crate) async fn instructions_by_pin<'a>(
+    agent: &'a AssistantAgent,
+    mut load: impl FnMut(
+        &'a crate::models::catalog_skill_revision::SkillReference,
+    ) -> futures::future::BoxFuture<'a, AppResult<BTreeMap<String, Vec<u8>>>>,
+) -> String {
+    if !enabled(agent, false) {
+        return String::new();
+    }
     let mut remaining = MAX_PRELOAD_BYTES;
     let mut entries = Vec::new();
     for pin in agent.skills.iter().filter(|pin| !pin.disabled).take(16) {
@@ -123,7 +135,7 @@ pub async fn instructions(reader: &impl OrnnReader, agent: &AssistantAgent, gues
         };
         let result = async {
             validate_paths(&meta.preload_paths)?;
-            let files = skills::pinned_files(reader, pin).await?;
+            let files = load(pin).await?;
             selected_files(&files, &meta.preload_paths, remaining)
         }
         .await;

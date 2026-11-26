@@ -85,9 +85,17 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pool<'a> {
     /// The owner's specialist and event turns, sized by the owner's setting.
-    Team { owner: &'a str, limit: u32 },
+    Team {
+        owner: &'a str,
+        limit: u32,
+    },
     /// Channel turns for one owner.
-    Channel { owner: &'a str },
+    Channel {
+        owner: &'a str,
+    },
+    ChannelGuest {
+        owner: &'a str,
+    },
 }
 
 pub(crate) enum Started {
@@ -110,6 +118,16 @@ pub(crate) async fn acquire(
             state
                 .direct_chat_limiter
                 .try_acquire_pool("assistant_team", owner, limit)
+                .await
+        }
+        Pool::ChannelGuest { owner } => {
+            state
+                .direct_chat_limiter
+                .try_acquire_pool(
+                    "assistant_channel_guest",
+                    owner,
+                    team::CHANNEL_TURNS_PER_OWNER,
+                )
                 .await
         }
         Pool::Channel { owner } => {

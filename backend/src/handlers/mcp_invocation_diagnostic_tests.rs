@@ -26,6 +26,7 @@ fn conversation_auth(
     auth.api_key_credential_id = Some(credential_id.to_owned());
     auth.diagnostic_credential = Some(proxy_service::CallerToken::from_verified(raw_key));
     auth.chat = Some(ChatAuthority {
+        channel_guest: None,
         key_version: 0,
         platform_model_context: None,
         automation_work: None,

@@ -456,6 +456,14 @@ async fn llm_proxy_request_inner(
     let body_bytes =
         super::body_limit::read_request_body(request, state.config.llm_max_body_size, "LLM proxy")
             .await?;
+    check_channel_guest_model_request(
+        &auth_user,
+        &method,
+        &path,
+        query.as_deref(),
+        &headers,
+        &body_bytes,
+    )?;
 
     capture_permission_input(
         &auth_user,
@@ -946,6 +954,13 @@ async fn llm_proxy_request_inner(
                 model_request.as_ref(),
             )
         });
+    let egress_guard =
+        crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+            egress_guard,
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            None,
+        );
     let execution = Box::pin(async {
         if let (Some(chat), Some(admission), Some(id)) = (
             auth_user.assistant_chat.as_deref(),
@@ -1023,6 +1038,7 @@ async fn llm_proxy_request_inner(
             );
 
             state.billing.mark_forwarded(&metered).await?;
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             if let Some(guard) = egress_guard.as_ref()
                 && let Err(error) = guard.revalidate().await
             {
@@ -1066,6 +1082,7 @@ async fn llm_proxy_request_inner(
                 &caller_path,
                 &delegated,
             );
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             let downstream_result = proxy_service::forward_request_with_egress_guard(
                 llm_scope.redirects(),
                 &target,
@@ -1276,6 +1293,14 @@ async fn gateway_request_inner(
         "LLM gateway",
     )
     .await?;
+    check_channel_guest_model_request(
+        &auth_user,
+        &method,
+        &path,
+        query.as_deref(),
+        &headers,
+        &body_bytes,
+    )?;
 
     capture_permission_input(
         &auth_user,
@@ -1370,6 +1395,28 @@ async fn gateway_request_inner(
             .cloned(),
     ))
     .await
+}
+
+async fn fence_guest_model_dispatch(
+    state: &AppState,
+    auth: &AuthUser,
+    metered: &crate::services::billing::meter::MeteredProxyContext,
+) -> AppResult<()> {
+    if auth
+        .assistant_chat
+        .as_ref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+        && let Err(error) = auth
+            .ensure_live_assistant_turn(&state.db, "llm.dispatch")
+            .await
+    {
+        state
+            .billing
+            .reject_before_send(metered, "assistant_authority_changed", false)
+            .await?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 // Provider-specific resolution and translation is outside the pool entrance's
@@ -1947,6 +1994,13 @@ async fn gateway_provider_request(
                 model_request.as_ref(),
             )
         });
+    let egress_guard =
+        crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+            egress_guard,
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            None,
+        );
     let execution = Box::pin(async {
         if let (Some(chat), Some(admission), Some(id)) = (
             auth_user.assistant_chat.as_deref(),
@@ -1999,6 +2053,7 @@ async fn gateway_provider_request(
             );
 
             state.billing.mark_forwarded(&metered).await?;
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             if let Some(guard) = egress_guard.as_ref()
                 && let Err(error) = guard.revalidate().await
             {
@@ -2024,6 +2079,7 @@ async fn gateway_provider_request(
             state.billing.mark_forwarded(&metered).await?;
             // The body selects the provider, so only external downloads have a caller URL.
             let location = super::proxy::AsyncLocationContext::for_target(&target, &delegated);
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             let downstream_result = proxy_service::forward_request_with_egress_guard(
                 llm_scope.redirects(),
                 &target,
@@ -2151,6 +2207,26 @@ async fn gateway_provider_request(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn check_channel_guest_model_request(
+    auth: &AuthUser,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> AppResult<()> {
+    use crate::services::channel_guest_access::{guest_tools, policy};
+    if auth
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+        && !guest_tools::stateless_model_request(method, path, query, headers, body)
+    {
+        return Err(policy::denied());
+    }
+    Ok(())
+}
 
 /// Assistant selection is resolved before legacy provider fallback. In
 /// particular an org primary must reach its exact consent gate instead of

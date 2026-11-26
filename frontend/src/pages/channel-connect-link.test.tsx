@@ -1,7 +1,20 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render as renderView, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { ChannelConnectLinkPage } from "./channel-connect-link";
 import type { ChannelConnectLink } from "@/schemas/channel-connect-links";
+
+vi.mock("@/lib/api-client", async (original) => ({
+  ...(await original<typeof import("@/lib/api-client")>()),
+  api: { get: vi.fn().mockResolvedValue({ available: false, enabled: false, bot_revision: 0 }) },
+}));
+
+function render(element: React.ReactElement) {
+  const client = new QueryClient();
+  return renderView(element, {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+}
 
 const mocks = vi.hoisted(() => ({
   data: {} as ChannelConnectLink,

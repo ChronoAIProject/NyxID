@@ -50,6 +50,7 @@ import type {
   CreateChannelBotResponse,
 } from "@/types/channels";
 import { ChannelBotConnect } from "./channel-bot-connect";
+import { GuestSetupEditor } from "@/features/channel-guest-access/guest-setup";
 
 /** Shape of a complete BotFather token; partial input is not looked up. */
 const TELEGRAM_TOKEN = /^\d{5,}:[\w-]{30,}$/;
@@ -352,6 +353,7 @@ export function ChannelBotSetup({
               ))}
             </ol>
           )}
+          <GuestSetupEditor botId={completedId} />
           <div className="flex justify-end gap-2">
             {onContinue && fullPage ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>{translateUi("Open channel bot")}</Link></Button> : null}
             <Button

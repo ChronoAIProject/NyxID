@@ -1,4 +1,5 @@
 import { ChannelBotHealthCard } from "@/components/channels/channel-bot-health-card";
+import { GuestSetupEditor } from "@/features/channel-guest-access/guest-setup";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -1210,6 +1211,8 @@ export function ChannelBotDetailPage() {
       {bot.status === "pending_webhook" && (isMetaInbox(bot.platform) ? <MetaVerificationHint /> : bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
+
+      <GuestSetupEditor botId={bot.id} />
 
       {/* Bot Information */}
       <DetailSection

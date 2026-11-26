@@ -1399,6 +1399,7 @@ fn verified_context(
     crate::models::assistant_conversation::ChannelTurnContext {
         meta_grant: None,
         text_completeness: None,
+        channel_guest: None,
         org_origin: None,
         source_event_id: event.id.clone(),
         channel_id: channel.id.clone(),

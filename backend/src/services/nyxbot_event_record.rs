@@ -13,6 +13,9 @@ use zeroize::Zeroizing;
 pub(crate) const CONTEXT: &str = "event_context_ciphertext";
 pub(crate) const TARGET: &str = "delivery.target_ciphertext";
 pub(crate) const GUEST: &str = "guest_setup_payload";
+pub(crate) const GUEST_VERSION: &str = "guest_setup_context_version";
+pub(crate) const CHANNEL_GUEST: &str = "channel_guest_setup_payload";
+pub(crate) const CHANNEL_GUEST_VERSION: &str = "channel_guest_setup_context_version";
 pub(crate) const REPLY: &str = "response_reply.ciphertext";
 
 pub(crate) async fn seal(
@@ -75,7 +78,14 @@ pub(crate) async fn guest_setup(
     event: &bson::Document,
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let invalid = || AppError::Internal("Guest queue unavailable".into());
-    let field = [GUEST, event.get_str("channel_id").map_err(|_| invalid())?];
+    let (payload, marker) = match (event.contains_key(GUEST), event.contains_key(CHANNEL_GUEST)) {
+        (true, false) if !event.contains_key(CHANNEL_GUEST_VERSION) => (GUEST, GUEST_VERSION),
+        (false, true) if !event.contains_key(GUEST_VERSION) => {
+            (CHANNEL_GUEST, CHANNEL_GUEST_VERSION)
+        }
+        _ => return Err(invalid()),
+    };
+    let field = [payload, event.get_str("channel_id").map_err(|_| invalid())?];
     let context = RecordContext::new(
         EVENTS_COLLECTION_NAME,
         event.get_str("_id").map_err(|_| invalid())?,
@@ -83,7 +93,7 @@ pub(crate) async fn guest_setup(
         &field,
     )?;
     let version = event
-        .get("guest_setup_context_version")
+        .get(marker)
         .cloned()
         .map(bson::from_bson::<Option<u8>>)
         .transpose()
@@ -93,9 +103,7 @@ pub(crate) async fn guest_setup(
         keys,
         &context,
         version,
-        event
-            .get_binary_generic("guest_setup_payload")
-            .map_err(|_| invalid())?,
+        event.get_binary_generic(payload).map_err(|_| invalid())?,
     )
     .await
 }
@@ -145,11 +153,27 @@ fn validate_plain(row: &Document, field: &str, bytes: &[u8]) -> AppResult<()> {
                 return Err(invalid());
             }
         }
-        GUEST => {
+        GUEST | CHANNEL_GUEST => {
             let guest: crate::models::nyxbot_channel::WaitingGuest =
                 serde_json::from_slice(bytes).map_err(|_| invalid())?;
+            let add_on = guest
+                .channel_context
+                .as_ref()
+                .and_then(|context| context.channel_guest.as_ref());
+            let valid_lane = match (field, add_on) {
+                (CHANNEL_GUEST, Some(turn)) => {
+                    row.get_str("_id") == Ok(turn.source_event_id.as_str())
+                        && row.get_str("channel_id") == Ok(turn.binding_id.as_str())
+                        && turn.hosted_conversation_id() == guest.conversation
+                }
+                (GUEST, None) => {
+                    !super::channel_guest_access::is_hosted_conversation(&guest.conversation)
+                }
+                _ => false,
+            };
             if row.get_str("guest_setup_conversation_id") != Ok(guest.conversation.as_str())
                 || row.get_str("channel_id") != Ok(guest.origin.nyxbot_channel_id.as_str())
+                || !valid_lane
             {
                 return Err(invalid());
             }
@@ -192,12 +216,18 @@ fn validate_plain(row: &Document, field: &str, bytes: &[u8]) -> AppResult<()> {
 }
 
 async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResult<Document> {
+    if (stored(row, GUEST)?.is_some() || stored(row, GUEST_VERSION)?.is_some())
+        && (stored(row, CHANNEL_GUEST)?.is_some() || stored(row, CHANNEL_GUEST_VERSION)?.is_some())
+    {
+        return Err(invalid());
+    }
     let mut set = Document::new();
     for (field, marker) in [
         (TARGET, "delivery.target_context_version"),
         (CONTEXT, "event_context_version"),
-        (GUEST, "guest_setup_context_version"),
+        (GUEST, GUEST_VERSION),
         (REPLY, "response_reply.context_version"),
+        (CHANNEL_GUEST, CHANNEL_GUEST_VERSION),
     ] {
         let version = stored(row, marker)?
             .map(|v| bson::from_bson::<u8>(v.clone()))
@@ -282,6 +312,73 @@ mod tests {
     use crate::services::encrypted_record_migration as migration;
 
     #[tokio::test]
+    async fn channel_guest_wait_migration_keeps_source_owner_channel_and_field_bound() {
+        use crate::models::channel_guest_access::{
+            AnswerAudience, GuestActor, GuestAssurance, GuestTurn,
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("channel_guest_wait_record").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let turn = GuestTurn {
+            bot_id: "bot".into(),
+            binding_id: "channel".into(),
+            platform: "telegram".into(),
+            conversation_id: "provider-thread".into(),
+            source_event_id: "event".into(),
+            actor: GuestActor {
+                id: "sender".into(),
+                assurance: GuestAssurance::ProviderVerified,
+            },
+            audience: AnswerAudience::Private,
+            policy_revision: 0,
+            activation_epoch: 1,
+            bot_revision: 1,
+            meta_grant_id: None,
+        };
+        let conversation = turn.hosted_conversation_id();
+        let plain = serde_json::to_vec(&serde_json::json!({
+            "agent": "agent", "profile": "profile", "text": "text",
+            "conversation": conversation, "origin": {
+                "nyxbot_channel_id": "channel", "partition": "provider-thread", "platform": "telegram",
+            }, "channel_context": {
+                "channel_guest": turn, "source_event_id": "event", "channel_id": "channel",
+                "channel_bot_id": "bot", "conversation_kind": "private",
+                "sender_kind": "human", "guest": true, "original_message": true,
+            },
+        })).unwrap();
+        let bytes = keys.encrypt(&plain).await.unwrap();
+        let source = doc! {
+            "_id": "event", "user_id": "owner", "channel_id": "channel",
+            "guest_setup_conversation_id": &conversation,
+            CHANNEL_GUEST: bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes },
+        };
+        assert_eq!(guest_setup(&keys, &source).await.unwrap().as_slice(), plain);
+        let rows = db.collection::<Document>(EVENTS_COLLECTION_NAME);
+        rows.insert_one(&source).await.unwrap();
+        assert!(verify(&keys, &source).await.is_err());
+        assert!(migrate(&db, &keys, &source).await.unwrap());
+        let saved = rows.find_one(doc! {"_id": "event"}).await.unwrap().unwrap();
+        assert_eq!(saved.get_i32(CHANNEL_GUEST_VERSION), Ok(3));
+        assert_eq!(guest_setup(&keys, &saved).await.unwrap().as_slice(), plain);
+        verify(&keys, &saved).await.unwrap();
+
+        for field in ["_id", "user_id", "channel_id"] {
+            let mut substituted = saved.clone();
+            substituted.insert(field, "other");
+            assert!(guest_setup(&keys, &substituted).await.is_err());
+            assert!(verify(&keys, &substituted).await.is_err());
+        }
+        let mut substituted = saved;
+        let ciphertext = substituted.remove(CHANNEL_GUEST).unwrap();
+        substituted.remove(CHANNEL_GUEST_VERSION);
+        substituted.insert(GUEST, ciphertext);
+        substituted.insert(GUEST_VERSION, 3);
+        assert!(guest_setup(&keys, &substituted).await.is_err());
+        assert!(verify(&keys, &substituted).await.is_err());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn event_record_generation_resumes_after_rewrap_and_counts_each_field() {
         let db = crate::test_utils::connect_transaction_test_database("event_generation").await;
         let keys = crate::test_utils::test_encryption_keys();
@@ -317,7 +414,7 @@ mod tests {
                     .iter()
                     .filter(|field| field.collection == EVENTS_COLLECTION_NAME)
                     .collect();
-                assert_eq!(fields.len(), 4);
+                assert_eq!(fields.len(), 5);
                 for field in fields {
                     let present = if field.field == CONTEXT { 2 } else { 0 };
                     assert_eq!(

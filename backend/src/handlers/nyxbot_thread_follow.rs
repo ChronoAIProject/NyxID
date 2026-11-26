@@ -213,6 +213,9 @@ async fn inbound_impl_inner(
     }
     let sender = Sender {
         truncated_original_bytes,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
         original_kind: None,
         media: crate::services::telegram_input::stored_attachments(&source.attachments),
         original_message: canonical_platform(&row.platform) != "telegram"
@@ -648,11 +651,13 @@ async fn inbound_impl_inner(
             row,
             &child,
             &sender,
-            text,
-            binding.guest,
-            addressed,
-            Some(binding.clone()),
-            event_key,
+            ChatTurnInput {
+                text,
+                guest: binding.guest,
+                addressed,
+                binding: Some(binding.clone()),
+                event_key,
+            },
         ))
         .await
     };

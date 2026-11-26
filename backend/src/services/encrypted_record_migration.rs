@@ -267,6 +267,7 @@ const REGISTRY: &[Entry] = &[
             "event_context_ciphertext",
             "guest_setup_payload",
             "response_reply.ciphertext",
+            "channel_guest_setup_payload",
         ],
     },
     Entry {
@@ -572,6 +573,22 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
             REGISTRY
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
+        )?,
+        Some(previous_labels::BEFORE_CHANNEL_GUEST_DIGEST) => project_labels(
+            &row,
+            REGISTRY.iter().map(|entry| {
+                let fields = if entry.collection == "nyxbot_events" {
+                    &[
+                        "delivery.target_ciphertext",
+                        "event_context_ciphertext",
+                        "guest_setup_payload",
+                        "response_reply.ciphertext",
+                    ]
+                } else {
+                    entry.fields
+                };
+                (entry.collection, fields)
+            }),
         )?,
         Some(
             previous_labels::EVENT_REPLY_DIGEST

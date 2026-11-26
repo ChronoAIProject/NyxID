@@ -37,6 +37,8 @@ pub struct CallbackPayload {
     pub platform: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_access_token: Option<String>,
     pub agent: CallbackAgent,
     pub conversation: CallbackConversation,
     pub sender: CallbackSender,
@@ -156,6 +158,7 @@ pub async fn inbound_platform_message_exists(
 /// held in memory for the duration of the callback forward and then
 /// discarded. Downstream agents keep any history they need.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn store_inbound_message_with_id(
     db: &mongodb::Database,
     channel_bot_id: &str,
@@ -246,6 +249,8 @@ pub(crate) fn inbound_metadata(
         } else {
             Vec::new()
         },
+        guest_transport_audience: None,
+        guest_relay: None,
         embedded_attachments: inbound.embedded_attachments.clone(),
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
@@ -349,10 +354,44 @@ pub async fn store_outbound_message(
     content_type: &str,
     platform_send: Option<crate::models::channel_delivery::PlatformSendRecord>,
 ) -> AppResult<ChannelMessage> {
+    store_outbound_with_guest_turn(
+        db,
+        channel_bot_id,
+        conversation_id,
+        user_id,
+        platform,
+        agent_api_key_id,
+        reply_to_message_id,
+        platform_message_id,
+        platform_conversation_id,
+        content_type,
+        platform_send,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn store_outbound_with_guest_turn(
+    db: &mongodb::Database,
+    channel_bot_id: &str,
+    conversation_id: &str,
+    user_id: &str,
+    platform: &str,
+    agent_api_key_id: &str,
+    reply_to_message_id: Option<&str>,
+    platform_message_id: Option<&str>,
+    platform_conversation_id: Option<&str>,
+    content_type: &str,
+    platform_send: Option<crate::models::channel_delivery::PlatformSendRecord>,
+    guest_turn: Option<&super::channel_guest_access::GuestTurn>,
+) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
         text_completeness: None,
         effective_attachment_filenames: Vec::new(),
+        guest_transport_audience: None,
+        guest_relay: guest_turn.cloned(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
@@ -472,6 +511,8 @@ pub async fn store_device_event_message(
     let message = ChannelMessage {
         text_completeness: None,
         effective_attachment_filenames: Vec::new(),
+        guest_transport_audience: None,
+        guest_relay: None,
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
@@ -1083,9 +1124,11 @@ pub fn build_callback_payload(
     reply_token: Option<String>,
     base_url: &str,
 ) -> CallbackPayload {
+    let guest = message.guest_relay.as_ref();
     let attachments: Vec<CallbackAttachment> = inbound
         .attachments
         .iter()
+        .filter(|_| guest.is_none())
         .enumerate()
         .map(|(index, a)| CallbackAttachment {
             download_url: super::channel_media_service::download_url(base_url, &message.id, index),
@@ -1101,7 +1144,11 @@ pub fn build_callback_payload(
         .collect();
 
     CallbackPayload {
-        thread_context: message.thread_context.clone(),
+        guest_access_token: None,
+        thread_context: guest
+            .is_none()
+            .then(|| message.thread_context.clone())
+            .flatten(),
         activity: None,
         message_id: message.id.clone(),
         correlation_id: String::new(),
@@ -1119,7 +1166,13 @@ pub fn build_callback_payload(
             // Likewise the message's own chat type (`private`, `group`,
             // `channel`): a default route answers every kind of chat, and its
             // configured type says nothing about this one.
-            conversation_type: if inbound.conversation_type.is_empty() {
+            conversation_type: if let Some(guest) = guest {
+                match guest.audience {
+                    super::channel_guest_access::AnswerAudience::Private => "private",
+                    super::channel_guest_access::AnswerAudience::Shared => "group",
+                }
+                .into()
+            } else if inbound.conversation_type.is_empty() {
                 conversation.platform_conversation_type.clone()
             } else {
                 inbound.conversation_type.clone()
@@ -1130,15 +1183,15 @@ pub fn build_callback_payload(
             display_name: inbound.sender_display_name.clone(),
         },
         content: CallbackContent {
-            content_type: inbound.content_type.clone(),
+            content_type: if guest.is_some() { "text".into() } else { inbound.content_type.clone() },
             text: inbound.text.clone(),
             attachments,
         },
         reply_to_message_id: None, // NyxID ID not available without a DB lookup
-        reply_to_platform_message_id: inbound.reply_to_platform_message_id.clone(),
-        thread_id: inbound.thread_id.clone(),
+        reply_to_platform_message_id: guest.is_none().then(|| inbound.reply_to_platform_message_id.clone()).flatten(),
+        thread_id: guest.is_none().then(|| inbound.thread_id.clone()).flatten(),
         timestamp: message.created_at.to_rfc3339(),
-        raw_platform_data: Some(inbound.raw_data.clone()),
+        raw_platform_data: guest.is_none().then(|| inbound.raw_data.clone()),
     }
 }
 
@@ -1747,6 +1800,7 @@ mod tests {
             correlation_id: String::new(),
             platform: "telegram".to_string(),
             reply_token: None,
+            guest_access_token: None,
             agent: CallbackAgent {
                 api_key_id: "key-1".to_string(),
                 name: "test-agent".to_string(),
@@ -1798,6 +1852,7 @@ mod tests {
             correlation_id: String::new(),
             platform: "telegram".to_string(),
             reply_token: Some("reply-token".to_string()),
+            guest_access_token: None,
             agent: CallbackAgent {
                 api_key_id: "key-1".to_string(),
                 name: "test-agent".to_string(),
@@ -1872,6 +1927,8 @@ mod tests {
         let message = ChannelMessage {
             text_completeness: None,
             effective_attachment_filenames: Vec::new(),
+            guest_transport_audience: None,
+            guest_relay: None,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -2235,6 +2292,7 @@ mod tests {
             correlation_id: String::new(),
             platform: "device".to_string(),
             reply_token: None,
+            guest_access_token: None,
             agent: CallbackAgent {
                 api_key_id: "key-1".to_string(),
                 name: "test-agent".to_string(),

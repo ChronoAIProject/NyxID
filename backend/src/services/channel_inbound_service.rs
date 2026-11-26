@@ -1,5 +1,6 @@
 //! Shared post-parse channel routing and callback dispatch.
 
+use super::channel_guest_access::relay as guest_relay;
 use super::channel_inbound_diagnostics::{self as diagnostics, Outcome};
 use crate::AppState;
 use crate::errors::AppError;
@@ -131,6 +132,7 @@ async fn process_messages(
     .await?;
 
     let mut complete = true;
+    let mut selector_failed = false;
     let mut stamped = false;
     for inbound in messages {
         let authorization = adapter
@@ -339,6 +341,20 @@ async fn process_messages(
             telegram,
             route_id: &route.conversation.id,
         };
+        match guest_relay::prepare(state.db, bot, &route.conversation, inbound, &mut metadata).await {
+            Ok(true) => {}
+            Ok(false) => {
+                matched.record(Outcome::Duplicate).await;
+                continue;
+            }
+            Err(error) => {
+                matched.record(Outcome::StorageUnavailable).await;
+                tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "channel ingress authority unavailable");
+                selector_failed |= matches!(error, AppError::SecurityReadinessUnavailable);
+                complete = false;
+                continue;
+            }
+        }
         let stored = if let Some((fence, _)) = gateway {
             super::channel_admission_service::store_discord(state.db, metadata, fence).await
         } else if adapter.atomic_inbound_admission() {
@@ -476,6 +492,7 @@ async fn process_messages(
         // NyxID identity. Their agents receive reply authority only.
         let user_access_token = if notification
             || super::channel_adapters::meta::is_meta(&bot.platform)
+            || stored_message.guest_relay.is_some()
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
@@ -528,13 +545,11 @@ async fn process_messages(
         let reply_token = if notification {
             None
         } else {
-            match crate::crypto::jwt::generate_relay_reply_token(
+            match guest_relay::reply_token(
                 state.jwt_keys,
                 state.config,
-                &api_key.id,
-                &route.conversation.id,
-                &stored_message.id,
-                &route.conversation.platform,
+                &stored_message,
+                &route.conversation,
             ) {
                 Ok(token) => Some(token),
                 Err(e) => {
@@ -565,6 +580,12 @@ async fn process_messages(
             reply_token,
             &state.config.base_url,
         );
+        payload.guest_access_token = guest_relay::guest_data_token(
+            state.jwt_keys,
+            state.config,
+            &stored_message,
+            &route.conversation,
+        )?;
 
         if extended {
             payload.activity = activity.as_ref().map(|value| {
@@ -573,7 +594,9 @@ async fn process_messages(
                     &inbound.platform_message_id,
                 )
             });
-            payload.conversation.conversation_type = inbound.conversation_type.clone();
+            if stored_message.guest_relay.is_none() {
+                payload.conversation.conversation_type = inbound.conversation_type.clone();
+            }
             if notification {
                 payload.raw_platform_data = None;
                 payload.content.text = None;
@@ -638,6 +661,22 @@ async fn process_messages(
             && !fence.current(state.db).await?
         {
             return Ok(false);
+        }
+        if stored_message.guest_relay.is_some()
+            && let Err(error) = guest_relay::revalidate_delivery(
+                state.db,
+                &stored_message,
+                &route.conversation,
+                bot,
+                &api_key.id,
+                None,
+            )
+            .await
+        {
+            matched.record(Outcome::AuthorityChanged).await;
+            tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "guest callback authority unavailable");
+            complete = false;
+            continue;
         }
         if !notification
             && (inbound
@@ -728,5 +767,8 @@ async fn process_messages(
         }
     }
 
+    if selector_failed {
+        return Err(Box::new(AppError::SecurityReadinessUnavailable));
+    }
     Ok(complete)
 }

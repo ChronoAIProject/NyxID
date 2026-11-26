@@ -852,6 +852,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let chat = ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
@@ -894,6 +895,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let guest = ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,

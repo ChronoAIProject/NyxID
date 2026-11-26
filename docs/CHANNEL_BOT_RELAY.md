@@ -1718,6 +1718,51 @@ The reply-token path skips the API-key branch's "caller must be the assigned age
 
 A leaked reply token authorizes one reply, later edits of that reply, and reads of the bound inbound message's attachments until expiry (default 30 minutes). Contrast with a leaked `full_key`, which grants unbounded access to everything the agent key can do until manually revoked.
 
+#### Guest access rollout
+
+For enrolled external callbacks, NyxID stores the original receipt and guest
+admission together. Callback retries retain that admission and the original
+destination. These callbacks omit `X-NyxID-User-Token` and carry a
+`channel-relay/guest-reply-v1` reply audience. The reply capability permits one
+text reply and subsequent edits at the original destination within its expiry.
+The assigned agent key can send or edit a shared reply against its original
+message while the admission is current. A private reply or edit requires the
+per-message capability. Old callbacks stop working when enrollment, policy
+revision, or assignment changes.
+
+An enrolled external callback uses an agent key dedicated to one bot. The key
+loses general NyxID access for that enrollment, including when its original
+route is deactivated or its callback URL is cleared. A new ordinary callback
+after switch-off uses the ordinary relay contract.
+
+An enrolled callback also carries `guest_access_token`. External runtimes
+use it as the Bearer credential for `POST /api/v1/channel-relay/guest-tools`.
+The `list` operation takes `{"operation":"list"}` and returns `tools`. The
+`call` operation takes `operation`, a UUID `request_id`, `tool_name`, and
+`arguments`. Each call binds to the original guest, destination, provider
+event, bot, assigned key, and policy revision. A committed request ID cannot
+run twice. The endpoint currently runs policy-authorized bot-owned personal
+record operations and observes the owner's approval setting. External
+callbacks need a verified specialist association to use hosted service or
+skill grants. The runtime configures its own conversation isolation and
+provider credentials independently of this capability.
+
+NyxID can positively verify one-to-one delivery from Telegram user messages,
+Lark and Feishu app-bound p2p messages, Discord type-1 DMs, Slack IM events,
+WhatsApp individual inbound messages, and authenticated X DMs whose
+conversation identifies both the sender and the receiving account.
+Supported provider-verified group messages retain their sender identity with
+a shared audience. An adapter without positive evidence uses an unverified
+actor and a shared audience. A normalized gateway event alone provides no
+private destination. Live group membership for named audiences requires
+independent evidence at authorization time.
+
+The one-way device gateway carries a caller-supplied source label and issues
+no guest capability. NyxBot custom events enter the hosted guest lane with a
+shared audience. Phone, SMS, and custom speech adapter bindings selected by
+the rollout refuse unclassified guest utterances and tool effects until the
+adapter can use the same guest work and delivery contract.
+
 ### Callback Flow Decision
 
 ```mermaid

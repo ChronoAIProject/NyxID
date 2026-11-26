@@ -416,6 +416,8 @@ pub(crate) async fn persist_verified_bot(
         x_events: None,
         last_verification: None,
         ownership_version: 0,
+        guest_access_v1: true,
+        guest_access_v1_revision: 1,
         id: id.clone(),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
@@ -2469,6 +2471,61 @@ pub async fn get_bot(db: &mongodb::Database, bot_id: &str) -> AppResult<ChannelB
 }
 
 /// Get a bot by ID with ownership verification.
+/// Set the bot preference after the caller has fenced the human owner's
+/// management authority in this same transaction.
+pub(crate) async fn set_guest_access_v1_in_session(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    bot_id: &str,
+    owner_id: &str,
+    expected_revision: i64,
+    enabled: bool,
+) -> AppResult<i64> {
+    if expected_revision < 0 {
+        return Err(AppError::ValidationError(
+            "Bot guest access revision must be nonnegative".into(),
+        ));
+    }
+    let conflict = || AppError::Conflict("Bot guest access changed. Reload its settings.".into());
+    let revision = if expected_revision == 0 {
+        bson::Bson::Document(doc! {"$in":[0_i64,bson::Bson::Null]})
+    } else {
+        expected_revision.into()
+    };
+    let filter = doc! {
+        "_id":bot_id, "user_id":owner_id, "is_active":true,
+        "guest_access_v1_revision":revision,
+    };
+    let bots = db.collection::<bson::Document>(COLLECTION_NAME);
+    let current = bots
+        .find_one(filter.clone())
+        .projection(doc! {"guest_access_v1":1})
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(conflict)?;
+    let saved = match current.get("guest_access_v1") {
+        None => false,
+        Some(bson::Bson::Boolean(saved)) => *saved,
+        Some(_) => return Err(conflict()),
+    };
+    let mut set = doc! {"channel_guest_preference_fence":uuid::Uuid::new_v4().to_string()};
+    let revision = if saved == enabled {
+        expected_revision
+    } else {
+        let next = expected_revision.checked_add(1).ok_or_else(conflict)?;
+        set.insert("guest_access_v1", enabled);
+        set.insert("guest_access_v1_revision", next);
+        next
+    };
+    // Touch the bot for both cases so any prepared configuration activated
+    // by this transaction serializes with transfer, deletion and dispatch.
+    let changed = bots.update_one(filter, doc! {"$set":set}).session(tx).await?;
+    if changed.matched_count != 1 {
+        return Err(conflict());
+    }
+    Ok(revision)
+}
+
 pub async fn get_bot_for_user(
     db: &mongodb::Database,
     bot_id: &str,
@@ -2766,6 +2823,7 @@ async fn delete_bot_inner(
     }
 
     super::org_channel_service::defaults::erase(db, doc! {"channel_bot_id":bot_id}).await?;
+    purge_guest_data(db, bot_id).await?;
 
     // Deactivate all conversations tied to this bot
     db.collection::<mongodb::bson::Document>(CONVERSATIONS)
@@ -3002,6 +3060,63 @@ pub(crate) async fn claim_owner_aurinko_lifecycle(
     Ok(claims)
 }
 
+pub(crate) async fn purge_guest_data(db: &mongodb::Database, bot_id: &str) -> AppResult<()> {
+    let bots = db.collection::<bson::Document>(COLLECTION_NAME);
+    let retiring = doc! {"_id":bot_id,"is_active":false,"channel_guest_data_present":true};
+    let Some(bot) = bots.find_one(retiring.clone()).projection(doc! {"platform":1}).await? else {
+        return Ok(());
+    };
+    // Meta's provider-approved cleanup retains other grants on the same inbox.
+    if !bot.get_str("platform").is_ok_and(super::channel_adapters::meta::is_meta) {
+        super::channel_guest_access::personal_records::purge_bot(db, bot_id).await?;
+    }
+    super::channel_guest_access::setup::purge_bot(db, bot_id).await?;
+    super::channel_guest_access::purge_bot(db, bot_id).await?;
+    bots.update_one(retiring, doc! {"$set":{"channel_guest_retirement_complete":true}}).await?;
+    Ok(())
+}
+
+/// Retire the departing owner's dataset in bounded pages. The cutoff was
+/// committed with transfer so a crash leaves the next pass resumable.
+pub(crate) async fn sweep_guest_retirement(db: &mongodb::Database) -> AppResult<()> {
+    let db = super::transaction_service::durable_database(db);
+    let bots = db.collection::<bson::Document>(COLLECTION_NAME);
+    let mut rows = bots
+        .find(doc! {"channel_guest_purge_before_ownership":{"$gt":0_i64}})
+        .projection(doc! {"channel_guest_purge_before_ownership":1,"platform":1})
+        .sort(doc! {"channel_guest_purge_before_ownership":1,"_id":1})
+        .limit(32)
+        .await?;
+    while let Some(row) = rows.try_next().await? {
+        let bot_id = row.get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid retiring channel bot".into()))?;
+        let cutoff = row.get_i64("channel_guest_purge_before_ownership")
+            .map_err(|_| AppError::Internal("Invalid channel cleanup cutoff".into()))?;
+        if !super::channel_guest_access::personal_records::purge_before_ownership(&db, bot_id, cutoff).await? {
+            continue;
+        }
+        super::channel_guest_access::purge_observations_before_ownership(&db, bot_id, cutoff).await?;
+        bots.update_one(
+            doc! {"_id":bot_id,"channel_guest_purge_before_ownership":cutoff},
+            doc! {"$unset":{"channel_guest_purge_before_ownership":""}},
+        ).await?;
+    }
+    let mut rows = bots
+        .find(doc! {
+            "is_active":false,"channel_guest_data_present":true,
+            "channel_guest_retirement_complete":{"$ne":true},
+            "platform":{"$nin":["messenger","instagram"]},
+        })
+        .projection(doc! {"_id":1})
+        .limit(32)
+        .await?;
+    while let Some(row) = rows.try_next().await? {
+        let id = row.get_str("_id").map_err(|_| AppError::Internal("Invalid retiring channel bot".into()))?;
+        purge_guest_data(&db, id).await?;
+    }
+    Ok(())
+}
+
 /// Erasure uses confirmed cleanup, unlike the ordinary best-effort delete UX.
 /// The inactive bot retains its encrypted retry capability until this durable
 /// marker is written. A crash after the remote effect repeats an idempotent
@@ -3114,6 +3229,7 @@ pub(crate) async fn erase_personal_bot(
                 Ok(())
             }.await;
             super::org_membership_authority::finish(tx,result).await?;
+            purge_guest_data(db, bot_id).await?;
             let bot=get_bot_for_user(db,bot_id,owner).await?;
             let source=db.collection::<bson::Document>(COLLECTION_NAME).find_one(doc! {"_id":bot_id,"user_id":owner}).await?
                 .ok_or_else(||AppError::Conflict("Channel owner changed".into()))?;
@@ -3222,6 +3338,7 @@ pub(crate) async fn fence_owner_management(
 
 #[cfg(test)]
 mod tests {
+    mod guest_preferences;
     mod mixed_records;
     use super::*;
     use std::sync::{Arc, Mutex};
@@ -3337,6 +3454,8 @@ mod tests {
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),

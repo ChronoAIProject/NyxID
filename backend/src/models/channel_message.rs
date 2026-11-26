@@ -107,6 +107,12 @@ pub struct NyxbotAdmission {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// Positive provider-authenticated evidence for the stored inbound sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_transport_audience: Option<crate::services::channel_guest_access::AnswerAudience>,
+    /// Original admission for an external guest relay callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_relay: Option<crate::services::channel_guest_access::GuestTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_completeness: Option<TextCompleteness>,
     /// Private download-name overrides aligned with top-level attachments.
@@ -232,6 +238,8 @@ mod tests {
         ChannelMessage {
             text_completeness: None,
             effective_attachment_filenames: Vec::new(),
+            guest_transport_audience: None,
+            guest_relay: None,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

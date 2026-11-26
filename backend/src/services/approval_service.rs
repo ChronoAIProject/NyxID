@@ -174,6 +174,25 @@ pub async fn resolve_org_aware_approval(
     descriptor: &OperationDescriptor,
     is_auto_connected: bool,
 ) -> AppResult<ApprovalResolution> {
+    resolve_policy(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+        is_auto_connected,
+    )
+    .await
+}
+
+async fn resolve_policy(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    suppress_global_fallback: bool,
+) -> AppResult<ApprovalResolution> {
     // Step 1: if the resolved service is org-owned and the org has a
     // policy, use it. We detect "org-owned" by looking up the owner's
     // `user_type`, NOT by comparing `actor_user_id` to
@@ -228,7 +247,7 @@ pub async fn resolve_org_aware_approval(
         // fallback, so it must not turn these services into approval gates.
         // Explicit actor/org ServiceApprovalConfig rows are handled above and
         // still apply verbatim.
-        let required = if is_auto_connected {
+        let required = if suppress_global_fallback {
             false
         } else {
             user_requires_approval(db, actor_user_id, &descriptor.verb).await?
@@ -255,6 +274,46 @@ pub async fn resolve_org_aware_approval(
         org_config: None,
         connection_id: None,
     })
+}
+
+/// The attachment's exact standing approval covers the implicit global read
+/// requirement only. Explicit service policy and grant matching still apply.
+pub(crate) async fn evaluate_channel_skill_read(
+    db: &Database,
+    maintainer: &str,
+    owner: &str,
+    catalog: &str,
+    descriptor: &OperationDescriptor,
+    bot_id: &str,
+    standing_approval: bool,
+) -> AppResult<ApprovalOutcome> {
+    if descriptor.method.as_deref() != Some("GET")
+        || descriptor.verb != crate::models::service_approval_config::ApprovalVerb::Read
+    {
+        return Ok(ApprovalOutcome::Denied);
+    }
+    let resolution = resolve_policy(
+        db,
+        maintainer,
+        owner,
+        catalog,
+        descriptor,
+        standing_approval,
+    )
+    .await?;
+    check_resolved_approval(
+        db,
+        catalog,
+        descriptor,
+        Some("api_key"),
+        bot_id,
+        false,
+        ApprovalOptions::NO_REQUEST,
+        resolution,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn evaluate_deny_only(
@@ -378,6 +437,38 @@ pub(super) async fn evaluate_service(
         service_id,
         &mut resolution,
     );
+
+    check_resolved_approval(
+        db,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass_approval_flow,
+        options,
+        resolution,
+        connection,
+        group_actor,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn check_resolved_approval(
+    db: &Database,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass_approval_flow: bool,
+    options: ApprovalOptions,
+    mut resolution: ApprovalResolution,
+    connection: Option<&str>,
+    group_actor: Option<&str>,
+) -> AppResult<ApprovalOutcome> {
+    if resolution.effect == ApprovalEffect::Deny {
+        return Ok(ApprovalOutcome::Denied);
+    }
 
     let named = resolution
         .org_config

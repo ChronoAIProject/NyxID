@@ -539,17 +539,24 @@ async fn ensure_org_partition(state: &AppState, key: &str) {
 
 #[tokio::test]
 async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_the_org() {
-    cold_guest_model_setup(false).await;
+    Box::pin(cold_guest_model_setup(false, false)).await;
 }
 
 #[tokio::test]
 async fn native_discord_notification_releases_org_guest_for_next_paid_answer() {
-    cold_guest_model_setup(true).await;
+    Box::pin(cold_guest_model_setup(true, false)).await;
 }
 
-async fn cold_guest_model_setup(native: bool) {
+#[tokio::test]
+async fn nyxbot_guest_runtime_organization_specialist_uses_cold_setup_and_org_billing() {
+    Box::pin(cold_guest_model_setup(false, true)).await;
+}
+
+async fn cold_guest_model_setup(native: bool, addon: bool) {
     use tower::ServiceExt;
-    let db_name = if native {
+    let db_name = if addon {
+        "org_channel_cold_model_addon"
+    } else if native {
         "org_guest_discord_deleted"
     } else {
         "org_channel_cold_model"
@@ -641,8 +648,8 @@ async fn cold_guest_model_setup(native: bool) {
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
             sink.lock().await.push(json!({"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
-                "contexts":turn_context_tests::contexts(&body),"input":body["input"],
-                "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
+                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
+                "instructions":body["instructions"], "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
                 "conversation":{"id":session},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
@@ -736,6 +743,9 @@ async fn cold_guest_model_setup(native: bool) {
         assert_eq!(snapshot["output"], json!([]));
         assert!(observations.lock().await.is_empty());
     }
+    if addon {
+        guest_runtime_tests::enable_guest_test_bot(&state, &row.channel_bot_id).await;
+    }
     let body = message("502", "Hello, first visitor");
     let response = body_text(respond(&state, &key, &body, "org-cold-first").await).await;
     assert!(
@@ -762,6 +772,17 @@ async fn cold_guest_model_setup(native: bool) {
     );
     assert_eq!(seen[0]["setup"], true);
     assert_eq!(seen[1]["guest"], true);
+    assert_eq!(
+        !seen[1]["persisted_context"]["channel_guest"].is_null(),
+        addon
+    );
+
+    assert_eq!(
+        seen[1]["instructions"]
+            .to_string()
+            .contains("send a direct message to this bot"),
+        addon,
+    );
     assert!(seen[0]["contexts"].as_array().unwrap().is_empty());
     let contexts = seen[1]["contexts"].as_array().unwrap();
     assert_eq!(contexts.len(), 1);

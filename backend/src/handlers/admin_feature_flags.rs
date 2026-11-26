@@ -435,6 +435,30 @@ pub async fn list_feature_flags(
     Ok(Json(AdminFeatureFlagListResponse { flags }))
 }
 
+pub(crate) async fn get_channel_guest_pilot(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<crate::services::channel_guest_access::PilotSelection>> {
+    use crate::services::channel_guest_access as runtime;
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
+    require_flag_write(&state, &auth, runtime::FLAG).await?;
+    Ok(Json(runtime::pilot(&state.db).await?))
+}
+
+pub(crate) async fn set_channel_guest_pilot(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(selection): Json<crate::services::channel_guest_access::PilotSelection>,
+) -> AppResult<Json<crate::services::channel_guest_access::PilotSelection>> {
+    use crate::services::channel_guest_access as runtime;
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
+    require_flag_write(&state, &auth, runtime::FLAG).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    Ok(Json(
+        runtime::set_pilot(&state.db, selection, &actor).await?,
+    ))
+}
+
 /// PUT /api/v1/admin/feature-flags/{flag_key}
 pub async fn set_feature_flag(
     State(state): State<AppState>,

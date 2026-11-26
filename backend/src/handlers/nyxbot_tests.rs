@@ -52,6 +52,8 @@ mod org_restore_tests;
 
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
+#[path = "nyxbot_guest_runtime_tests.rs"]
+mod guest_runtime_tests;
 
 #[path = "nyxbot_turn_context_tests.rs"]
 mod turn_context_tests;
@@ -270,6 +272,7 @@ async fn setup_with_engine(
                     let (_, key, _) = key_service::validate_api_key(&db, raw).await.unwrap();
                     let persisted = db.collection::<AssistantConversation>(CONVERSATIONS)
                         .find_one(doc! {"credential_api_key_id":&key.id}).await.unwrap().unwrap();
+                    crate::services::channel_guest_access::test_hooks::provider_entered(&db, &persisted.id);
                     let mut observed = body;
                     observed["_test_channel_context"] = serde_json::to_value(&persisted.active_turn.as_ref().unwrap().channel_context).unwrap();
                     sink.lock().await.push(observed);
@@ -5835,6 +5838,9 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
     );
     let sender = |id: &'static str| Sender {
         truncated_original_bytes: None,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
         original_kind: None,
         media: Vec::new(),
         original_message: true,

@@ -130,6 +130,9 @@ async fn admit_fenced(
                             "platform":&message.platform, "direction":"inbound", "platform_message_id":&message.platform_message_id,
                         }).session(&mut *session).await?;
                     if existing.is_some() { return Ok(false); }
+                    super::api_key_mutation_service::transaction_result(
+                        super::channel_guest_access::relay::bind_in_session(db, session, message).await,
+                    )?;
                     if let Some(grant) = meta_grant {
                         let mut stored=bson::to_document(message).map_err(mongodb::error::Error::custom)?;
                         stored.insert("meta_grant",bson::to_bson(&grant).map_err(mongodb::error::Error::custom)?);
@@ -241,6 +244,7 @@ pub(crate) async fn store_current_owner(
             if owner.matched_count != 1 {
                 return Ok(None);
             }
+            super::channel_guest_access::relay::bind_in_session(db, tx, message).await?;
             db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))
                 .insert_one(message)
                 .session(&mut *tx)

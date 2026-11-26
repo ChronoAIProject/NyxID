@@ -147,6 +147,18 @@ async fn accept(
     } else {
         claim_message(state, row, activity).await?
     };
+    use crate::services::channel_guest_access::{self as guest, GuestMode};
+    let guest_mode = if let Some(claim) = &claim {
+        match guest::select_mode(&state.db, &row.channel_bot_id).await {
+            Ok(mode) => mode,
+            Err(error) => {
+                let _ = EventDedupStore::release(&state.db, claim).await;
+                return Err(error);
+            }
+        }
+    } else {
+        GuestMode::Legacy
+    };
     let now = Utc::now();
     let event_key = dispatch_identity::native_event(&response_id);
     let event = NyxbotEvent {
@@ -309,7 +321,9 @@ async fn accept(
                     .session(&mut *session).await?;
                 if committed.matched_count!=1 {return Err(AppError::Conflict("Native admission changed".into()));}
             }
-            db.collection::<NyxbotEvent>(EVENTS).insert_one(&event).session(&mut *session).await?;
+            let mut stored_event = bson::to_document(&event).map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+            stored_event.insert("channel_guest_admission", bson::to_bson(&guest_mode).map_err(|_| AppError::OAuthAuthorityUnavailable)?);
+            db.collection::<bson::Document>(EVENTS).insert_one(stored_event).session(&mut *session).await?;
             db.collection::<StoredResponse>(RESPONSES).insert_one(&inserted).session(&mut *session).await?;
             Ok(())
         }.await;
@@ -389,6 +403,9 @@ pub(super) fn native_sender(activity: &Value) -> Sender<'_> {
     use crate::models::channel_thread::ThreadSenderKind as Kind;
     Sender {
         truncated_original_bytes: None,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
         original_kind: Some(match activity["actor"]["kind"].as_str() {
             Some("human") => Kind::Human,
             Some("bot") => Kind::Bot,
@@ -415,7 +432,34 @@ async fn execute(
     let partition = stored.partition.as_str();
     let event_key = stored.event_key.as_str();
     let mut thread_reply = false;
-    let sender = native_sender(activity);
+    let mut sender = native_sender(activity);
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        use crate::services::channel_guest_access::{AnswerAudience, GuestMode, hosted_mode};
+        let mode = hosted_mode(&state.db, event_key, &row.id).await?;
+        sender.guest_mode = Some(mode);
+        if matches!(mode, GuestMode::AddOn { .. }) {
+            let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+            let config = crate::services::whatsapp_native::load(&state.db, &bot)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Forbidden("native_whatsapp_identity_unavailable".into())
+                })?;
+            let account = crate::services::whatsapp_native::verified_account(
+                &config,
+                &bot,
+                row.gateway_channel_id.as_deref().unwrap_or_default(),
+                context,
+            )
+            .ok_or_else(|| AppError::Forbidden("native_whatsapp_identity_unavailable".into()))?;
+            sender.guest_facts = crate::services::channel_guest_access::transport::TransportFacts {
+                sender_id: Some(account),
+                audience: AnswerAudience::Private,
+            };
+        }
+    }
     let text = if row.platform == "whatsapp"
         && crate::services::whatsapp_native::has_unavailable_media(activity)
     {
@@ -660,6 +704,16 @@ async fn current(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&stored.event_key})
         .await?;
+    if stored
+        .conversation_id
+        .as_deref()
+        .is_some_and(crate::services::channel_guest_access::is_hosted_conversation)
+        && event.as_ref().is_none_or(|event| {
+            event.delivery.is_none() || event.conversation_id != stored.conversation_id
+        })
+    {
+        return Ok(None);
+    }
     if let Some(event) = event.as_ref() {
         provider_refusal::partition_known();
         provider_refusal::event(&event.event_id);
@@ -714,6 +768,14 @@ async fn current(
         return Ok(None);
     };
     let mut payload = recovery::payload(&state.encryption_keys, &stored).await?;
+    if stored
+        .conversation_id
+        .as_deref()
+        .is_some_and(crate::services::channel_guest_access::is_hosted_conversation)
+        && !late_delivery::stream_allowed(state, &stored.event_key).await
+    {
+        return Ok(None);
+    }
     if row.gateway_source.is_none() && stored.terminal {
         let event = state
             .db
@@ -982,6 +1044,11 @@ async fn send_update_impl(
         } else {None};
         let mut outcome = "reply_confirmed";
         for (index, part) in reply_parts.into_iter().enumerate() {
+            if crate::services::channel_guest_access::is_hosted_conversation(conversation)
+                && !late_delivery::stream_allowed(state, &event.id).await
+            {
+                return Err(unavailable());
+            }
             let mut part_trace = crate::turn_trace::Operation::part(
                 crate::turn_trace::TurnContext::current(), index,
             );

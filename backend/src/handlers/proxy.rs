@@ -527,6 +527,110 @@ struct PreResolved {
     is_auto_connected: bool,
 }
 
+/// Exact server-admitted skill package. The ordinary HTTP path still owns
+/// catalog restrictions, approval decisions, concurrency and billing.
+pub(super) async fn channel_guest_skill_download(
+    state: &AppState,
+    mut service: crate::models::downstream_service::DownstreamService,
+    permit: crate::services::channel_guest_access::skills::Permit,
+) -> AppResult<Response> {
+    use crate::services::channel_guest_access::skills;
+    permit.revalidate(&state.db).await?;
+    if service.slug != "ornn-api" || service.service_type != "http" || service.inference.is_some() {
+        return Err(AppError::Forbidden(
+            "Ornn package service unavailable".into(),
+        ));
+    }
+    let key = crate::services::key_service::get_api_key(
+        &state.db,
+        &permit.chat.user_id,
+        &permit.chat.api_key_id,
+    )
+    .await?;
+    let mut auth = Box::pin(crate::mw::auth::api_key_auth_user(
+        &state.db, &key, None, None, None,
+    ))
+    .await?;
+    let live = auth
+        .assistant_chat
+        .take()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    if live.channel_guest.as_ref() != Some(&permit.turn) || live.turn_id != permit.chat.turn_id {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    // Only this exact server-owned catalog route is projected. The verified
+    // chat remains on the permit for live policy, payer and turn checks.
+    auth.allow_all_services = false;
+    auth.allowed_service_ids = vec![service.id.clone()];
+    auth.allow_all_nodes = false;
+    auth.allowed_node_ids.clear();
+    auth.org_agent_access = None;
+    auth.assistant_agent_owner_id = None;
+    auth.execution_permission = None;
+    auth.execution_enrolled = false;
+    auth.approval_owner_user_id = Some(permit.maintainer.clone());
+    auth.assistant_operation_scopes = permit.operation_scopes.clone();
+    auth.assistant_turn_fence = Some(Box::new(permit.chat.turn_fence()));
+    let service_id = service.id.clone();
+    let path = permit.path();
+    permit.check_scope(&service_id)?;
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/api/v1/proxy/{service_id}{path}"))
+        .body(Body::empty())
+        .map_err(|_| AppError::BadRequest("Invalid pinned package path".into()))?;
+    let capability = skills::issue(state, &permit, &service)?;
+    let owner = permit.owner.clone();
+    let billing_owner = permit
+        .chat
+        .org_agent_access
+        .as_ref()
+        .and_then(|access| access.channel())
+        .and_then(|channel| channel.guest_payer())
+        .map_or_else(
+            || permit.chat.user_id.clone(),
+            |payer| payer.org_id().to_owned(),
+        );
+    request.extensions_mut().insert(permit);
+    request
+        .extensions_mut()
+        .insert(super::assistant_nyxagent::SERVER_TURN_POLICY);
+    // Use only the configured Ornn origin. Instance and alternate destination
+    // routing, plus any provider credential transforms, have separate authority.
+    service.destination_targets.clear();
+    service.token_exchange_config = None;
+    service.platform_key = None;
+    service.credential_encrypted.clear();
+    let target = super::public_proxy::public_proxy_target(service);
+    Box::pin(execute_proxy_inner(
+        state,
+        &auth,
+        &service_id,
+        &path,
+        request,
+        Some(PreResolved {
+            target,
+            catalog_service_slug: Some("ornn-api".into()),
+            node_id: None,
+            user_service_id: None,
+            has_server_credential: false,
+            master_credential: false,
+            require_identity_assertion: false,
+            credential_source: None,
+            effective_owner_id: owner,
+            billing_owner_id: Some(billing_owner),
+            is_auto_connected: false,
+        }),
+        TargetMode::CallerAddressed,
+        vec![(
+            skills::CAPABILITY_HEADER.into(),
+            capability.as_str().to_owned(),
+        )],
+        &mut String::new(),
+    ))
+    .await
+}
+
 /// Return the persisted owner of an exact UserService for a shared turn.
 /// Shared discovery exposes both the owner's connection and the actor's own
 /// same-catalog connection; the execution preflight must scope later
@@ -1735,6 +1839,13 @@ async fn proxy_request_through_pool(
     resolved_slug: &mut String,
     pool: crate::models::service_pool::ServicePool,
 ) -> AppResult<Response> {
+    if auth_user
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+    {
+        return Err(crate::services::channel_guest_access::policy::denied());
+    }
     if request.method() == Method::CONNECT || is_ws_upgrade_request(&request) {
         return Err(AppError::BadRequest(
             "service pool failover does not support WebSocket or CONNECT requests".to_string(),
@@ -3640,13 +3751,21 @@ async fn resolve_proxy_execution_inner(
         // for org-routed calls, the actor for personal) when looking up
         // the node fallback list, so the failover candidates reflect
         // the org's bindings rather than just the actor's personal ones.
-        let mut node_route = build_pre_resolved_node_route(
-            state,
-            &pre.effective_owner_id,
-            service_id,
-            pre.node_id.as_deref(),
-        )
-        .await?;
+        let mut node_route = if request
+            .extensions()
+            .get::<crate::services::channel_guest_access::skills::Permit>()
+            .is_some()
+        {
+            None
+        } else {
+            build_pre_resolved_node_route(
+                state,
+                &pre.effective_owner_id,
+                service_id,
+                pre.node_id.as_deref(),
+            )
+            .await?
+        };
 
         if crate::services::credential_verification::checking() && node_route.is_some() {
             return Err(AppError::Conflict(
@@ -4202,6 +4321,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
         .is_some();
+    let channel_guest_skill = request
+        .extensions()
+        .get::<crate::services::channel_guest_access::skills::Permit>()
+        .cloned();
     let permission_bound =
         auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound;
     let model_request = request
@@ -4572,7 +4695,10 @@ async fn execute_resolved_proxy_inner<'a>(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
-            auth_user.org_agent_access.as_deref(),
+            channel_guest_skill
+                .as_ref()
+                .and_then(|permit| permit.chat.org_agent_access.as_deref())
+                .or(auth_user.org_agent_access.as_deref()),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
@@ -4634,7 +4760,12 @@ async fn execute_resolved_proxy_inner<'a>(
     {
         billing_ctx = billing_ctx.with_platform_model_orchestration(proof);
     }
-    billing_ctx = billing_ctx.with_assistant_payer(auth_user.assistant_chat.as_deref());
+    billing_ctx = billing_ctx.with_assistant_payer(
+        channel_guest_skill
+            .as_ref()
+            .map(|permit| &permit.chat)
+            .or(auth_user.assistant_chat.as_deref()),
+    );
     billing_ctx = billing_ctx.with_assistant_provenance(
         auth_user.assistant_turn_fence.is_some(),
         nyxagent_admission,
@@ -4828,6 +4959,63 @@ async fn execute_resolved_proxy_inner<'a>(
     } else {
         crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path).ok()
     };
+    use crate::services::channel_guest_access::{guest_tools, policy as guest_data_policy};
+    let channel_guest_chat = auth_user
+        .assistant_chat
+        .as_deref()
+        .filter(|chat| chat.channel_guest.is_some());
+    let mut channel_guest_sheets = if let Some(chat) = channel_guest_chat {
+        let model_transport = !is_ws_candidate
+            && !shared_connect
+            && !is_pool_attempt
+            && node_route.is_none()
+            && target.service.inference.is_some()
+            && guest_tools::stateless_model_request(
+                &method,
+                path,
+                query.as_deref(),
+                &all_headers,
+                &body_bytes,
+            );
+        if channel_guest_skill.is_some() || model_transport {
+            None
+        } else {
+            if is_ws_candidate
+                || shared_connect
+                || streaming_body.is_some()
+                || is_pool_attempt
+                || pool_authority.is_some()
+                || node_route.is_some()
+                || !has_server_credential
+                || permission_ingress.is_some()
+                || durable_grant_id.is_some()
+                || durable_operation_id.is_some()
+            {
+                return Err(guest_data_policy::denied());
+            }
+            let content_type = single_system_header(&all_headers, "content-type")?;
+            let authorized = Box::pin(guest_tools::authorize_sheets(
+                &state.db,
+                chat,
+                guest_tools::SheetsRequest {
+                    catalog_slug: catalog_service_slug.as_deref(),
+                    connection_id: resolved_user_service_id.as_deref(),
+                    target: &target,
+                    method: &method,
+                    path: operation_path
+                        .as_ref()
+                        .ok_or_else(guest_data_policy::denied)?,
+                    query: query.as_deref(),
+                    body: &body_bytes,
+                    content_type: content_type.as_deref(),
+                },
+            ))
+            .await?;
+            Some(authorized)
+        }
+    } else {
+        None
+    };
     if let (true, Some(canonical)) = (operation_scoped, operation_path.as_ref()) {
         // Check the bytes that will be sent: the stream-usage normalization
         // applied before dispatch, on a cheap reference-counted copy. A
@@ -4857,42 +5045,46 @@ async fn execute_resolved_proxy_inner<'a>(
             }
         })?;
     }
-    let operation_guest = box_proxy_future(|| {
-        crate::services::agent_operation_scope_service::check_non_mcp_context(
-            &state.db,
-            auth_user,
-            operation_scoped,
-            operation_scope_id,
-            operation_catalog_id,
-            method.as_str(),
-            operation_path.as_ref(),
-            crate::services::agent_operation_scope_service::GuestHttpContext {
-                catalog_slug: catalog_service_slug.as_deref(),
-                query: query.as_deref(),
-                websocket: is_ws_candidate,
-                // The webhook floor runs before assistant selection/consent.
-                // Give it the same closed inference classification; a bare POST
-                // without a catalog endpoint row is otherwise treated as a write.
-                // This changes only that floor, never grants or guest authority.
-                stateless_model: auth_user.assistant_chat.as_deref().is_some_and(|chat| {
-                    chat.confirmation_policy.is_some() && !chat.guest && chat.turn_live
-                }) && !is_ws_candidate
-                    && method == Method::POST
-                    && target.service.inference.is_some()
-                    && serde_json::from_slice(&body_bytes).is_ok_and(|body| {
-                        crate::services::assistant_service_execution::stateless_inference(
-                            path, &body,
-                        )
-                    }),
-            },
-        )
-    })
-    .await
-    .inspect_err(|error| {
-        if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
-            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
-        }
-    })?;
+    let operation_guest = if channel_guest_skill.is_some() {
+        true
+    } else {
+        box_proxy_future(|| {
+            crate::services::agent_operation_scope_service::check_non_mcp_context(
+                &state.db,
+                auth_user,
+                operation_scoped,
+                operation_scope_id,
+                operation_catalog_id,
+                method.as_str(),
+                operation_path.as_ref(),
+                crate::services::agent_operation_scope_service::GuestHttpContext {
+                    catalog_slug: catalog_service_slug.as_deref(),
+                    query: query.as_deref(),
+                    websocket: is_ws_candidate,
+                    // The webhook floor runs before assistant selection/consent.
+                    // Give it the same closed inference classification; a bare POST
+                    // without a catalog endpoint row is otherwise treated as a write.
+                    // This changes only that floor, never grants or guest authority.
+                    stateless_model: auth_user.assistant_chat.as_deref().is_some_and(|chat| {
+                        chat.confirmation_policy.is_some() && !chat.guest && chat.turn_live
+                    }) && !is_ws_candidate
+                        && method == Method::POST
+                        && target.service.inference.is_some()
+                        && serde_json::from_slice(&body_bytes).is_ok_and(|body| {
+                            crate::services::assistant_service_execution::stateless_inference(
+                                path, &body,
+                            )
+                        }),
+                },
+            )
+        })
+        .await
+        .inspect_err(|error| {
+            if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+                GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+            }
+        })?
+    };
 
     if operation_guest {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
@@ -5011,6 +5203,7 @@ async fn execute_resolved_proxy_inner<'a>(
         // invocation. It must never author or dispatch a new execution
         // permission proposal before the legacy approval guard below runs.
         && !invocation_diagnostic_probe
+        && channel_guest_sheets.is_none()
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
@@ -5181,23 +5374,39 @@ async fn execute_resolved_proxy_inner<'a>(
         .as_deref()
         .unwrap_or(&approval_owner_user_id);
     let approval_requester_id = auth_user.approval_requester_id();
-    let (approval_outcome, approval_auto) = box_proxy_future(|| {
-        crate::services::execution_permission_dispatch::approval(
-            auth_user.execution_permission.as_ref(),
-            &state.db,
-            &approval_owner_user_id,
-            service_owner_for_approval,
-            service_id,
-            resolved_user_service_id.as_deref(),
-            &operation,
-            auth_user.approval_requester_type(),
-            &approval_requester_id,
-            auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
-            is_auto_connected_for_approval,
-            auth_user.assistant_chat.as_deref(),
+    let (approval_outcome, approval_auto) = if let Some(permit) = &channel_guest_skill {
+        (
+            crate::services::approval_service::evaluate_channel_skill_read(
+                &state.db,
+                &permit.maintainer,
+                &permit.owner,
+                service_id,
+                &operation,
+                &permit.turn.bot_id,
+                permit.all_requests_approved,
+            )
+            .await?,
+            None,
         )
-    })
-    .await?;
+    } else {
+        box_proxy_future(|| {
+            crate::services::execution_permission_dispatch::approval(
+                auth_user.execution_permission.as_ref(),
+                &state.db,
+                &approval_owner_user_id,
+                service_owner_for_approval,
+                service_id,
+                resolved_user_service_id.as_deref(),
+                &operation,
+                auth_user.approval_requester_type(),
+                &approval_requester_id,
+                auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
+                is_auto_connected_for_approval,
+                auth_user.assistant_chat.as_deref(),
+            )
+        })
+        .await?
+    };
 
     let approval_outcome = crate::services::execution_permission_dispatch::approval_outcome(
         auth_user.execution_permission.as_ref(),
@@ -5215,7 +5424,7 @@ async fn execute_resolved_proxy_inner<'a>(
         );
 
     crate::services::agent_operation_scope_service::check_guest_approval(
-        operation_guest,
+        (operation_guest || channel_guest_sheets.is_some()) && channel_guest_skill.is_none(),
         &approval_outcome,
     )
     .inspect_err(|_| {
@@ -5228,6 +5437,15 @@ async fn execute_resolved_proxy_inner<'a>(
             reason.record(Stage::Proxy, Some(403));
         }
     })?;
+    if let Some(authorized) = &mut channel_guest_sheets {
+        authorized.approval = Some(guest_tools::SheetsApproval {
+            actor: approval_owner_user_id.clone(),
+            owner: service_owner_for_approval.to_owned(),
+            catalog: service_id.to_owned(),
+            descriptor: operation.clone(),
+            auto_connected: is_auto_connected_for_approval,
+        });
+    }
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -5285,6 +5503,12 @@ async fn execute_resolved_proxy_inner<'a>(
             request_audit.denied(403);
             return Err(AppError::Forbidden(
                 "Diagnostic probe skipped: approval required".to_string(),
+            ));
+        }
+        approval_service::ApprovalOutcome::NeedsApproval(_) if channel_guest_skill.is_some() => {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "The attached skill read requires approval".into(),
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
@@ -7269,6 +7493,9 @@ async fn execute_resolved_proxy_inner<'a>(
             // Convert axum HeaderMap to reqwest HeaderMap
             let mut reqwest_headers = reqwest::header::HeaderMap::new();
             for (name, value) in all_headers.iter() {
+                if channel_guest_sheets.is_some() && *name != axum::http::header::CONTENT_TYPE {
+                    continue;
+                }
                 if let Ok(reqwest_name) =
                     reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
                     && let Ok(reqwest_value) =
@@ -7403,7 +7630,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     durable_operation_grant_service::mark_dispatched(&state.db, reservation, None)
                         .await?;
                 }
-                if let Some(guard) =
+                let guard =
                     crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
                         assistant_decision.admission.as_ref(),
                         machine_ingress.as_ref(),
@@ -7419,7 +7646,11 @@ async fn execute_resolved_proxy_inner<'a>(
                             .observed(model_request.as_ref())
                             .projected(&assistant_projection)
                             .routed(node_route.as_ref())
-                    })
+                    });
+                let guard = crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+                    guard, &state.db, channel_guest_chat, None,
+                );
+                if let Some(guard) = guard
                     && let Err(error) = guard.revalidate().await
                 {
                     if let Some(reservation) = durable_reservation.as_ref() {
@@ -7557,6 +7788,25 @@ async fn execute_resolved_proxy_inner<'a>(
                 return observe_model_response(model_request, path, response).await;
             }
 
+            if let Some(permit) = &channel_guest_skill {
+                let result = async {
+                    permit.revalidate(&state.db).await?;
+                    crate::services::channel_guest_access::skills::revalidate_catalog(
+                        &state.db,
+                        &target.service,
+                    )
+                    .await?;
+                    permit.require_approved(&state.db, service_id).await
+                }
+                .await;
+                if let Err(error) = result {
+                    state
+                        .billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+            }
             // Reuse the shared reqwest::Client from AppState for connection pooling.
             if resolved_user_service_id.is_none()
                 && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
@@ -7684,6 +7934,13 @@ async fn execute_resolved_proxy_inner<'a>(
                         .projected(&assistant_projection)
                         .routed(node_route.as_ref())
                 });
+            let egress_guard =
+                crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+                    egress_guard,
+                    &state.db,
+                    channel_guest_chat,
+                    channel_guest_sheets.as_ref(),
+                );
             if shared_connect {
                 require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
             }
@@ -7701,6 +7958,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     proxy_service::forward_request_with_resource_proof(
                         if publication_dispatch.is_some()
                             || crate::services::credential_verification::checking()
+                            || channel_guest_skill.is_some()
                             || is_pool_attempt
                             || operation_scoped
                             || operation_guest

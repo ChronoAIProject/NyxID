@@ -81,7 +81,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "c526844b3d17aa7a1211f84b3e167ffa92c1e7fae23853506517fc966a0a8dae"
+        "8acbe2061299e980970c72edbec11205c3575ef6f29ae743074d5023de3ca873"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -109,7 +109,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let native_reply_base = "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50";
     let mobile_social_base = "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b";
     let meta_consent_base = "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d";
+    let before_channel_guest = "c526844b3d17aa7a1211f84b3e167ffa92c1e7fae23853506517fc966a0a8dae";
     for digest in [
+        Some(before_channel_guest),
         Some(meta_consent_base),
         Some(mobile_social_base),
         Some(native_reply_base),
@@ -169,6 +171,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         );
         let includes_meta = digest.is_some_and(|v| {
             v == live
+                || v == before_channel_guest
                 || v == device_base
                 || v == node_device_base
                 || v == meta_consent_base
@@ -194,6 +197,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                     && field.field == "response_reply.ciphertext"
                     && field.authenticated_current == 11),
             digest == Some(live.as_str())
+                || digest == Some(before_channel_guest)
                 || digest == Some(node_device_base)
                 || digest == Some(meta_consent_base)
                 || digest == Some(mobile_social_base)
@@ -202,6 +206,12 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 || digest == Some(event_reply_checkpoint)
                 || digest == Some(device_base)
                 || digest == Some(reply_draft)
+        );
+        assert_eq!(
+            report.field_outcomes.iter().any(|field| {
+                field.collection == "nyxbot_events" && field.field == "channel_guest_setup_payload"
+            }),
+            digest == Some(live.as_str()),
         );
         let expected = match digest {
             Some(previous_labels::DIGEST) => Some((

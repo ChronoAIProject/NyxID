@@ -734,6 +734,99 @@ async fn aurinko_partial_batch_retries_reuse_uuid_and_committed_messages_dedup()
 }
 
 #[tokio::test]
+async fn channel_guest_aurinko_retries_settle_only_proven_obsolete_receipts() {
+    use crate::models::feature_flag_override::COLLECTION_NAME as FLAGS;
+    use crate::services::{
+        channel_guest_access as guest,
+        feature_flag_service::{self as flags, FlagTarget},
+        security_readiness_service::ready_test_replica,
+    };
+
+    let fixture = Fixture::new().await;
+    let db = &fixture.state.db;
+    db.collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &fixture.bot.user_id,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    ready_test_replica(db).await;
+    let flag = flags::set_platform_override(
+        db,
+        guest::FLAG,
+        &FlagTarget::Global,
+        true,
+        &fixture.bot.user_id,
+    )
+    .await
+    .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    guest::update_activation_in_session(db, &mut session, true)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+
+    fixture.mock.lock().await.callback_status = 500;
+    assert!(fixture.event(&["guest-retry"]).await.is_err());
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+    let original = fixture.original().await;
+    assert!(original.guest_relay.is_some());
+    let messages = db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+    let read_receipt = || messages.find_one(doc! {"_id": &original.id});
+
+    db.collection::<bson::Document>(FLAGS)
+        .update_one(
+            doc! {"_id": &flag.id},
+            doc! {"$set":{"enabled":"unreadable"}},
+        )
+        .await
+        .unwrap();
+    assert!(fixture.event(&["guest-retry"]).await.is_err());
+    assert!(
+        !read_receipt()
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("guest_relay_obsolete_at")
+    );
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+
+    flags::set_platform_override(
+        db,
+        guest::FLAG,
+        &FlagTarget::Global,
+        false,
+        &fixture.bot.user_id,
+    )
+    .await
+    .unwrap();
+    fixture.mock.lock().await.callback_status = 202;
+    fixture.event(&["guest-retry"]).await.unwrap();
+    assert!(
+        read_receipt()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("guest_relay_obsolete_at")
+            .is_ok()
+    );
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+    fixture.event(&["guest-retry"]).await.unwrap();
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+
+    fixture.event(&["fresh-message"]).await.unwrap();
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 2);
+    assert!(
+        fixture.mock.lock().await.callbacks[1]
+            .get("guest_access_token")
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn aurinko_inflight_claim_is_retryable_and_concurrent_batches_forward_once() {
     let f = Fixture::new().await;
     let EventDedupClaimResult::Claimed(claim) = EventDedupStore::claim(

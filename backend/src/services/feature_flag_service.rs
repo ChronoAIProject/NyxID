@@ -446,12 +446,19 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+const CHANNEL_GUEST_ACCESS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: super::channel_guest_access::FLAG,
+    description: "Enable the channel guest audience add-on for selected bots. Global only and requires serving-fleet readiness.",
+    default_enabled: false,
+};
+
 /// Flags resolved without a user or organization; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
     INVITATION_CODE_FLAG_KEY,
     OAUTH_EXACT_REDIRECTS_FLAG_KEY,
     APP_TOKEN_MANAGEMENT_FLAG_KEY,
+    super::channel_guest_access::FLAG,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
 ];
@@ -554,6 +561,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
+    CHANNEL_GUEST_ACCESS_FLAG,
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
@@ -636,6 +644,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
+    CHANNEL_GUEST_ACCESS_FLAG,
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
@@ -1333,6 +1342,10 @@ pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<
 
 pub async fn oauth_exact_redirects_enforced(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &OAUTH_EXACT_REDIRECTS_FLAG).await
+}
+
+pub(crate) async fn channel_guest_access_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &CHANNEL_GUEST_ACCESS_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {

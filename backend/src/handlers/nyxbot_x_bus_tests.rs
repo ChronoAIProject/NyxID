@@ -576,6 +576,9 @@ async fn org_x_verification_then_personal_specialist_dm_is_answered_and_private_
     // A concurrent request holding the original link snapshot cannot claim success.
     let stale_sender = Sender {
         truncated_original_bytes: None,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
         original_kind: None,
         media: Vec::new(),
         original_message: true,

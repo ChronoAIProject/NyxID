@@ -442,6 +442,16 @@ async fn mutate_in_session(
             {
                 security_readiness_service::require_flag_enable(db, key).await?;
             }
+            if key == super::channel_guest_access::FLAG
+                && before.as_ref().is_some_and(|row| row.enabled) != enabled.unwrap_or(false)
+            {
+                super::channel_guest_access::update_activation_in_session(
+                    db,
+                    session,
+                    enabled.unwrap_or(false),
+                )
+                .await?;
+            }
             if key == enrollment::FLAG {
                 // A clear restores inheritance. Gate potential widening, while a
                 // disable stays available even if readiness or scope reads fail.

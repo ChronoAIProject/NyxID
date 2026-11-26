@@ -148,6 +148,7 @@ pub async fn allocate(
         revision: 1,
         label: "Allocated provider resource".into(),
         agent_id: String::new(),
+        parent_channel_bot_id: None,
         credential: input.setup.credential.clone(),
         account_id: input.setup.account_id.clone(),
         resource_id: input.setup.resource_id.clone(),

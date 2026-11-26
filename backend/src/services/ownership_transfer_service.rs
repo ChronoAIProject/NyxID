@@ -979,10 +979,26 @@ pub async fn transfer_with_keys(
                 set.extend(rebound.clone());
             }
             let mut update = doc! { "$set": set };
+            let mut retire_guest_data = false;
             if kind == ResourceKind::ChannelBot {
                 let mut increments=doc! {"ownership_version":1_i64};
-                let moving_bot=db.collection::<Document>(BOTS).find_one(doc! {"_id":&resource_id}).session(&mut **transaction).await?;
-                if moving_bot.as_ref().and_then(|row|row.get_str("platform").ok()).is_some_and(super::channel_adapters::meta::is_meta) {
+                let moving_bot = credential_rebind.as_ref().map(|(row, _)| row)
+                    .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
+                let current = super::channel_bot_record::decode(moving_bot)?;
+                retire_guest_data = moving_bot.get_bool("channel_guest_data_present") == Ok(true);
+                if current.guest_access_v1_revision > 0 || retire_guest_data {
+                    current.guest_access_v1_revision.checked_add(1)
+                        .ok_or_else(|| AppError::Conflict("Bot guest access revision exhausted".into()))?;
+                    increments.insert("guest_access_v1_revision", 1_i64);
+                }
+                if retire_guest_data {
+                    let cutoff = current.ownership_version.checked_add(1)
+                        .ok_or_else(|| AppError::Conflict("Bot ownership revision exhausted".into()))?;
+                    update.get_document_mut("$set").map_err(|_| AppError::Internal("Invalid channel transfer".into()))?
+                        .insert("channel_guest_purge_before_ownership", cutoff);
+                    update.insert("$unset", doc! { "guest_skill_selection": "" });
+                }
+                if super::channel_adapters::meta::is_meta(&current.platform) {
                     increments.insert("meta_binding.generation",1_i64);
                     update.get_document_mut("$set").map_err(|_|AppError::Internal("Invalid channel transfer".into()))?.extend(doc! {
                         "meta_binding.subscription":"reconnect_required","meta_binding.grant_reconnect_required":true,
@@ -1018,6 +1034,11 @@ pub async fn transfer_with_keys(
                 return Err(AppError::Conflict(
                     "The resource owner changed. Review a fresh transfer preview".into(),
                 ));
+            }
+            if retire_guest_data {
+                super::channel_guest_access::setup::retire_for_transfer_in_session(
+                    &db, transaction, &resource_id,
+                ).await?;
             }
             let receipt = OwnershipTransfer {
                 tool_transfer: reviewed.tool_transfer,

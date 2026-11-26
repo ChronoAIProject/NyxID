@@ -430,6 +430,8 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(result.status, "active");
     assert_eq!(result.platform, "telegram-new");
     assert_eq!(result.credential_source, "platform");
+    assert!(result.guest_access_v1);
+    assert_eq!(result.guest_access_v1_revision, 1);
     let provenance = state
         .db
         .collection::<crate::models::telegram_bot_request::ManagedBotEvents>(
@@ -443,11 +445,19 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
         provenance.retired,
         "provisioning permanently consumes the creation identity"
     );
+    state.db.collection::<ChannelBot>(BOTS)
+        .update_one(doc! {"_id":&result.id}, doc! {"$set":{
+            "guest_access_v1":false,"guest_access_v1_revision":2_i64,
+        }})
+        .await
+        .unwrap();
     let repeated = service
         .connect(&actor, &ready.id, 900, ready.revision)
         .await
         .unwrap();
     assert_eq!(result.id, repeated.id);
+    assert!(!repeated.guest_access_v1);
+    assert_eq!(repeated.guest_access_v1_revision, 2);
     assert_eq!(
         state
             .db

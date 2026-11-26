@@ -323,6 +323,13 @@ async fn insert_device_conversation(
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
                 fence_route_key(&db, &conversation.agent_api_key_id, session).await?;
+                super::channel_guest_access::relay::require_assignment_in_session(
+                    &db,
+                    session,
+                    &conversation.agent_api_key_id,
+                    None,
+                )
+                .await?;
                 db.collection::<ChannelConversation>(COLLECTION_NAME)
                     .insert_one(&conversation)
                     .session(&mut *session)
@@ -377,6 +384,9 @@ async fn insert_bot_conversation(
                     )
                     .await?;
                     fence_route_key(&db, &conversation.agent_api_key_id, session).await?;
+                    super::channel_guest_access::relay::require_assignment_in_session(
+                        &db, session, &conversation.agent_api_key_id, Some(&conversation.id),
+                    ).await?;
                     if let Some(callback) = &expected_callback {
                         let key = db.collection::<ApiKey>(API_KEYS).find_one(doc! {
                             "_id": &conversation.agent_api_key_id, "user_id": &conversation.user_id,
@@ -413,6 +423,29 @@ async fn insert_bot_conversation(
         .map_err(map_transaction_error)
 }
 
+pub(crate) async fn guest_access_state(
+    db: &mongodb::Database,
+    route: &ChannelConversation,
+) -> AppResult<&'static str> {
+    use super::channel_guest_access::{GuestMode, relay};
+    let Some(bot_id) = route.channel_bot_id.as_deref().filter(|_| route.is_active) else {
+        return Ok("ordinary");
+    };
+    if super::channel_guest_access::select_mode(db, bot_id).await? == GuestMode::Legacy {
+        return Ok("ordinary");
+    }
+    if relay::is_hosted_route(db, bot_id, &route.id, &route.agent_api_key_id).await? {
+        return Ok("hosted");
+    }
+    match relay::external_route_status(db, route).await {
+        Ok(relay::ExternalRouteStatus::Ready) => Ok("guest_access"),
+        Ok(relay::ExternalRouteStatus::DedicatedKeyRequired) => Ok("ordinary_dedicated_key_required"),
+        Ok(relay::ExternalRouteStatus::LegacyCallbackPending) => Ok("ordinary_legacy_callback_pending"),
+        Err(AppError::Forbidden(_)) => Ok("guest_access_key_unavailable"),
+        Err(error) => Err(error),
+    }
+}
+
 /// List active conversations for a user, optionally filtered by bot.
 pub async fn list_conversations(
     db: &mongodb::Database,
@@ -444,6 +477,24 @@ pub async fn update_conversation(
     default_agent: Option<bool>,
     is_active: Option<bool>,
     allow_agent_initiated: Option<bool>,
+) -> AppResult<ChannelConversation> {
+    update_conversation_with_guest_key(
+        db, conversation_id, user_id, agent_api_key_id, default_agent, is_active,
+        allow_agent_initiated, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn update_conversation_with_guest_key(
+    db: &mongodb::Database,
+    conversation_id: &str,
+    user_id: &str,
+    agent_api_key_id: Option<&str>,
+    default_agent: Option<bool>,
+    is_active: Option<bool>,
+    allow_agent_initiated: Option<bool>,
+    dedicate_agent_key: bool,
 ) -> AppResult<ChannelConversation> {
     let current = db
         .collection::<ChannelConversation>(COLLECTION_NAME)
@@ -492,7 +543,12 @@ pub async fn update_conversation(
         set_doc.insert("default_agent", default);
     }
     if current.channel_bot_id.is_some() {
-        return mutate_bot_conversation(db, &current, set_doc, default_agent == Some(true)).await;
+        return mutate_bot_conversation(
+            db, &current, set_doc, default_agent == Some(true), dedicate_agent_key,
+        ).await;
+    }
+    if dedicate_agent_key {
+        return Err(AppError::ValidationError("Device routes do not use guest access keys".into()));
     }
 
     if let Some(key) = widened_route_key(&set_doc, &current).map(str::to_owned) {
@@ -505,6 +561,9 @@ pub async fn update_conversation(
             .and_run2(async move |session| {
                 let result: AppResult<ChannelConversation> = async {
                     fence_route_key(&db, &key, session).await?;
+                    super::channel_guest_access::relay::require_assignment_in_session(
+                        &db, session, &key, None,
+                    ).await?;
                     let mut filter = doc! { "_id": &conversation_id, "user_id": &user_id, "retired_by_transfer": { "$ne": true } };
                     pin_fenced_key(&mut filter, &set_doc, &key);
                     db.collection::<ChannelConversation>(COLLECTION_NAME)
@@ -572,6 +631,7 @@ pub async fn delete_conversation(
                 &current,
                 doc! {"is_active": false, "updated_at": bson::DateTime::now()},
                 false,
+                false,
             )
             .await?;
             return Ok(());
@@ -623,6 +683,7 @@ async fn mutate_bot_conversation(
     current: &ChannelConversation,
     set: bson::Document,
     default: bool,
+    dedicate_agent_key: bool,
 ) -> AppResult<ChannelConversation> {
     use super::api_key_mutation_service::{map_transaction_error, transaction_result};
     let db = db.clone();
@@ -635,7 +696,21 @@ async fn mutate_bot_conversation(
             let mut filter = doc! {"_id": &current.id, "user_id": &current.user_id, "channel_bot_id": bot, "retired_by_transfer": {"$ne": true}};
             if let Some(key) = widened_route_key(&set, &current) {
                 fence_route_key(&db, key, session).await?;
+                super::channel_guest_access::relay::require_assignment_in_session(
+                    &db, session, key, Some(&current.id),
+                ).await?;
                 pin_fenced_key(&mut filter, &set, key);
+            }
+            if dedicate_agent_key {
+                let key = set.get_str("agent_api_key_id").unwrap_or(&current.agent_api_key_id);
+                if !set.get_bool("is_active").unwrap_or(current.is_active) {
+                    return Err(AppError::Conflict("Enable the route before dedicating its key".into()));
+                }
+                fence_route_key(&db, key, session).await?;
+                filter.insert("agent_api_key_id", &current.agent_api_key_id);
+                super::channel_guest_access::relay::dedicate_key_in_session(
+                    &db, session, &current, key,
+                ).await?;
             }
             let reconcile_default = if !default
                 && super::channel_adapters::meta::is_meta(&current.platform)
@@ -1050,6 +1125,7 @@ mod tests {
                 &db,
                 &stale,
                 doc! {"is_active": true, "updated_at": bson::DateTime::now()},
+                false,
                 false,
             )
             .await

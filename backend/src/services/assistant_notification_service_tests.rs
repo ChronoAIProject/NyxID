@@ -1321,6 +1321,7 @@ fn chat_authority(row: &AssistantConversation, agent_id: &str) -> acks::ChatAuth
     acks::ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,

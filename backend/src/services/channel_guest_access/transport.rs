@@ -1,0 +1,498 @@
+//! Positive identity and destination evidence from authenticated channel ingress.
+
+use super::AnswerAudience;
+use crate::models::{
+    channel_bot::ChannelBot, channel_message::ChannelMessage, channel_thread::ChannelThreadFacts,
+};
+use crate::services::channel_platform::{InboundMessage, canonical_platform};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+#[derive(Clone, Copy)]
+pub(crate) struct TransportFacts<'a> {
+    pub sender_id: Option<&'a str>,
+    pub audience: AnswerAudience,
+}
+
+impl Default for TransportFacts<'_> {
+    fn default() -> Self {
+        Self {
+            sender_id: None,
+            audience: AnswerAudience::Shared,
+        }
+    }
+}
+
+/// Canonical identity of one authenticated platform reply address. Hash the
+/// tuple because some adapters use a short-lived interaction secret as a selector.
+pub(crate) fn destination(chat_id: &str, thread_id: Option<&str>) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"nyxid.channel-guest.destination.v1");
+    hash.update((chat_id.len() as u64).to_be_bytes());
+    hash.update(chat_id.as_bytes());
+    if let Some(thread) = thread_id {
+        hash.update([1]);
+        hash.update(thread.as_bytes());
+    } else {
+        hash.update([0]);
+    }
+    hex::encode(hash.finalize())
+}
+
+pub(crate) fn inbound_facts<'a>(
+    bot: &ChannelBot,
+    message: &'a InboundMessage,
+    discord: Option<&ChannelThreadFacts>,
+) -> TransportFacts<'a> {
+    authenticated_facts(
+        &bot.platform,
+        &bot.platform_bot_id,
+        &message.raw_data,
+        &message.conversation_id,
+        &message.platform_message_id,
+        &message.sender_platform_id,
+        discord,
+    )
+}
+
+/// Bind the server's persisted provider evidence to the original local source
+/// and the destination the caller resolved independently.
+pub(crate) fn stored_facts<'a>(
+    bot: &ChannelBot,
+    source: &ChannelMessage,
+    conversation_id: &str,
+    sender_id: &'a str,
+    thread_id: Option<&str>,
+) -> TransportFacts<'a> {
+    if source.direction != "inbound"
+        || source.channel_bot_id.as_deref() != Some(&bot.id)
+        || source.user_id != bot.user_id
+        || source.platform != bot.platform
+        || source.platform_conversation_id.as_deref() != Some(conversation_id)
+        || sender_id.is_empty()
+        || source.sender_platform_id.as_deref() != Some(sender_id)
+        || source.thread_id.as_deref() != thread_id
+    {
+        return TransportFacts::default();
+    }
+    source
+        .guest_transport_audience
+        .map_or_else(TransportFacts::default, |audience| TransportFacts {
+            sender_id: Some(sender_id),
+            audience,
+        })
+}
+
+/// Only use with facts derived by the authenticated Discord socket verifier
+/// or the bot-authenticated REST message and channel verifier.
+fn discord_facts<'a>(
+    bot_platform_id: &str,
+    chat_id: &str,
+    message_id: &str,
+    sender_id: &'a str,
+    facts: &ChannelThreadFacts,
+) -> TransportFacts<'a> {
+    use crate::models::channel_thread::ThreadSenderKind;
+    use crate::services::discord_gateway::valid_message_id;
+
+    if !valid_message_id(chat_id)
+        || !valid_message_id(message_id)
+        || !valid_message_id(sender_id)
+        || sender_id == bot_platform_id
+        || facts.version != 1
+        || facts.chat_id != chat_id
+        || facts.message_id != message_id
+        || facts.sender_kind != ThreadSenderKind::Human
+    {
+        return TransportFacts::default();
+    }
+    let Some(discord) = facts.discord_gateway.as_ref().filter(|discord| {
+        discord.version == 1 && discord.bot_id == bot_platform_id && !discord.author_is_bot
+    }) else {
+        return TransportFacts::default();
+    };
+    verified(sender_id, discord.channel_type == 1)
+}
+
+fn verified(sender_id: &str, private: bool) -> TransportFacts<'_> {
+    TransportFacts {
+        sender_id: Some(sender_id),
+        audience: if private {
+            AnswerAudience::Private
+        } else {
+            AnswerAudience::Shared
+        },
+    }
+}
+
+fn provider_id(value: &str, prefix: &str) -> bool {
+    value.starts_with(prefix)
+        && value.len() > prefix.len()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn authenticated_facts<'a>(
+    platform: &str,
+    bot_platform_id: &str,
+    raw: &Value,
+    chat_id: &str,
+    message_id: &str,
+    sender_id: &'a str,
+    discord: Option<&ChannelThreadFacts>,
+) -> TransportFacts<'a> {
+    let unknown = TransportFacts::default();
+    match canonical_platform(platform) {
+        "telegram" => {
+            let Some(message) = raw.get("message").or_else(|| raw.get("edited_message")) else {
+                return unknown;
+            };
+            let from = &message["from"];
+            let chat = &message["chat"];
+            if !message["message_id"]
+                .as_i64()
+                .is_some_and(|id| id > 0 && id.to_string() == message_id)
+                || !chat["id"]
+                    .as_i64()
+                    .is_some_and(|id| id != 0 && id.to_string() == chat_id)
+                || !from["id"]
+                    .as_i64()
+                    .is_some_and(|id| id > 0 && id.to_string() == sender_id)
+                || from["is_bot"] != false
+                || !message["sender_chat"].is_null()
+                || sender_id == bot_platform_id
+            {
+                return unknown;
+            }
+            verified(sender_id, chat["type"] == "private" && chat_id == sender_id)
+        }
+        "lark" | "feishu" => {
+            let message = &raw["event"]["message"];
+            let sender = &raw["event"]["sender"];
+            if raw["header"]["event_type"] != "im.message.receive_v1"
+                || raw["header"]["app_id"].as_str() != Some(bot_platform_id)
+                || sender["sender_type"] != "user"
+                || sender["sender_id"]["open_id"].as_str() != Some(sender_id)
+                || !provider_id(sender_id, "ou_")
+                || message["message_id"].as_str() != Some(message_id)
+                || !provider_id(message_id, "om_")
+                || message["chat_id"].as_str() != Some(chat_id)
+                || !provider_id(chat_id, "oc_")
+            {
+                return unknown;
+            }
+            verified(sender_id, message["chat_type"] == "p2p")
+        }
+        "discord" => {
+            use crate::services::discord_gateway::valid_message_id as snowflake;
+
+            if let Some(facts) = discord {
+                if raw["author"]["id"].as_str() != Some(sender_id) {
+                    return unknown;
+                }
+                return discord_facts(bot_platform_id, chat_id, message_id, sender_id, facts);
+            }
+            let user = if raw["guild_id"].is_null() {
+                &raw["user"]
+            } else {
+                &raw["member"]["user"]
+            };
+            if !matches!(raw["type"].as_u64(), Some(2 | 3 | 5))
+                || raw["application_id"].as_str() != Some(bot_platform_id)
+                || raw["id"].as_str() != Some(message_id)
+                || raw["channel_id"].as_str() != Some(chat_id)
+                || user["id"].as_str() != Some(sender_id)
+                || !matches!(user.get("bot"), None | Some(Value::Bool(false)))
+                || !snowflake(chat_id)
+                || !snowflake(message_id)
+                || !snowflake(sender_id)
+                || sender_id == bot_platform_id
+            {
+                return unknown;
+            }
+            verified(
+                sender_id,
+                raw["guild_id"].is_null()
+                    && raw["member"].is_null()
+                    && raw["channel"]["id"].as_str() == Some(chat_id)
+                    && raw["channel"]["type"] == 1,
+            )
+        }
+        "slack" => {
+            let event = &raw["event"];
+            if raw["type"] != "event_callback"
+                || !matches!(event["type"].as_str(), Some("message" | "app_mention"))
+                || event["channel"].as_str() != Some(chat_id)
+                || event["ts"].as_str() != Some(message_id)
+                || event["user"].as_str() != Some(sender_id)
+                || !(provider_id(sender_id, "U") || provider_id(sender_id, "W"))
+                || sender_id == bot_platform_id
+                || !event["bot_id"].is_null()
+                || matches!(
+                    event["subtype"].as_str(),
+                    Some("bot_message" | "message_changed")
+                )
+            {
+                return unknown;
+            }
+            verified(
+                sender_id,
+                event["channel_type"] == "im" && provider_id(chat_id, "D"),
+            )
+        }
+        "whatsapp" => {
+            // The adapter strips the envelope only after verifying the Meta
+            // signature and matching the receiving account and phone number.
+            if raw["id"].as_str() != Some(message_id)
+                || raw["from"].as_str() != Some(sender_id)
+                || sender_id.is_empty()
+                || sender_id.len() > 32
+                || !sender_id.bytes().all(|b| b.is_ascii_digit())
+            {
+                return unknown;
+            }
+            verified(
+                sender_id,
+                chat_id == sender_id
+                    && raw["group_id"].is_null()
+                    && (raw["recipient_type"].is_null() || raw["recipient_type"] == "individual"),
+            )
+        }
+        "x" => {
+            // Polling is authenticated to the receiving account. The X
+            // webhook also authenticates the account/tag and DM recipient
+            // before producing this normalized provider event.
+            use crate::services::discord_gateway::valid_message_id as account_id;
+            if !account_id(sender_id)
+                || !account_id(bot_platform_id)
+                || sender_id == bot_platform_id
+                || raw["sender_id"].as_str() != Some(sender_id)
+                || raw["id"].as_str() != Some(message_id)
+                || !account_id(message_id)
+                || raw["dm_conversation_id"].as_str() != Some(chat_id)
+            {
+                return unknown;
+            }
+            if let Some((left, right)) = chat_id.split_once('-') {
+                if (left == sender_id && right == bot_platform_id)
+                    || (right == sender_id && left == bot_platform_id)
+                {
+                    return verified(sender_id, true);
+                }
+                return unknown;
+            }
+            if account_id(chat_id) {
+                verified(sender_id, false)
+            } else {
+                unknown
+            }
+        }
+        _ => unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::{
+        channel_adapters::resolve_adapter, provider_token_exchange_service::TokenExchangeCache,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    async fn parsed(platform: &str, raw: &Value) -> InboundMessage {
+        resolve_adapter(platform, &Arc::new(TokenExchangeCache::new()))
+            .unwrap()
+            .parse_inbound(&serde_json::to_vec(raw).unwrap())
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    fn facts<'a>(platform: &str, bot_id: &str, message: &'a InboundMessage) -> TransportFacts<'a> {
+        authenticated_facts(
+            platform,
+            bot_id,
+            &message.raw_data,
+            &message.conversation_id,
+            &message.platform_message_id,
+            &message.sender_platform_id,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn channel_guest_transport_telegram_requires_exact_native_user_and_private_chat() {
+        let mut raw = json!({"update_id":1,"message":{
+            "message_id":20,"chat":{"id":123,"type":"private"},
+            "from":{"id":123,"is_bot":false},"text":"hello"
+        }});
+        let direct = parsed("telegram", &raw).await;
+        assert_eq!(facts("telegram", "999", &direct).sender_id, Some("123"));
+        assert_eq!(
+            facts("telegram", "999", &direct).audience,
+            AnswerAudience::Private
+        );
+
+        raw["message"]["chat"] = json!({"id":-321,"type":"supergroup"});
+        let mut group = parsed("telegram", &raw).await;
+        assert_eq!(facts("telegram", "999", &group).sender_id, Some("123"));
+        assert_eq!(
+            facts("telegram", "999", &group).audience,
+            AnswerAudience::Shared
+        );
+        group.sender_platform_id = "333".into();
+        assert_eq!(facts("telegram", "999", &group).sender_id, None);
+
+        raw["message"]["sender_chat"] = json!({"id":-321});
+        let anonymous = parsed("telegram", &raw).await;
+        assert_eq!(facts("telegram", "999", &anonymous).sender_id, None);
+    }
+
+    #[tokio::test]
+    async fn channel_guest_transport_discord_one_to_one_group_dm_and_forged_author() {
+        let mut raw = json!({
+            "type": 2, "id": "123", "application_id": "999", "channel_id": "321",
+            "channel": {"id": "321", "type": 1},
+            "user": {"id": "666", "bot":false},
+            "data": {"name": "hello"}
+        });
+        let direct = parsed("discord", &raw).await;
+        assert_eq!(facts("discord", "999", &direct).sender_id, Some("666"));
+        assert_eq!(
+            facts("discord", "999", &direct).audience,
+            AnswerAudience::Private
+        );
+        raw["channel"]["type"] = json!(3);
+        let mut group = parsed("discord", &raw).await;
+        assert_eq!(
+            facts("discord", "999", &group).audience,
+            AnswerAudience::Shared
+        );
+        assert_eq!(facts("discord", "999", &group).sender_id, Some("666"));
+        group.sender_platform_id = "667".into();
+        assert_eq!(facts("discord", "999", &group).sender_id, None);
+        assert_eq!(facts("discord", "555", &direct).sender_id, None);
+    }
+
+    #[tokio::test]
+    async fn channel_guest_transport_lark_and_feishu_bind_app_and_open_id() {
+        let mut raw = json!({
+            "header":{"event_type":"im.message.receive_v1","event_id":"event-1","app_id":"cli_bot"},
+            "event":{
+                "sender":{"sender_type":"user","sender_id":{"open_id":"ou_person"}},
+                "message":{"message_id":"om_message","chat_id":"oc_conversation",
+                    "chat_type":"p2p","message_type":"text","content":"{\"text\":\"hello\"}"}
+            }
+        });
+        for platform in ["lark", "feishu"] {
+            let direct = parsed(platform, &raw).await;
+            assert_eq!(
+                facts(platform, "cli_bot", &direct).sender_id,
+                Some("ou_person")
+            );
+            assert_eq!(
+                facts(platform, "cli_bot", &direct).audience,
+                AnswerAudience::Private
+            );
+            assert_eq!(facts(platform, "cli_other", &direct).sender_id, None);
+        }
+        raw["event"]["message"]["chat_type"] = json!("group");
+        let group = parsed("feishu", &raw).await;
+        assert_eq!(
+            facts("feishu", "cli_bot", &group).audience,
+            AnswerAudience::Shared
+        );
+        assert_eq!(
+            facts("feishu", "cli_bot", &group).sender_id,
+            Some("ou_person")
+        );
+    }
+
+    #[test]
+    fn channel_guest_transport_destination_binds_chat_and_thread() {
+        assert_ne!(destination("abc", Some("d")), destination("ab", Some("cd")));
+        assert_ne!(destination("abc", None), destination("abc", Some("")));
+        assert_ne!(destination("abc", Some("d")), destination("abc", Some("e")));
+    }
+
+    #[test]
+    fn channel_guest_transport_other_adapters_require_positive_provider_evidence() {
+        let check =
+            |platform: &str, bot: &str, chat: &str, message: &str, sender: &str, raw: Value| {
+                let result = authenticated_facts(platform, bot, &raw, chat, message, sender, None);
+                (result.sender_id.is_some(), result.audience)
+            };
+        assert_eq!(
+            check(
+                "slack",
+                "Ubot",
+                "D123",
+                "1.2",
+                "Uguest",
+                json!({
+                    "type":"event_callback","event":{"type":"message","channel":"D123",
+                        "channel_type":"im","ts":"1.2","user":"Uguest"}
+                })
+            ),
+            (true, AnswerAudience::Private),
+        );
+        assert_eq!(
+            check(
+                "slack",
+                "Ubot",
+                "G123",
+                "1.2",
+                "Uguest",
+                json!({
+                    "type":"event_callback","event":{"type":"message","channel":"G123",
+                        "channel_type":"mpim","ts":"1.2","user":"Uguest"}
+                })
+            ),
+            (true, AnswerAudience::Shared),
+        );
+        assert_eq!(
+            check(
+                "whatsapp",
+                "999",
+                "111",
+                "wamid.fake",
+                "111",
+                json!({
+                    "from":"111", "id":"wamid.fake", "recipient_type":"individual"
+                })
+            ),
+            (true, AnswerAudience::Private),
+        );
+        assert_eq!(
+            check(
+                "x",
+                "999",
+                "111-999",
+                "123",
+                "111",
+                json!({
+                    "sender_id":"111","id":"123","dm_conversation_id":"111-999"
+                })
+            ),
+            (true, AnswerAudience::Private),
+        );
+        for platform in ["aurinko", "openclaw", "device", "custom"] {
+            assert_eq!(
+                check(
+                    platform,
+                    "999",
+                    "111",
+                    "123",
+                    "111",
+                    json!({
+                        "sender_id":"111","conversation_type":"private","actor_kind":"human"
+                    })
+                ),
+                (false, AnswerAudience::Shared),
+            );
+        }
+    }
+}

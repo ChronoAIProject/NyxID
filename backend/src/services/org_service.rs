@@ -664,9 +664,18 @@ pub async fn delete_org_user(
     db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
-    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .delete_many(doc! { "user_id": org_user_id })
+    let bots = db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let mut bot_ids = bots
+        .find(doc! { "user_id": org_user_id, "channel_guest_data_present": true })
+        .projection(doc! { "_id": 1 })
         .await?;
+    while let Some(row) = bot_ids.try_next().await? {
+        let id = row
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Malformed channel bot ID".into()))?;
+        super::channel_bot_service::purge_guest_data(db, id).await?;
+    }
+    bots.delete_many(doc! { "user_id": org_user_id }).await?;
     // OpenClaw channel mappings. Hard-deleted, no blocker, no platform-
     // side cleanup: NyxID never registers anything with OpenClaw -- the
     // user manually pastes the per-mapping webhook secret into their
