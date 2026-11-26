@@ -421,7 +421,9 @@ or edit MongoDB to investigate a held reservation.
 
 1. Find `cma_sandbox_slot_occupied` in the audit log. Its metadata identifies the
    owner, reservation, catalog service and holding class. New refusals keep the
-   original HTTP 409/code 1004/message bytes; a separate transactional TTL claim
+   original HTTP 409/code 1004/message bytes. The owner receives the local
+   reservation ID, holding class, creation time and release condition in
+   `details`. A separate transactional TTL claim
    bounds these audits to one per owner/reservation/hour across upgraded replicas.
    A process-local cache suppresses looping clients before database work; the
    diagnostic never writes a reservation or creation document.
@@ -477,6 +479,23 @@ The read contract was checked against CMA commit
 `259c26cf5be0837f0f8ee4d400380e7608fb0301`: `api/crates/layer1-public/src/rest/idempotency.rs`
 (retention and durable-ledger distinction), `agents.rs` (lifecycle reads by ID),
 and `sandboxes.rs` (Sandbox detail/list and mutation routes).
+
+### Sandbox creation refusals
+
+A slot-allocating proxy request requires a JSON media type. The server checks the
+effective Content-Type, including configured defaults, before reserving or
+replaying. Both `application/json` and `application/*+json` accept parameters.
+A local 415 identifies the header to correct.
+
+For a direct Sandbox create, CMA caches the typed media-type refusal, JSON data
+error and owner Sandbox limit under the owner, key and exact body. An exact
+replay within the 23-hour window can settle those outcomes. A request-body read
+error, authentication failure or route rate limit can also precede CMA's key
+lookup. Those responses release only a single original dispatch. Agent lifecycle
+body extraction also precedes its ledger. Ambiguous responses keep the original
+creation material and slot. Each newly recognized refusal that releases a slot
+writes `cma_sandbox_creation_refused` with the owner, local reservation and HTTP
+status in the settlement transaction.
 
 ### Sandbox trust confirmation and stranded requests
 

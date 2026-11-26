@@ -1530,7 +1530,13 @@ async fn lost_creation_fixture(path: &str) -> (AsyncFixture, wiremock::MockServe
             path,
             None,
             raw,
-            || Ok(vec![("Idempotency-Key".into(), "lost-creation-key".into())].into()),
+            || {
+                Ok(vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Idempotency-Key".into(), "lost-creation-key".into()),
+                ]
+                .into())
+            },
             false,
         )
         .await
@@ -2036,7 +2042,13 @@ async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence()
         &creation.path,
         None,
         &raw,
-        || Ok(vec![("Idempotency-Key".into(), creation.idempotency_key.clone())].into()),
+        || {
+            Ok(vec![
+                ("Content-Type".into(), "application/json".into()),
+                ("Idempotency-Key".into(), creation.idempotency_key.clone()),
+            ]
+            .into())
+        },
         false,
     )
     .await
@@ -2071,6 +2083,7 @@ async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence()
         &raw,
         || {
             Ok(vec![
+                ("Content-Type".into(), "application/json".into()),
                 ("Idempotency-Key".into(), creation.idempotency_key.clone()),
                 ("x-nyxid-cma-recovery-submission".into(), recovery_identity),
             ]

@@ -1727,7 +1727,10 @@ fn ensure_callback_user_matches_state(
 
 #[cfg(test)]
 mod tests {
+    mod legacy_device_codes;
+
     use super::*;
+    use crate::crypto::aes::EncryptionKeys;
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::connect_link::{
         COLLECTION_NAME as CONNECT_LINKS, ConnectLink, ConnectLinkStatus,
@@ -1745,6 +1748,7 @@ mod tests {
     };
     use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::mw::auth::AuthMethod;
+    use crate::services::credential_record_service;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
         test_user_service,
@@ -1833,6 +1837,72 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    async fn set_provider_client(
+        keys: &EncryptionKeys,
+        provider: &mut ProviderConfig,
+        client: &str,
+        secret: Option<&str>,
+    ) {
+        for (field, slot, value) in [
+            (
+                "client_id_encrypted",
+                &mut provider.client_id_encrypted,
+                Some(client),
+            ),
+            (
+                "client_secret_encrypted",
+                &mut provider.client_secret_encrypted,
+                secret,
+            ),
+        ] {
+            *slot = match value {
+                Some(value) => {
+                    let encrypted = credential_record_service::encrypt(
+                        keys,
+                        PROVIDER_CONFIGS,
+                        &provider.id,
+                        credential_record_service::PLATFORM_OWNER,
+                        field,
+                        value.as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                    credential_record_service::mark_version(
+                        &mut provider.secret_context_versions,
+                        keys,
+                        field,
+                    );
+                    Some(encrypted)
+                }
+                None => {
+                    provider.secret_context_versions.remove(field);
+                    None
+                }
+            };
+        }
+    }
+
+    async fn set_provider_tokens(
+        keys: &EncryptionKeys,
+        token: &mut UserProviderToken,
+        access: &str,
+        refresh: &str,
+    ) {
+        let (versions, access, refresh) = credential_record_service::oauth_token_fields(
+            keys,
+            &token.id,
+            &token.user_id,
+            Some(token),
+            access,
+            Some(refresh),
+        )
+        .await
+        .unwrap();
+        token.secret_context_versions = versions;
+        token.access_token_encrypted = Some(access);
+        token.refresh_token_encrypted = refresh;
     }
 
     fn test_provider_token(token_id: &str, user_id: &str, provider_id: &str) -> UserProviderToken {
@@ -2216,20 +2286,13 @@ mod tests {
         let provider_id = Uuid::new_v4().to_string();
 
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-secret")
-                .await
-                .unwrap(),
-        );
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            Some("test-client-secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
@@ -2299,20 +2362,13 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-secret")
-                .await
-                .unwrap(),
-        );
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            Some("test-client-secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
@@ -2396,14 +2452,13 @@ mod tests {
         provider.token_url = None;
         provider.device_code_url = Some(device_url);
         provider.device_verification_url = Some("https://provider.example/device".to_string());
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = None;
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            None,
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
@@ -3081,20 +3136,13 @@ mod tests {
 
         let mut provider = test_provider_config(&provider_id);
         provider.token_url = Some(token_url);
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-secret")
-                .await
-                .unwrap(),
-        );
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            Some("test-client-secret"),
+        )
+        .await;
 
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
@@ -3337,10 +3385,13 @@ mod tests {
             .mount(&remote)
             .await;
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted =
-            Some(state.encryption_keys.encrypt(b"test-app").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(state.encryption_keys.encrypt(b"test-secret").await.unwrap());
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-app",
+            Some("test-secret"),
+        )
+        .await;
         provider.revocation = Some(RevocationConfig {
             effect_scope: None,
             request_encoding: "form".to_string(),
@@ -3354,20 +3405,13 @@ mod tests {
             .await
             .unwrap();
         let mut token = test_provider_token(&token_id, &user_id, &provider_id);
-        token.access_token_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"provider-access")
-                .await
-                .unwrap(),
-        );
-        token.refresh_token_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"provider-refresh")
-                .await
-                .unwrap(),
-        );
+        set_provider_tokens(
+            &state.encryption_keys,
+            &mut token,
+            "provider-access",
+            "provider-refresh",
+        )
+        .await;
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(token)
             .await
@@ -3629,10 +3673,13 @@ mod tests {
             let key_id = Uuid::new_v4().to_string();
             let mut provider = test_provider_config(&provider_id);
             provider.token_url = Some(token_url.clone());
-            provider.client_id_encrypted =
-                Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-            provider.client_secret_encrypted =
-                Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+            set_provider_client(
+                &state.encryption_keys,
+                &mut provider,
+                "client",
+                Some("secret"),
+            )
+            .await;
             db.collection(PROVIDER_CONFIGS)
                 .insert_one(provider)
                 .await
@@ -3814,15 +3861,43 @@ mod tests {
         let epochs = get_api_key(&db, &key_id).await.credential_epoch;
         assert!(epochs >= 1);
         let (token_url, server) = spawn_oauth_token_server().await;
-        db.collection::<bson::Document>(PROVIDER_CONFIGS).update_one(doc! { "_id": &provider_id },doc! { "$set": { "provider_type": "device_code", "device_token_url": token_url, "client_id_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: state.encryption_keys.encrypt(b"client").await.unwrap() } } }).await.unwrap();
+        let mut set = doc! { "provider_type": "device_code", "device_token_url": token_url };
+        let field = "client_id_encrypted";
+        let client_id = credential_record_service::encrypt(
+            &state.encryption_keys,
+            PROVIDER_CONFIGS,
+            &provider_id,
+            credential_record_service::PLATFORM_OWNER,
+            field,
+            b"client",
+        )
+        .await
+        .unwrap();
+        set.insert(
+            field,
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: client_id,
+            },
+        );
+        let mut unset = bson::Document::new();
+        credential_record_service::mark_classic_update(
+            &mut set,
+            &mut unset,
+            &state.encryption_keys,
+            field,
+        );
+        db.collection::<bson::Document>(PROVIDER_CONFIGS)
+            .update_one(
+                doc! { "_id": &provider_id },
+                doc! { "$set": set, "$unset": unset },
+            )
+            .await
+            .unwrap();
         let state_id = Uuid::new_v4().to_string();
         let mut oauth = test_oauth_state(&state_id, &owner, &provider_id);
-        oauth.device_code_encrypted = Some(hex::encode(
-            state.encryption_keys.encrypt(b"device").await.unwrap(),
-        ));
-        oauth.user_code_encrypted = Some(hex::encode(
-            state.encryption_keys.encrypt(b"user-code").await.unwrap(),
-        ));
+        oauth.device_code_encrypted = Some(legacy_device_codes::DEVICE_CODE.into());
+        oauth.user_code_encrypted = Some(legacy_device_codes::USER_CODE.into());
         oauth.history_context = Some(context.clone());
         db.collection(OAUTH_STATES).insert_one(oauth).await.unwrap();
         context::scope(context::system("polling_request"), async {
@@ -3886,8 +3961,7 @@ mod tests {
         db.collection(USER_API_KEYS).insert_one(key).await.unwrap();
         let keys = crate::test_utils::test_encryption_keys();
         let mut token = test_provider_token(&Uuid::new_v4().to_string(), &owner, &provider);
-        token.access_token_encrypted = Some(keys.encrypt(b"recovered-access").await.unwrap());
-        token.refresh_token_encrypted = Some(keys.encrypt(b"recovered-refresh").await.unwrap());
+        set_provider_tokens(&keys, &mut token, "recovered-access", "recovered-refresh").await;
         db.collection(USER_PROVIDER_TOKENS)
             .insert_one(token)
             .await
@@ -4044,10 +4118,13 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted =
-            Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "client",
+            Some("secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
@@ -4112,10 +4189,13 @@ mod tests {
                 server = Some(handle);
                 let mut provider = test_provider_config(&provider_id);
                 provider.token_url = Some(token_url);
-                provider.client_id_encrypted =
-                    Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-                provider.client_secret_encrypted =
-                    Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+                set_provider_client(
+                    &state.encryption_keys,
+                    &mut provider,
+                    "client",
+                    Some("secret"),
+                )
+                .await;
                 db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
                     .insert_one(provider)
                     .await

@@ -3441,15 +3441,14 @@ async fn enrich_key_discovery_metadata(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::{
         extract_app_id_from_api_key, extract_app_id_from_credential,
         validate_optional_label_for_update,
     };
-    use crate::crypto::aes::EncryptionKeys;
-    use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::errors::AppError;
+    use crate::handlers::credential_record_fixtures::{
+        KeySecret, test_encryption_keys, unrelated_encryption_keys,
+    };
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
@@ -3474,10 +3473,6 @@ mod tests {
     };
     use chrono::Utc;
     use mongodb::bson::doc;
-
-    fn test_encryption_keys() -> EncryptionKeys {
-        EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
-    }
 
     #[tokio::test]
     async fn conversation_key_inventory_requires_a_live_turn_for_every_projection() {
@@ -3949,7 +3944,9 @@ mod tests {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_id":"cli_token_exchange","app_secret":"shh"}"#;
-        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, plaintext.as_bytes())
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, Some("cli_token_exchange".to_string()));
@@ -3959,8 +3956,9 @@ mod tests {
     async fn extract_from_api_key_falls_back_to_byo_oauth_client_id() {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
-        api_key.user_oauth_client_id_encrypted =
-            Some(keys.encrypt(b"  cli_byo_oauth  ").await.unwrap());
+        KeySecret::OAuthClientId
+            .set(&keys, &mut api_key, b"  cli_byo_oauth  ")
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, Some("cli_byo_oauth".to_string()));
@@ -3975,9 +3973,12 @@ mod tests {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_id":"cli_from_blob","app_secret":"shh"}"#;
-        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
-        api_key.user_oauth_client_id_encrypted =
-            Some(keys.encrypt(b"cli_from_oauth").await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, plaintext.as_bytes())
+            .await;
+        KeySecret::OAuthClientId
+            .set(&keys, &mut api_key, b"cli_from_oauth")
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, Some("cli_from_blob".to_string()));
@@ -3991,12 +3992,12 @@ mod tests {
         let writer_keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_id":"cli_xyz","app_secret":"shh"}"#;
-        api_key.credential_encrypted =
-            Some(writer_keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        KeySecret::Credential
+            .set(&writer_keys, &mut api_key, plaintext.as_bytes())
+            .await;
 
         // Use a completely different key set to read it back.
-        let reader_keys =
-            EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x99; 32], None)));
+        let reader_keys = unrelated_encryption_keys();
         let app_id = extract_app_id_from_api_key(&reader_keys, &api_key).await;
         assert_eq!(app_id, None);
     }
@@ -4007,7 +4008,9 @@ mod tests {
         let mut api_key = make_blank_api_key();
         // Encrypt raw bytes that aren't valid UTF-8 (eg an arbitrary
         // binary blob someone shoved into credential_encrypted).
-        api_key.credential_encrypted = Some(keys.encrypt(&[0xff, 0xfe, 0xfd]).await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, &[0xff, 0xfe, 0xfd])
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, None);
@@ -4020,7 +4023,9 @@ mod tests {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_secret":"shh"}"#;
-        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, plaintext.as_bytes())
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, None);

@@ -156,6 +156,15 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Conflict: {message}")]
+    CmaSandboxSlotOccupied {
+        message: &'static str,
+        details: Box<serde_json::Value>,
+    },
+
+    #[error("CMA creation requires a JSON Content-Type (application/json or application/*+json)")]
+    CmaJsonContentTypeRequired,
+
     #[error(transparent)]
     SkillPublication(#[from] skill_publication::SkillPublicationFailure),
 
@@ -946,6 +955,7 @@ impl AppError {
             Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
             | Self::SkillPublication(_)
             | Self::TriggerOverlapSkip { .. }
             | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
@@ -1109,7 +1119,9 @@ impl AppError {
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
             Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
-            Self::ChannelMediaUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ChannelMediaUnsupported | Self::CmaJsonContentTypeRequired => {
+                StatusCode::UNSUPPORTED_MEDIA_TYPE
+            }
             Self::ChannelMediaTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ChannelMediaFetchFailed(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelAttachmentNotFound => StatusCode::NOT_FOUND,
@@ -1185,7 +1197,9 @@ impl AppError {
             Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::InvocationDiagnostic { source, .. } => source.error_code(),
-            Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
+            Self::BadRequest(_)
+            | Self::CredentialUnavailable(_)
+            | Self::CmaJsonContentTypeRequired => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
             Self::OAuthAuthorityUnavailable => 12900,
@@ -1193,7 +1207,10 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => 1004,
+            Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1482,16 +1499,19 @@ impl AppError {
             Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::InvocationDiagnostic { source, .. } => source.error_key(),
-            Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
+            Self::BadRequest(_)
+            | Self::CredentialUnavailable(_)
+            | Self::CmaJsonContentTypeRequired => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
             Self::OAuthAuthorityUnavailable => "oauth_authority_unavailable",
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => {
-                "conflict"
-            }
+            Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. } => "conflict",
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1813,6 +1833,7 @@ impl AppError {
                 request_id,
                 approve_url,
             )),
+            AppError::CmaSandboxSlotOccupied { details, .. } => Some(details.as_ref().clone()),
             AppError::SkillPublication(failure) => Some(serde_json::json!(failure)),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
