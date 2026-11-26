@@ -117,3 +117,21 @@ test("allowance metric rows follow Chinese language changes without translating 
     assert.ok(!metricRows.some((row) => /tokens|Images/i.test(row.label)));
   }
 });
+
+test("included and expiring balances use the selected credit unit and announce exact amounts", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  const screen = setup("BillingWalletCard", {
+    wallet: walletSchema.parse(walletFixture), now: Date.parse("2026-10-28T00:00:00Z"),
+    grants: grantsSchema.parse({ grants: [{ ...grantFixture, remaining: "1000.000000000002",
+      held: "0", scope: { all_services: true, service_ids: [], service_slugs: [] }, service_limits: [] }] }).grants,
+    allowances: [],
+  });
+  t.after(screen.harness.unmount);
+  for (const [language, unit] of [["zh-CN", "积分"], ["zh-TW", "積分"]] as const) {
+    setAppTranslationLanguage(language);
+    screen.harness.render();
+    const funded = rows(screen).filter(row => row.value === "1,000 " + unit);
+    assert.equal(funded.length, 2);
+    assert.ok(funded.every(row => row.accessibilityLabel.includes("1000.000000000002 " + unit)));
+  }
+});

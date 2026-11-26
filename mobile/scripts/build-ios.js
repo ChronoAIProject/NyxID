@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+const { reportReleaseArtifact } = require("./performance-artifact");
 const { loadEnv, resolveProfile, appIdentity, MOBILE_ROOT } = require("./lib/load-env");
 
 const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
@@ -141,4 +142,5 @@ const ipaPath = path.join(ipaOutputDir, ipas[0]);
 console.log(`\n[build-ios] ✓ produced: ${ipaPath}`);
 console.log(`\nNext: pnpm submit:ios   (uploads this .ipa to TestFlight)`);
 // Last line is just the path so submit-ios.js can pipe it
-process.stdout.write(`\n${ipaPath}\n`);
+reportReleaseArtifact(ipaPath, "ipa", r.iosBuildNumber, appIdentity(env).version, APP_ENV, r)
+  .then(() => process.stdout.write(`\n${ipaPath}\n`));

@@ -23,6 +23,7 @@ import { ApiError } from "../../lib/api/ApiError";
 import { createIdempotencyKey } from "../../lib/api/idempotency";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { resolveChatAgentId } from "./assistantAgentContext";
+import type { AssistantTurnPerformance } from "./assistantTurnPerformance";
 import { useAssistantLiveRefresh } from "./useAssistantLiveRefresh";
 import { recoveryReason, storedError } from "./assistantTurnPresentation";
 import { settledInterruptedTurn } from "./interruptedTurn";
@@ -115,7 +116,7 @@ export function useAssistant(
   const reopenSequence = useRef(0);
   const recoverSequence = useRef(0);
   const indexSequence = useRef(0);
-  const streamController = useRef<AbortController | undefined>(undefined);
+  const cancelStream = useRef<((outcome?: "cancelled" | "error") => void) | undefined>(undefined);
   const sendLock = useRef(false);
   const sendOperation = useRef<object | undefined>(undefined);
   const decisionLock = useRef(false);
@@ -262,7 +263,7 @@ export function useAssistant(
           if (isAgentAccessRefusal(cause)) {
             setDeniedThread(id);
             updateHistory(undefined);
-            streamController.current?.abort();
+            cancelStream.current?.("error");
             setLive(undefined);
             void refreshAgents.current();
           }
@@ -313,7 +314,7 @@ export function useAssistant(
       }
       epoch.current += 1;
       cancelHistory();
-      streamController.current?.abort();
+      cancelStream.current?.();
       selected.current = id;
       setDeniedThread(undefined);
       setConversationId(id);
@@ -388,7 +389,7 @@ export function useAssistant(
       mounted.current = false;
       epoch.current += 1;
       cancelHistory();
-      streamController.current?.abort();
+      cancelStream.current?.();
       subscription.remove();
       unsubscribe();
     };
@@ -397,11 +398,11 @@ export function useAssistant(
   useEffect(() => {
     if (!active || deniedUse) {
       cancelHistory();
-      streamController.current?.abort();
+      cancelStream.current?.(deniedUse || !online ? "error" : "cancelled");
       return;
     }
     void recover();
-  }, [active, deniedUse, recover, cancelHistory]);
+  }, [active, deniedUse, online, recover, cancelHistory]);
 
   useEffect(() => {
     // Refocusing can rerun this with the previous chat in the same commit that
@@ -489,6 +490,7 @@ export function useAssistant(
       uploads?: AssistantUploadedMessage,
       acknowledgementId?: string,
       model?: string,
+      sample?: AssistantTurnPerformance,
     ) => {
       if (sendLock.current) throw localizedError("A message is already being sent.");
       if (!activeRef.current) throw localizedError("Reconnect to send a message.");
@@ -527,7 +529,11 @@ export function useAssistant(
       const localEpoch = epoch.current;
       const operation = {};
       const controller = new AbortController();
-      streamController.current = controller;
+      const cancel = (outcome: "cancelled" | "error" = "cancelled") => {
+        sample?.finish(outcome);
+        controller.abort();
+      };
+      cancelStream.current = cancel;
       sendOperation.current = operation;
       sendLock.current = true;
       setSending(true);
@@ -560,6 +566,7 @@ export function useAssistant(
           },
           (event) => {
             if (!mounted.current || epoch.current !== localEpoch) return;
+            const previous = reply;
             reply = applyAssistantEvent(reply, event);
             if (event.event === "turn.status") {
               id = event.conversation_id;
@@ -569,16 +576,20 @@ export function useAssistant(
             } else if (!reply.conversationId) {
               throw localizedError("Assistant did not identify the conversation.");
             }
+            if (reply !== previous) sample?.observe(event, reply);
             setLive(reply);
           },
           controller,
           () => {
             admitted = true;
+            sample?.admitted();
             // The server has already claimed the files, even if SSE fails later.
             adoptKnownDraft();
           },
+          sample ? () => sample.finish("timeout") : undefined,
         );
       } catch (cause) {
+        sample?.finish("error");
         if (mounted.current && epoch.current === localEpoch) {
           if (isAgentAccessRefusal(cause)) void refreshAgents.current();
           // An explicit pre-admission client error can safely leave its text editable.
@@ -599,8 +610,7 @@ export function useAssistant(
           }
         }
       } finally {
-        if (streamController.current === controller)
-          streamController.current = undefined;
+        if (cancelStream.current === cancel) cancelStream.current = undefined;
         if (sendOperation.current === operation) sendLock.current = false;
         try {
           if (mounted.current && epoch.current === localEpoch) {

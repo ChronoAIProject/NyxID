@@ -57,6 +57,8 @@ function readProfile(env, prefix) {
     legalBaseUrl: env[`${prefix}_LEGAL_BASE_URL`] || "",
     allowedEmails: env[`${prefix}_ALLOWED_EMAILS`] || "",
     telemetryDsn: env[`${prefix}_TELEMETRY_DSN`] || "",
+    performanceToken: env[`${prefix}_PERFORMANCE_POSTHOG_TOKEN`] || "",
+    performanceHost: env[`${prefix}_PERFORMANCE_POSTHOG_HOST`] || "",
     telemetryHost: env[`${prefix}_TELEMETRY_HOST`] || "",
     shareAnalytics: env[`${prefix}_SHARE_ANALYTICS`] || "",
   };
@@ -204,6 +206,11 @@ function resolveProfile(appEnv, env, options = {}) {
 
   const pick = (k) => primary[k] || fallback[k] || "";
   const androidPackage = pick("androidPackage");
+  // The ingest destination is profile-local and must be valid as a pair.
+  const performance = performanceDestination(
+    primary.performanceHost,
+    primary.performanceToken,
+  );
   const explicitFrontendUrl = pick("frontendUrl");
   const legalBaseUrl = pick("legalBaseUrl");
   const apiBaseUrl = pick("apiBaseUrl");
@@ -249,6 +256,8 @@ function resolveProfile(appEnv, env, options = {}) {
     legalBaseUrl,
     allowedEmails: pick("allowedEmails"),
     telemetryDsn: pick("telemetryDsn"),
+    performanceToken: performance?.token ?? "",
+    performanceHost: performance?.host ?? "",
     telemetryHost: pick("telemetryHost"),
     shareAnalytics: pick("shareAnalytics") || "false",
   };
@@ -295,6 +304,31 @@ function resolveProfile(appEnv, env, options = {}) {
   return resolved;
 }
 
+function performanceDestination(host, token) {
+  if (
+    typeof token !== "string" ||
+    !/^phc_[A-Za-z0-9_-]+$/.test(token) ||
+    typeof host !== "string" ||
+    !/^https:\/\/[^/?#@\\\s]+\/?$/i.test(host)
+  ) return null;
+  try {
+    const url = new URL(host);
+    return url.hostname && url.protocol === "https:"
+      ? { host: url.origin, token }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+// Native launch listeners run before JS and must match the saved grant to this build.
+function performanceLaunchBinding(profile) {
+  const destination = performanceDestination(profile.performanceHost, profile.performanceToken);
+  if (!destination) return "";
+  return require("node:crypto").createHash("sha256")
+    .update(JSON.stringify([destination.host, destination.token])).digest("hex");
+}
+
 function appIdentity(env) {
   return {
     name: env.APP_NAME || "NyxID Mobile",
@@ -309,6 +343,8 @@ module.exports = {
   resolveProfile,
   validateAndroidGoogleServicesFile,
   appIdentity,
+  performanceDestination,
+  performanceLaunchBinding,
   fatal,
   MOBILE_ROOT,
 };

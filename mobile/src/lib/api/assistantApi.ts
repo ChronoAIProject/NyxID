@@ -219,6 +219,7 @@ export async function streamAssistantTurn(
   onEvent: (event: AssistantTurnEvent) => void,
   controller: AbortController,
   onAdmitted?: () => void,
+  onTimeout?: () => void,
 ): Promise<void> {
   const body = assistantTurnBody(input);
   const response = await withDeadline(
@@ -230,6 +231,7 @@ export async function streamAssistantTurn(
     }),
     45000,
     controller,
+    onTimeout,
   );
   onAdmitted?.();
   if (
@@ -238,13 +240,14 @@ export async function streamAssistantTurn(
   ) {
     throw localizedError("The connection was interrupted. Refresh history before sending again.");
   }
-  await readAssistantResponse(response.body, onEvent, controller);
+  await readAssistantResponse(response.body, onEvent, controller, onTimeout);
 }
 
 async function withDeadline<T>(
   promise: Promise<T>,
   milliseconds: number,
   controller: AbortController,
+  onTimeout?: () => void,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -252,6 +255,7 @@ async function withDeadline<T>(
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          onTimeout?.();
           controller.abort();
           reject(
             localizedError("The connection was interrupted. Refresh history before sending again."),

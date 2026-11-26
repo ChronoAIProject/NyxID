@@ -36,7 +36,6 @@ import {
 
 /** iOS centers native title views; a shared row anchors identity beside Menu/Back. */
 export function ChatHeaderFrame(props: NativeStackHeaderProps) {
-  useAppLanguage();
   // Navigation invokes `header` as a render callback, inside the navigator.
   // Hooks belong to the child component's own React render.
   return <ChatHeaderContent {...props} />;

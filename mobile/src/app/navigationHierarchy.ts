@@ -159,6 +159,7 @@ export function workspaceNavigateAction<
     ? WorkspaceContentParamList[Name]
     : WorkspaceParamList["AccountSettings"],
   state?: NavigationState,
+  platform?: string,
 ) {
   if (name === "AccountSettings")
     return openWorkspaceSheetAction(
@@ -176,10 +177,17 @@ export function workspaceNavigateAction<
     params: assistantHomeParams(),
   };
   const previous = content?.routes.find((route) => route.name === name);
-  const routes =
-    name === "Assistant"
+  let routes: PartialState<NavigationState>["routes"];
+  if (name === "Notifications" && platform === "ios" && content?.routes.length) {
+    // The inbox returns to its exact caller, including a nested detail or chat.
+    const index = content.index ?? content.routes.length - 1;
+    const history = content.routes.slice(0, index + 1);
+    routes = history.at(-1)?.name === name ? history : [...history, { name }];
+  } else {
+    routes = name === "Assistant"
       ? [{ ...chat, params }]
       : [chat, { ...previous, name, params }];
+  }
   return {
     ...CommonActions.reset({
       ...state,
@@ -299,7 +307,8 @@ export function withWorkspaceFallback(
 }
 
 /** Native nested pages own Back swipes; root pages expose the base sidebar. */
-export function isWorkspaceSidebarRoot(name: string | undefined) {
+export function isWorkspaceSidebarRoot(name: string | undefined, platform?: string) {
+  if (name === "Notifications") return platform !== "ios";
   return (
     !!name &&
     [
@@ -310,7 +319,6 @@ export function isWorkspaceSidebarRoot(name: string | undefined) {
       "Plugins",
       "Services",
       "Activity",
-      "Notifications",
       "WorkspaceSearch",
       "WorkspaceRecents",
     ].includes(name)

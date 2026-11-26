@@ -169,6 +169,21 @@ test("sidebar selection removes obsolete editor history and keeps the mounted ba
   }
 });
 
+test("iOS sidebar Notifications returns to its exact caller with the native Back gesture", () => {
+  const caller = pushContent(pushContent(fixture(), "Agents"), "AgentDetail", {
+    agentId: "agent",
+  });
+  const open = (state: NavigationState) =>
+    apply(state, workspaceNavigateAction("Notifications", undefined, state, "ios"));
+  const inbox = open(caller);
+  assert.deepEqual(content(inbox).routes.slice(0, -1), content(caller).routes);
+  assert.equal(selected(content(inbox)).name, "Notifications");
+  assert.deepEqual(content(open(inbox)).routes, content(inbox).routes);
+  assert.deepEqual(content(backContent(inbox)).routes, content(caller).routes);
+  assert.equal(isWorkspaceSidebarRoot("Notifications", "ios"), false);
+  assert.equal(isWorkspaceSidebarRoot("Notifications", "android"), true);
+});
+
 test("Settings alone uses a sheet, preserving the complete content history on close", () => {
   const caller = pushContent(
     pushContent(fixture(), "Machines"),

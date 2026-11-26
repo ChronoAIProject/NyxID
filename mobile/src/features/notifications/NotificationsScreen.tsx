@@ -67,11 +67,13 @@ import {
 import {
   notificationAccessibilityLabel,
   notificationCountLabel,
+  notificationFilterCount,
   notificationPending,
   notificationTarget,
   notificationTime,
   notificationTitle,
   notificationSentence,
+  notificationPreview,
   notificationContextLabel,
   notificationTone,
   notificationMatchesSearch,
@@ -203,6 +205,7 @@ export function NotificationRow({
   const palette = toneColors(colors, tone);
   const Icon = KIND_ICON[item.kind];
   const sentence = notificationSentence(item);
+  const preview = notificationPreview(item);
   const contextLabel = notificationContextLabel(item);
   const agents = (item.participants ?? [])
     .filter((actor) => actor.type === "agent" && actor.id)
@@ -312,13 +315,13 @@ export function NotificationRow({
             )}
           </Text>
         </View>
-        {item.preview ? (
+        {preview ? (
           <Text
             numberOfLines={cornerWindow ? 3 : 2}
             ellipsizeMode="tail"
             style={[styles.preview, { color: colors.textSecondary }]}
           >
-            {item.preview}
+            {preview}
           </Text>
         ) : null}
         <View style={styles.metaLine}>
@@ -473,7 +476,12 @@ export function NotificationsScreen({
       unstable_headerRightItems: () => [{ type: "custom", element: button(), hidesSharedBackground: true }],
     };
   }, [enabled, runtime.active, openOptions, colors.textPrimary, t]);
-  useWorkspaceBack({ active: false, defaultRole: "menu", onBack: navigation.goBack, options: headerOptions });
+  useWorkspaceBack({
+    active: false,
+    defaultRole: Platform.OS === "ios" ? "back" : "menu",
+    onBack: navigation.goBack,
+    options: headerOptions,
+  });
 
   const open = useCallback(
     (item: AssistantNotification) => {
@@ -511,10 +519,13 @@ export function NotificationsScreen({
     },
     [markRead.mutate, navigation, openChat],
   );
-  const segments = NOTIFICATION_FILTERS.map((value) => ({
-    id: value,
-    label: NOTIFICATION_FILTER_LABELS[value],
-  }));
+  const segments = NOTIFICATION_FILTERS.map((id) => {
+    const label = NOTIFICATION_FILTER_LABELS[id];
+    const count = Platform.OS === "android" ? notificationFilterCount(summary.data, id) : 0;
+    return count > 0
+      ? { id, label, count, accessibilityLabel: `${label}, ${count}` }
+      : { id, label };
+  });
   const loadMore = () => {
     if (feed.hasNextPage && !feed.isFetchingNextPage) void feed.fetchNextPage();
   };
@@ -609,6 +620,7 @@ export function NotificationsScreen({
       </View>
       <SegmentControl
         segments={segments}
+        compact={Platform.OS === "android"}
         activeIndex={NOTIFICATION_FILTERS.indexOf(filter)}
         accessibilityLabel={translateApp("Filter notifications")}
         style={styles.filters}

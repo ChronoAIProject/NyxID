@@ -267,6 +267,9 @@ export function setupSettingsScreen(
     },
     "../display/ChatPreview": { ChatPreview: "ChatPreview" },
     "./AccountDeletionSheet": { AccountDeletionSheet: "AccountDeletionSheet" },
+    "./PerformanceConsentSettings": {
+      PerformanceConsentSettings: "PerformanceConsentSettings",
+    },
     "../display/ChatDisplaySettings": {
       ChatDisplaySettings: "ChatDisplaySettings",
     },

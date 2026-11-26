@@ -1,3 +1,4 @@
+import { setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -86,7 +87,7 @@ function setup(
     },
   };
   const harness = hookHarness<Element>({
-    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ t: (phrase: string) => { translations.push(phrase); return phrase; } }) },
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ t: (phrase: string, values?: Record<string, unknown>) => { translations.push(phrase); return translateApp(phrase, values); } }) },
     "./OrgGuestControls": { OrgGuestChannel: "OrgGuestChannel", OrgGuestGrantsAdoption: "OrgGuestGrantsAdoption" },
     "./AgentCollaborationPanel": {
       AgentCollaborationPanel: "AgentCollaborationPanel",
@@ -815,5 +816,21 @@ test("personal channel slugs bypass translation", () => {
     const rows = elements(state.harness.render());
     assert.equal(rows.find((r) => r.props.label === "Plain slug")?.props.detail, platform);
     assert.ok(!state.translations.includes(platform));
+  }
+});
+
+
+test("NyxBot profile status follows the language while the account name stays verbatim", (t) => {
+  const state = setup();
+  t.after(state.harness.unmount);
+  t.after(() => setAppTranslationLanguage("en"));
+  state.latest({ kind: "nyxbot", name: "NyxBot", status: "idle", memory_count: 14 });
+  for (const [language, status] of [["zh-CN", "空闲"], ["zh-TW", "閒置"]] as const) {
+    setAppTranslationLanguage(language);
+    state.harness.render();
+    const heading = state.one(row => typeof row.type === "function" && row.type.name === "AgentIdentityHeader");
+    const identity = (heading.type as (props: typeof heading.props) => Element)(heading.props);
+    const labels = elements(identity).map(node => node.props.children).filter(value => typeof value === "string");
+    assert.ok(labels.some(value => value.includes("@NyxBot") && value.includes(status)), labels.join(" | "));
   }
 });

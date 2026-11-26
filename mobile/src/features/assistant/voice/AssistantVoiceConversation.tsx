@@ -889,6 +889,7 @@ function VoiceConversation({
         <VoiceMediaBridge
           key={thread + ":" + voice.mediaAttempt}
           media={voice.media}
+          protocol={voice.mediaProtocol}
           origin={environment.origin}
         />
       ) : null}

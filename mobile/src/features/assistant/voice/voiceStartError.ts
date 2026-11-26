@@ -9,6 +9,8 @@ export type VoiceStartStep =
   | "response"
   | "transport";
 
+export class NativeVoiceRuntimeUnavailableError extends Error {}
+
 export type VoiceStartRecovery = {
   kind: "credits" | "wallet_suspended" | "billing_unavailable";
   message: string;
@@ -158,6 +160,8 @@ export function voiceStartError(error: unknown, step: VoiceStartStep): string {
     return `${message}${hint ? ` (${hint})` : ""}`;
   }
   if (step === "microphone") {
+    if (error instanceof NativeVoiceRuntimeUnavailableError)
+      return translateApp("Voice audio is not supported by this app runtime.");
     const name = error instanceof Error ? error.name : "";
     if (name === "NotAllowedError") return translateApp("Microphone permission was denied");
     if (name === "NotFoundError") return translateApp("No microphone found");

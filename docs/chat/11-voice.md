@@ -2141,11 +2141,18 @@ deadline to avoid double-paid sessions. Closing this crash window requires a
 recoverable provider identity recorded before create, such as a provider-supported
 idempotency key or handle that can be looked up or closed.
 
+The `dev` and `prod` native app builds on iOS and Android use
+`react-native-webrtc` for OpenAI (`openai_live`). When the runtime lacks
+`WebRTCModule`, the app displays the localized “Voice audio is not supported by
+this app runtime.” message before sending a Start request or opening a control
+connection. Native OpenAI calls do not fall back to a WebView. Grok
+(`xai_realtime`) uses the local PCM WebView for capture and playback on both platforms.
+
 Connected iOS native WebRTC (`openai_live`) calls retain their session, audio and
 transcript in the background with the `audio` UIBackgroundMode.
 [useNativeVoice.ts](../../mobile/src/features/assistant/voice/useNativeVoice.ts)
 resyncs on foreground; only definitive server state ends the call. Errors,
-timeouts and stale revisions are inconclusive. Android, WebView/Grok and
+timeouts and stale revisions are inconclusive. Android, Grok and
 still-connecting calls end with a specific localized reason. In
 [AssistantVoiceClient.ts](../../mobile/src/features/assistant/voice/AssistantVoiceClient.ts),
 End is sent before media teardown. A dispatched start POST keeps its own deadline
