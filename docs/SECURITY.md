@@ -905,6 +905,9 @@ Production global, per-IP and per-agent enforcement includes MongoDB-backed shar
 
 ## Security Controls Reference
 
+The [file intake inventory](security/FILE_INTAKE.md) lists where the application
+receives file content and how each surface handles storage and retrieval.
+
 Summary of security controls by identifier (from the architecture plan):
 
 | ID     | Control                                    | Implementation                              |
