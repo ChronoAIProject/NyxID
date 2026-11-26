@@ -398,3 +398,18 @@ The filtered Rust handoff and CORS tests must pass on the final tree (digest `7f
 - **Parent-reported:** 483/483 focused Vitest across 17 files, 4/4 Playwright specialist-handoff scenarios, a production build, and full frontend lint, typography and i18n (0 errors, 33 existing warnings). `cargo fmt` changed only the two expressions above. I did not re-run these.
 - **Unchanged residuals:** the residual limits from the second pass still apply.
 - **One integration-specific residual:** a voice reply that is *not* grouped would still pass through the gated TextBlock if it carried `origin === "user"`. The backend never offers the capability on voice turns, so this is a defence-in-depth gap only, not a defect.
+
+### Addendum: CI follow-up commit `24eb67532` (2026-11-26)
+
+- **Verdict: APPROVED is unchanged.** This commit contains no changes to implementation behaviour.
+- **`frontend/src/pages/channel-bots.test.tsx`: test-only.**
+  - Nine `api.post` call assertions across twelve cases now expect a third argument, `{ authorityGuard: expect.any(Function) }`. Their exact payloads are kept.
+  - This catches the tests up with the already-approved `useCreateChannelBot(authorityGuard)` path. `ChannelBotSetup` always supplies the identity-revision fence, including on Studio pages, and the hook passes it to `api.post`.
+  - I ran this file locally: 54/54 passed.
+- **CLI wizard bundle: generated output.**
+  - The minified `cli/src/wizard/assets/index.html` changes `post(e,t){…{method,body}}` to `post(e,t,n){…{...n,method,body}}`. That is exactly the approved `api-client.ts` change; `api-client.ts` is in the wizard manifest closure.
+  - The only other change is one regenerated CSS utility rule.
+  - `bundle-meta/index.hash` was updated to match. CI's wizard freshness check is the authority for this file.
+- **Evidence condition, refined:** the parent reports that CI's dev profile runs only `cargo clippy` (binary and lib) and `cargo fmt`, so it gives compile evidence but runs no backend tests.
+  - The approval therefore requires two things on the final head: CI is green, and the parent's local run of the two filtered Rust tests (`handoff_cards_are_offered_only_in_direct_specialist_user_turns` and `private_cors_allows_analytics_narrowing_header_only_for_trusted_origin`) passes.
+  - Backend sources are unchanged since `241da803e`.
