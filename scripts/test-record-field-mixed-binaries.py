@@ -50,6 +50,8 @@ def main():
                         help="exchange four versions of pending, completed and cleared approvals")
     parser.add_argument("--approval-writers", action="store_true",
                         help="migrate and exchange retained approvals with the dual-reader base")
+    parser.add_argument("--auth-device", action="store_true",
+                        help="exchange both session protocols and their v2 Agent Key grant")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -86,6 +88,32 @@ def main():
                 result.check_returncode()
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
+
+        if args.auth_device:
+            for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                run(writer, "write", "compatible")
+                run(reader, "read", "compatible")
+            run("base", "write", "base-on", writes=True)
+            run("candidate", "reject", "base-on", legacy=False)
+            run("candidate", "read", "base-on", writes=True)
+            run("base", "write", "retained")
+            run("candidate", "migrate", "retained", writes=True,
+                test="services::auth_device_service::mixed_delivery::migrate_retained_device_deliveries")
+            run("base", "reject", "retained")
+            run("candidate", "read", "retained", legacy=False)
+            run("candidate", "write", "activated", writes=True)
+            run("base", "reject", "activated")
+            run("candidate", "read", "activated", writes=True, legacy=False)
+            run("candidate", "write", "before-rollback", writes=True)
+            run("candidate", "read", "before-rollback", legacy=False)
+            run("candidate", "write", "rollback")
+            run("base", "read", "rollback")
+            registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+            for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                run(writer, "registry-write", "generation", writes=True, test=registry)
+                run(writer, "registry-live", "generation", writes=True, test=registry)
+                run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
 
         if args.gateway_setup:
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:

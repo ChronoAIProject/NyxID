@@ -278,3 +278,6 @@ pub(super) const META_ASSETS: super::FieldLabels =
 
 pub(super) const EVENT_WRITERS_DIGEST: &str =
     "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";
+
+pub(super) const DEVICE_BASE_DIGEST: &str =
+    "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513";

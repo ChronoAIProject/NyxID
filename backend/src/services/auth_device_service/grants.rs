@@ -71,7 +71,16 @@ pub async fn approve_with_agent_key(
     let created = matches!(selection, agent::Selection::New(_));
     let credential_id = Uuid::new_v4().to_string();
     let secret = credentials::generate_secret();
-    let encrypted = encryption.encrypt(secret.as_bytes()).await?;
+    let encrypted = record::seal(
+        encryption,
+        collection.name(),
+        &row.id,
+        &input.user_id,
+        &record::grant_path(&key_id, &credential_id),
+        secret.as_bytes(),
+    )
+    .await?;
+    let contextual = encryption.contextual_record_writes();
     let context = InitiateInput {
         client_label: row.client_label.clone(),
         client_user_agent: row.client_user_agent.clone(),
@@ -101,7 +110,7 @@ pub async fn approve_with_agent_key(
                 credential_expires_at, created_at, &key_id, &credential_id, &secret, &mut *session).await?;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AuthDeviceCodeExpired); }
-            collection.update_one(doc! {"_id": &row.id}, doc! {"$set": {
+            let set = doc! {
                 "approved_user_id": &input.user_id,
                 "mfa_assured": mfa_assured,
                 "mfa_policy_revision": &mfa_policy_revision,
@@ -111,7 +120,9 @@ pub async fn approve_with_agent_key(
                 "agent_key_grant": {"api_key_id": &key_id, "credential_id": &credential_id,
                     "key_was_created": created,
                     "delivery_credential_encrypted": bson::Binary {subtype: BinarySubtype::Generic, bytes: encrypted.clone()}}
-            }}).session(&mut *session).await?;
+            };
+            collection.update_one(doc! {"_id": &row.id}, record::approval_update(set, contextual))
+                .session(&mut *session).await?;
             Ok(())
         }.await;
         mutations::transaction_result(operation)
@@ -130,6 +141,24 @@ pub async fn approve_with_agent_key(
         None,
     );
     Ok(())
+}
+
+pub(in crate::services) async fn prepare_grant(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    collection: &str,
+    row: &AuthDeviceCode,
+    grant: &crate::models::auth_device_code::AuthDeviceAgentKeyGrant,
+) -> AppResult<agent::Delivery> {
+    let credential = record::open_grant(encryption, collection, row, grant).await?;
+    agent::prepare_decoded_credential_delivery(
+        db,
+        Some(&grant.credential_id),
+        row.approved_user_id.as_deref(),
+        credential,
+        grant.key_was_created,
+    )
+    .await
 }
 
 pub async fn poll_agent_key(
@@ -156,15 +185,7 @@ pub async fn poll_agent_key(
         .as_ref()
         .ok_or(AppError::AgentKeyCredentialNotFound)?;
     // KMS and parent eligibility failures retain the encrypted delivery for retry.
-    let delivery = agent::prepare_credential_delivery(
-        db,
-        encryption,
-        Some(&grant.credential_id),
-        row.approved_user_id.as_deref(),
-        grant.delivery_credential_encrypted.as_deref(),
-        grant.key_was_created,
-    )
-    .await?;
+    let delivery = prepare_grant(db, encryption, collection.name(), &row, grant).await?;
     let context = (db, &collection, &row, delivery.api_key.owner_id.as_str());
     let claimed = crate::services::transaction_service::run_db_only(db, &context, |tx, c| {
         Box::pin(async move {
@@ -210,9 +231,17 @@ async fn claim_agent_key_delivery(
     let now = Utc::now();
     let claim = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-            "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-            "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}},
+        doc! {
+            "$set": {
+                "status": "delivered",
+                "delivered_at": bson::DateTime::from_chrono(now),
+                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+            },
+            "$unset": {
+                "agent_key_grant.delivery_credential_encrypted": "",
+                "delivery_context_version": "",
+            },
+        },
     );
     let claimed = claim.session(transaction).await?;
     Ok(claimed)
@@ -228,9 +257,15 @@ pub(super) async fn expire(
         .find_one_and_update(
             doc! {"_id": &row.id, "status": {"$in": ["pending", "approved", "expired"]},
             "expires_at": {"$lte": bson::DateTime::from_chrono(now)}},
-            doc! {"$set": {"status": "expired"}, "$unset": {
-            "delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": "",
-            "agent_key_grant.delivery_credential_encrypted": ""}},
+            doc! {
+                "$set": {"status": "expired"},
+                "$unset": {
+                    "delivery_access_token_encrypted": "",
+                    "delivery_refresh_token_encrypted": "",
+                    "agent_key_grant.delivery_credential_encrypted": "",
+                    "delivery_context_version": "",
+                },
+            },
         )
         .return_document(ReturnDocument::After)
         .await?;

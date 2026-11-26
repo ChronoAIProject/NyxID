@@ -7,25 +7,11 @@ fn pending_sources() -> Vec<(&'static str, Document)> {
         subtype: bson::spec::BinarySubtype::Generic,
         bytes: vec![0xa5],
     });
-    let grant = auth_device_code::AuthDeviceAgentKeyGrant {
-        api_key_id: "key".into(),
-        credential_id: "grant".into(),
-        key_was_created: true,
-        delivery_credential_encrypted: Some(vec![0xa5]),
-    };
     vec![
         (channel_meta::SESSIONS, doc! {"assets_encrypted": &bytes}),
         (
             mobile_social::MobileSocialDelivery::COLLECTION_NAME,
             doc! {"ciphertext": &bytes},
-        ),
-        (
-            auth_device_code::V2_COLLECTION_NAME,
-            doc! {"agent_key_grant": bson::to_document(&grant).unwrap()},
-        ),
-        (
-            auth_device_code::V2_COLLECTION_NAME,
-            doc! {"delivery_access_token_encrypted": &bytes, "delivery_refresh_token_encrypted": &bytes},
         ),
     ]
 }
@@ -168,7 +154,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513"
+        "90d8a86835621035aac28bbb0e064ef45c90b76e3572949f4c41917c5ed9323a"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -191,7 +177,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let event_reply_checkpoint = "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
     let event_writers_checkpoint =
         "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";
+    let device_base = "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513";
     for digest in [
+        Some(device_base),
         Some(event_writers_checkpoint),
         Some(event_reply_checkpoint),
         Some(reply_draft),
@@ -246,6 +234,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         );
         let includes_meta = digest.is_some_and(|v| {
             v == live
+                || v == device_base
                 || v == event_writers_checkpoint
                 || v == event_reply_checkpoint
                 || historical_meta.contains(&v)
@@ -268,6 +257,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             digest == Some(live.as_str())
                 || digest == Some(event_writers_checkpoint)
                 || digest == Some(event_reply_checkpoint)
+                || digest == Some(device_base)
                 || digest == Some(reply_draft)
         );
         let expected = match digest {
