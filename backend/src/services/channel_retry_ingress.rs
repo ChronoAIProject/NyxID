@@ -119,7 +119,8 @@ pub async fn deliver(
         .find_one(doc! { "_id": &route.api_key_id, "user_id": &bot.user_id, "is_active": true })
         .await?
         .filter(|key| {
-            key.key.expires_at
+            key.key
+                .expires_at
                 .is_none_or(|expiry| expiry > chrono::Utc::now())
         })
         .ok_or_else(retry_later)?;
@@ -148,7 +149,16 @@ pub async fn deliver(
                 &api_key.id,
                 message_id,
             );
-            if !guest_relay::prepare(db, context.encryption_keys, bot, &route.conversation, inbound, &mut message).await? {
+            if !guest_relay::prepare(
+                db,
+                context.encryption_keys,
+                bot,
+                &route.conversation,
+                inbound,
+                &mut message,
+            )
+            .await?
+            {
                 return Err(retry_later());
             }
             if message.guest_relay.is_some() {
@@ -239,23 +249,27 @@ pub async fn deliver(
         let rbac = super::rbac_helpers::build_rbac_claim_data(db, &bot.user_id, scope)
             .await
             .ok();
-        Some(retained_key.mint_ordinary_bearer(
-            db,
-            context.jwt_keys,
-            context.config,
-            &owner,
-            &route.conversation,
-            scope,
-            rbac.as_ref(),
-            &crate::crypto::jwt::RelayAgentScope {
-                api_key_id: api_key.id.clone(),
-                api_key_name: api_key.name.clone(),
-                allowed_service_ids: api_key.allowed_service_ids.clone(),
-                allowed_node_ids: api_key.allowed_node_ids.clone(),
-                allow_all_services: api_key.allow_all_services,
-                allow_all_nodes: api_key.allow_all_nodes,
-            },
-        ).await?)
+        Some(
+            retained_key
+                .mint_ordinary_bearer(
+                    db,
+                    context.jwt_keys,
+                    context.config,
+                    &owner,
+                    &route.conversation,
+                    scope,
+                    rbac.as_ref(),
+                    &crate::crypto::jwt::RelayAgentScope {
+                        api_key_id: api_key.id.clone(),
+                        api_key_name: api_key.name.clone(),
+                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                        allowed_node_ids: api_key.allowed_node_ids.clone(),
+                        allow_all_services: api_key.allow_all_services,
+                        allow_all_nodes: api_key.allow_all_nodes,
+                    },
+                )
+                .await?,
+        )
     };
     let mut config = context.config.clone();
     config.channel_relay_callback_timeout_secs = config.channel_relay_callback_timeout_secs.min(10);

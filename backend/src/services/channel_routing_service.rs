@@ -199,9 +199,17 @@ pub async fn create_conversation(
     allow_agent_initiated: bool,
 ) -> AppResult<ChannelConversation> {
     create_conversation_with_guest_key(
-        db, user_id, channel_bot_id, platform, platform_conversation_id,
-        platform_conversation_type, platform_sender_id, agent_api_key_id,
-        default_agent, allow_agent_initiated, false,
+        db,
+        user_id,
+        channel_bot_id,
+        platform,
+        platform_conversation_id,
+        platform_conversation_type,
+        platform_sender_id,
+        agent_api_key_id,
+        default_agent,
+        allow_agent_initiated,
+        false,
     )
     .await
 }
@@ -221,7 +229,9 @@ pub(crate) async fn create_conversation_with_guest_key(
     dedicate_agent_key: bool,
 ) -> AppResult<ChannelConversation> {
     if dedicate_agent_key && channel_bot_id.is_none() {
-        return Err(AppError::ValidationError("Device routes do not use guest access keys".into()));
+        return Err(AppError::ValidationError(
+            "Device routes do not use guest access keys".into(),
+        ));
     }
     create_conversation_with_default_policy(
         db,
@@ -484,8 +494,12 @@ pub(crate) async fn guest_access_state(
     }
     match relay::external_route_status(db, route).await {
         Ok(relay::ExternalRouteStatus::Ready) => Ok("guest_access"),
-        Ok(relay::ExternalRouteStatus::DedicatedKeyRequired) => Ok("ordinary_dedicated_key_required"),
-        Ok(relay::ExternalRouteStatus::LegacyCallbackPending) => Ok("ordinary_legacy_callback_pending"),
+        Ok(relay::ExternalRouteStatus::DedicatedKeyRequired) => {
+            Ok("ordinary_dedicated_key_required")
+        }
+        Ok(relay::ExternalRouteStatus::LegacyCallbackPending) => {
+            Ok("ordinary_legacy_callback_pending")
+        }
         Err(AppError::Forbidden(_)) => Ok("guest_access_key_unavailable"),
         Err(error) => Err(error),
     }
@@ -524,8 +538,14 @@ pub async fn update_conversation(
     allow_agent_initiated: Option<bool>,
 ) -> AppResult<ChannelConversation> {
     update_conversation_with_guest_key(
-        db, conversation_id, user_id, agent_api_key_id, default_agent, is_active,
-        allow_agent_initiated, None,
+        db,
+        conversation_id,
+        user_id,
+        agent_api_key_id,
+        default_agent,
+        is_active,
+        allow_agent_initiated,
+        None,
     )
     .await
 }
@@ -589,11 +609,18 @@ pub(crate) async fn update_conversation_with_guest_key(
     }
     if current.channel_bot_id.is_some() {
         return mutate_bot_conversation(
-            db, &current, set_doc, default_agent == Some(true), dedicate_agent_key,
-        ).await;
+            db,
+            &current,
+            set_doc,
+            default_agent == Some(true),
+            dedicate_agent_key,
+        )
+        .await;
     }
     if dedicate_agent_key.is_some() {
-        return Err(AppError::ValidationError("Device routes do not use guest access keys".into()));
+        return Err(AppError::ValidationError(
+            "Device routes do not use guest access keys".into(),
+        ));
     }
 
     if let Some(key) = widened_route_key(&set_doc, &current).map(str::to_owned) {

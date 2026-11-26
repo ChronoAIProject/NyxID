@@ -245,12 +245,12 @@ async fn guest_route_item(
 ) -> ConversationItem {
     let mut item = conversation_to_item(state, conversation);
     if conversation.channel_bot_id.is_some() {
-        item.guest_access_state = Some(match channel_routing_service::guest_access_state(
-            &state.db, conversation,
-        ).await {
-            Ok(status) => status,
-            Err(_) => "authority_unavailable",
-        });
+        item.guest_access_state = Some(
+            match channel_routing_service::guest_access_state(&state.db, conversation).await {
+                Ok(status) => status,
+                Err(_) => "authority_unavailable",
+            },
+        );
     }
     item
 }
@@ -303,7 +303,9 @@ pub async fn create_conversation(
 
     let conversation = if is_device {
         if body.dedicate_agent_key_for_guest_access {
-            return Err(AppError::ValidationError("Device routes do not use guest access keys".into()));
+            return Err(AppError::ValidationError(
+                "Device routes do not use guest access keys".into(),
+            ));
         }
         create_device_conversation(&state, &owner_id, &body).await?
     } else {

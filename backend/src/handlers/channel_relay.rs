@@ -5413,6 +5413,22 @@ mod tests {
             .await
             .is_err()
         );
+        flags::set_platform_override(db, guest::FLAG, &FlagTarget::Global, false, &fixture.bot.user_id)
+            .await.unwrap();
+        assert!(
+            crate::mw::auth::ensure_relay_agent_key_active(db, &rolled_back).await.is_err(),
+            "a bearer from an earlier off interval must not revive"
+        );
+        assert!(crate::services::key_service::validate_api_key(db, raw_key).await.is_ok());
+        crate::services::channel_routing_service::delete_conversation(
+            db, &fixture.conversation.id, &fixture.bot.user_id,
+        ).await.unwrap();
+        assert!(crate::services::key_service::validate_api_key(db, raw_key).await.is_err());
+        let successor = crate::services::key_service::rotate_api_key(
+            db, &state.encryption_keys, &fixture.bot.user_id, &fixture.api_key.id,
+        ).await.unwrap();
+        assert!(crate::services::key_service::validate_api_key(db, &successor.full_key).await.is_ok());
+        assert!(crate::services::key_service::validate_api_key(db, raw_key).await.is_err());
         db.drop().await.unwrap();
     }
 
@@ -6499,6 +6515,58 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, AppError::DeviceChannelReplyNotAllowed));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_relay_preflight_failure_preserves_the_reply_token_for_one_send() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let fixture = setup_reply_token_fixture("legacy_reply_preflight")
+            .await
+            .expect("isolated MongoDB is required");
+        let state = &fixture.state;
+        let db = &state.db;
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &fixture.bot.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&fixture.message.id},
+                doc! {"$set":{"platform_conversation_id":"1234"}},
+            )
+            .await.unwrap();
+        let server = MockServer::start().await;
+        Mock::given(path("/botbot-token/sendMessage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok":true,"result":{"message_id":78},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let adapter = crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
+            &server.uri(),
+        );
+        let claims = valid_reply_claims(&fixture);
+        let token = encode_reply_claims(state, &claims);
+        let headers = bearer_headers(&token);
+        let request = reply_request(&fixture.message.id);
+        let mut context = resolve_reply_token_context(state, &token, &request).await.unwrap();
+        context.validated_bot.as_mut().unwrap().bot_token_encrypted = vec![];
+        assert!(deliver_async_reply(state, &headers, context, request, &adapter).await.is_err());
+        assert!(!reply_token_has_been_consumed(state, &claims.jti).await.unwrap());
+
+        let response = async_reply_with_test_adapter(
+            state, &headers, reply_request(&fixture.message.id), &adapter,
+        ).await.unwrap().0;
+        assert_eq!(response.platform_message_id.as_deref(), Some("78"));
+        assert!(reply_token_has_been_consumed(state, &claims.jti).await.unwrap());
+        assert!(async_reply_with_test_adapter(
+            state, &headers, reply_request(&fixture.message.id), &adapter,
+        ).await.is_err());
         db.drop().await.unwrap();
     }
 

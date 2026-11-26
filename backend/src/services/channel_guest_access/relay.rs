@@ -136,9 +136,11 @@ pub(crate) async fn prepare(
     };
     metadata.id = stable_source;
     metadata.guest_relay = Some(turn);
-    if let Some(thread) = metadata.thread_id.as_deref().filter(|thread| {
-        metadata.platform == "discord" && thread.starts_with("interaction:")
-    }) {
+    if let Some(thread) = metadata
+        .thread_id
+        .as_deref()
+        .filter(|thread| metadata.platform == "discord" && thread.starts_with("interaction:"))
+    {
         metadata.thread_id = Some(seal_reply_handle(keys, metadata, thread.as_bytes()).await?);
     }
     Ok(true)
@@ -156,9 +158,16 @@ fn validate_meta_source(
         || authority.generation != grant.generation
         || authority.asset_id != bot.platform_bot_id
         || source.sender_platform_id.as_deref() != Some(&authority.sender_id)
-        || source.platform_conversation_id.as_deref() != Some(meta::conversation(
-            &bot.platform, &bot.id, &authority.asset_id, &authority.sender_id,
-        ).as_str())
+        || source.platform_conversation_id.as_deref()
+            != Some(
+                meta::conversation(
+                    &bot.platform,
+                    &bot.id,
+                    &authority.asset_id,
+                    &authority.sender_id,
+                )
+                .as_str(),
+            )
         || authority.event_at > now
         || now >= authority.event_at + chrono::Duration::hours(24)
         || now >= authority.reply_expires_at
@@ -183,11 +192,21 @@ pub(crate) async fn prove_meta_tool_participant(
     validate_meta_source(bot, source)?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     let token = crate::services::channel_credentials::resolve_bot_token(
-        &state.db, &state.encryption_keys, adapter.as_ref(), bot,
-    ).await?;
-    meta::MetaAdapter::new(inbox).prove_control(
-        &state.db, &state.http_client, bot, &authority.sender_id, &token,
-    ).await
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        bot,
+    )
+    .await?;
+    meta::MetaAdapter::new(inbox)
+        .prove_control(
+            &state.db,
+            &state.http_client,
+            bot,
+            &authority.sender_id,
+            &token,
+        )
+        .await
 }
 
 pub(crate) fn reply_token(
@@ -248,7 +267,9 @@ fn guest_token_config(config: &AppConfig, source: &ChannelMessage) -> AppResult<
         .saturating_sub(chrono::Utc::now().timestamp());
     let remaining = source.meta_authority.as_ref().map_or(remaining, |meta| {
         let now = chrono::Utc::now();
-        let expires = meta.reply_expires_at.min(meta.event_at + chrono::Duration::hours(24));
+        let expires = meta
+            .reply_expires_at
+            .min(meta.event_at + chrono::Duration::hours(24));
         remaining.min((expires - now).num_seconds())
     });
     if remaining <= 0 {
@@ -276,18 +297,25 @@ pub(crate) async fn fence_data_in_session(
         if turn.meta_grant_id.as_deref() != Some(&grant.grant_id) {
             return Err(refused());
         }
-        crate::services::channel_meta_service::scopes::fence_reference(
-            db, session, &grant, true,
-        ).await?;
+        crate::services::channel_meta_service::scopes::fence_reference(db, session, &grant, true)
+            .await?;
         let binding = bot.meta_binding.as_ref().ok_or_else(refused)?;
-        let chat = source.platform_conversation_id.as_deref().ok_or_else(refused)?;
-        if db.collection::<Document>(crate::services::channel_adapters::meta::CONTROLS)
+        let chat = source
+            .platform_conversation_id
+            .as_deref()
+            .ok_or_else(refused)?;
+        if db
+            .collection::<Document>(crate::services::channel_adapters::meta::CONTROLS)
             .update_one(
                 doc! {"identity_key":format!("{}:{chat}",bot.id),"controlled":true,
-                    "generation": grant.generation,
-                    "$and":[crate::services::channel_adapters::meta::control_scope(binding)]},
+                "generation": grant.generation,
+                "$and":[crate::services::channel_adapters::meta::control_scope(binding)]},
                 doc! {"$inc":{"admission_revision":1_i64}},
-            ).session(&mut *session).await?.matched_count != 1
+            )
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
         {
             return Err(refused());
         }
@@ -377,7 +405,10 @@ pub(crate) async fn bind_in_session(
         doc! {"_id":&turn.bot_id,"user_id":&source.user_id,"is_active":true},
         doc! {"$set":{"channel_guest_data_present":true,"diagnostics.guest_relay_work_present":true}},
     ).session(&mut *session).await?;
-    if [route, retained, bot].iter().any(|row| row.matched_count != 1) {
+    if [route, retained, bot]
+        .iter()
+        .any(|row| row.matched_count != 1)
+    {
         return Err(refused());
     }
     super::bind_work_in_session(db, session, turn).await
@@ -396,16 +427,28 @@ pub(crate) async fn external_route_status(
     route: &ChannelConversation,
 ) -> AppResult<ExternalRouteStatus> {
     let bot_id = route.channel_bot_id.as_deref().ok_or_else(refused)?;
-    let key = db.collection::<RetainedRelayKey>(API_KEYS).find_one(doc! {
-        "_id": &route.agent_api_key_id, "guest_relay_dedicated_route_id": &route.id,
-        "guest_relay_dedicated_bot_id": bot_id,
-    }).await?;
-    let route_state = db.collection::<Document>(ROUTES).find_one(doc! {"_id": &route.id})
-        .projection(doc! {"guest_relay_activated": 1}).await?;
-    let activated = route_state.as_ref().and_then(|row| row.get_bool("guest_relay_activated").ok())
+    let key = db
+        .collection::<RetainedRelayKey>(API_KEYS)
+        .find_one(doc! {
+            "_id": &route.agent_api_key_id, "guest_relay_dedicated_route_id": &route.id,
+            "guest_relay_dedicated_bot_id": bot_id,
+        })
+        .await?;
+    let route_state = db
+        .collection::<Document>(ROUTES)
+        .find_one(doc! {"_id": &route.id})
+        .projection(doc! {"guest_relay_activated": 1})
+        .await?;
+    let activated = route_state
+        .as_ref()
+        .and_then(|row| row.get_bool("guest_relay_activated").ok())
         == Some(true);
     if !key.is_some_and(|key| compatible_key(&key.key, &route.user_id)) {
-        return if activated { Err(refused()) } else { Ok(ExternalRouteStatus::DedicatedKeyRequired) };
+        return if activated {
+            Err(refused())
+        } else {
+            Ok(ExternalRouteStatus::DedicatedKeyRequired)
+        };
     }
     if route.platform == "aurinko"
         && has_pending_legacy_callback(db, bot_id, &route.user_id).await?
@@ -438,17 +481,31 @@ pub(crate) async fn dedicate_key_in_session(
     key_id: &str,
 ) -> AppResult<()> {
     let bot_id = route.channel_bot_id.as_deref().ok_or_else(refused)?;
-    let key = db.collection::<ApiKey>(API_KEYS).find_one(doc! {"_id":key_id})
-        .session(&mut *session).await?.filter(|key| compatible_key(key, &route.user_id))
-        .ok_or_else(|| AppError::Conflict("Choose a compatible ordinary callback key for this route".into()))?;
-    let shared = db.collection::<Document>(ROUTES).find_one(doc! {
-        "agent_api_key_id":key_id,"is_active":true,"_id":{"$ne":&route.id},
-    }).projection(doc! {"_id":1}).session(&mut *session).await?.is_some();
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id":key_id})
+        .session(&mut *session)
+        .await?
+        .filter(|key| compatible_key(key, &route.user_id))
+        .ok_or_else(|| {
+            AppError::Conflict("Choose a compatible ordinary callback key for this route".into())
+        })?;
+    let shared = db
+        .collection::<Document>(ROUTES)
+        .find_one(doc! {
+            "agent_api_key_id":key_id,"is_active":true,"_id":{"$ne":&route.id},
+        })
+        .projection(doc! {"_id":1})
+        .session(&mut *session)
+        .await?
+        .is_some();
     let hosted = db.collection::<Document>(HOSTED).find_one(doc! {"$or":[
         {"route_api_key_id":key_id}, {"pending_route_api_key_id":key_id}, {"agent_api_key_id":key_id},
     ]}).projection(doc! {"_id":1}).session(&mut *session).await?.is_some();
     if shared || hosted {
-        return Err(AppError::Conflict("Choose an agent key that is unused by other routes".into()));
+        return Err(AppError::Conflict(
+            "Choose an agent key that is unused by other routes".into(),
+        ));
     }
     let result = db.collection::<Document>(API_KEYS).update_one(
         doc! {"_id":&key.id,"user_id":&route.user_id,"is_active":true,
@@ -460,7 +517,9 @@ pub(crate) async fn dedicate_key_in_session(
         doc! {"$set":{"guest_relay_dedicated_route_id":&route.id,"guest_relay_dedicated_bot_id":bot_id}},
     ).session(&mut *session).await?;
     if result.matched_count != 1 {
-        return Err(AppError::Conflict("Choose an agent key dedicated to this route".into()));
+        return Err(AppError::Conflict(
+            "Choose an agent key dedicated to this route".into(),
+        ));
     }
     Ok(())
 }
@@ -483,7 +542,10 @@ impl RetainedRelayKey {
         self.broad_route(db).await.map(drop)
     }
 
-    async fn broad_route(&self, db: &Database) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
+    async fn broad_route(
+        &self,
+        db: &Database,
+    ) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
         let current = self.live_route(db).await?;
         if let Some((bot, route)) = &current {
             if super::select_mode_for_bot(db, bot).await? == GuestMode::Legacy
@@ -499,16 +561,31 @@ impl RetainedRelayKey {
         Err(refused())
     }
 
-    async fn live_route(&self, db: &Database) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
-        let Some((bot_id, route_id)) = self.guest_relay_dedicated_bot_id.as_deref()
-            .zip(self.guest_relay_dedicated_route_id.as_deref()) else {
+    async fn live_route(
+        &self,
+        db: &Database,
+    ) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
+        let Some((bot_id, route_id)) = self
+            .guest_relay_dedicated_bot_id
+            .as_deref()
+            .zip(self.guest_relay_dedicated_route_id.as_deref())
+        else {
             return Ok(None);
         };
-        let bot = db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .find_one(doc! {"_id":bot_id,"user_id":&self.key.user_id,"is_active":true,
-                "status":{"$nin":["suspended","transferring"]},
-            }).await?;
-        let Some(bot) = bot else { return Ok(None); };
+        let bot = db
+            .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .find_one(
+                doc! {"_id":bot_id,"user_id":&self.key.user_id,"is_active":true,
+                    "status":{"$nin":["suspended","transferring"]},
+                },
+            )
+            .await?;
+        let Some(bot) = bot else {
+            return Ok(None);
+        };
+        if !crate::services::platform_bot_authority::permits_personal_routes(db, bot_id).await? {
+            return Ok(None);
+        }
         let route = db.collection::<ChannelConversation>(ROUTES).find_one(doc! {
             "_id": route_id, "channel_bot_id": bot_id, "user_id": &self.key.user_id,
             "agent_api_key_id": &self.key.id, "is_active":true, "retired_by_transfer":{"$ne":true},
@@ -525,10 +602,15 @@ impl RetainedRelayKey {
         let enrolled_epoch = self.guest_relay_activation_epoch.ok_or_else(refused)?;
         let enrolled_revision = self.guest_relay_bot_revision.ok_or_else(refused)?;
         let rollout_epoch = super::activation_collection(db)
-            .find_one(doc! {"_id":super::FLAG}).await?.ok_or_else(refused)?.epoch;
+            .find_one(doc! {"_id":super::FLAG})
+            .await?
+            .ok_or_else(refused)?
+            .epoch;
         Ok(Some(format!(
             "{}.{enrolled_epoch}.{enrolled_revision}.{rollout_epoch}.{}.{}",
-            route.id, bot.guest_access_v1_revision, route.updated_at.timestamp_millis(),
+            route.id,
+            bot.guest_access_v1_revision,
+            route.updated_at.timestamp_millis(),
         )))
     }
 
@@ -537,6 +619,11 @@ impl RetainedRelayKey {
         db: &Database,
         claim: Option<&str>,
     ) -> AppResult<()> {
+        if (self.guest_relay_dedicated_route_id.is_some() || self.guest_relay_bot_id.is_some())
+            && self.key.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now())
+        {
+            return Err(refused());
+        }
         if self.broad_assignment(db).await?.as_deref() != claim {
             return Err(refused());
         }
@@ -556,10 +643,15 @@ impl RetainedRelayKey {
         agent: &jwt::RelayAgentScope,
     ) -> AppResult<String> {
         let assignment = self.broad_assignment(db).await?;
-        if self.key.user_id != route.user_id || agent.api_key_id != self.key.id
-            || (assignment.is_some() && self.guest_relay_dedicated_route_id.as_deref() != Some(&route.id))
+        if self.key.user_id != route.user_id
+            || agent.api_key_id != self.key.id
+            || (assignment.is_some()
+                && self.guest_relay_dedicated_route_id.as_deref() != Some(&route.id))
         {
             return Err(refused());
+        }
+        if assignment.is_none() {
+            return jwt::generate_relay_access_token(keys, config, owner, scope, rbac, agent);
         }
         jwt::generate_relay_access_token_with_assignment(
             keys, config, owner, scope, rbac, agent, assignment,
@@ -574,15 +666,25 @@ pub(crate) async fn release_unused_key_in_session(
 ) -> AppResult<()> {
     let keys = db.collection::<Document>(API_KEYS);
     let filter = doc! {"_id":&route.agent_api_key_id,"user_id":&route.user_id,
-        "guest_relay_dedicated_route_id":&route.id};
-    if keys.find_one(filter.clone()).session(&mut *session).await?
+    "guest_relay_dedicated_route_id":&route.id};
+    if keys
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
         .is_some_and(|key| key.get_str("guest_relay_bot_id").is_ok())
     {
-        return Err(AppError::Conflict("Rotate the previously enrolled key to reuse it on another route".into()));
+        return Err(AppError::Conflict(
+            "Rotate the previously enrolled key to reuse it on another route".into(),
+        ));
     }
-    keys.update_one(filter, doc! {"$unset":{
-        "guest_relay_dedicated_route_id":"","guest_relay_dedicated_bot_id":"",
-    }}).session(&mut *session).await?;
+    keys.update_one(
+        filter,
+        doc! {"$unset":{
+            "guest_relay_dedicated_route_id":"","guest_relay_dedicated_bot_id":"",
+        }},
+    )
+    .session(&mut *session)
+    .await?;
     Ok(())
 }
 
@@ -592,17 +694,40 @@ pub(crate) async fn require_assignment_in_session(
     key: &str,
     requested_route: Option<&str>,
 ) -> AppResult<()> {
-    let retained = db.collection::<Document>(API_KEYS).find_one(doc! {"_id":key})
+    let keys = db.collection::<Document>(API_KEYS);
+    let retained = keys
+        .find_one(doc! {"_id":key})
         .projection(doc! {"guest_relay_bot_id":1,"guest_relay_dedicated_route_id":1})
-        .session(&mut *session).await?;
-    if let Some(retained) = retained {
-        if let Ok(route) = retained.get_str("guest_relay_dedicated_route_id") {
-            if Some(route) != requested_route {
-                return Err(AppError::Conflict("This key is dedicated to another channel route".into()));
-            }
-        } else if retained.get_str("guest_relay_bot_id").is_ok() {
-            return Err(AppError::Conflict("This key is reserved for guest relay".into()));
+        .session(&mut *session)
+        .await?;
+    let Some(retained) = retained else {
+        return Ok(());
+    };
+    let route = retained.get_str("guest_relay_dedicated_route_id").ok();
+    let activated = retained.get_str("guest_relay_bot_id").is_ok();
+    if route == requested_route && (route.is_some() || !activated) {
+        return Ok(());
+    }
+    if activated {
+        return Err(AppError::Conflict(
+            "Rotate the previously enrolled key to reuse it on another route".into(),
+        ));
+    }
+    if let Some(route) = route {
+        if db.collection::<Document>(ROUTES).find_one(doc! {
+            "_id":route,"agent_api_key_id":key,"is_active":true,"retired_by_transfer":{"$ne":true},
+        }).projection(doc! {"_id":1}).session(&mut *session).await?.is_some() {
+            return Err(AppError::Conflict("This key is dedicated to another channel route".into()));
         }
+        keys.update_one(
+            doc! {"_id":key,"guest_relay_dedicated_route_id":route,
+            "guest_relay_bot_id":null},
+            doc! {"$unset":{
+                "guest_relay_dedicated_route_id":"","guest_relay_dedicated_bot_id":"",
+            }},
+        )
+        .session(&mut *session)
+        .await?;
     }
     Ok(())
 }
@@ -613,15 +738,24 @@ fn reply_handle_fields(source: &ChannelMessage) -> AppResult<[&str; 7]> {
     let turn = source.guest_relay.as_ref().ok_or_else(refused)?;
     let bot = source.channel_bot_id.as_deref().ok_or_else(refused)?;
     let event = source.platform_message_id.as_deref().ok_or_else(refused)?;
-    if source.direction != "inbound" || source.platform != "discord"
-        || turn.bot_id != bot || turn.binding_id != source.conversation_id
+    if source.direction != "inbound"
+        || source.platform != "discord"
+        || turn.bot_id != bot
+        || turn.binding_id != source.conversation_id
         || turn.platform != source.platform
         || turn.conversation_id != destination_for(source)?
     {
         return Err(refused());
     }
-    Ok(["thread_id", "guest-relay-discord", bot, &source.platform,
-        &turn.binding_id, event, &turn.conversation_id])
+    Ok([
+        "thread_id",
+        "guest-relay-discord",
+        bot,
+        &source.platform,
+        &turn.binding_id,
+        event,
+        &turn.conversation_id,
+    ])
 }
 
 fn reply_handle_context<'a>(
@@ -629,7 +763,10 @@ fn reply_handle_context<'a>(
     fields: &'a [&'a str],
 ) -> AppResult<RecordContext<'a>> {
     RecordContext::new(
-        crate::models::channel_message::COLLECTION_NAME, &source.id, &source.user_id, fields,
+        crate::models::channel_message::COLLECTION_NAME,
+        &source.id,
+        &source.user_id,
+        fields,
     )
 }
 
@@ -642,14 +779,22 @@ async fn seal_reply_handle(
         return Err(refused());
     }
     let fields = reply_handle_fields(source)?;
-    let ciphertext = keys.encrypt_record(plaintext, &reply_handle_context(source, &fields)?).await?;
-    Ok(format!("{REPLY_HANDLE_PREFIX}{}", URL_SAFE_NO_PAD.encode(ciphertext)))
+    let ciphertext = keys
+        .encrypt_record(plaintext, &reply_handle_context(source, &fields)?)
+        .await?;
+    Ok(format!(
+        "{REPLY_HANDLE_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(ciphertext)
+    ))
 }
 
 fn decode_reply_handle(source: &ChannelMessage) -> AppResult<Vec<u8>> {
-    let encoded = source.thread_id.as_deref()
+    let encoded = source
+        .thread_id
+        .as_deref()
         .and_then(|thread| thread.strip_prefix(REPLY_HANDLE_PREFIX))
-        .filter(|encoded| encoded.len() <= 8192).ok_or_else(refused)?;
+        .filter(|encoded| encoded.len() <= 8192)
+        .ok_or_else(refused)?;
     URL_SAFE_NO_PAD.decode(encoded).map_err(|_| refused())
 }
 
@@ -657,7 +802,11 @@ pub(crate) async fn open_reply_handle(
     keys: &EncryptionKeys,
     source: &ChannelMessage,
 ) -> AppResult<Option<zeroize::Zeroizing<String>>> {
-    let Some(thread) = source.thread_id.as_deref().filter(|_| source.guest_relay.is_some()) else {
+    let Some(thread) = source
+        .thread_id
+        .as_deref()
+        .filter(|_| source.guest_relay.is_some())
+    else {
         return Ok(None);
     };
     if !thread.starts_with(REPLY_HANDLE_PREFIX) {
@@ -670,7 +819,11 @@ pub(crate) async fn open_reply_handle(
         return Err(AppError::TokenExpired);
     }
     let fields = reply_handle_fields(source)?;
-    let bytes = keys.decrypt_record(&decode_reply_handle(source)?, &reply_handle_context(source, &fields)?)
+    let bytes = keys
+        .decrypt_record(
+            &decode_reply_handle(source)?,
+            &reply_handle_context(source, &fields)?,
+        )
         .await?;
     let opened = std::str::from_utf8(&bytes).map_err(|_| refused())?;
     if !opened.starts_with("interaction:") || opened.len() > 2048 {
@@ -679,11 +832,17 @@ pub(crate) async fn open_reply_handle(
     Ok(Some(zeroize::Zeroizing::new(opened.to_owned())))
 }
 
-pub(crate) async fn verify_reply_handle_record(keys: &EncryptionKeys, row: &Document) -> AppResult<()> {
+pub(crate) async fn verify_reply_handle_record(
+    keys: &EncryptionKeys,
+    row: &Document,
+) -> AppResult<()> {
     let source: ChannelMessage = bson::from_document(row.clone()).map_err(|_| refused())?;
     let fields = reply_handle_fields(&source)?;
-    keys.authenticate_current_record(&decode_reply_handle(&source)?, &reply_handle_context(&source, &fields)?)
-        .await
+    keys.authenticate_current_record(
+        &decode_reply_handle(&source)?,
+        &reply_handle_context(&source, &fields)?,
+    )
+    .await
 }
 
 pub(crate) async fn migrate_reply_handle_record(
@@ -695,20 +854,26 @@ pub(crate) async fn migrate_reply_handle_record(
     let ciphertext = decode_reply_handle(&source)?;
     let fields = reply_handle_fields(&source)?;
     let context = reply_handle_context(&source, &fields)?;
-    if keys.authenticate_current_record(&ciphertext, &context).await.is_ok() {
+    if keys
+        .authenticate_current_record(&ciphertext, &context)
+        .await
+        .is_ok()
+    {
         return Ok(false);
     }
     let bytes = keys.decrypt_record(&ciphertext, &context).await?;
     let sealed = seal_reply_handle(keys, &source, &bytes).await?;
-    let applied = db.collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+    let applied = db
+        .collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
         .update_one(
             doc! {"_id": &source.id, "user_id":&source.user_id,
-                "channel_bot_id": &source.channel_bot_id, "conversation_id": &source.conversation_id,
-                "platform_conversation_id": &source.platform_conversation_id,
-                "platform_message_id": &source.platform_message_id,
-                "thread_id": &source.thread_id},
+            "channel_bot_id": &source.channel_bot_id, "conversation_id": &source.conversation_id,
+            "platform_conversation_id": &source.platform_conversation_id,
+            "platform_message_id": &source.platform_message_id,
+            "thread_id": &source.thread_id},
             doc! {"$set":{"thread_id":sealed}},
-        ).await?;
+        )
+        .await?;
     Ok(applied.modified_count == 1)
 }
 
@@ -720,10 +885,15 @@ fn destination_for(source: &ChannelMessage) -> AppResult<String> {
         .ok_or_else(refused)?;
     let mut thread = source.thread_id.as_deref();
     let interaction;
-    if source.platform == "discord" && thread.is_some_and(|thread| {
-        thread.starts_with(REPLY_HANDLE_PREFIX) || thread.starts_with("interaction:")
-    }) {
-        let event = source.platform_message_id.as_deref().filter(|id| !id.is_empty())
+    if source.platform == "discord"
+        && thread.is_some_and(|thread| {
+            thread.starts_with(REPLY_HANDLE_PREFIX) || thread.starts_with("interaction:")
+        })
+    {
+        let event = source
+            .platform_message_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
             .ok_or_else(refused)?;
         interaction = format!("discord-interaction:{event}");
         thread = Some(&interaction);

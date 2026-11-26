@@ -2020,9 +2020,7 @@ pub async fn ensure_relay_agent_key_active(
             AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
         })?;
     crate::services::key_service::require_ordinary_purpose(key.key.purpose)?;
-    if key.key.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now())
-        || crate::services::erasure_admission::is_erasure_accepted(db, &key.key.user_id).await?
-    {
+    if crate::services::erasure_admission::is_erasure_accepted(db, &key.key.user_id).await? {
         return Err(AppError::Unauthorized(
             "Relay token's agent key is inactive or revoked".into(),
         ));

@@ -1743,7 +1743,7 @@ a dedication that has yet to admit guest work.
 | Dedicated route active in the add-on | The durable key can reply to original shared sources. Private replies require the source capability. General key use is blocked. |
 | Live original assignment after global or bot opt-out | Fresh ordinary callbacks use the original assigned key and receive a freshly signed bearer bound to the current rollout, bot preference and route revision. Earlier broad bearers and add-on capabilities remain invalid. |
 | Activated assignment removed, retired, transferred or suspended | Old broad credentials are blocked. To repurpose a previously activated key, rotate it and use the successor. Rotation revokes the predecessor and its children. |
-| Dedicated route waiting for a pending ordinary Aurinko callback | The original receipt resumes the ordinary callback. Fresh add-on admission waits for the pending receipt to settle. |
+| Dedicated route waiting for a pending ordinary Aurinko callback | The original receipt resumes the ordinary callback. Pending and failed callbacks keep the route ordinary until they settle or their retained message metadata expires. |
 
 An enrolled callback also carries `guest_access_token`. External runtimes
 use it as the Bearer credential for `POST /api/v1/channel-relay/guest-tools`.
