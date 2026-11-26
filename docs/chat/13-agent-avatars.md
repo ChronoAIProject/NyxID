@@ -231,9 +231,10 @@ provides the remaining entries. Mobile uses the roster projection. Older
 servers fall back to the coarse pending count and running flag when activity
 is absent.
 
-Background proxy approvals matched by chat-key name are visible as approval
-in the open transcript. In the background their avatar follows the observable
-live tool state. Conversation, group and notification events refresh web
+The open transcript also resolves loaded proxy approvals matched by chat-key
+name and shared connection consent cards as approval. In background threads,
+the avatar follows the observable live tool state. Conversation, group and
+notification events refresh web
 activity on a coalesced one-second cadence. A card expiry or change without one
 of those events can remain stale until the next existing refresh, with no fixed
 wall-clock bound. Group transcripts expose working member IDs and pending

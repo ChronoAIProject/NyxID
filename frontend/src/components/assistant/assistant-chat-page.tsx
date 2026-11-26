@@ -1109,6 +1109,7 @@ function NyxAgentThreadPage() {
       streaming: chat.isStreaming,
       streamedText,
       pendingOwnerAction:
+        decisions.length > 0 ||
         (conversation?.pending_acknowledgements ?? 0) > 0 ||
         chat.acknowledgements.some((row) => row.status === "pending") ||
         chat.approvals.some((row) => !row.status || row.status === "pending"),
