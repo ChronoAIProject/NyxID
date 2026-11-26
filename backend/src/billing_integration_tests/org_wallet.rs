@@ -63,7 +63,13 @@ async fn topup_http_limits_match_for_personal_and_org_wallets_before_provisionin
     let token = route_access_token(&state, &admin);
 
     for owner in [None, Some(org.as_str())] {
-        for amount in [json!(-1), json!(0), json!(9), json!(10_000_001), json!(i64::MAX)] {
+        for amount in [
+            json!(-1),
+            json!(0),
+            json!(9),
+            json!(10_000_001),
+            json!(i64::MAX),
+        ] {
             let (status, body) = request(
                 &app, &token, Method::POST, "/api/v1/billing/topup",
                 json!({"owner_id": owner, "amount_credits": amount, "idempotency_key": "d7-rejected"}),
@@ -78,15 +84,29 @@ async fn topup_http_limits_match_for_personal_and_org_wallets_before_provisionin
     assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
     assert!(lago.topup_wallets.lock().unwrap().is_empty());
     for collection in [BILLING_WALLET, "billing_topup_sessions"] {
-        assert_eq!(db.collection::<bson::Document>(collection).count_documents(doc! {}).await.unwrap(), 0);
+        assert_eq!(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     // JSON numbers outside i64 or fractional credits fail extraction, before writes.
     for amount in [json!(9_223_372_036_854_775_808_u64), json!(10.5)] {
-        let response = app.clone().oneshot(route_request(
-            Method::POST, "/api/v1/billing/topup", &token,
-            Body::from(json!({"amount_credits": amount, "idempotency_key": "d7-overflow"}).to_string()),
-        )).await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(route_request(
+                Method::POST,
+                "/api/v1/billing/topup",
+                &token,
+                Body::from(
+                    json!({"amount_credits": amount, "idempotency_key": "d7-overflow"}).to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
     for owner in [None, Some(org.as_str())] {

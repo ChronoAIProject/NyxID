@@ -1406,7 +1406,9 @@ mod tests {
         assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
         assert_eq!(
             db.collection::<BillingWallet>(BILLING_WALLET)
-                .count_documents(doc! { "owner_id": &owner_id }).await.unwrap(),
+                .count_documents(doc! { "owner_id": &owner_id })
+                .await
+                .unwrap(),
             0
         );
         let session_count = db
@@ -1433,9 +1435,17 @@ mod tests {
         }
         assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 7);
         let inputs = lago.topup_inputs.lock().unwrap();
-        for ((external_id, quantity), amount) in inputs.iter().zip([10, 11, 20, 50, 100, 500, 10_000_000]) {
+        for ((external_id, quantity), amount) in
+            inputs.iter().zip([10, 11, 20, 50, 100, 500, 10_000_000])
+        {
             assert_eq!(*quantity, amount);
-            assert_eq!(external_id, &format!("nyxid-topup:{}", deterministic_topup_session_id(&owner_id, &format!("purchase-{amount}"))));
+            assert_eq!(
+                external_id,
+                &format!(
+                    "nyxid-topup:{}",
+                    deterministic_topup_session_id(&owner_id, &format!("purchase-{amount}"))
+                )
+            );
         }
     }
 

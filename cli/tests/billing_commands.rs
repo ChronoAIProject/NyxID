@@ -2227,21 +2227,51 @@ async fn topup_signed_amounts_reach_server_and_preserve_the_raw_error() {
                 "idempotency_key": "d7-raw-error"
             })))
             .respond_with(ResponseTemplate::new(400).set_body_raw(raw, "application/json"))
-            .expect(1).mount(&server).await;
-        let out = run(&server, &[
-            "billing", "topup", "--amount-credits", amount,
-            "--idempotency-key", "d7-raw-error", "--output", "json",
-        ]).await;
-        assert_eq!(out.status.code(), Some(1), "{amount}: {}", output_text(&out));
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = run(
+            &server,
+            &[
+                "billing",
+                "topup",
+                "--amount-credits",
+                amount,
+                "--idempotency-key",
+                "d7-raw-error",
+                "--output",
+                "json",
+            ],
+        )
+        .await;
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{amount}: {}",
+            output_text(&out)
+        );
         assert!(out.stdout.is_empty());
-        assert!(output_text(&out).contains(raw), "{amount}: {}", output_text(&out));
+        assert!(
+            output_text(&out).contains(raw),
+            "{amount}: {}",
+            output_text(&out)
+        );
         assert!(!output_text(&out).contains(SENTINEL));
     }
 }
 
 #[tokio::test]
 async fn topup_cli_preserves_whole_quantities_and_existing_below_minimum_checkout() {
-    for (amount, reused) in [(9, true), (10, false), (11, false), (20, false), (50, false), (100, false), (500, false), (10_000_000, false)] {
+    for (amount, reused) in [
+        (9, true),
+        (10, false),
+        (11, false),
+        (20, false),
+        (50, false),
+        (100, false),
+        (500, false),
+        (10_000_000, false),
+    ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/billing/topup"))
@@ -2252,10 +2282,20 @@ async fn topup_cli_preserves_whole_quantities_and_existing_below_minimum_checkou
                 "lago_wallet_transaction_id": "fixture", "lago_invoice_id": null,
                 "status": "checkout_created", "reused": reused
             }))).expect(1).mount(&server).await;
-        let out = run(&server, &[
-            "billing", "topup", "--amount-credits", &amount.to_string(),
-            "--idempotency-key", "d7-parity", "--output", "json",
-        ]).await;
+        let out = run(
+            &server,
+            &[
+                "billing",
+                "topup",
+                "--amount-credits",
+                &amount.to_string(),
+                "--idempotency-key",
+                "d7-parity",
+                "--output",
+                "json",
+            ],
+        )
+        .await;
         assert!(out.status.success(), "{}", output_text(&out));
         assert_eq!(json(&out)["amount_credits"], amount);
         assert_eq!(json(&out)["reused"], reused);
@@ -2770,8 +2810,11 @@ async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_o
             "provided-key",
         ],
     ] {
-        let amount = args.iter().position(|arg| *arg == "--amount-credits")
-            .map(|index| args[index + 1].parse::<usize>().unwrap()).unwrap_or(20);
+        let amount = args
+            .iter()
+            .position(|arg| *arg == "--amount-credits")
+            .map(|index| args[index + 1].parse::<usize>().unwrap())
+            .unwrap_or(20);
         let server = MockServer::start().await;
         let wallet: Value =
             serde_json::from_str(include_str!("fixtures/billing/wallet.json")).unwrap();

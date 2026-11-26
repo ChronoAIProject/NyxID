@@ -789,10 +789,7 @@ async fn invisible_card_2072_sheets_write_ask_history_allow_and_single_dispatch(
     assert_eq!(result["code"], "acknowledgement_used");
     assert!(result.get("confirm_phrase").is_none());
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(
-        *cells.lock().unwrap(),
-        json!([["Ledger", "=SUM(B2:B10)"]])
-    );
+    assert_eq!(*cells.lock().unwrap(), json!([["Ledger", "=SUM(B2:B10)"]]));
 }
 
 #[tokio::test]
@@ -809,9 +806,8 @@ async fn d7_2607_approved_sheets_write_without_funds_refuses_before_dispatch_or_
         ))
         .await
         .unwrap();
-    let lago = Arc::new(crate::billing_integration_tests::FakeLago::with_wallet_balance(
-        Credits::ZERO,
-    ));
+    let lago =
+        Arc::new(crate::billing_integration_tests::FakeLago::with_wallet_balance(Credits::ZERO));
     f.state.billing = Arc::new(crate::billing_integration_tests::billing_service(
         &f.state.db,
         lago.clone(),
@@ -843,7 +839,13 @@ async fn d7_2607_approved_sheets_write_without_funds_refuses_before_dispatch_or_
         )
         .await
         .unwrap();
-    let wallet = f.state.billing.ensure_wallet(&f.owner).await.unwrap().wallet;
+    let wallet = f
+        .state
+        .billing
+        .ensure_wallet(&f.owner)
+        .await
+        .unwrap()
+        .wallet;
     assert_eq!(wallet.balance_credits, Credits::ZERO);
     assert_eq!(wallet.overdraft_cap_credits, Credits::ZERO);
     assert_eq!(wallet.reserved_credits, Credits::ZERO);
@@ -863,7 +865,12 @@ async fn d7_2607_approved_sheets_write_without_funds_refuses_before_dispatch_or_
         "usage_meter",
     ] {
         assert_eq!(
-            f.state.db.collection::<Document>(collection).count_documents(doc! {}).await.unwrap(),
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
             0,
             "{collection}"
         );
@@ -896,13 +903,23 @@ async fn d7_2607_approved_sheets_write_without_funds_refuses_before_dispatch_or_
         "usage_meter",
     ] {
         assert_eq!(
-            f.state.db.collection::<Document>(collection).count_documents(doc! {}).await.unwrap(),
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
             0,
             "{collection}"
         );
     }
     assert_eq!(
-        f.state.db.collection::<Document>("billing_ledger").count_documents(doc! {}).await.unwrap(),
+        f.state
+            .db
+            .collection::<Document>("billing_ledger")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
         ledger_before
     );
 }

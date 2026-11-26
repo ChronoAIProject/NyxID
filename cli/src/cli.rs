@@ -3344,19 +3344,59 @@ mod tests {
 
     #[test]
     fn billing_topup_parses_signed_boundaries_and_verifier_defaults_to_twenty() {
-        for amount in ["-1", "0", "9", "10", "11", "20", "50", "100", "500", "10000000", "10000001", "9223372036854775807"] {
-            let cli = Cli::try_parse_from(["nyxid", "billing", "topup", "--amount-credits", amount]).unwrap();
-            let Commands::Billing { command: BillingCommands::Topup { amount_credits, .. } } = cli.command else { panic!("topup command"); };
+        for amount in [
+            "-1",
+            "0",
+            "9",
+            "10",
+            "11",
+            "20",
+            "50",
+            "100",
+            "500",
+            "10000000",
+            "10000001",
+            "9223372036854775807",
+        ] {
+            let cli =
+                Cli::try_parse_from(["nyxid", "billing", "topup", "--amount-credits", amount])
+                    .unwrap();
+            let Commands::Billing {
+                command: BillingCommands::Topup { amount_credits, .. },
+            } = cli.command
+            else {
+                panic!("topup command");
+            };
             assert_eq!(amount_credits, amount.parse::<i64>().unwrap());
         }
-        assert!(Cli::try_parse_from(["nyxid", "billing", "topup", "--amount-credits", "9223372036854775808"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "billing",
+                "topup",
+                "--amount-credits",
+                "9223372036854775808"
+            ])
+            .is_err()
+        );
         for args in [
             vec!["nyxid", "billing", "verify-topup-flow"],
-            vec!["nyxid", "billing", "verify-topup-flow", "--amount-credits", "-1"],
+            vec![
+                "nyxid",
+                "billing",
+                "verify-topup-flow",
+                "--amount-credits",
+                "-1",
+            ],
         ] {
             let expected = if args.len() == 3 { 20 } else { -1 };
             let cli = Cli::try_parse_from(args).unwrap();
-            let Commands::Billing { command: BillingCommands::VerifyTopupFlow { amount_credits, .. } } = cli.command else { panic!("verifier command"); };
+            let Commands::Billing {
+                command: BillingCommands::VerifyTopupFlow { amount_credits, .. },
+            } = cli.command
+            else {
+                panic!("verifier command");
+            };
             assert_eq!(amount_credits, expected);
         }
     }
