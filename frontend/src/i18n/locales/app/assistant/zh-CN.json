@@ -746,6 +746,7 @@
   "Retry {{value1}}": "重试 {{value1}}",
   "Return to the original conversation and explicitly request the task again. This expired operation will not be sent.": "请返回原来的对话，并明确再次请求该任务。此已过期的操作不会被发送。",
   "Review the device owner and initial service allowlist before creating the provisioning package.": "创建配置包前，请检查设备所有者和初始服务允许列表。",
+  "Review the exact inputs and permission scope before allowing.": "允许前请审阅确切的输入内容和权限范围。",
   "Review the injection shape. Credential material is encrypted through the node flow and is never accepted from chat.": "检查注入配置。凭据内容通过节点流程加密，绝不会从聊天中接收。",
   "Review the node name and owner. NyxID creates the token only after you continue.": "检查节点名称和所有者。 NyxID 仅在你继续后才会创建令牌。",
   "Review {{value1}}'s request: {{value2}}": "审阅 {{value1}} 的请求：{{value2}}",

@@ -5,6 +5,10 @@ import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { DecisionReceipt } from "./decision-receipt";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { AuthoredSkillCard } from "./authored-skill-card";
+import { usePinnedDecisionCard } from "./decision-card-presentation";
+import { ownerConfirmationBypassed } from "@/lib/assistant/pending-decisions";
+import { DecisionCardActions } from "./decision-card-actions";
+import { DecisionReview } from "./decision-review";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { actionRiskLabel, confirmationReason } from "@/lib/assistant/nyxbot-labels";
@@ -45,6 +49,7 @@ export function NyxAgentAcknowledgementCard({
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const { t: translateUi, language } = useCardTranslation();
+  const pinned = usePinnedDecisionCard();
   const [error, setError] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -57,10 +62,7 @@ export function NyxAgentAcknowledgementCard({
     (acknowledgement.status === "pending" || (acknowledgement.status === "allowed" && acknowledgement.kind === "action")) &&
     Date.parse(acknowledgement.expires_at) <= now;
 
-  const confirmationsBypassed =
-    accessMode === "autopilot" &&
-    acknowledgement.decider === "user" &&
-    !["org_connection", "delegation"].includes(acknowledgement.confirmation?.reason ?? "");
+  const confirmationsBypassed = ownerConfirmationBypassed(acknowledgement, accessMode);
   if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
   const label = title(translateUi, acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
@@ -87,11 +89,11 @@ export function NyxAgentAcknowledgementCard({
     }
   }
 
-  return (
-    <section lang={language}
-      aria-label={label}
-      className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}
-    >
+  const actions = <div className="flex flex-wrap justify-end gap-2">
+    <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Deny")}</Button>
+    <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>{translateUi("Allow")}</Button>
+  </div>;
+  const content = <>
       {routed ? (
         <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Requested from NyxBot")}</p>
       ) : null}
@@ -147,12 +149,16 @@ export function NyxAgentAcknowledgementCard({
       {acknowledgement.connect_own?.supported && acknowledgement.connect_own.service_slug ? (
         <ConnectOwnAction slug={acknowledgement.connect_own.service_slug} />
       ) : null}
-      <div className="flex justify-end gap-2">
-        <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Deny")}</Button>
-        <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>{translateUi("Allow")}</Button>
-      </div>
-    </section>
-  );
+  </>;
+  if (pinned && (acknowledgement.kind === "account" || label.length > 200 || label.split("\n").length > 3)) {
+    return <DecisionReview title={translateUi("Review action")} busy={deciding} onDeny={() => void decide("deny")} actions={actions}
+      summary={<><p className="line-clamp-2 break-words">{label}</p>{error ? <p role="alert" className="text-destructive">{translateUi(error)}</p> : null}</>}
+    ><div className="space-y-3">{content}</div></DecisionReview>;
+  }
+  return <section lang={language} aria-label={label} className={pinned ? "space-y-3 p-4" : `${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
+    {content}
+    <DecisionCardActions>{actions}</DecisionCardActions>
+  </section>;
 }
 
 function ConnectOwnAction({ slug }: { readonly slug: string }) {

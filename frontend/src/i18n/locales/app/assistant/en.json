@@ -746,6 +746,7 @@
   "Retry {{value1}}": "Retry {{value1}}",
   "Return to the original conversation and explicitly request the task again. This expired operation will not be sent.": "Return to the original conversation and explicitly request the task again. This expired operation will not be sent.",
   "Review the device owner and initial service allowlist before creating the provisioning package.": "Review the device owner and initial service allowlist before creating the provisioning package.",
+  "Review the exact inputs and permission scope before allowing.": "Review the exact inputs and permission scope before allowing.",
   "Review the injection shape. Credential material is encrypted through the node flow and is never accepted from chat.": "Review the injection shape. Credential material is encrypted through the node flow and is never accepted from chat.",
   "Review the node name and owner. NyxID creates the token only after you continue.": "Review the node name and owner. NyxID creates the token only after you continue.",
   "Review {{value1}}'s request: {{value2}}": "Review {{value1}}'s request: {{value2}}",
