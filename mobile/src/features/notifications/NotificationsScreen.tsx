@@ -67,6 +67,7 @@ import {
 import {
   notificationAccessibilityLabel,
   notificationCountLabel,
+  notificationFilterCount,
   notificationPending,
   notificationTarget,
   notificationTime,
@@ -511,10 +512,13 @@ export function NotificationsScreen({
     },
     [markRead.mutate, navigation, openChat],
   );
-  const segments = NOTIFICATION_FILTERS.map((value) => ({
-    id: value,
-    label: NOTIFICATION_FILTER_LABELS[value],
-  }));
+  const segments = NOTIFICATION_FILTERS.map((id) => {
+    const label = NOTIFICATION_FILTER_LABELS[id];
+    const count = Platform.OS === "android" ? notificationFilterCount(summary.data, id) : 0;
+    return count > 0
+      ? { id, label, count, accessibilityLabel: `${label}, ${count}` }
+      : { id, label };
+  });
   const loadMore = () => {
     if (feed.hasNextPage && !feed.isFetchingNextPage) void feed.fetchNextPage();
   };
@@ -609,6 +613,7 @@ export function NotificationsScreen({
       </View>
       <SegmentControl
         segments={segments}
+        compact={Platform.OS === "android"}
         activeIndex={NOTIFICATION_FILTERS.indexOf(filter)}
         accessibilityLabel={translateApp("Filter notifications")}
         style={styles.filters}
