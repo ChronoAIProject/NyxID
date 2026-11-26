@@ -105,7 +105,7 @@ export function notificationTitle(
 export function notificationPreview(item: AssistantNotification): string {
   if (item.kind === "automation_result") {
     const preview = item.preview.trim();
-    if (!preview || preview === "无（建设中，未发送）" || preview === "Completed.") return "";
+    if (!preview || preview === "无（建设中，未发送）") return "";
   }
   return item.preview;
 }

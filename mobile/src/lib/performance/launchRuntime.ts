@@ -53,6 +53,15 @@ const sources = {
   ],
 };
 
+function matchesLaunchKind(snapshot: LaunchSnapshot, kind: LaunchKind) {
+  return (
+    snapshot.startup_kind === kind &&
+    sources[kind].includes(snapshot.origin_source) &&
+    Number.isSafeInteger(snapshot.launch_id) &&
+    snapshot.launch_id >= 0
+  );
+}
+
 export function createLaunchMonitor(deps: {
   native: LaunchBridge | null;
   androidActivityPause?: boolean;
@@ -173,16 +182,14 @@ export function createLaunchMonitor(deps: {
         }
       });
   }
-  async function read(c: Cycle, attempt = 0) {
+  async function read(c: Cycle, attempt = 0, firstSnapshot?: LaunchSnapshot) {
     if (!valid(c)) return;
-    const snap = await deps.native?.getLaunchSnapshot?.().catch(() => null);
+    const snap =
+      firstSnapshot ?? (await deps.native?.getLaunchSnapshot?.().catch(() => null));
     if (!valid(c)) return;
     if (
       snap &&
-      snap.startup_kind === c.kind &&
-      sources[c.kind].includes(snap.origin_source) &&
-      Number.isSafeInteger(snap.launch_id) &&
-      snap.launch_id >= 0 &&
+      matchesLaunchKind(snap, c.kind) &&
       (c.id === undefined
         ? !snap.continuation_only && snap.launch_id > lastId
         : c.id === snap.launch_id)
@@ -223,7 +230,7 @@ export function createLaunchMonitor(deps: {
         attempt < 20 ? 150 : 1000,
       );
   }
-  function start(kind: LaunchKind, grant: number | null) {
+  function start(kind: LaunchKind, grant: number | null, snapshot?: LaunchSnapshot) {
     if (
       !deps.native?.getLaunchSnapshot ||
       grant === null ||
@@ -240,7 +247,7 @@ export function createLaunchMonitor(deps: {
       reported: new Set(),
     };
     expiry = setTimeout(reset, 120000);
-    void read(cycle);
+    void read(cycle, 0, snapshot);
   }
   async function resumeAndroid(grant: number, gen: number, attempt = 0) {
     const current = () =>
@@ -256,21 +263,25 @@ export function createLaunchMonitor(deps: {
     const previous = suspended;
     suspended = undefined;
     if (!snapshot.continuation_only) {
-      if (snapshot.startup_kind === "hot") start("hot", grant);
+      if (matchesLaunchKind(snapshot, "hot") && snapshot.launch_id > lastId)
+        start("hot", grant, snapshot);
       return;
     }
     // RN Android reports background on Activity.pause, including a short
-    // permission sheet. Only this native ID and its original sample can resume.
+    // permission sheet. Hot samples already have the ID from resumeAndroid.
+    // The process has only one cold launch, which may pause before its first read.
     if (
       !previous ||
       previous.epoch !== grant ||
-      previous.id !== snapshot.launch_id ||
-      previous.kind !== snapshot.startup_kind
+      !matchesLaunchKind(snapshot, previous.kind) ||
+      (previous.id === undefined
+        ? previous.kind !== "cold" || snapshot.launch_id <= lastId
+        : previous.id !== snapshot.launch_id)
     )
       return;
-    cycle = { ...previous, readyPending: false };
+    cycle = { ...previous, id: snapshot.launch_id, readyPending: false };
     expiry = setTimeout(reset, 120000);
-    void read(cycle);
+    void read(cycle, 0, snapshot);
   }
   return {
     state(next: string | null) {

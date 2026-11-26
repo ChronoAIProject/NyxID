@@ -1,4 +1,3 @@
-import { localizedError } from "../../../i18n/localizedError";
 import { NativeModules, Platform } from "react-native";
 import type { VoiceMediaAdapter } from "./AssistantVoiceClient";
 import {
@@ -6,12 +5,13 @@ import {
   type NativeAudioPeer,
   type NativeAudioStream,
 } from "./NativeOpenAIMedia";
+import { NativeVoiceRuntimeUnavailableError } from "./voiceStartError";
 
 /** The native import stays outside the pure, injected media lifecycle. */
 export function createNativeOpenAIMedia(): VoiceMediaAdapter | undefined {
   if (Platform.OS !== "ios" && Platform.OS !== "android") return undefined;
   if (!NativeModules.WebRTCModule) {
-    throw localizedError("Voice audio is not supported by this app runtime.");
+    throw new NativeVoiceRuntimeUnavailableError();
   }
   const { mediaDevices, RTCPeerConnection } =
     require("react-native-webrtc") as typeof import("react-native-webrtc");

@@ -26,8 +26,10 @@ Both implementations use a fixed 1,002-bin histogram, one millisecond percentile
 precision and a maximum of 10,000 observations per window. Values over one second
 share an overflow bin whose percentile uses the window's observed maximum.
 Percentiles may round up by less than one millisecond. Do not average window P95s
-as a global frame P95. JS projects a closed set of numeric fields and rechecks
-consent epoch, visibility and scope before submitting a result.
+as a global frame P95. JS projects a closed set of numeric fields. A scope change,
+loss of focus or foreground, consent change, or disposal invalidates pending
+frame results even if the original scope and visibility return before native
+completion.
 
 Launch measurement requires a pre-existing native consent mirror bound to the
 build's configured performance destination. The mirror contains only a SHA-256
@@ -37,6 +39,9 @@ subsequent cold launch or real background-to-foreground transition, without
 reviving the launch that was already in progress. Rehydrating the same prior
 grant preserves an eligible launch. JavaScript remains responsible for checking
 the authoritative saved choice and current consent epoch before transmission.
+Settings shows a loaded JavaScript choice and lets the user withdraw it even
+when reconciliation of the native mirror fails. Explicit saves and withdrawals
+continue to report native persistence errors.
 
 On iOS, the supported cold origin is `didFinishLaunching`, excluding pre-main
 time. A hot origin is `willEnterForeground` following `didEnterBackground`.
@@ -45,6 +50,11 @@ App-active uses `didBecomeActive`. The first-frame source is explicitly
 layer transaction completes and a later display-link callback occurs. This
 proxy does not prove React Native content presentation or GPU completion.
 Display observation starts only for a previously authorized launch.
+
+On Android, a temporary Activity pause preserves the original sample for the
+same native launch, including a cold launch paused before its first JavaScript
+snapshot. An Activity stop ends that launch. A fresh hot launch receives a new
+native ID and its own sampling decision.
 
 `getLaunchSnapshot` exposes the launch kind, a process-local launch ID and
 elapsed milestone values. `measureLaunchMilestone(id)` returns an elapsed value

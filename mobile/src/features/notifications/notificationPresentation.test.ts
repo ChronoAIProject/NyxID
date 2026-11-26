@@ -244,12 +244,16 @@ test("completed automation results localize the action and omit only empty-resul
   for (const [language, action] of [["zh-CN", "已完成"], ["zh-TW", "已完成"], ["en", "finished"]] as const) {
     setAppTranslationLanguage(language);
     assert.equal(notificationSentence(item).text, "顾客订单通知 " + action);
-    for (const preview of ["无（建设中，未发送）", "Completed.", "  "]) {
+    for (const preview of ["无（建设中，未发送）", "  "]) {
       const empty = { ...item, preview };
       assert.equal(notificationPreview(empty), "");
       assert.ok(!notificationAccessibilityLabel(empty).includes("建设中"));
       assert.equal(notificationMatchesSearch(empty, "建设中"), false);
     }
+    const completed = { ...item, preview: "Completed." };
+    assert.equal(notificationPreview(completed), "Completed.");
+    assert.ok(notificationAccessibilityLabel(completed).includes("Completed."));
+    assert.equal(notificationMatchesSearch(completed, "completed."), true);
     const text = "顾客备注：无（建设中，未发送）";
     assert.equal(notificationPreview({ ...item, preview: text }), text);
     assert.equal(notificationPreview({ ...item, kind: "chat_update", preview: "Completed." }), "Completed.");

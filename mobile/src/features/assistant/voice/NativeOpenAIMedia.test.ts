@@ -10,6 +10,7 @@ import {
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
 import { systemStatusActivityActive } from "../../../lib/systemStatusActivity";
 import { loadTestModule } from "../../../lib/api/apiUrlTestHarness";
+import { NativeVoiceRuntimeUnavailableError } from "./voiceStartError";
 
 type Event = { data?: unknown; track?: NativeAudioTrack };
 type Listener = (event: Event) => void;
@@ -125,12 +126,12 @@ for (const platform of ["ios", "android", "web"] as const) {
       {
         require(name: string) {
           switch (name) {
-            case "../../../i18n/localizedError":
-              return { localizedError: (message: string) => new Error(message) };
             case "react-native":
               return { Platform: { OS: platform }, NativeModules: modules };
             case "./NativeOpenAIMedia":
               return { NativeOpenAIMedia };
+            case "./voiceStartError":
+              return { NativeVoiceRuntimeUnavailableError };
             case "react-native-webrtc":
               imports++;
               return {
@@ -162,7 +163,10 @@ for (const platform of ["ios", "android", "web"] as const) {
     }
     assert.equal(stream.track.readyState, "ended");
     delete modules.WebRTCModule;
-    assert.throws(() => factory.createNativeOpenAIMedia(), /not supported/);
+    assert.throws(
+      () => factory.createNativeOpenAIMedia(),
+      NativeVoiceRuntimeUnavailableError,
+    );
     assert.equal(imports, 1);
   });
 }

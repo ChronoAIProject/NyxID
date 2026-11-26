@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { AppState } from "react-native";
 import {
   beginPerformanceSample,
@@ -50,19 +50,21 @@ export function useChatNativeFrames(options: {
   streaming: boolean;
   scope: unknown;
 }) {
+  const { focused, scope, streaming } = options;
   const latest = useRef(options);
-  latest.current = options;
   const observer = useRef<
     ReturnType<typeof createChatFrameObserver> | undefined
   >(undefined);
   if (!observer.current)
-    observer.current = createChatFrameObserver((scenario) =>
+    observer.current = createChatFrameObserver((scenario, isCurrent) =>
       beginFrameWindow(scenario, {
         native: nativePerformance,
         begin: beginPerformanceSample,
         current: getPerformanceConsentEpoch,
         visible: () =>
-          latest.current.focused && AppState.currentState === "active",
+          isCurrent() &&
+          latest.current.focused &&
+          AppState.currentState === "active",
         submit: (epoch, scenario, timing) =>
           submitPerformanceSample(epoch, "mobile.perf_frames", {
             scenario,
@@ -70,15 +72,14 @@ export function useChatNativeFrames(options: {
           }),
       }),
     );
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sample = observer.current!;
-    const update = () =>
+    const sub = AppState.addEventListener("change", (state) =>
       sample.update({
         ...latest.current,
-        visible: latest.current.focused && AppState.currentState === "active",
-      });
-    update();
-    const sub = AppState.addEventListener("change", update);
+        visible: latest.current.focused && state === "active",
+      }),
+    );
     let previousEpoch = getPerformanceConsentEpoch();
     const unsubscribe = subscribePerformanceConsent(() => {
       const epoch = getPerformanceConsentEpoch();
@@ -95,11 +96,12 @@ export function useChatNativeFrames(options: {
       sample.dispose();
     };
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    latest.current = { focused, scope, streaming };
     observer.current!.update({
-      ...options,
-      visible: options.focused && AppState.currentState === "active",
+      ...latest.current,
+      visible: focused && AppState.currentState === "active",
     });
-  }, [options.focused, options.scope, options.streaming]);
+  }, [focused, scope, streaming]);
   return observer.current;
 }

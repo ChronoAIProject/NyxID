@@ -190,6 +190,9 @@ importers:
       react-native-worklets:
         specifier: 0.7.2
         version: 0.7.2(@babel/core@7.29.0)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+      whatwg-url-minimum:
+        specifier: 0.1.1
+        version: 0.1.1
       zod:
         specifier: ^4.6.6
         version: 4.6.7

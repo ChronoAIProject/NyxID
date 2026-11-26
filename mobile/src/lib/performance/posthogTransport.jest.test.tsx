@@ -5,6 +5,10 @@ import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
 import { createPerformanceConsent } from "./consent";
 import { PerformancePostHog } from "./posthogTransport";
 
+const { URL: NativeURL } = jest.requireActual<{ URL: typeof URL }>(
+  "react-native/Libraries/Blob/URL",
+);
+
 // The Expo Jest preset preserves import(), which ordinarily requires Node's
 // experimental VM modules flag. The shared harness compiles the production
 // entry point to CommonJS and injects this exact SDK class at its lazy import.
@@ -12,6 +16,7 @@ function loadMetrics(
   nativeLaunch: {
     setLaunchConsent(binding: string | null): Promise<void>;
   } | null = null,
+  host = destination.host,
 ) {
   const harness = hookHarness({
     "expo-constants": {
@@ -20,7 +25,7 @@ function loadMetrics(
           APP_ENV: "dev",
           PERFORMANCE_LAUNCH_BINDING: "a".repeat(64),
           PERFORMANCE_POSTHOG_TOKEN: destination.token,
-          PERFORMANCE_POSTHOG_HOST: destination.host,
+          PERFORMANCE_POSTHOG_HOST: host,
         },
       },
     },
@@ -231,5 +236,180 @@ test("the device mirrors only the current project's grant and never reauthorizes
   expect(await restarted.getPerformanceColdGrant()).not.toBeNull();
   await restarted.setPerformanceConsent(false);
   expect(writes).toEqual([null, "a".repeat(64), "a".repeat(64), null]);
+  expect(await restarted.getPerformanceColdGrant()).toBeNull();
+});
+
+test.each(["https://us.i.posthog.com", destination.host])(
+  "a legacy trailing slash for %s hydrates the stored grant and sends to its origin",
+  async (origin) => {
+    const legacyHost = origin + "/";
+    expect(new NativeURL(legacyHost).origin).toBe(origin);
+    await AsyncStorage.setItem(
+      "nyxid.performance-sharing.v1",
+      JSON.stringify([origin, destination.token]),
+    );
+    const restarted = loadMetrics(null, legacyHost);
+    expect(restarted.isPerformanceConfigured()).toBe(true);
+    await restarted.hydratePerformanceConsent();
+    const epoch = restarted.beginPerformanceSample();
+    expect(epoch).not.toBeNull();
+    expect(await restarted.getPerformanceColdGrant()).toBe(epoch);
+
+    restarted.submitPerformanceSample(epoch, "mobile.perf_chat_turn", {
+      outcome: "completed",
+      duration_ms: 200,
+    });
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(origin + "/batch/");
+  },
+);
+
+test.each([
+  ["https://INGEST.invalid:443/", destination.host],
+  ["https://INGEST.invalid:08443/", destination.host + ":8443"],
+  ["https://192.0.2.1:443/", "https://192.0.2.1"],
+  ["https://[2001:DB8::1]:443/", "https://[2001:db8::1]"],
+  ["https://[0:0:0:0:0:0:0:1]/", "https://[::1]"],
+])("a stored RN origin from %s matches the configured origin %s", async (legacyHost, origin) => {
+  const preferenceKey = "nyxid.performance-sharing.v1";
+  const legacyGrant = JSON.stringify([new NativeURL(legacyHost).origin, destination.token]);
+  await AsyncStorage.setItem(preferenceKey, legacyGrant);
+  let finishMirror!: () => void;
+  const pendingMirror = new Promise<void>((resolve) => {
+    finishMirror = resolve;
+  });
+  const mirror = {
+    setLaunchConsent: jest.fn((binding: string | null) =>
+      binding ? pendingMirror : Promise.resolve(),
+    ),
+  };
+  const restarted = loadMetrics(mirror, origin);
+  await restarted.hydratePerformanceConsent();
+  const epoch = restarted.beginPerformanceSample();
+  expect(epoch).not.toBeNull();
+  expect(await restarted.getPerformanceColdGrant()).toBe(epoch);
+  expect(await AsyncStorage.getItem(preferenceKey)).toBe(legacyGrant);
+  expect(mirror.setLaunchConsent).toHaveBeenCalledWith("a".repeat(64));
+
+  restarted.submitPerformanceSample(epoch, "mobile.perf_chat_turn", {
+    outcome: "completed",
+    duration_ms: 200,
+  });
+  await settle();
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([origin + "/batch/"]);
+
+  restarted.submitPerformanceSample(epoch, "mobile.perf_chat_turn", {
+    outcome: "completed",
+    duration_ms: 200,
+  });
+  const withdrawn = restarted.setPerformanceConsent(false);
+  expect(restarted.beginPerformanceSample()).toBeNull();
+  finishMirror();
+  await withdrawn;
+  await settle();
+  expect(mirror.setLaunchConsent.mock.calls).toEqual([["a".repeat(64)], [null]]);
+  expect(await AsyncStorage.getItem(preferenceKey)).toBeNull();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await restarted.setPerformanceConsent(true);
+  expect(await AsyncStorage.getItem(preferenceKey)).toBe(JSON.stringify([origin, destination.token]));
+  expect(restarted.beginPerformanceSample()).not.toBe(epoch);
+  expect(await restarted.getPerformanceColdGrant()).toBeNull();
+});
+
+const invalidOrigins = [
+  "http://ingest.invalid",
+  "https://",
+  "https://user:password@ingest.invalid",
+  "https://@ingest.invalid",
+  " https://ingest.invalid",
+  "https://ingest.invalid\n",
+  "https://IN\tGEST.invalid",
+  "https://ingest.invalid?",
+  "https://ingest.invalid#",
+  "https://ingest.invalid/private",
+  "https://ingest%2einvalid",
+  "https://ingest.invalid\\",
+  "https://ingest.invalid:",
+  "https://ingest.invalid:65536",
+  "https://ingest.invalid:443x",
+  "https://0x7f000001",
+  "https://[:::]",
+];
+
+test.each(invalidOrigins)("invalid HTTPS origin %j cannot configure collection or hydrate consent", async (host) => {
+  await AsyncStorage.setItem(
+    "nyxid.performance-sharing.v1",
+    JSON.stringify([host, destination.token]),
+  );
+  const configured = loadMetrics();
+  await configured.hydratePerformanceConsent();
+  expect(await configured.getPerformanceColdGrant()).toBeNull();
+  expect(configured.beginPerformanceSample()).toBeNull();
+  const injected = loadMetrics(null, host);
+  expect(injected.isPerformanceConfigured()).toBe(false);
+  await injected.setPerformanceConsent(true);
+  expect(injected.beginPerformanceSample()).toBeNull();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["a different host", ["https://another.invalid", destination.token]],
+  ["a different port", [destination.host + ":8443", destination.token]],
+  ["a changed token", [destination.host, destination.token + "x"]],
+  ["a changed token case", [destination.host, destination.token.toUpperCase()]],
+  ["an extra field", [destination.host, destination.token, true]],
+])("a saved grant with %s stays off", async (_reason, value) => {
+  await AsyncStorage.setItem("nyxid.performance-sharing.v1", JSON.stringify(value));
+  const restarted = loadMetrics();
+  await restarted.hydratePerformanceConsent();
+  expect(await restarted.getPerformanceColdGrant()).toBeNull();
+  expect(restarted.beginPerformanceSample()).toBeNull();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("React Native's empty HTTPS origin disables collection before the SDK can use its default", async () => {
+  expect(new NativeURL("https://").origin).toBe("");
+  await AsyncStorage.setItem(
+    "nyxid.performance-sharing.v1",
+    JSON.stringify(["", destination.token]),
+  );
+  const malformed = loadMetrics(null, "https://");
+  expect(malformed.isPerformanceConfigured()).toBe(false);
+  await malformed.hydratePerformanceConsent();
+  expect(await malformed.getPerformanceColdGrant()).toBeNull();
+  await malformed.setPerformanceConsent(true);
+  const epoch = malformed.beginPerformanceSample();
+  expect(epoch).toBeNull();
+  malformed.submitPerformanceSample(epoch, "mobile.perf_chat_turn", {
+    outcome: "completed",
+    duration_ms: 200,
+  });
+  await settle();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+test("a saved JS grant hydrates through a native mirror failure and can be withdrawn", async () => {
+  await metrics.setPerformanceConsent(true);
+  const failedWrite = new Error("native disk write failed");
+  const bridge = {
+    setLaunchConsent: jest.fn(async (_binding: string | null) => {})
+      .mockRejectedValueOnce(failedWrite)
+      .mockRejectedValueOnce(failedWrite),
+  };
+  const restarted = loadMetrics(bridge);
+  await expect(restarted.hydratePerformanceConsent()).resolves.toBeUndefined();
+  const original = restarted.beginPerformanceSample();
+  expect(original).not.toBeNull();
+  expect(bridge.setLaunchConsent).toHaveBeenCalledWith("a".repeat(64));
+
+  await expect(restarted.setPerformanceConsent(false)).rejects.toBe(failedWrite);
+  expect(bridge.setLaunchConsent).toHaveBeenLastCalledWith(null);
+  expect(restarted.getPerformanceConsentEpoch()).toBeNull();
+  await expect(loadMetrics().getPerformanceColdGrant()).resolves.toBeNull();
+
+  await restarted.setPerformanceConsent(true);
+  expect(restarted.beginPerformanceSample()).not.toBeNull();
+  expect(restarted.beginPerformanceSample()).not.toBe(original);
   expect(await restarted.getPerformanceColdGrant()).toBeNull();
 });

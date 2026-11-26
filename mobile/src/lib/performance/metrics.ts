@@ -4,6 +4,7 @@ import Constants from "expo-constants";
 import { nativeBuildVersion, nativeApplicationVersion } from "expo-application";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { URL as WhatwgURL } from "whatwg-url-minimum";
 import { createPerformanceConsent } from "./consent";
 import type { PerformancePostHog } from "./posthogTransport";
 import type { FrameScenario, FrameTiming } from "./nativePerformance";
@@ -21,33 +22,56 @@ type PerformanceEvents = {
 const extra = Constants.expoConfig?.extra;
 const token = extra?.PERFORMANCE_POSTHOG_TOKEN;
 const host = extra?.PERFORMANCE_POSTHOG_HOST;
+
+function canonicalPerformanceOrigin(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  // Require the raw HTTPS origin form before URL parsing can discard or rewrite input.
+  const match =
+    /^https:\/\/([a-zA-Z0-9._-]+|\[[a-fA-F0-9:.]+\])(?::[0-9]+)?\/?$/.exec(value);
+  const rawHost = match?.[1];
+  if (!rawHost || match?.[0] !== value) return null;
+  try {
+    const url = new WhatwgURL(value);
+    // For unbracketed hosts, reject transformations such as packed IPv4 aliases.
+    if (!rawHost.startsWith("[") && url.hostname !== rawHost.toLowerCase())
+      return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function readDestination() {
   if (
     (Platform.OS !== "android" && Platform.OS !== "ios") ||
     typeof token !== "string" ||
-    !/^phc_[A-Za-z0-9_-]+$/.test(token) ||
-    typeof host !== "string"
+    !/^phc_[A-Za-z0-9_-]+$/.test(token)
   )
     return null;
-  try {
-    const url = new URL(host);
-    if (
-      url.protocol === "https:" &&
-      !url.username &&
-      !url.password &&
-      url.pathname === "/" &&
-      !url.search &&
-      !url.hash
-    ) {
-      return { token, host: url.origin };
-    }
-  } catch {
-    /* An invalid configuration disables collection. */
-  }
-  return null;
+  const origin = canonicalPerformanceOrigin(host);
+  return origin ? { token, host: origin } : null;
 }
 const destination = readDestination();
 const preferenceKey = "nyxid.performance-sharing.v1";
+const destinationGrant =
+  destination && JSON.stringify([destination.host, destination.token]);
+async function readSavedGrant() {
+  const saved = await AsyncStorage.getItem(preferenceKey);
+  if (!destination || saved === null) return null;
+  try {
+    const record: unknown = JSON.parse(saved);
+    if (
+      Array.isArray(record) &&
+      record.length === 2 &&
+      record[1] === destination.token &&
+      canonicalPerformanceOrigin(record[0]) === destination.host
+    )
+      return destinationGrant;
+  } catch {
+    // Invalid saved records carry no grant.
+  }
+  return null;
+}
 const launchBinding = extra?.PERFORMANCE_LAUNCH_BINDING;
 let mirrorWrites = Promise.resolve();
 let preferenceChanged = false;
@@ -65,8 +89,8 @@ function mirrorLaunchGrant(enabled: boolean) {
   return write;
 }
 const consent = createPerformanceConsent(
-  destination && JSON.stringify([destination.host, destination.token]),
-  () => AsyncStorage.getItem(preferenceKey),
+  destinationGrant,
+  readSavedGrant,
   async (value) => {
     if (value === null) {
       // Attempt both removals even if one durable store fails. The UI can retry.
@@ -90,9 +114,10 @@ export const isPerformanceConfigured = () => destination !== null;
 export const getPerformanceConsentEpoch = consent.current;
 export async function hydratePerformanceConsent() {
   await consent.hydrate();
-  // This also migrates an existing installation's grant. Native setters never
-  // arm a launch already in progress and ignore repeated current bindings.
-  if (!preferenceChanged) await mirrorLaunchGrant(consent.current() !== null);
+  // The saved JS choice stays available for withdrawal while the native mirror
+  // reconciles. Native setters do not arm a launch already in progress.
+  if (!preferenceChanged)
+    void mirrorLaunchGrant(consent.current() !== null).catch(() => {});
 }
 export const getPerformanceColdGrant = consent.coldGrant;
 export function setPerformanceConsent(enabled: boolean) {

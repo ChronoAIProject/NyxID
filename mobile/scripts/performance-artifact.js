@@ -2,7 +2,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const { parseArgs } = require("node:util");
-const { loadEnv } = require("./lib/load-env");
+const { loadEnv, performanceDestination } = require("./lib/load-env");
 
 const artifacts = new Map([
   ["aab", ["android", ".aab"]],
@@ -49,17 +49,8 @@ async function reportArtifact(
   fetcher = fetch,
 ) {
   if (!host && !token) return { status: "disabled" };
-  const origin = new URL(host);
-  if (
-    origin.protocol !== "https:" ||
-    origin.username ||
-    origin.password ||
-    origin.pathname !== "/" ||
-    origin.search ||
-    origin.hash ||
-    !/^phc_[A-Za-z0-9_-]+$/.test(token ?? "")
-  )
-    throw new Error("Invalid performance destination");
+  const destination = performanceDestination(host, token);
+  if (!destination) throw new Error("Invalid performance destination");
   if (
     !["dev", "prod"].includes(environment) ||
     !["debug", "release"].includes(configuration) ||
@@ -80,13 +71,13 @@ async function reportArtifact(
     kind,
     size,
   ];
-  const response = await fetcher(new URL("/batch/", origin), {
+  const response = await fetcher(new URL("/batch/", destination.host), {
     method: "POST",
     redirect: "error",
     signal: AbortSignal.timeout(5000),
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      api_key: token,
+      api_key: destination.token,
       batch: [
         {
           event: "mobile.perf_artifact",

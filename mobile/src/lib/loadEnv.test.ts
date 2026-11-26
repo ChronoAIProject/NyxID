@@ -760,7 +760,11 @@ test("native launch consent is bound to the same explicitly configured ingestion
   const config = (host: string, token: string) => expoConfig(productionEnv({
     APP_ENV: "prod", PROD_PERFORMANCE_POSTHOG_HOST: host, PROD_PERFORMANCE_POSTHOG_TOKEN: token,
   })) as ReturnType<typeof expoConfig> & {
-    extra: { PERFORMANCE_LAUNCH_BINDING: string };
+    extra: {
+      PERFORMANCE_LAUNCH_BINDING: string;
+      PERFORMANCE_POSTHOG_HOST: string;
+      PERFORMANCE_POSTHOG_TOKEN: string;
+    };
     ios: { infoPlist: { NyxPerformanceLaunchBinding: string } };
     plugins: (string | [string, { binding: string }])[];
   };
@@ -776,8 +780,20 @@ test("native launch consent is bound to the same explicitly configured ingestion
   const us = choice("https://us.i.posthog.com", "phc_test");
   assert.match(us, /^[a-f0-9]{64}$/);
   assert.equal(choice("https://us.i.posthog.com/", "phc_test"), us);
+  assert.deepEqual(
+    { ...config("HTTPS://US.I.POSTHOG.COM:443/", "phc_test").extra },
+    {
+      ...config("https://us.i.posthog.com", "phc_test").extra,
+      PERFORMANCE_POSTHOG_HOST: "https://us.i.posthog.com",
+      PERFORMANCE_POSTHOG_TOKEN: "phc_test",
+    },
+  );
   assert.notEqual(choice("https://us.i.posthog.com", "phc_other"), us);
   assert.notEqual(choice("https://eu.i.posthog.com", "phc_test"), us);
   assert.equal(choice("https://us.i.posthog.com", ""), "");
   assert.equal(choice("http://us.i.posthog.com", "phc_test"), "");
+  assert.equal(choice("https://", "phc_test"), "");
+  const malformed = config("https://", "phc_test").extra;
+  assert.equal(malformed.PERFORMANCE_POSTHOG_HOST, "");
+  assert.equal(malformed.PERFORMANCE_POSTHOG_TOKEN, "");
 });

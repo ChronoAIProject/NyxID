@@ -289,7 +289,9 @@ foreground, push receipt and notification live frames. Push taps use the existin
 canonical assistant-link router and mark the supplied `notification_id` seen.
 Approvals Activity remains separate.
 
-Mobile filters show text labels without counts. Search matches titles, previews,
+iOS filters show text labels without counts. Android filters show counts as
+described in the [native workspace routes](../../mobile/docs/NATIVE_WORKSPACE_ROUTES.md).
+Search matches titles, previews,
 agents, participants, source labels and platform names within the selected filter.
 Search filters the fetched pages locally; when no match is visible it follows
 up to five distinct cursors, then offers **Search older notifications**. That

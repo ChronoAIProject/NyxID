@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
+import { deferred, hookHarness } from "../../features/assistant/assistantHookTestHarness";
 import { beginFrameWindow, createChatFrameObserver } from "./frameWindow";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 function setup(
   initialState: string | null = "active",
   initialEpoch: number | null = 7,
+  beforeStop = async () => {},
 ) {
   let epoch = initialEpoch;
   const stateListeners = new Set<(state: string) => void>();
@@ -44,6 +45,7 @@ function setup(
         },
         stopFrames: async (token: string) => {
           stops.push(token);
+          await beforeStop();
           return {
             measurement_source: "ios_display_link",
             duration_ms: 300,
@@ -145,4 +147,79 @@ test("withdrawal cancels a running stream window and a new grant starts at the n
   assert.equal(x.reports[0][2].scenario, "chat_drag_during_stream");
   x.harness.unmount();
   assert.deepEqual(x.subscriptions(), [0, 0]);
+});
+
+const stopTransitions: Record<string, (fixture: ReturnType<typeof setup>) => void> = {
+  "switching focused chats": (x) => {
+    x.options.scope = "other-chat";
+    x.harness.render();
+  },
+  "switching away and back": (x) => {
+    x.options.scope = "other-chat";
+    x.harness.render();
+    x.options.scope = "chat";
+    x.harness.render();
+  },
+  "blurring and refocusing": (x) => {
+    x.options.focused = false;
+    x.harness.render();
+    x.options.focused = true;
+    x.harness.render();
+  },
+  "going to background and returning": (x) => {
+    x.state("background");
+    x.state("active");
+  },
+  "withdrawing and granting again": (x) => {
+    x.consent(null);
+    x.consent(8);
+  },
+  "unmounting": (x) => x.harness.unmount(),
+};
+
+for (const [transition, invalidate] of Object.entries(stopTransitions)) {
+  test(`a deferred native stop cannot report a completed stream after ${transition}`, async (t) => {
+    const stopped = deferred<void>();
+    const x = setup("active", 7, () => stopped.promise);
+    t.after(x.harness.unmount);
+    x.options.streaming = true;
+    x.harness.render();
+    await tick();
+    x.options.streaming = false;
+    x.harness.render();
+    await tick();
+    assert.equal(x.stops.length, 1);
+
+    invalidate(x);
+    stopped.resolve();
+    await tick();
+    assert.equal(x.reports.length, 0);
+
+    if (transition !== "unmounting") {
+      x.harness.value().frames.beginDrag();
+      x.harness.value().frames.momentumEnd();
+      await tick();
+      assert.equal(x.reports.length, 1);
+      assert.equal(x.reports[0]?.[2].scenario, "chat_drag");
+    }
+  });
+}
+
+test("a deferred native stop reports a completed stream in the same generation", async (t) => {
+  const stopped = deferred<void>();
+  const x = setup("active", 7, () => stopped.promise);
+  t.after(x.harness.unmount);
+  x.options.streaming = true;
+  x.harness.render();
+  await tick();
+  x.options.streaming = false;
+  x.harness.render();
+  await tick();
+  assert.equal(x.stops.length, 1);
+  assert.equal(x.reports.length, 0);
+  stopped.resolve();
+  await tick();
+  assert.equal(x.reports.length, 1);
+  assert.equal(x.reports[0]?.[0], 7);
+  assert.equal(x.reports[0]?.[2].scenario, "chat_streaming");
 });

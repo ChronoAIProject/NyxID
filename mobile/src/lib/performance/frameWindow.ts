@@ -108,14 +108,19 @@ export function beginFrameWindow(
 
 /** One streaming window per visible episode; native observers stop after 10s. */
 export function createChatFrameObserver(
-  start: (scenario: FrameScenario) => Sample,
+  start: (scenario: FrameScenario, isCurrent: () => boolean) => Sample,
 ) {
+  let generation = 0;
   let visible = false,
     streaming = false,
     dragging = false;
   let stream: Sample | undefined, drag: Sample | undefined;
   let scope: unknown;
   let momentumTimer: ReturnType<typeof setTimeout> | undefined;
+  const startWindow = (scenario: FrameScenario) => {
+    const captured = generation;
+    return start(scenario, () => captured === generation);
+  };
   const endDrag = (report = true) => {
     clearTimeout(momentumTimer);
     momentumTimer = undefined;
@@ -127,29 +132,32 @@ export function createChatFrameObserver(
     endDrag();
     if (!visible) return;
     dragging = true;
-    drag = start(streaming ? "chat_drag_during_stream" : "chat_drag");
+    drag = startWindow(streaming ? "chat_drag_during_stream" : "chat_drag");
+  };
+  const cancel = () => {
+    // This also invalidates windows that already requested a native stop.
+    generation++;
+    endDrag(false);
+    stream?.stop(false);
+    stream = undefined;
   };
   return {
     update(next: { visible: boolean; streaming: boolean; scope: unknown }) {
-      if (!next.visible || scope !== next.scope) {
-        endDrag(false);
-        stream?.stop(false);
-        stream = undefined;
-      }
+      if (!next.visible || scope !== next.scope) cancel();
       if (
         next.visible &&
         (!visible || scope !== next.scope || streaming !== next.streaming)
       ) {
         if (next.streaming) {
           stream?.stop();
-          stream = start("chat_streaming");
+          stream = startWindow("chat_streaming");
         } else {
           stream?.stop();
           stream = undefined;
         }
         if (dragging && streaming !== next.streaming) {
           drag?.stop();
-          drag = start(
+          drag = startWindow(
             next.streaming ? "chat_drag_during_stream" : "chat_drag",
           );
         }
@@ -172,15 +180,9 @@ export function createChatFrameObserver(
     },
     // Consent changes stop observers but preserve visibility for the next drag.
     // Streaming is not restarted in the middle of an existing episode.
-    cancel() {
-      endDrag(false);
-      stream?.stop(false);
-      stream = undefined;
-    },
+    cancel,
     dispose() {
-      endDrag(false);
-      stream?.stop(false);
-      stream = undefined;
+      cancel();
       visible = false;
     },
   };

@@ -215,6 +215,51 @@ test("Android temporary pause suspends an existing sample and resumes only the s
   assert.equal(x.calls(), 1);
   x.launch.reset();
 });
+
+test("Android resumes the original cold sample after a pause before the first snapshot", async (t) => {
+  const x = fixture(true);
+  t.after(x.launch.reset);
+  x.read(async () => null);
+  x.launch.splash();
+  x.launch.shell("chat", true);
+  x.launch.input({}, "chat_composer", () => true, async () => true);
+  x.launch.state("active");
+  await tick();
+  assert.equal(x.calls(), 1);
+  assert.deepEqual(x.events, []);
+
+  x.launch.state("background");
+  x.read(async () => ({ ...cold, continuation_only: true }));
+  x.launch.state("active");
+  await tick();
+  assert.deepEqual(
+    x.events.map(({ startup_kind, milestone }) => [startup_kind, milestone]),
+    [["cold", "app_active"], ["cold", "first_frame"], ["cold", "interaction_ready"]],
+  );
+  assert.equal(x.calls(), 1);
+});
+
+test("Android will not attach a suspended hot sample to a replacement launch ID", async (t) => {
+  const x = fixture(true);
+  t.after(x.launch.reset);
+  x.read(async () => null);
+  x.launch.state("active");
+  await tick();
+  x.launch.state("background");
+  // A true Activity stop replaces the unbound cold launch with a fresh hot ID.
+  x.read(async () => ({ ...hot, first_frame_ms: undefined }));
+  x.launch.state("active");
+  await tick();
+  assert.deepEqual(x.events.map((event) => event.startup_kind), ["hot"]);
+
+  x.launch.state("background");
+  x.read(async () => ({ ...hot, launch_id: 3, continuation_only: true }));
+  x.launch.state("active");
+  await tick();
+  assert.deepEqual(x.events.map((event) => event.milestone), ["app_active"]);
+  assert.equal(x.calls(), 2);
+});
+
 test("Android fresh activity start discards prior partial measurements and a permission resume cannot resample a hot launch", async () => {
   const x = fixture(true);
   x.launch.state("active");
