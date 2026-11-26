@@ -69,7 +69,10 @@ from their single-button capsule and retain the existing Settings destination.
 Both shrink back to their source on outside tap, Android Back or accessibility
 escape; reduced motion changes size immediately. Accessibility focus enters the
 options and returns to the trigger on dismissal. Selected destinations wait for
-the bubble and native modal to dismiss. The Notifications row carries the unread count. Thread, crew,
+the bubble and native modal to dismiss. The Notifications row shows a single-line
+unread count capped at 99+. Android notification filters show their positive
+counts from the same summary and scroll horizontally when labels and counts
+exceed the available width. Thread, crew,
 channel-bot and Recents rows
 carry the unread counts the one notification summary attributes to them.
 Opening a thread or crew marks its notifications read once it has stayed in

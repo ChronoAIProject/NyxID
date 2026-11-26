@@ -32,6 +32,7 @@ export type SegmentControlProps = {
   /** External spacing only; grouped-choice visuals belong to this component. */
   style?: StyleProp<ViewStyle>;
   stacked?: boolean;
+  compact?: boolean;
   onPress: (index: number) => void;
 };
 
@@ -65,6 +66,7 @@ export function SegmentControl({
   accessibilityLabel,
   style,
   stacked = false,
+  compact = false,
   onPress,
 }: SegmentControlProps) {
   const { colors } = useTheme();
@@ -148,6 +150,7 @@ export function SegmentControl({
         disabled={disabled}
         style={({ pressed }) => [
           styles.item,
+          compact && styles.itemCompact,
           stacked && styles.itemStacked,
           adaptive && widths.length > 0 && { flex: 0, width: widths[i] },
           stacked && isActive && styles.selected,
@@ -226,7 +229,7 @@ export function SegmentControl({
                   key={seg.id ?? seg.label}
                   testID={`segment-measure-${i}`}
                   onLayout={(e) => measure(i, e.nativeEvent.layout.width)}
-                  style={[styles.item, styles.itemNatural]}
+                  style={[styles.item, compact && styles.itemCompact, styles.itemNatural]}
                 >
                   {segmentContent(seg, i === activeIndex, styles, false, true)}
                 </View>
@@ -319,6 +322,7 @@ const createStyles = (c: ThemeColors) => {
       gap: spacing.xs,
       zIndex: 1,
     },
+    itemCompact: { paddingHorizontal: spacing.xs },
     itemStacked: {
       flex: undefined,
     },

@@ -30,6 +30,7 @@ const row = (id: string, overrides: Record<string, unknown>) =>
   });
 
 function setup(options: {
+  platform?: "ios" | "android";
   enabled?: boolean;
   cornerWindow?: boolean;
   pages?: unknown[];
@@ -58,7 +59,7 @@ function setup(options: {
     },
     "react-native": {
       ActionSheetIOS: { showActionSheetWithOptions: (options: any, select: (index: number) => void) => { sheet = { options, select }; } },
-      Platform: { OS: "ios" },
+      Platform: { OS: options.platform ?? "ios" },
       Keyboard: { dismiss() {} },
       TextInput: "TextInput",
       ActivityIndicator: "ActivityIndicator",
@@ -418,7 +419,27 @@ test("each notification kind renders the source avatar, corner badge and client-
   x.h.unmount();
 });
 
-test("all filters omit unread counts and mark-all belongs to the header options", () => {
+test("Android filters expose the server summary counts with their labels", () => {
+  const x = setup({
+    platform: "android",
+    summary: {
+      unread_count: 52,
+      needs_decision_count: 0,
+      by_kind: { automation_result: 46, chat_update: 6 },
+    },
+  });
+  const filters = x.all().find((node) => node.type === "SegmentControl")!;
+  assert.equal(filters.props.compact, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(filters.props.segments)), [
+    { id: "all", label: "All", count: 52, accessibilityLabel: "All, 52" },
+    { id: "needs_you", label: "Needs you" },
+    { id: "automations", label: "Automations", count: 46, accessibilityLabel: "Automations, 46" },
+    { id: "chats", label: "Chats", count: 6, accessibilityLabel: "Chats, 6" },
+  ]);
+  x.h.unmount();
+});
+
+test("iOS filters omit unread counts and mark-all belongs to the header options", () => {
   const x = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [] }], summary: { unread_count: 21, needs_decision_count: 3, by_source: [], by_kind: { automation_result: 2, automation_problem: 4, needs_decision: 3, agent_update: 5, chat_update: 6, group_mention: 1 } } });
   const segments = x.all().find((n) => n.type === "SegmentControl")!;
   for (const segment of segments.props.segments) {
