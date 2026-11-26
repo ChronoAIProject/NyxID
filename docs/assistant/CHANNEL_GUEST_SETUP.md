@@ -20,6 +20,13 @@ selects zero bots. Turning off the test bot restores ordinary handling for its
 fresh requests. Turning off the flag does the same across all bots. Both actions
 invalidate affected guest work already in flight.
 
+For organization specialists, the admin guest-history view shows retained
+ordinary guest conversations. Enrolled bots keep new guest conversations in
+a separate history. During the pilot, the admin view can still link to the last
+ordinary conversation from before enrollment. This affects both private
+messages and shared rooms. After opt-out, newly admitted ordinary guest
+conversations can appear there again.
+
 Use the explicit bot IDs from the proposed pilot selection. Run the inventory from the repository root against the NyxID database with a read-only MongoDB account. The script accepts up to 100 bot IDs and returns JSON.
 
 ```sh

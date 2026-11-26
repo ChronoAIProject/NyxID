@@ -1,6 +1,6 @@
 # Channel bot guest access add-on
 
-PR #3004 implements this contract on NyxID `dev` at `4f828cc49`. The platform flag defaults to off. The implementation plan records the earlier prototype and compatibility reviews. [Implementation plan](plans/channel-bot-audience-boundaries.md)
+PR #3004 implements this contract on NyxID `dev` at `4d3cb8902`. The platform flag defaults to off. The implementation plan records the earlier prototype and compatibility reviews. [Implementation plan](plans/channel-bot-audience-boundaries.md)
 
 ## Runtime contract
 

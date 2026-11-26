@@ -100,6 +100,18 @@ fn guest_input() -> Document {
     }
 }
 
+// Ordinary history handles address the legacy conversation namespace.
+// Hosted guest IDs keep their separate namespace after the active turn and
+// admission record expire. A lane row alone cannot establish provenance.
+fn ordinary_scope(selectors: Document) -> Document {
+    doc! {"$and": [
+        {"_id": {"$regex": r"^nyxa-[0-9a-f]{32}\z"},
+            "active_turn.channel_guest.audience": {"$ne": "private"},
+            "active_turn.channel_context.channel_guest.audience": {"$ne": "private"}},
+        selectors,
+    ]}
+}
+
 // Resolve the current channel revision, exact chat partition, effective agent
 // and retained guest input before applying the page limit. A group may have
 // several guest lanes and an independent member transcript.
@@ -115,7 +127,7 @@ fn eligible(org: &str, selectors: Document) -> Vec<Document> {
     };
     guest.extend(selectors);
     vec![
-        doc! {"$match": guest},
+        doc! {"$match": ordinary_scope(guest)},
         doc! {"$project": {
             "agent_id": 1, "created_at": 1, "updated_at": 1, "meta_grant": 1,
             "channel.nyxbot_channel_id": 1, "channel.partition": 1, "channel.org_execution": 1,
@@ -451,7 +463,9 @@ pub(crate) async fn history(
     let id = conversation_id(handle).ok_or_else(missing)?;
     let row = db
         .collection::<Document>(CONVERSATIONS)
-        .find_one(doc! {"_id": &id, "channel.org_execution.guest": true})
+        .find_one(ordinary_scope(
+            doc! {"_id": &id, "channel.org_execution.guest": true},
+        ))
         .projection(doc! {"agent_id": 1})
         .await?
         .ok_or_else(missing)?;

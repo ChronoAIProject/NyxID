@@ -2569,6 +2569,88 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
     let mut member_source = f.link(&f.org.member, "member").await;
     member_source.partition = "group".into();
     let member = channel_turn(&f, &member_source, "GROUP_MEMBER_PRIVATE_SENTINEL").await;
+    use crate::models::channel_guest_access::{
+        AnswerAudience, GuestActor, GuestAssurance, GuestTurn,
+    };
+
+    db.collection::<Document>("channel_bots")
+        .update_one(
+            doc! {"_id": &f.bot.id},
+            doc! {"$set": {"guest_access_v1": true, "guest_access_v1_revision": 1_i64}},
+        )
+        .await
+        .unwrap();
+
+    let private_turn = GuestTurn {
+        bot_id: f.bot.id.clone(),
+        binding_id: f.channel.id.clone(),
+        platform: f.channel.platform.clone(),
+        conversation_id: "private-destination".into(),
+        source_event_id: uuid::Uuid::new_v4().to_string(),
+        actor: GuestActor {
+            id: "private-addon-actor".into(),
+            assurance: GuestAssurance::ProviderVerified,
+        },
+        audience: AnswerAudience::Private,
+        policy_revision: 1,
+        activation_epoch: 1,
+        bot_revision: 1,
+        meta_grant_id: None,
+    };
+    let hosted_id = private_turn.hosted_conversation_id();
+    let hosted_suffix = hosted_id.strip_prefix("nyxag-").unwrap();
+    let forged_id = format!("nyxa-{hosted_suffix}");
+    let conversations = db.collection::<Document>("assistant_conversations");
+    let lanes = db.collection::<Document>(crate::models::org_channel::LANES);
+    let template_conversation = conversations
+        .find_one(doc! {"_id": &private.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let template_lane = lanes
+        .find_one(doc! {"conversation_id": &private.id})
+        .await
+        .unwrap()
+        .unwrap();
+    // Model a settled private add-on row with an ordinary lane pointer and a
+    // forged ordinary handle whose stored turn still carries private evidence.
+    for (id, active_private) in [(&hosted_id, false), (&forged_id, true)] {
+        let mut row = template_conversation.clone();
+        row.insert("_id", id.as_str());
+        row.insert(
+            "updated_at",
+            bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::minutes(1)),
+        );
+        row.get_document_mut("channel")
+            .unwrap()
+            .get_document_mut("org_execution")
+            .unwrap()
+            .insert("sender_hash", id.as_str());
+        if active_private {
+            row.get_document_mut("active_turn")
+                .unwrap()
+                .insert("channel_guest", bson::to_bson(&private_turn).unwrap());
+        } else {
+            row.remove("active_turn");
+        }
+        conversations.insert_one(row).await.unwrap();
+
+        let mut lane = template_lane.clone();
+        lane.insert("_id", uuid::Uuid::new_v4().to_string());
+        lane.insert("sender_hash", id.as_str());
+        lane.insert("conversation_id", id.as_str());
+        lanes.insert_one(lane).await.unwrap();
+
+        db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "conversation_id": id, "user_id": &f.org.org,
+                "seq": 1_i64, "turn_id": "private-addon-turn", "role": "user", "author": "guest",
+                "origin": "channel", "text": "PRIVATE_ADDON_SENTINEL", "status": "completed",
+                "created_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
     let reply = uuid::Uuid::new_v4().to_string();
     engine::finish_turn(
         db,
@@ -2647,8 +2729,8 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
 
     let (_, router) = crate::routes::build_router();
     let router = router.with_state(f.org.state.clone());
-    let request = |actor: &str, method: &str, path: String| {
-        let token = crate::crypto::jwt::generate_access_token(
+    let token = |actor: &str| {
+        crate::crypto::jwt::generate_access_token(
             &f.org.state.jwt_keys,
             &f.org.state.config,
             &uuid::Uuid::parse_str(actor).unwrap(),
@@ -2659,11 +2741,13 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+    };
+    let request = |actor: &str, method: &str, path: String| {
         let request = Request::builder()
             .method(method)
             .uri(format!("/api/v1/assistant/nyxagent/{path}"))
-            .header("authorization", format!("Bearer {token}"))
+            .header("authorization", format!("Bearer {}", token(actor)))
             .header("content-type", "application/json")
             .body(Body::from(r#"{"title":"edited"}"#))
             .unwrap();
@@ -2678,6 +2762,12 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
     };
     let handle = |id: &str| format!("org-guest-{}", id.strip_prefix("nyxa-").unwrap());
     let discovery = format!("agents/{}/guest-conversations?limit=1", f.agent.id);
+    let forged_handles = [format!("org-guest-{hosted_id}"), handle(&forged_id)];
+    for handle in &forged_handles {
+        let (status, body) =
+            request(second_admin, "GET", format!("guest-conversations/{handle}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
     let (status, refusal) = request(
         second_admin,
         "GET",
@@ -2795,6 +2885,71 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
         .unwrap();
     assert_eq!(private_chat["guest_conversation_id"], handle(&private.id));
     assert_eq!(private_chat["conversation_id"], Value::Null);
+    let opt_out = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/v1/channel-bots/{}/guest-setup", f.bot.id))
+                .header("authorization", format!("Bearer {}", token(&f.org.admin)))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false,"expected_bot_revision":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = opt_out.status();
+    let body = to_bytes(opt_out.into_body(), 64 * 1024).await.unwrap();
+    let opt_out: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{opt_out}");
+    assert_eq!(opt_out["enabled"], false);
+    assert_eq!(opt_out["bot_revision"], 2);
+
+    let (status, ordinary) = request(
+        &f.org.admin,
+        "GET",
+        format!("guest-conversations/{}", handle(&private.id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ordinary}");
+    assert_eq!(ordinary["messages"][0]["text"], "private guest question");
+    let (status, visible) = request(
+        &f.org.admin,
+        "GET",
+        format!("agents/{}/guest-conversations?limit=10", f.agent.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{visible}");
+    assert_eq!(
+        visible["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<std::collections::HashSet<_>>(),
+        ids,
+    );
+    let (status, chats_after_opt_out) = request(
+        &f.org.admin,
+        "GET",
+        format!("channels/{}/chats", f.channel.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{chats_after_opt_out}");
+    assert_eq!(
+        chats_after_opt_out["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["kind"] == "private")
+            .unwrap()["guest_conversation_id"],
+        handle(&private.id),
+    );
+    for handle in &forged_handles {
+        let (status, body) =
+            request(&f.org.admin, "GET", format!("guest-conversations/{handle}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
     for actor in [&f.org.member, &f.org.outsider] {
         assert_eq!(
             request(actor, "GET", discovery.clone()).await.0,

@@ -5,7 +5,7 @@ Claude Fable 5.2 completed the pre-implementation review against source at
 estimates below refer to that revision. The six streams produced an uncommitted
 runtime prototype based on `575c5f596`. The initial compatibility assessment used `dev` at
 `c03a6637d`. PR #3004 ports the runtime to `c267f3dcf` and incorporates
-subsequent `dev` changes through `4f828cc49`. The per-bot setting, explicit
+subsequent `dev` changes through `4d3cb8902`. The per-bot setting, explicit
 pilot selection and global switch control rollout. Existing installations
 stay on their ordinary path until an owner opts in and the platform selects
 the bot. Fable cleared the earlier static compatibility findings on the port.
