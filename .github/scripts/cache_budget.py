@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 
 MAIN = "refs/heads/main"
+DEV = "refs/heads/dev"
+WARM_REFS = {MAIN, DEV}
 BRANCH_GRACE = timedelta(hours=48)
 # Swatinem keys are 8-hex environment and lock hashes. Incremental jobs use
 # v1-rust-incremental; non-incremental lanes stay on v0-rust. The separate
@@ -37,7 +39,7 @@ COVERAGE_BASE = re.compile(
     r"^coverage-backend-base-v2-(?P<sha>[0-9a-f]{40})-(?P<fingerprint>[0-9a-f]{64})$"
 )
 LANES = {
-    "permissions-test", "rust-clippy", "backend-build", "coverage-backend-build",
+    "permissions-test", "rust-clippy", "rust-clippy-dev", "backend-build", "coverage-backend-build",
     "backend-image-inputs-backend-image-inputs", "cli-cli-test",
     "features-aws-kms-rust-features", "features-gcp-kms-rust-features",
     "features-aws-and-gcp-kms-rust-features", "coverage-cli-coverage-cli",
@@ -92,30 +94,34 @@ def family(key):
     return "unknown"
 
 
-def main_newest(rows, pattern, group):
+def newest_by_ref(rows, pattern, group):
     newest = {}
     for row in rows:
-        if row["ref"] != MAIN:
+        if row["ref"] not in WARM_REFS:
             continue
         match = pattern.fullmatch(row["key"])
         if not match:
             continue
-        key = group(match)
+        key = (row["ref"], group(match, row))
         previous = newest.get(key)
         if previous is None or rank(row) > rank(previous):
             newest[key] = row
     return newest
 
 
-def plan(rows, now=None):
+def rust_family(match, row, lane=None):
+    return (match["prefix"], lane or match["lane"], match["os"], match["arch"], cache_version(row))
+
+
+def plan(rows, now=None, default_ref=MAIN):
     """Return cache rows safe to delete, preserving every current restore lane."""
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=14)
     removals = []
 
-    dist_newest = main_newest(rows, DIST, lambda match: match["target"])
-    main_node_keys = {
-        row["key"] for row in rows if row["ref"] == MAIN and NODE.fullmatch(row["key"])
+    dist_newest = newest_by_ref(rows, DIST, lambda match, row: match["target"])
+    default_node_keys = {
+        row["key"] for row in rows if row["ref"] == default_ref and NODE.fullmatch(row["key"])
     }
     coverage_rows = [
         row for row in rows if row["ref"] == MAIN and COVERAGE_BASE.fullmatch(row["key"])
@@ -131,45 +137,25 @@ def plan(rows, now=None):
         row["id"] for row in coverage_rows if timestamp(row.get("createdAt")) is None
     )
 
-    rust_newest = {}
-    for row in rows:
-        if row["ref"] != MAIN:
-            continue
-        match = RUST.fullmatch(row["key"])
-        if not match or match["lane"] not in LANES:
-            continue
-        family_key = (match["prefix"], match["lane"], match["os"], match["arch"], cache_version(row))
-        if family_key not in rust_newest or rank(row) > rank(rust_newest[family_key]):
-            rust_newest[family_key] = row
-
-    # The version hashes the exact path list. A one-path main entry cannot
-    # restore a two-path reader, so it is not a replacement for that version.
-    incremental_newest = {}
-    for row in rows:
-        if row["ref"] != MAIN:
-            continue
-        match = INCREMENTAL.fullmatch(row["key"])
-        if not match:
-            continue
-        family_key = (match["prefix"], match["lane"], match["os"], match["arch"], cache_version(row))
-        if family_key not in incremental_newest or rank(row) > rank(incremental_newest[family_key]):
-            incremental_newest[family_key] = row
+    rust_newest = newest_by_ref(rows, RUST, rust_family)
+    incremental_newest = newest_by_ref(rows, INCREMENTAL, rust_family)
 
     for row in rows:
         key = row["key"]
+        replacement_ref = DEV if row["ref"] == DEV else MAIN
         match = DIST.fullmatch(key)
         reason = None
         if match:
-            newest = dist_newest.get(match["target"])
-            if row["ref"] != MAIN:
-                reason = "dist cache saved on a non-main ref"
+            newest = dist_newest.get((row["ref"], match["target"]))
+            if row["ref"] not in WARM_REFS:
+                reason = "dist cache outside main and dev"
             elif newest is not None and row["id"] != newest["id"]:
-                reason = f"superseded dist cache for target by main cache {newest['id']}"
+                reason = f"superseded dist cache for target on same ref by cache {newest['id']}"
         else:
             match = NODE.fullmatch(key)
             if match:
-                if row["ref"] != MAIN and key in main_node_keys:
-                    reason = "non-main node cache has an identical main cache"
+                if row["ref"] not in WARM_REFS and key in default_node_keys:
+                    reason = f"identical node cache on {default_ref}"
             elif COVERAGE_BASE.fullmatch(key):
                 if row["ref"] != MAIN:
                     reason = "coverage baseline saved on a non-main ref"
@@ -178,29 +164,26 @@ def plan(rows, now=None):
             else:
                 rust = RUST.fullmatch(key)
                 if rust and rust["lane"] in (LANES | set(RETIRED)):
-                    family_key = (
-                        rust["prefix"], RETIRED.get(rust["lane"], rust["lane"]),
-                        rust["os"], rust["arch"], cache_version(row),
-                    )
-                    replacement = rust_newest.get(family_key)
+                    lane = RETIRED.get(rust["lane"], rust["lane"])
+                    family_key = rust_family(rust, row, lane)
+                    replacement = rust_newest.get((replacement_ref, family_key))
                     if replacement and row["id"] != replacement["id"]:
-                        reason = f"superseded by main cache {replacement['id']}"
+                        # A retired lane looks up a different lane whose newest entry may still be older.
+                        if row["ref"] == DEV and rust["lane"] in RETIRED and rank(replacement) < rank(row):
+                            continue
+                        reason = f"superseded by {replacement_ref} cache {replacement['id']}"
                 elif key.startswith(DOCKER):
                     reason = "Docker consumers now import registry caches; GHA export retired"
                 else:
                     incremental = INCREMENTAL.fullmatch(key)
                     if incremental:
-                        family_key = (
-                            incremental["prefix"], incremental["lane"], incremental["os"], incremental["arch"],
-                            cache_version(row),
-                        )
-                        replacement = incremental_newest.get(family_key)
+                        replacement = incremental_newest.get((replacement_ref, rust_family(incremental, row)))
                         if replacement and row["id"] != replacement["id"]:
-                            reason = f"superseded incremental cache by main cache {replacement['id']}"
+                            reason = f"superseded by {replacement_ref} incremental cache {replacement['id']}"
         if reason:
             # Manual warm runs need time for a second dispatch and a small-edit
             # comparison, even when main already has a compatible generation.
-            if row["ref"] != MAIN and family(key) in {"rust-lane", "rust-incremental"}:
+            if row["ref"] not in WARM_REFS and family(key) in {"rust-lane", "rust-incremental"}:
                 created = timestamp(row.get("createdAt"))
                 if created is None or created > now - BRANCH_GRACE:
                     continue
@@ -243,7 +226,7 @@ def main():
     if args.soft_cap_gb <= 0:
         parser.error("--soft-cap-gb must be positive")
     rows = json.loads(args.inventory.read_text())
-    removals = plan(rows)
+    removals = plan(rows, default_ref="refs/heads/" + os.environ.get("CACHE_DEFAULT_BRANCH", "main"))
     report(rows, removals, args.soft_cap_gb)
     for row in removals:
         print(

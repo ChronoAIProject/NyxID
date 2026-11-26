@@ -149,6 +149,48 @@ async fn audit_decisions(f: &Fixture) -> Vec<bson::Document> {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn supplemental_native_side_messages_lark_keeps_local_relay() {
+    Box::pin(async {
+        let (f, platform) = image_fixture("lark", "gateway").await;
+        assert!(f.channel.gateway_source.is_none());
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"sent"}})),
+            )
+            .expect(1)
+            .mount(&platform)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/events/cmaeg1.ev.original/side-messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"available":true})))
+            .expect(0)
+            .mount(&f.gateway)
+            .await;
+        let conversation = engine::get(
+            &f.state.db,
+            OWNER,
+            f.event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = &f.event.delivery.as_ref().unwrap().origin;
+        deliver_to(&f.state, &conversation, origin, "Independent result", None).await;
+        platform.verify().await;
+        assert!(f.gateway.received_requests().await.unwrap().is_empty());
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 1);
+        let data = audits[0].get_document("event_data").unwrap();
+        assert_eq!(data.get_str("egress"), Ok("local_relay"));
+        assert_eq!(data.get_str("outcome"), Ok("confirmed"));
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
 async fn notice(f: &Fixture, row: &AssistantConversation) {
     assert!(
         crate::handlers::assistant_nyxagent::send_checking_notice(
@@ -574,8 +616,10 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         request_hash: "fixture".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: true,
+        answer_delivery: None,
         revision: 1,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_context_version: None,
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
@@ -745,6 +789,40 @@ async fn supplemental_direct_and_relay_era_keep_identical_request_bytes() {
                 0
             );
             assert!(f.gateway.received_requests().await.unwrap().is_empty());
+            let legacy_chat = direct_post_turn_chat(&f, "124").await;
+            let mut fields = doc! {"deliver_also":[bson::to_bson(&legacy_chat).unwrap()]};
+            if transport == "gateway" {
+                fields.insert("channel", bson::Bson::Null);
+                fields.insert("reply_channel", bson::to_bson(origin).unwrap());
+            }
+            f.state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .update_one(doc! {"_id":&row.id}, doc! {"$set":fields})
+                .await
+                .unwrap();
+            let row =
+                settle_direct_post_turn(&f, TurnOrigin::Event, &[], "Useful answer", None).await;
+            let conversation = engine::get(&f.state.db, OWNER, &row.id).await.unwrap();
+            assert_eq!(
+                conversation.deliver_also.as_slice(),
+                std::slice::from_ref(&legacy_chat)
+            );
+            result_hook(&f, &row).await;
+            result_hook(&f, &row).await;
+            let requests = platform.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 3);
+            let body = requests[2].body_json::<Value>().unwrap();
+            assert_eq!(body["chat_id"], "123");
+            assert_eq!(body["text"], "Useful answer");
+            assert!(
+                audit_decisions(&f)
+                    .await
+                    .iter()
+                    .any(|audit| { result_reason(audit) == Some("already_claimed") })
+            );
+            let conversation = engine::get(&f.state.db, OWNER, &row.id).await.unwrap();
+            assert_eq!(conversation.deliver_also, [legacy_chat]);
             f.state.db.drop().await.unwrap();
         }
     })
@@ -929,11 +1007,11 @@ async fn supplemental_notice_preserves_recovered_failure_and_one_failure_deliver
         let id=stored_recovery(&mut f).await;
         let mut payload=crate::services::nyxbot_response_recovery::Payload::new(&id,"nyxbot-test",Default::default());
         payload.finish(None,true);
-        let cipher=payload.seal(&f.state.encryption_keys).await.unwrap();
+        let cipher=payload.seal_legacy(&f.state.encryption_keys).await.unwrap();
         f.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
         let (mut baseline_fixture,_,_)=Box::pin(notice_fixture()).await;
         let baseline_id=stored_recovery(&mut baseline_fixture).await;
-        let cipher=payload.seal(&baseline_fixture.state.encryption_keys).await.unwrap();
+        let cipher=payload.seal_legacy(&baseline_fixture.state.encryption_keys).await.unwrap();
         baseline_fixture.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&baseline_id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
         let baseline=recovery_bytes(&baseline_fixture,&baseline_id).await;
         assert!(baseline.0.contains("failed"));
@@ -1004,6 +1082,948 @@ async fn result_hook(f: &Fixture, row: &AssistantConversation) {
         None,
     ))
     .await;
+}
+
+async fn settle_direct_post_turn(
+    f: &Fixture,
+    origin: crate::models::assistant_conversation::TurnOrigin,
+    also: &[ChannelOrigin],
+    text: &str,
+    error: Option<engine::TurnError>,
+) -> AssistantConversation {
+    let conversation = f.event.conversation_id.as_deref().unwrap();
+    let turn_id = Uuid::new_v4().to_string();
+    let db = &f.state.db;
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":conversation},
+            doc! {"$set":{"active_turn":{
+                "turn_id":&turn_id,
+                "origin":bson::to_bson(&origin).unwrap(),
+                "started_at":bson::DateTime::now(),
+                "stop_requested":false,
+            }}},
+        )
+        .await
+        .unwrap();
+    let row = engine::get(db, OWNER, conversation).await.unwrap();
+    for origin in also {
+        assert!(
+            engine::also_deliver(db, OWNER, conversation, &turn_id, origin)
+                .await
+                .unwrap()
+        );
+    }
+    let code = error.as_ref().map(|error| error.code);
+    let result = engine::TurnResult {
+        text: text.into(),
+        session_id: None,
+        response_id: None,
+        error,
+    };
+    let reply_id = Uuid::new_v4().to_string();
+    let error = engine::finish_turn(db, &row, &row.credential_api_key_id, &reply_id, &result)
+        .await
+        .unwrap();
+    assert_eq!(error.as_ref().map(|error| error.code), code);
+    row
+}
+
+async fn direct_post_turn_chat(f: &Fixture, chat_id: &str) -> ChannelOrigin {
+    use crate::models::channel_message::COLLECTION_NAME as MESSAGES;
+    let db = &f.state.db;
+    let mut origin = f.event.delivery.as_ref().unwrap().origin.clone();
+    let mut chat = thread(f).await;
+    let messages = db.collection::<bson::Document>(MESSAGES);
+    let inbound_id = Uuid::new_v4().to_string();
+    let mut inbound = messages
+        .find_one(doc! {"_id":&f.event.relay_message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    inbound.insert("_id", &inbound_id);
+    inbound.insert("platform_conversation_id", chat_id);
+    messages.insert_one(inbound).await.unwrap();
+    origin.partition = format!("private-{chat_id}");
+    chat.id = Uuid::new_v4().to_string();
+    chat.partition.clone_from(&origin.partition);
+    chat.platform_chat_id = Some(chat_id.into());
+    chat.last_message_id = Some(inbound_id.clone());
+    chat.last_relay_message_id = Some(inbound_id);
+    db.collection::<NyxbotThread>(THREADS)
+        .insert_one(chat)
+        .await
+        .unwrap();
+    origin
+}
+
+#[tokio::test]
+async fn post_turn_result_direct_repeat_sends_once() {
+    Box::pin(async {
+        use crate::models::assistant_conversation::TurnOrigin;
+        let (f, platform) = Box::pin(image_fixture("telegram", "direct")).await;
+        mock_platform(&platform, "confirmed").await;
+        let row = settle_direct_post_turn(&f, TurnOrigin::Event, &[], "Useful answer", None).await;
+        tokio::join!(
+            result_hook(&f, &row),
+            Box::pin(crate::handlers::assistant_team::after_turn(
+                &f.state,
+                &row,
+                "Uncommitted answer",
+                None,
+            )),
+        );
+
+        let requests = platform.received_requests().await.unwrap();
+        let audits = audit_decisions(&f).await;
+        f.state.db.drop().await.unwrap();
+        assert_eq!(requests.len(), 1, "requests: {requests:?}");
+        let body = requests[0].body_json::<Value>().unwrap();
+        assert_eq!(body["chat_id"], "123");
+        assert_eq!(body["text"], "Useful answer");
+        let turn_id = row.active_turn.as_ref().unwrap().turn_id.as_str();
+        assert_eq!(audits.len(), 2, "audits: {audits:?}");
+        assert!(audits.iter().all(|audit| {
+            audit.get_document("event_data").unwrap().get_str("turn_id") == Ok(turn_id)
+        }));
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| result_reason(audit) == Some("already_claimed"))
+                .count(),
+            1
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn post_turn_result_meta_reply_keeps_grant_and_claims_destination_once() {
+    Box::pin(async {
+        use crate::models::assistant_conversation::ChannelTurnContext;
+        use crate::services::channel_adapters::meta::{self, tests};
+        use wiremock::matchers::method;
+
+        let (f, graph) = Box::pin(image_fixture("instagram", "direct")).await;
+        let db = &f.state.db;
+        let bot = tests::registered_bot(&f.state, OWNER, "instagram").await;
+        let route = f.channel.route_id.as_deref().unwrap();
+        let inbound = tests::inbound_for(
+            &f.state,
+            &bot,
+            route,
+            &f.channel.route_api_key_id,
+            "333",
+            "mid.settled-result",
+        )
+        .await;
+        tests::admit_original(&f.state, &inbound).await;
+        let chat = inbound.platform_conversation_id.as_deref().unwrap();
+        db.collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id": &f.channel.id},
+                doc! {"$set": {"channel_bot_id": &bot.id}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": route},
+                doc! {"$set": {"channel_bot_id": &bot.id, "platform_conversation_id": chat}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(THREADS)
+            .update_one(
+                doc! {"channel_id": &f.channel.id},
+                doc! {"$set": {
+                    "platform_chat_id": chat,
+                    "last_message_id": &inbound.id,
+                    "last_relay_message_id": &inbound.id,
+                }},
+            )
+            .await
+            .unwrap();
+
+        let grant = crate::services::channel_meta_service::scopes::reference(&bot).unwrap();
+        let origin = &f.event.delivery.as_ref().unwrap().origin;
+        let conversation = f.event.conversation_id.as_deref().unwrap();
+        let request: engine::TurnRequest = serde_json::from_value(json!({
+            "conversation_id": conversation, "text": "Summarize the verified inbox context"
+        }))
+        .unwrap();
+        let mut start = engine::TurnStart::from(&request);
+        // Seed trusted Meta provenance and add the same verified chat through
+        // the running-turn writer. Signed admission is covered by the Meta
+        // integration fixtures.
+        start.channel_context = Some(ChannelTurnContext {
+            meta_grant: Some(grant.clone()),
+            text_completeness: None,
+            org_origin: None,
+            display_name: None,
+            conversation_label: None,
+            followed: false,
+            source_event_id: inbound.id.clone(),
+            channel_id: f.channel.id.clone(),
+            channel_bot_id: bot.id.clone(),
+            conversation_kind: "private".into(),
+            sender_kind: crate::models::channel_thread::ThreadSenderKind::Human,
+            guest: false,
+            original_message: true,
+        });
+        let row = engine::begin_turn(db, OWNER, start, &f.state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = &row.active_turn.as_ref().unwrap().turn_id;
+        assert!(
+            engine::also_deliver(db, OWNER, conversation, turn, origin)
+                .await
+                .unwrap()
+        );
+        assert!(
+            engine::finish_turn(
+                db,
+                &row,
+                &row.credential_api_key_id,
+                &Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: "Verified Meta result".into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let saved = result_message(&f, &row).await;
+        assert_eq!(
+            saved.get("meta_grants"),
+            Some(&bson::to_bson(&[grant]).unwrap())
+        );
+        assert_eq!(
+            saved.get("post_turn_deliver_also"),
+            Some(&bson::to_bson(&[origin]).unwrap())
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/v25.0/222/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "sent"})))
+            .expect(1)
+            .mount(&graph)
+            .await;
+        meta::with_test_graph_base(graph.uri(), async {
+            result_hook(&f, &row).await;
+            result_hook(&f, &row).await;
+        })
+        .await;
+        let requests = graph.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let sent = requests[0].body_json::<Value>().unwrap();
+        assert_eq!(sent["recipient"]["id"], "333");
+        assert_eq!(sent["message"]["text"], "Verified Meta result");
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 2);
+        let decisions = audits
+            .iter()
+            .map(|audit| audit.get_document("event_data").unwrap())
+            .collect::<Vec<_>>();
+        assert!(decisions.iter().all(|audit| {
+            audit.get_str("turn_id") == Ok(turn.as_str())
+                && audit.get_str("purpose") == Ok("team_additional_result")
+        }));
+        assert!(
+            decisions
+                .iter()
+                .any(|audit| audit.get_str("outcome") == Ok("confirmed"))
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| result_reason(audit) == Some("already_claimed"))
+                .count(),
+            1
+        );
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn post_turn_result_older_hook_cannot_take_newer_additional_chat() {
+    Box::pin(check_post_turn_result_destinations(false)).await;
+}
+
+#[tokio::test]
+async fn post_turn_result_only_the_failed_turns_additional_chat_gets_a_notice() {
+    Box::pin(check_post_turn_result_destinations(true)).await;
+}
+
+async fn check_post_turn_result_destinations(newer_failed: bool) {
+    Box::pin(async {
+        use crate::models::assistant_conversation::TurnOrigin;
+        let (f, platform) = Box::pin(image_fixture("telegram", "direct")).await;
+        mock_platform(&platform, "confirmed").await;
+        f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&f.event.conversation_id},
+                doc! {"$unset":{"channel":""}},
+            )
+            .await
+            .unwrap();
+        let chat_a = direct_post_turn_chat(&f, "124").await;
+        let chat_b = direct_post_turn_chat(&f, "125").await;
+        let a = settle_direct_post_turn(&f, TurnOrigin::User, &[chat_a], "Answer A", None).await;
+        let b = settle_direct_post_turn(
+            &f,
+            TurnOrigin::User,
+            &[chat_b],
+            "Answer B",
+            newer_failed.then(|| engine::TurnError::internal("upstream_failed", "upstream")),
+        )
+        .await;
+
+        // A's hook reaches delivery after B has already committed settlement.
+        Box::pin(crate::handlers::assistant_team::after_turn(
+            &f.state, &a, "Answer A", None,
+        ))
+        .await;
+        for _ in 0..2 {
+            Box::pin(crate::handlers::assistant_team::after_turn(
+                &f.state, &b, "Answer B", None,
+            ))
+            .await;
+        }
+
+        let requests = platform.received_requests().await.unwrap();
+        let audits = audit_decisions(&f).await;
+        f.state.db.drop().await.unwrap();
+        let sent = requests
+            .iter()
+            .map(|request| {
+                let body = request.body_json::<Value>().unwrap();
+                (body["chat_id"].clone(), body["text"].clone())
+            })
+            .collect::<Vec<_>>();
+        let answer_b = if newer_failed {
+            "I couldn't finish answering that question. Please ask again."
+        } else {
+            "Answer B"
+        };
+        assert_eq!(
+            sent,
+            [
+                (json!("124"), json!("Answer A")),
+                (json!("125"), json!(answer_b))
+            ]
+        );
+        assert_eq!(audits.len(), 3, "audits: {audits:?}");
+        for row in [&a, &b] {
+            let turn = row.active_turn.as_ref().unwrap();
+            assert!(
+                audits.iter().any(|audit| {
+                    let data = audit.get_document("event_data").unwrap();
+                    data.get_str("turn_id") == Ok(turn.turn_id.as_str())
+                        && data.get_str("purpose") == Ok("team_additional_result")
+                        && data.get_str("outcome") == Ok("confirmed")
+                }),
+                "audits: {audits:?}"
+            );
+        }
+        let duplicate = audits
+            .iter()
+            .find(|audit| result_reason(audit) == Some("already_claimed"))
+            .unwrap();
+        assert_eq!(
+            duplicate
+                .get_document("event_data")
+                .unwrap()
+                .get_str("turn_id"),
+            Ok(b.active_turn.as_ref().unwrap().turn_id.as_str())
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn post_turn_result_direct_preparation_and_claim_error_leave_no_marker() {
+    Box::pin(async {
+        let (f, platform) = Box::pin(image_fixture("telegram", "direct")).await;
+        mock_platform(&platform, "confirmed").await;
+        let row = settle_direct_post_turn(&f, TurnOrigin::Event, &[], "Useful answer", None).await;
+        let db = &f.state.db;
+        let threads = db.collection::<bson::Document>(THREADS);
+        let chat = doc! {"channel_id":&f.channel.id};
+        threads
+            .update_one(
+                chat.clone(),
+                doc! {"$set":{"last_message_id":Uuid::new_v4().to_string()}},
+            )
+            .await
+            .unwrap();
+        result_hook(&f, &row).await;
+        threads
+            .update_one(
+                chat,
+                doc! {"$set":{"last_message_id":&f.event.relay_message_id}},
+            )
+            .await
+            .unwrap();
+        let collection = crate::models::assistant_message::COLLECTION_NAME;
+        db.run_command(doc! {
+            "collMod":collection,
+            "validator":{"supplemental_result_claims":{"$exists":false}},
+        })
+        .await
+        .unwrap();
+        result_hook(&f, &row).await;
+        assert!(platform.received_requests().await.unwrap().is_empty());
+        assert!(
+            !result_message(&f, &row)
+                .await
+                .contains_key("supplemental_result_claims")
+        );
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 2);
+        for reason in ["authority_refused", "source_unavailable"] {
+            assert!(
+                audits
+                    .iter()
+                    .any(|audit| result_reason(audit) == Some(reason))
+            );
+        }
+
+        let origin = row.channel.as_ref().unwrap();
+        deliver_to_for(
+            &f.state,
+            &row,
+            origin,
+            "Progress",
+            None,
+            Purpose::MachineDesktopNotice,
+        )
+        .await;
+        assert!(
+            !result_message(&f, &row)
+                .await
+                .contains_key("supplemental_result_claims")
+        );
+        db.run_command(doc! {"collMod":collection,"validator":{}})
+            .await
+            .unwrap();
+        result_hook(&f, &row).await;
+        let requests = platform.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for (request, expected) in requests.iter().zip(["Progress", "Useful answer"]) {
+            let body = request.body_json::<Value>().unwrap();
+            assert_eq!(body["chat_id"], "123");
+            assert_eq!(body["text"], expected);
+        }
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn private_chat_handoff_direct_anchor_is_saved_only() {
+    let (mut fixture, _) = Box::pin(image_fixture("telegram", "direct")).await;
+    let thread = fixture
+        .state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id":&fixture.channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.event.relay_message_id = None;
+    for saved in [false, true] {
+        let mut decision = supplemental::Decision::new(Purpose::TeamResult);
+        decision.saved_result = saved;
+        let anchor = supplemental::event_anchor(
+            &fixture.state,
+            &fixture.event,
+            &fixture.channel,
+            &thread,
+            &mut decision,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            anchor.as_deref(),
+            saved.then_some(fixture.event.event_id.as_str())
+        );
+    }
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn private_chat_handoff_ordinary_subscriber_close_keeps_failure_copy() {
+    let fixture = Box::pin(fixture("closed_channel_subscriber")).await;
+    let closed = || {
+        let (sender, receiver) = broadcast::channel(1);
+        drop(sender);
+        receiver
+    };
+    let error = final_reply(closed()).await.unwrap_err();
+    let expected = engine::TurnError::new("turn_lost");
+    assert_eq!(
+        (error.code, error.message),
+        (expected.code, expected.message)
+    );
+    let wire = body_text(late_delivery::provider_stream(
+        fixture.state.clone(),
+        fixture.event.id.clone(),
+        "response".into(),
+        json!({"type":"response.created"}),
+        closed(),
+        Utc::now(),
+    ))
+    .await;
+    assert!(
+        wire.contains("response.failed")
+            && wire.contains("turn_lost")
+            && wire.contains("NyxBot could not finish this turn."),
+        "{wire}"
+    );
+    assert_eq!(status(&fixture).await, "streamed");
+    assert!(sends(&fixture).await.is_empty());
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_wake_expired_saved_delivery_preserves_owner_history() {
+    let (fixture, platform, row) = Box::pin(result_fixture(ChronoDuration::minutes(1))).await;
+    let saved = result_message(&fixture, &row).await;
+    let reply = saved.get_str("_id").unwrap();
+    let origin = &fixture.event.delivery.as_ref().unwrap().origin;
+    let source = sources::ResultSource::capture(row.active_turn.as_ref().unwrap(), origin);
+    let messages = fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    messages.update_one(doc! {"_id":reply},doc! {"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::hours(24)),"handoff_delivery":{"agent_id":&row.agent_id,"targets":[{"source":bson::to_bson(&source).unwrap(),"origin":bson::to_bson(origin).unwrap(),"additional":false}]},"handoff_delivery_due_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+    Box::pin(handoff_delivery::deliver(&fixture.state, reply))
+        .await
+        .unwrap();
+    let after = messages
+        .find_one(doc! {"_id":reply})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !after.contains_key("handoff_delivery_due_at")
+            && !after.contains_key("handoff_delivery_lease")
+    );
+    let history = Box::pin(crate::handlers::assistant_nyxagent::history(
+        State(fixture.state.clone()),
+        crate::handlers::assistant_team::owner_auth(OWNER).unwrap(),
+        Path(row.id),
+        axum::extract::Query(Default::default()),
+    ))
+    .await
+    .unwrap()
+    .0;
+    let history = serde_json::to_value(history).unwrap();
+    let messages = history["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["text"], "Useful answer");
+    assert!(platform.received_requests().await.unwrap().is_empty());
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn private_chat_handoff_settlement_parity() {
+    Box::pin(settlement_parity(false)).await;
+}
+
+#[tokio::test]
+async fn nyxbot_wake_settlement_parity() {
+    Box::pin(settlement_parity(true)).await;
+}
+
+async fn settlement_parity(wake: bool) {
+    use crate::models::assistant_conversation::{
+        EngineWorkerInstance, ReattachDeployment, TurnOrigin,
+    };
+    use crate::services::{
+        assistant_team_service, feature_flag_service as flags, security_readiness_service,
+    };
+    let (fixture, platform, mut initial) = Box::pin(notice_fixture()).await;
+    let db = &fixture.state.db;
+    mock_platform(&platform, "confirmed").await;
+    security_readiness_service::observe_test_handoff_readiness(db, true).await;
+    let messages =
+        db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    let conversations = db.collection::<bson::Document>(CONVERSATIONS);
+    let events = db.collection::<bson::Document>(EVENTS);
+    let original_event = events
+        .find_one(doc! {"_id":&fixture.event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let origin = fixture.event.delivery.as_ref().unwrap().origin.clone();
+    initial.channel = None;
+    initial.reply_channel = Some(origin.clone());
+    let active = initial.active_turn.as_mut().unwrap();
+    active.initiating_message_seq = Some(1);
+    active.worker_instance = Some(EngineWorkerInstance {
+        id: Uuid::new_v4().to_string(),
+        hostname: None,
+    });
+    let mut start =
+        engine::TurnStart::from(&engine::parse_turn(br#"{"text":"Same question"}"#).unwrap());
+    if wake {
+        active.origin = TurnOrigin::Event;
+        active.channel_event_id = None;
+        active.asked_from = None;
+        active.events.push(assistant_team_service::event(
+            "subagent_settled",
+            "done".into(),
+            None,
+        ));
+        initial.event_streak = 1;
+    } else {
+        active.channel_context = Some(serde_json::from_value(json!({"source_event_id":fixture.event.id,"channel_id":fixture.channel.id,"channel_bot_id":fixture.channel.channel_bot_id,"conversation_kind":"private","sender_kind":"human","guest":false,"original_message":true})).unwrap());
+        start.owner_instruction_source =
+            Some(engine::OwnerInstructionSource::VerifiedPrivateChannel);
+    }
+    start.origin = active.origin;
+    start.reply_channel = initial.reply_channel.clone();
+    let reply_id = Uuid::new_v4().to_string();
+    let mut baseline = None;
+    for enabled in [false, true] {
+        let mut row = initial.clone();
+        flags::set_platform_override(
+            db,
+            flags::TURN_HANDOFF_FLAG_KEY,
+            &flags::FlagTarget::User(OWNER.into()),
+            enabled,
+            OWNER,
+        )
+        .await
+        .unwrap();
+        if enabled {
+            engine::enroll_restart(&mut row, &start, "question", ReattachDeployment {
+                destination_hash: "local-test".into(),
+                limits: serde_json::from_value(json!({"protocol":"nyxagent-reattach-v1","credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15},"max_events":64,"recent_events":32,"max_event_bytes":65536,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32})).unwrap(),
+            }, false);
+            let admission = row
+                .active_turn
+                .as_mut()
+                .unwrap()
+                .restart_admission
+                .as_mut()
+                .unwrap();
+            assert_eq!(admission.version, 4);
+            admission.reply_id.clone_from(&reply_id);
+        }
+        messages
+            .delete_many(doc! {"conversation_id":&row.id,"role":"assistant"})
+            .await
+            .unwrap();
+        conversations
+            .replace_one(doc! {"_id":&row.id}, bson::to_document(&row).unwrap())
+            .await
+            .unwrap();
+        events
+            .replace_one(doc! {"_id":&fixture.event.id}, &original_event)
+            .await
+            .unwrap();
+        let result = engine::TurnResult {
+            text: "Useful answer".into(),
+            session_id: Some("session".into()),
+            response_id: Some("response".into()),
+            error: None,
+        };
+        assert!(
+            engine::finish_turn(db, &row, &row.credential_api_key_id, &reply_id, &result)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut reply = messages
+            .find_one(doc! {"_id":&reply_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut conversation = conversations
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let queued_event = events
+            .find_one(doc! {"_id":&fixture.event.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.remove("settled_by_attempt").is_some(), enabled);
+        let saved_route = reply.remove("handoff_delivery");
+        assert_eq!(saved_route.is_some(), enabled && wake);
+        if let Some(saved_route) = saved_route {
+            let active = row.active_turn.as_ref().unwrap();
+            let source = sources::ResultSource::capture(active, &origin);
+            assert_eq!(
+                saved_route,
+                bson::Bson::Document(
+                    doc! {"agent_id":&row.agent_id,"targets":[{"origin":bson::to_bson(&origin).unwrap(),"source":bson::to_bson(&source).unwrap(),"additional":false}]}
+                )
+            );
+            assert_eq!(
+                reply.remove("handoff_delivery_due_at").as_ref(),
+                reply.get("created_at")
+            );
+        }
+        let settled_at = reply.remove("created_at").unwrap();
+        assert_eq!(conversation.remove("updated_at"), Some(settled_at.clone()));
+        if conversation.get_datetime("context_reset_at").is_ok() {
+            assert_eq!(
+                conversation.remove("context_reset_at"),
+                Some(settled_at.clone())
+            );
+        }
+        let metadata = reply.get_document_mut("turn_metadata").unwrap();
+        assert_eq!(
+            metadata
+                .get_document_mut("work")
+                .unwrap()
+                .remove("settled_at"),
+            Some(settled_at.clone())
+        );
+        let duration = settled_at.as_datetime().unwrap().timestamp_millis()
+            - row
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .started_at
+                .timestamp_millis();
+        assert_eq!(
+            metadata
+                .get_document_mut("timing")
+                .unwrap()
+                .remove("total_ms"),
+            Some(bson::Bson::Int64(duration))
+        );
+        let saved_repeat_audit = doc! {
+            "event_type": "nyxbot_channel_supplemental_delivery",
+            "event_data.turn_id": &row.active_turn.as_ref().unwrap().turn_id,
+            "event_data.conversation_id": &row.id,
+            "event_data.purpose": "team_result",
+            "event_data.reason": "already_claimed",
+        };
+        let audit = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        if enabled && wake {
+            let due_at = settled_at.as_datetime().unwrap();
+            messages
+                .update_one(
+                    doc! {"_id": &reply_id},
+                    doc! {"$set": {"handoff_delivery_due_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(2)),
+                                    "handoff_delivery_lease": "deferred-worker"}},
+                )
+                .await
+                .unwrap();
+            Box::pin(crate::handlers::assistant_team::after_turn(
+                &fixture.state,
+                &row,
+                &result.text,
+                None,
+            ))
+            .await;
+            assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+            assert_eq!(
+                audit
+                    .count_documents(saved_repeat_audit.clone())
+                    .await
+                    .unwrap(),
+                0
+            );
+            messages
+                .update_one(
+                    doc! {"_id": &reply_id},
+                    doc! {"$set": {"handoff_delivery_due_at": due_at}, "$unset": {"handoff_delivery_lease": ""}},
+                )
+                .await
+                .unwrap();
+        }
+        Box::pin(crate::handlers::assistant_team::after_turn(
+            &fixture.state,
+            &row,
+            &result.text,
+            None,
+        ))
+        .await;
+        let wire = if wake {
+            let sends = platform.received_requests().await.unwrap();
+            assert_eq!(sends.len(), if enabled { 2 } else { 1 });
+            assert_eq!(
+                serde_json::from_slice::<Value>(&sends.last().unwrap().body).unwrap()["text"],
+                result.text
+            );
+            if enabled {
+                Box::pin(crate::handlers::assistant_team::after_turn(
+                    &fixture.state,
+                    &row,
+                    &result.text,
+                    None,
+                ))
+                .await;
+                assert_eq!(platform.received_requests().await.unwrap().len(), 2);
+                assert_eq!(audit.count_documents(saved_repeat_audit).await.unwrap(), 1);
+            }
+            sends.last().unwrap().body.clone()
+        } else {
+            assert!(
+                crate::services::channel_turn_delivery::detach(db, &fixture.event.id)
+                    .await
+                    .is_ok()
+            );
+            Box::pin(late_delivery::process(&fixture.state, &fixture.event.id)).await;
+            let sends = sends(&fixture).await;
+            assert_eq!(sends.len(), if enabled { 2 } else { 1 });
+            assert!(String::from_utf8_lossy(&sends.last().unwrap().body).contains(&result.text));
+            sends.last().unwrap().body.clone()
+        };
+        let actual = (reply, conversation, queued_event, wire);
+        if let Some(expected) = baseline.take() {
+            assert_eq!(actual, expected)
+        } else {
+            baseline = Some(actual)
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn saved_wake_recovers_the_unsent_suffix_and_preserves_uncertain_sends() {
+    for uncertain in [false, true] {
+        Box::pin(saved_wake_delivery_race(uncertain, false)).await;
+    }
+}
+
+#[tokio::test]
+async fn saved_wake_recovers_while_the_predecessor_is_still_alive() {
+    Box::pin(saved_wake_delivery_race(false, true)).await;
+}
+
+async fn saved_wake_delivery_race(uncertain: bool, overlapping: bool) {
+    use crate::services::{channel_text_delivery as journal, durable_wake_tests as crash};
+    let (fixture, platform, mut row) = Box::pin(result_fixture(ChronoDuration::minutes(1))).await;
+    mock_platform(&platform, "confirmed").await;
+    let origin = fixture.event.delivery.as_ref().unwrap().origin.clone();
+    let turn = row.active_turn.as_mut().unwrap();
+    let mut event = crate::services::assistant_team_service::event("result", "done".into(), None);
+    event.reply_to.push(origin.clone());
+    event.source_event_ids.push(fixture.event.id.clone());
+    turn.events.push(event);
+    let target = sources::SavedDestination {
+        source: sources::ResultSource::capture(turn, &origin),
+        origin: origin.clone(),
+        additional: true,
+    };
+    let key = sources::saved_key(&turn.turn_id, &origin);
+    let db = &fixture.state.db;
+    journal::ensure_indexes(db).await.unwrap();
+    let saved = result_message(&fixture, &row).await;
+    let reply = saved.get_str("_id").unwrap();
+    let messages =
+        db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME);
+    messages.update_one(doc! {"_id":reply},doc! {"$set":{"text":"x".repeat(5000),"handoff_delivery":{"agent_id":&row.agent_id,"targets":[bson::to_bson(&target).unwrap()]},"handoff_delivery_due_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+    db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&fixture.channel.id},doc! {"$set":{"last_message_id":"newer-inbound","last_relay_message_id":"newer-inbound"}}).await.unwrap();
+    let site = if uncertain {
+        "text_part_provider_accepted"
+    } else {
+        "text_suffix_prepared"
+    };
+    let original = Box::pin(handoff_delivery::deliver(&fixture.state, reply));
+    if overlapping {
+        crash::resume_after(site, original, async {
+            let before = messages
+                .find_one(doc! {"_id":reply})
+                .await
+                .unwrap()
+                .unwrap();
+            messages
+                .update_one(
+                    doc! {"_id":reply},
+                    doc! {"$set":{"handoff_delivery_due_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            Box::pin(handoff_delivery::deliver(&fixture.state, reply))
+                .await
+                .unwrap();
+            let after = messages
+                .find_one(doc! {"_id":reply})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                before.get_str("handoff_delivery_lease").unwrap(),
+                after.get_str("handoff_delivery_lease").unwrap()
+            );
+        })
+        .await;
+        let receipt = journal::load(db, &key).await.unwrap().unwrap();
+        assert_eq!(
+            receipt.parts[0].state,
+            crate::models::channel_text_delivery::TextPartState::Sent
+        );
+        assert_eq!(
+            receipt.parts[1].state,
+            crate::models::channel_text_delivery::TextPartState::Pending
+        );
+    } else {
+        crash::drop_after(site, original).await;
+    }
+    assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+    messages
+        .update_one(
+            doc! {"_id":reply},
+            doc! {"$set":{"handoff_delivery_due_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+        .update_one(
+            doc! {"logical_key":&key,"parts.1.preparation.version":1},
+            doc! {"$set":{"parts.1.preparation.lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        Box::pin(handoff_delivery::deliver(&fixture.state, reply)),
+        Box::pin(handoff_delivery::deliver(&fixture.state, reply))
+    );
+    first.unwrap();
+    second.unwrap();
+    let sent = platform.received_requests().await.unwrap();
+    assert_eq!(sent.len(), if uncertain { 1 } else { 2 });
+    for request in sent {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["reply_to_message_id"], 17);
+    }
+    let receipt = journal::load(db, &key).await.unwrap().unwrap();
+    assert_eq!(receipt.parts.len(), 2);
+    use crate::models::channel_text_delivery::TextPartState;
+    assert_eq!(
+        receipt.parts[0].state,
+        if uncertain {
+            TextPartState::Sending
+        } else {
+            TextPartState::Sent
+        }
+    );
+    assert_eq!(
+        receipt.parts[1].state,
+        if uncertain {
+            TextPartState::Pending
+        } else {
+            TextPartState::Sent
+        }
+    );
+    db.drop().await.unwrap();
 }
 
 async fn result_message(f: &Fixture, row: &AssistantConversation) -> bson::Document {
@@ -1213,7 +2233,15 @@ async fn repeated_result(concurrent: bool, also: bool) {
     let (f, platform, row) = Box::pin(result_fixture(ChronoDuration::minutes(30))).await;
     mock_platform(&platform, "confirmed").await;
     if also {
-        f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&row.id},doc! {"$set":{"deliver_also":[bson::to_bson(row.channel.as_ref().unwrap()).unwrap()]}}).await.unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"conversation_id":&row.id,"turn_id":&row.active_turn.as_ref().unwrap().turn_id,"role":"assistant"},
+                doc! {"$set":{"post_turn_deliver_also":[bson::to_bson(row.channel.as_ref().unwrap()).unwrap()]}},
+            )
+            .await
+            .unwrap();
         result_hook(&f, &row).await;
     } else if concurrent {
         tokio::join!(result_hook(&f, &row), result_hook(&f, &row));
@@ -1546,3 +2574,6 @@ async fn supplemental_result_preparation_failure_does_not_claim() {
         f.state.db.drop().await.unwrap();
     }).await;
 }
+
+#[path = "nyxbot_thread_reference_tests.rs"]
+mod thread_reference_tests;

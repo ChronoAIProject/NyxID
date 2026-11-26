@@ -1,3 +1,8 @@
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "../../components/workspace/WorkspaceLayoutContext";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -7,8 +12,9 @@ import {
   StyleSheet,
   View,
 } from "react-native";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, X } from "lucide-react-native";
+import { floatingSurface } from "../../components/workspace/workspaceFloatingSurface";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import {
   workspaceCloseControlStyle,
@@ -16,6 +22,7 @@ import {
 } from "../../components/workspace/workspaceCloseControl";
 import { useTheme } from "../../theme/ThemeContext";
 import { assistantApi } from "../../lib/api/assistantApi";
+import { useComposerSettingsQuery } from "./useComposerSettingsQuery";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useGroupAvailability } from "../groups/useGroupRuntime";
 import {
@@ -36,19 +43,16 @@ type Props = {
 
 /** Owner permissions are separate from the human-only per-agent override editor. */
 export function AssistantComposerSettings(props: Props) {
-  const { colors } = useTheme();
+  useAppLanguage();
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
+  const { colors, mode: themeMode } = useTheme();
   const availability = useGroupAvailability();
   const queryClient = useQueryClient();
   const epoch = getAuthEpoch();
   const settingsKey = ["assistant", "composer-settings", epoch];
-  const settings = useQuery({
-    queryKey: settingsKey,
-    queryFn: ({ signal }) => assistantApi.settings(signal),
-    enabled: availability.active,
-    retry: false,
-  });
+  const settings = useComposerSettingsQuery(epoch, availability.active, availability.available);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
   const mounted = useRef(true);
   const latest = useRef({ props, availability });
@@ -64,8 +68,8 @@ export function AssistantComposerSettings(props: Props) {
     props.onOpenChange(false);
   }, [props.scope]);
   const mode = props.agentOverride ?? settings.data?.access_mode;
-  const accessLabel = mode ? COMPOSER_ACCESS_LABEL[mode] : "Permissions";
-  const title = "Permissions";
+  const accessLabel = mode ? COMPOSER_ACCESS_LABEL[mode] : translateApp("Permissions");
+  const title = translateApp("Permissions");
   const permissionLocked =
     props.activeTurn || !!props.agentOverride || pending || !settings.data;
   const unavailable = props.disabled || !availability.active;
@@ -99,9 +103,9 @@ export function AssistantComposerSettings(props: Props) {
     } catch (cause) {
       if (current())
         setError(
-          cause instanceof Error
+          () =>cause instanceof Error
             ? cause.message
-            : "Could not change permissions.",
+            : translateApp("Could not change permissions."),
         );
     } finally {
       lock.current = false;
@@ -154,33 +158,82 @@ export function AssistantComposerSettings(props: Props) {
   }
   return (
     <>
-      {!props.hideTrigger && (
+      {!props.hideTrigger && (cornerWindow ? (
+        // A plain pill showing only the current mode: the 44pt target
+        // surrounds a smaller pill on the shared floating surface.
         <Pressable
+          testID="composer-access-mode"
           accessibilityRole="button"
-          accessibilityLabel={`Permissions: ${accessLabel}${props.agentOverride ? " (this agent)" : ""}`}
+          accessibilityLabel={props.agentOverride ? translateApp("Permissions: {{accessLabel}} (this agent)", { accessLabel: accessLabel,}) : translateApp("Permissions: {{accessLabel}}", { accessLabel: accessLabel, })}
+          accessibilityHint={translateApp("Changes the permission mode")}
           disabled={unavailable}
           onPress={() => props.onOpenChange(true)}
-          style={{
+          style={({ pressed }) => ({
             minHeight: 44,
             minWidth: 44,
             maxWidth: 180,
             flexShrink: 1,
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 4,
-            paddingHorizontal: 6,
-            opacity: unavailable ? 0.5 : 1,
-          }}
+            justifyContent: "center",
+            opacity: unavailable ? 0.5 : pressed ? 0.7 : 1,
+          })}
         >
-          <Label
-            numberOfLines={1}
-            maxFontSizeMultiplier={1.3}
-            style={{ fontSize: 12, flexShrink: 1 }}
+          <View
+            testID="composer-access-mode-pill"
+            style={[
+              floatingSurface(colors, themeMode, StyleSheet.hairlineWidth),
+              {
+                minHeight: 30,
+                borderRadius: 15,
+                paddingHorizontal: 12,
+                justifyContent: "center",
+                flexShrink: 1,
+              },
+            ]}
           >
-            {accessLabel}
-          </Label>
-          <ChevronDown size={12} color={colors.textSecondary} />
+            <Label
+              numberOfLines={1}
+              ellipsizeMode="tail"
+              maxFontSizeMultiplier={1.3}
+              style={{ fontSize: 12, flexShrink: 1 }}
+            >
+              {accessLabel}
+            </Label>
+          </View>
         </Pressable>
+        ) : (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              props.agentOverride
+                ? translateApp("Permissions: {{accessLabel}} (this agent)", {
+                    accessLabel,
+                  })
+                : translateApp("Permissions: {{accessLabel}}", { accessLabel })
+            }
+            disabled={unavailable}
+            onPress={() => props.onOpenChange(true)}
+            style={{
+              minHeight: 44,
+              minWidth: 44,
+              maxWidth: 180,
+              flexShrink: 1,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              paddingHorizontal: 6,
+              opacity: unavailable ? 0.5 : 1,
+            }}
+          >
+            <Label
+              numberOfLines={1}
+              maxFontSizeMultiplier={1.3}
+              style={{ fontSize: 12, flexShrink: 1 }}
+            >
+              {accessLabel}
+            </Label>
+            <ChevronDown size={12} color={colors.textSecondary} />
+          </Pressable>
+        )
       )}
       <Modal
         visible={
@@ -202,7 +255,7 @@ export function AssistantComposerSettings(props: Props) {
         >
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Dismiss permissions"
+            accessibilityLabel={translateApp("Dismiss permissions")}
             onPress={close}
             style={StyleSheet.absoluteFill}
           />
@@ -237,7 +290,7 @@ export function AssistantComposerSettings(props: Props) {
               </Label>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Close ${title.toLowerCase()}`}
+                accessibilityLabel={translateApp("Close permissions")}
                 style={workspaceCloseControlStyle(colors.cardSoft)}
                 onPress={close}
               >
@@ -257,7 +310,7 @@ export function AssistantComposerSettings(props: Props) {
                 >
                   <ActivityIndicator size="small" color={colors.primary} />
                   <Label muted accessibilityLiveRegion="polite">
-                    Saving permissions…
+                    {translateApp("Saving permissions…")}
                   </Label>
                 </View>
               ) : null}
@@ -270,9 +323,7 @@ export function AssistantComposerSettings(props: Props) {
                 </Label>
               ) : null}
               {props.agentOverride ? (
-                <Label muted>
-                  This agent uses {accessLabel}. Its override is read-only here.
-                </Label>
+                <Label muted>{translateApp("This agent uses {{accessLabel}}. Its override is read-only here.", {accessLabel: accessLabel },)}</Label>
               ) : null}
               {(["autopilot", "nyxmode", "ask_every_time"] as const).map(
                 (value) =>
@@ -290,7 +341,7 @@ export function AssistantComposerSettings(props: Props) {
                   disabled={unavailable}
                   onPress={() => void settings.refetch()}
                 >
-                  <Label>Retry loading permissions</Label>
+                  <Label>{translateApp("Retry loading permissions")}</Label>
                 </Pressable>
               ) : null}
             </ScrollView>
@@ -302,13 +353,9 @@ export function AssistantComposerSettings(props: Props) {
 }
 
 export function useComposerAccessMode(override?: ComposerAccessMode | null) {
+  useAppLanguage();
   const availability = useGroupAvailability();
   const epoch = getAuthEpoch();
-  const settings = useQuery({
-    queryKey: ["assistant", "composer-settings", epoch],
-    queryFn: ({ signal }) => assistantApi.settings(signal),
-    enabled: availability.active,
-    retry: false,
-  });
+  const settings = useComposerSettingsQuery(epoch, availability.active, availability.available);
   return override ?? settings.data?.access_mode;
 }

@@ -56,6 +56,16 @@ pub async fn retry_channel(
 
 pub(crate) async fn retry(state: &AppState, owner: &str, id: &str) -> AppResult<Value> {
     let row = load_channel(state, owner, id).await?;
+    if row.org_specialist.is_some() {
+        crate::services::assistant_team_service::maintained_agent(
+            &state.db,
+            owner,
+            row.agent_id
+                .as_deref()
+                .ok_or_else(crate::services::org_channel_service::denied)?,
+        )
+        .await?;
+    }
     if row.platform != "discord" || row.status != "active" || row.transport != "direct" {
         return Err(refused("native_gateway_retry_not_available"));
     }
@@ -75,12 +85,32 @@ pub(crate) async fn retry(state: &AppState, owner: &str, id: &str) -> AppResult<
     let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
     // Sweeps and owner requests compete for this exact timestamp; only one
     // may start. Preparing keys are never replaced by another request.
-    let result = channels.update_one(
-        doc! {"_id":&row.id,"user_id":owner,"status":"active","transport":"direct",
-            "route_api_key_id":&row.route_api_key_id,"gateway_attempted_at":row.gateway_attempted_at.map(bson::DateTime::from_chrono),
-            "pending_agent_api_key_id":null,"pending_route_api_key_id":null},
-        doc! {"$set":{"gateway_attempted_at":bson::DateTime::from_chrono(now),"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null}},
-    ).await?;
+    let mut claim = doc! {"_id":&row.id,"user_id":&row.user_id,"status":"active","transport":"direct",
+    "route_api_key_id":&row.route_api_key_id,"gateway_attempted_at":row.gateway_attempted_at.map(bson::DateTime::from_chrono),
+    "pending_agent_api_key_id":null,"pending_route_api_key_id":null};
+    let update = doc! {"$set":{"gateway_attempted_at":bson::DateTime::from_chrono(now),"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null}};
+    let result = if row.org_specialist.is_some() {
+        let context = (&state.db, &row, owner, &claim, &update);
+        crate::services::transaction_service::run_db_only(
+            &state.db,
+            &context,
+            |tx, (db, row, actor, claim, update)| {
+                Box::pin(async move {
+                    crate::services::org_channel_service::fence_management(db, tx, row, actor)
+                        .await?;
+                    Ok(db
+                        .collection::<NyxbotChannel>(CHANNELS)
+                        .update_one((*claim).clone(), (*update).clone())
+                        .session(tx)
+                        .await?)
+                })
+            },
+        )
+        .await?
+    } else {
+        claim.insert("org_specialist", bson::Bson::Null);
+        channels.update_one(claim, update).await?
+    };
     if result.matched_count != 1 {
         return Err(refused("native_gateway_retry_busy"));
     }
@@ -90,7 +120,7 @@ pub(crate) async fn retry(state: &AppState, owner: &str, id: &str) -> AppResult<
     };
     if let Err(code) = outcome {
         channels.update_one(
-            doc! {"_id":&row.id,"user_id":owner,"status":"active","transport":"direct",
+            doc! {"_id":&row.id,"user_id":&row.user_id,"status":"active","transport":"direct",
                 "route_api_key_id":&row.route_api_key_id,"gateway_attempted_at":bson::DateTime::from_chrono(now)},
             doc! {"$set":{"gateway_native_activation":code,"gateway_fallback_at":bson::DateTime::now()}},
         ).await?;

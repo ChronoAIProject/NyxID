@@ -1,4 +1,5 @@
 import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import {
   WORKSPACE_CLOSE_ICON_SIZE,
   workspaceCloseControlStyle,
@@ -34,8 +35,17 @@ import {
   View,
 } from "react-native";
 import { ChevronLeft, Menu, X } from "lucide-react-native";
+import { FloatingButton } from "../components/FloatingControl";
+import {
+  WorkspaceColumnHeaderContext,
+  type WorkspaceColumnHeaderControls,
+} from "../components/workspace/workspaceColumnHeader";
+import type { AgentIdentity } from "../components/agentAvatarModel";
 import { useTheme } from "../theme/ThemeContext";
-import { workspaceContextChatNavigationAction } from "./workspaceChatNavigation";
+import {
+  workspaceContextChatNavigationAction,
+  type WorkspaceChatTarget,
+} from "./workspaceChatNavigation";
 import type { RootStackParamList } from "./AppNavigator";
 import type {
   WorkspaceNavigationProp,
@@ -54,14 +64,18 @@ export const WorkspaceSheetContext = createContext<{
   onClose: () => void;
   onOpenChat: (params?: AssistantParams) => void;
   onOpenGroup: (groupId: string) => void;
+  /** Close the sheet onto an exact thread, as a sidebar row does. */
+  onOpenTarget: (target: WorkspaceChatTarget) => void;
 } | null>(null);
 
 export function useWorkspaceSheet() {
+  useAppLanguage();
   return useContext(WorkspaceSheetContext);
 }
 
 /** A chat opened from a workspace page keeps its caller and draft beneath it. */
 export function useOpenWorkspaceChat() {
+  useAppLanguage();
   const sheet = useContext(WorkspaceSheetContext);
   const navigation = useNavigation<WorkspaceNavigationProp>();
   return (params?: AssistantParams) => {
@@ -77,6 +91,14 @@ export function useOpenWorkspaceChat() {
 }
 
 export const WorkspaceMenuContext = createContext(() => {});
+/**
+ * Wide windows: Menu shows or hides the persistent sidebar instead of
+ * opening a drawer, so its label names that toggle.
+ */
+export const WorkspaceSidebarToggleContext = createContext({
+  persistent: false,
+  collapsed: false,
+});
 export type WorkspaceNavigationGuardChange = (
   id: symbol,
   blocked: boolean,
@@ -98,6 +120,7 @@ export function WorkspaceHeaderVisibility({
 }: {
   children: React.ReactNode;
 }) {
+  useAppLanguage();
   const sheet = useContext(WorkspaceSheetContext);
   return (
     <WorkspaceInteractionSurface inSheet={Boolean(sheet)}>
@@ -107,6 +130,21 @@ export function WorkspaceHeaderVisibility({
 }
 
 export type WorkspaceHeaderRole = "menu" | "back";
+
+/** Menu/Back's spoken name, shared by the bar and the Duo's column. */
+export function workspaceLeadingLabel(
+  role: WorkspaceHeaderRole,
+  sidebarToggle: { persistent: boolean; collapsed: boolean },
+  t: (phrase: string) => string = translateApp,
+) {
+  return role === "back"
+    ? t("Back")
+    : sidebarToggle.persistent
+      ? sidebarToggle.collapsed
+        ? t("Show sidebar")
+        : t("Hide sidebar")
+      : t("Open navigation");
+}
 
 function WorkspaceHeaderButton({
   back = false,
@@ -119,10 +157,16 @@ function WorkspaceHeaderButton({
   close?: boolean;
   onPress: () => void;
   disabled: boolean;
-  label: string;
+  label?: string;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const sheet = useContext(WorkspaceSheetContext);
+  const sidebarToggle = useContext(WorkspaceSidebarToggleContext);
+  // Every bar floats Menu/Back as the shared glass button: slab bars (narrow,
+  // beside the persistent sidebar, the Duo) and sheet pages (Settings and its
+  // account pages); only a sheet's own circular Close stays plain.
+  const floating = !close;
   const control = useRef<View>(null);
   const focused = useIsFocused();
   const owner = useRef(Symbol("primary-header-control")).current;
@@ -142,39 +186,51 @@ function WorkspaceHeaderButton({
       primaryScope.current,
     );
   }, [owner, hidden, primaryKey, Boolean(sheet)]);
-  return (
+  const icon = close ? (
+    <X color={colors.textPrimary} size={WORKSPACE_CLOSE_ICON_SIZE} />
+  ) : back ? (
+    <ChevronLeft color={colors.textPrimary} size={24} />
+  ) : (
+    <Menu color={colors.textPrimary} size={22} />
+  );
+  const controlProps = {
+    ref: control,
+    accessibilityElementsHidden: hidden,
+    importantForAccessibility: hidden
+      ? ("no-hide-descendants" as const)
+      : ("auto" as const),
+    accessible: !hidden,
+    onPress: () => {
+      if (!sheet) workspaceFocus.invoked(owner);
+      onPress();
+    },
+    onLayout: () => {
+      if (sheet && close)
+        workspaceFocus.focusDrawerOnce(sheet.sheetKey, () =>
+          findNodeHandle(control.current),
+        );
+    },
+    accessibilityRole: "button" as const,
+    accessibilityLabel:
+      label ??
+      (close
+        ? t("Close drawer")
+        : workspaceLeadingLabel(back ? "back" : "menu", sidebarToggle, t)),
+    accessibilityState: { disabled: controlDisabled },
+    disabled: controlDisabled,
+  };
+  return floating ? (
+    <FloatingButton {...controlProps}>{icon}</FloatingButton>
+  ) : (
     <Pressable
-      ref={control}
-      accessibilityElementsHidden={hidden}
-      importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
-      accessible={!hidden}
-      onPress={() => {
-        if (!sheet) workspaceFocus.invoked(owner);
-        onPress();
-      }}
-      onLayout={() => {
-        if (sheet && close)
-          workspaceFocus.focusDrawerOnce(sheet.sheetKey, () =>
-            findNodeHandle(control.current),
-          );
-      }}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: controlDisabled }}
-      disabled={controlDisabled}
+      {...controlProps}
       style={[
         styles.button,
-        close && workspaceCloseControlStyle(colors.navActive),
+        workspaceCloseControlStyle(colors.navActive),
         controlDisabled && styles.disabled,
       ]}
     >
-      {close ? (
-        <X color={colors.textPrimary} size={WORKSPACE_CLOSE_ICON_SIZE} />
-      ) : back ? (
-        <ChevronLeft color={colors.textPrimary} size={24} />
-      ) : (
-        <Menu color={colors.textPrimary} size={22} />
-      )}
+      {icon}
     </Pressable>
   );
 }
@@ -185,7 +241,7 @@ export function workspaceHeaderOptions({
   onOpenMenu,
   onClose,
   disabled = false,
-  label = "Back",
+  label,
 }: {
   onOpenMenu: () => void;
   onClose?: () => void;
@@ -201,7 +257,7 @@ export function workspaceHeaderOptions({
         back={role === "back"}
         onPress={role === "back" ? onBack : onOpenMenu}
         disabled={disabled}
-        label={role === "back" ? label : "Open navigation"}
+        label={role === "back" ? label : undefined}
       />
     );
   const closeButton = () =>
@@ -210,7 +266,6 @@ export function workspaceHeaderOptions({
         close
         onPress={onClose}
         disabled={disabled}
-        label="Close drawer"
       />
     ) : null;
   return {
@@ -243,13 +298,131 @@ export function workspaceHeaderOptions({
   };
 }
 
+type ColumnControlInput = {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+};
+
+/**
+ * A chat's bar controls for the Duo, whose chats have no top bar in rail
+ * mode: the status column shows them below the shortcuts (full screen: the
+ * chat's own bar):
+ * Menu (or Back, the same action as the bar's), the agent (the identity
+ * pill's picker) and More. Registered while the chat is focused or is the
+ * page beneath an open workspace sheet (never inside a sheet); handlers
+ * always call the latest props.
+ */
+export function useWorkspaceColumnHeader({
+  role,
+  onBack,
+  disabled = false,
+  identity,
+  more,
+}: {
+  role: WorkspaceHeaderRole;
+  onBack: () => void;
+  disabled?: boolean;
+  identity: ColumnControlInput & {
+    agent?: AgentIdentity;
+    members?: readonly AgentIdentity[];
+  };
+  more: ColumnControlInput;
+}) {
+  const { t } = useAppLanguage();
+  const register = useContext(WorkspaceColumnHeaderContext);
+  const onOpenMenu = useContext(WorkspaceMenuContext);
+  const sidebarToggle = useContext(WorkspaceSidebarToggleContext);
+  const sheet = useContext(WorkspaceSheetContext);
+  const focused = useIsFocused();
+  // The same focus scope as the bar's Menu/Back: the workspace's, never a
+  // sheet's opened over it.
+  const { sheetOpen, primaryKey } = useWorkspaceAccessibility();
+  const primaryScope = useRef(primaryKey);
+  if (focused && !sheetOpen) primaryScope.current = primaryKey;
+  const scope = primaryScope.current;
+  // A workspace sheet (Settings, the agent picker, Recent chats) blurs the
+  // chat beneath it, but the chat is still the page on screen: the Duo's
+  // column keeps its controls in view beside the sheet. Only a chat that was
+  // focused when the sheet opened keeps them.
+  const focusedBeforeSheet = useRef(focused);
+  if (!sheetOpen) focusedBeforeSheet.current = focused;
+  const onScreen = focused || (sheetOpen && focusedBeforeSheet.current);
+  const owner = useRef(Symbol("workspace-column-header")).current;
+  const focusOwner = useRef(Symbol("column-header-control")).current;
+  const latest = useRef({ onBack, onOpenMenu, identity, more });
+  latest.current = { onBack, onOpenMenu, identity, more };
+  const leadingLabel = workspaceLeadingLabel(role, sidebarToggle, t);
+  // Re-register only when what the column shows changes.
+  const shown = JSON.stringify([
+    identity.label,
+    Boolean(identity.disabled),
+    identity.agent ?? null,
+    identity.members ?? null,
+    more.label,
+    Boolean(more.disabled),
+  ]);
+  useLayoutEffect(() => {
+    if (!onScreen || sheet) {
+      register(owner, null);
+      return;
+    }
+    const current = latest.current;
+    const controls: WorkspaceColumnHeaderControls = {
+      leading: {
+        role,
+        label: leadingLabel,
+        disabled,
+        onPress: () => {
+          workspaceFocus.invoked(focusOwner);
+          if (role === "back") latest.current.onBack();
+          else latest.current.onOpenMenu();
+        },
+        registerFocus: (target, active) =>
+          workspaceFocus.register(focusOwner, target, active, scope),
+      },
+      identity: {
+        label: current.identity.label,
+        disabled: current.identity.disabled,
+        agent: current.identity.agent,
+        members: current.identity.members,
+        onPress: () => latest.current.identity.onPress(),
+      },
+      more: {
+        label: current.more.label,
+        disabled: current.more.disabled,
+        onPress: () => latest.current.more.onPress(),
+      },
+    };
+    register(owner, controls);
+  }, [
+    onScreen,
+    Boolean(sheet),
+    register,
+    owner,
+    focusOwner,
+    role,
+    leadingLabel,
+    disabled,
+    shown,
+    scope,
+  ]);
+  useEffect(
+    () => () => {
+      register(owner, null);
+      workspaceFocus.release(focusOwner);
+    },
+    [register, owner, focusOwner],
+  );
+}
+
 /** Keep a screen's local detail/form history ahead of the native route history. */
 export function useWorkspaceBack({
   active,
   onBack,
   defaultRole = "menu",
   disabled = false,
-  label = "Back",
+  label = translateApp("Back"),
   options,
   discardOnClose,
 }: {
@@ -313,7 +486,7 @@ export function useWorkspaceBack({
         onClose: sheet?.onClose,
         onBack: active ? localBack : navigation.goBack,
         disabled,
-        label: active ? label : "Back",
+        label: active ? label : translateApp("Back"),
       }),
       gestureEnabled:
         !disabled && (Boolean(sheet) || (!active && defaultRole === "back")),
@@ -330,6 +503,7 @@ export function useWorkspaceBack({
     onOpenMenu,
     options,
     sheet,
+    t,
   ]);
 
   useEffect(() => {

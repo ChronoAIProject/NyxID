@@ -20,22 +20,25 @@ function buildNativeLinks({ associatedUrls, universalLinkHost, universalLinkPath
     category: ["BROWSABLE", "DEFAULT"],
   }];
   if (androidHttpsAppLinks) {
-    const hosts = new Set();
+    const hosts = new Map();
     for (const value of associatedUrls) {
       try {
         const url = new URL(value);
-        if (url.protocol === "https:") hosts.add(url.host);
+        if (url.protocol === "https:") hosts.set(url.host, {
+          host: url.hostname,
+          ...(url.port ? { port: url.port } : {}),
+        });
       } catch {
         // Invalid optional URLs do not register a native association.
       }
     }
-    for (const host of hosts) {
+    for (const authority of hosts.values()) {
       androidIntentFilters.push({
         action: "VIEW",
         autoVerify: true,
         data: claimedPaths.map((path) => ({
           scheme: "https",
-          host,
+          ...authority,
           ...(path.includes("*")
             ? { pathPrefix: path.slice(0, -1) }
             : { path }),

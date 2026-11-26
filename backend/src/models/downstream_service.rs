@@ -326,9 +326,15 @@ pub struct DownstreamService {
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
+    /// Digests bind caller-token approval to this row, target selector and exact URL.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub caller_token_approved_destinations: std::collections::BTreeSet<String>,
     /// Base URL of the downstream service.
     /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
+    /// Exact catalog base approved by a platform administrator for a private direct connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_private_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub destination_targets: std::collections::BTreeMap<String, String>,
     /// "http" | "ssh"
@@ -670,6 +676,8 @@ pub mod test_helpers {
             requires_user_credential: false,
             is_active: true,
             created_by: "test".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -790,6 +798,8 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -894,6 +904,8 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

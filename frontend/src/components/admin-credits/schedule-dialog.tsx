@@ -51,11 +51,13 @@ export function ScheduleDialog({
   editingSchedule,
   onSubmit,
   allocationPolicies = false,
+  recipientSchedules = false,
   servicesError = false,
   servicesLoading = false,
   retryServices,
 }: {
   readonly allocationPolicies?: boolean;
+  readonly recipientSchedules?: boolean;
   readonly servicesError?: boolean;
   readonly servicesLoading?: boolean;
   readonly retryServices?: () => void;
@@ -73,8 +75,13 @@ export function ScheduleDialog({
   const values = form.watch();
   const exactAmount = allocationPolicies || values.amount !== undefined;
   const valid = scheduleFormSchema.safeParse(values).success;
+  const recipientUnavailable =
+    editingSchedule === null &&
+    values.timing === "recipient" &&
+    !recipientSchedules;
   const blocked =
     lookupBlocked ||
+    recipientUnavailable ||
     ((servicesError || servicesLoading) &&
       (!values.all_services || Boolean(values.service_limits?.length)));
   const expiry = form.watch("expiry");
@@ -94,7 +101,11 @@ export function ScheduleDialog({
               ? translateUi("Edit credit schedule")
               : translateUi("Create credit schedule")}
           </DialogTitle>
-          <DialogDescription>{translateUi("Issue a fresh shared credit total on a UTC cycle. Each issuance has its own service ceilings. Changes affect future periods only.")}</DialogDescription>
+          <DialogDescription>
+            {translateUi(
+              "Issue a fresh credit total per recipient each cycle. Each issuance has its own service ceilings. Changes affect future issuances only.",
+            )}
+          </DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form
@@ -124,7 +135,9 @@ export function ScheduleDialog({
                       name="amount"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>{translateUi("Credits per recipient")}</FormLabel>
+                          <FormLabel>
+                            {translateUi("Credits per recipient")}
+                          </FormLabel>
                           <FormControl>
                             <Input
                               inputMode="decimal"
@@ -144,7 +157,9 @@ export function ScheduleDialog({
                         name="amount_credits"
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{translateUi("Credits per recipient")}</FormLabel>
+                            <FormLabel>
+                              {translateUi("Credits per recipient")}
+                            </FormLabel>
                             <FormControl>
                               <Input
                                 type="number"
@@ -161,7 +176,11 @@ export function ScheduleDialog({
                                 }
                               />
                             </FormControl>
-                            <FormDescription className="text-13">{translateUi("Issued as a separate credit allocation each period.")}</FormDescription>
+                            <FormDescription className="text-13">
+                              {translateUi(
+                                "Issued as a separate credit allocation each period.",
+                              )}
+                            </FormDescription>
                             <FormMessage />
                           </FormItem>
                         )}
@@ -185,13 +204,23 @@ export function ScheduleDialog({
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="daily">{translateUi("Daily")}</SelectItem>
-                            <SelectItem value="weekly">{translateUi("Weekly")}</SelectItem>
-                            <SelectItem value="monthly">{translateUi("Monthly")}</SelectItem>
+                            <SelectItem value="daily">
+                              {translateUi("Daily")}
+                            </SelectItem>
+                            <SelectItem value="weekly">
+                              {translateUi("Weekly")}
+                            </SelectItem>
+                            <SelectItem value="monthly">
+                              {translateUi("Monthly")}
+                            </SelectItem>
                           </SelectContent>
                         </Select>
                         {editingSchedule ? (
-                          <FormDescription className="text-13">{translateUi("Pause this schedule and create another to change its recurrence.")}</FormDescription>
+                          <FormDescription className="text-13">
+                            {translateUi(
+                              "Pause this schedule and create another to change its recurrence.",
+                            )}
+                          </FormDescription>
                         ) : null}
                         <FormMessage />
                       </FormItem>
@@ -199,13 +228,65 @@ export function ScheduleDialog({
                   />
                 </div>
 
+                {recipientSchedules || values.timing === "recipient" ? (
+                  <FormField
+                    control={form.control}
+                    name="timing"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{translateUi("Renewal cycle")}</FormLabel>
+                        <Select
+                          value={field.value ?? "calendar"}
+                          disabled={editingSchedule !== null}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem
+                              value="recipient"
+                              disabled={!recipientSchedules}
+                            >
+                              {translateUi("From when each recipient joins")}
+                            </SelectItem>
+                            <SelectItem value="calendar">
+                              {translateUi("Calendar periods (UTC)")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {editingSchedule ? (
+                          <FormDescription>
+                            {translateUi(
+                              "Pause this schedule and create another to change its renewal cycle.",
+                            )}
+                          </FormDescription>
+                        ) : null}
+                        {recipientUnavailable ? (
+                          <FormDescription>
+                            {translateUi(
+                              "Recipient scheduling is currently unavailable. Choose calendar periods or try again later.",
+                            )}
+                          </FormDescription>
+                        ) : null}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
                 <FormField
                   control={form.control}
                   name="expiry"
                   render={({ field }) => (
                     <FormItem>
                       <fieldset className="space-y-2">
-                        <Label asChild><legend className="text-muted-foreground">{translateUi("Expiry policy")}</legend></Label>
+                        <Label asChild>
+                          <legend className="text-muted-foreground">
+                            {translateUi("Expiry policy")}
+                          </legend>
+                        </Label>
                         <div className="grid gap-2 sm:grid-cols-3">
                           <ExpiryOption
                             label={translateUi("End of each period")}
@@ -217,7 +298,11 @@ export function ScheduleDialog({
                           />
                           <ExpiryOption
                             label={translateUi("After a fixed number of days")}
-                            description={translateUi("From disbursement")}
+                            description={
+                              values.timing === "recipient"
+                                ? translateUi("From cycle start")
+                                : translateUi("From disbursement")
+                            }
                             checked={field.value.kind === "after_days"}
                             onChange={() =>
                               field.onChange({ kind: "after_days", days: 30 })
@@ -241,7 +326,9 @@ export function ScheduleDialog({
                     name="expiry.days"
                     render={({ field }) => (
                       <FormItem className="max-w-52">
-                        <FormLabel>{translateUi("Days until expiry")}</FormLabel>
+                        <FormLabel>
+                          {translateUi("Days until expiry")}
+                        </FormLabel>
                         <FormControl>
                           <Input
                             type="number"
@@ -265,7 +352,15 @@ export function ScheduleDialog({
 
                 <RecipientTargetFields
                   onLookupBlocked={setLookupBlocked}
-                  description={translateUi("Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period.")}
+                  description={
+                    values.timing === "recipient"
+                      ? translateUi(
+                          "New members can receive their full first allocation when they join. Monthly renewals follow each recipient’s start date.",
+                        )
+                      : translateUi(
+                          "Each calendar period freezes its recipient policy. New signups and organization or group joins can receive its grant. Use Grant missing credits to recover missed grants.",
+                        )
+                  }
                 />
 
                 <FormField
@@ -275,7 +370,11 @@ export function ScheduleDialog({
                     <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                       <div>
                         <FormLabel>{translateUi("All services")}</FormLabel>
-                        <p className="text-13 text-muted-foreground">{translateUi("Allow each period's credits to fund any service.")}</p>
+                        <p className="text-13 text-muted-foreground">
+                          {translateUi(
+                            "Allow each period's credits to fund any service.",
+                          )}
+                        </p>
                       </div>
                       <FormControl>
                         <Switch
@@ -291,7 +390,9 @@ export function ScheduleDialog({
                 />
                 {servicesError ? (
                   <ErrorBanner
-                    message={translateUi("Services could not be loaded. Retry to verify restrictions.")}
+                    message={translateUi(
+                      "Services could not be loaded. Retry to verify restrictions.",
+                    )}
                     onRetry={retryServices}
                   />
                 ) : null}
@@ -314,7 +415,11 @@ export function ScheduleDialog({
                             multiple
                           />
                         </FormControl>
-                        <FormDescription className="text-13">{translateUi("Service metrics do not change the scheduled credit amount.")}</FormDescription>
+                        <FormDescription className="text-13">
+                          {translateUi(
+                            "Service metrics do not change the scheduled credit amount.",
+                          )}
+                        </FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -349,7 +454,9 @@ export function ScheduleDialog({
                         <textarea
                           rows={3}
                           className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-14 outline-none focus:border-input-focus"
-                          placeholder={translateUi("Why these recurring credits are issued")}
+                          placeholder={translateUi(
+                            "Why these recurring credits are issued",
+                          )}
                           {...field}
                         />
                       </FormControl>
@@ -367,7 +474,9 @@ export function ScheduleDialog({
                 onClick={() => {
                   if (!pending && !submitting.current) onOpenChange(false);
                 }}
-              >{translateUi("Cancel")}</Button>
+              >
+                {translateUi("Cancel")}
+              </Button>
               <FormSubmitErrors />
               <Button
                 type="submit"
@@ -375,7 +484,9 @@ export function ScheduleDialog({
                 isLoading={pending}
                 disabled={!form.formState.isDirty || !valid || blocked}
               >
-                {editingSchedule ? translateUi("Save changes") : translateUi("Create schedule")}
+                {editingSchedule
+                  ? translateUi("Save changes")
+                  : translateUi("Create schedule")}
               </Button>
             </DialogFooter>
           </form>

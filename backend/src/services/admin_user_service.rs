@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
-use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
+use crate::models::user::{COLLECTION_NAME as USERS, PROVIDER_DISPLAY_NAME, PlatformRole, User};
 use crate::services::{api_key_mutation_service as key_mutations, role_service};
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
@@ -198,6 +198,7 @@ async fn create_user_with_actor(
         }),
     )?;
     audit::insert_user(db, &new_user, intent).await?;
+    super::billing::schedules::eligibility::after_user_created(db, &new_user.id, now).await;
 
     tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
 
@@ -261,6 +262,7 @@ async fn update_user_with_actor(
                 bson::Bson::String(name.to_string())
             },
         );
+        set_doc.insert(PROVIDER_DISPLAY_NAME, bson::Bson::Null);
     }
 
     if let Some(new_email) = email {
@@ -599,7 +601,7 @@ async fn apply_user_security_state_with_audit(
                 session,
                 &user_id,
                 active,
-                deleting,
+                deleting.then_some(user_id.as_str()),
                 owner_deletion_policy.as_deref(),
                 expected_active,
             )
@@ -628,10 +630,11 @@ pub(crate) async fn apply_user_security_state_in_session(
     session: &mut mongodb::ClientSession,
     user_id: &str,
     active: bool,
-    deleting: bool,
+    departure_actor: Option<&str>,
     owner_deletion_policy: Option<&str>,
     expected_active: Option<bool>,
 ) -> AppResult<()> {
+    let deleting = departure_actor.is_some();
     if let Some(policy) = owner_deletion_policy {
         validate_account_deletion_policy(policy)?;
         if active || !deleting {
@@ -658,7 +661,10 @@ pub(crate) async fn apply_user_security_state_in_session(
     }
     if !active {
         super::org_membership_authority::fence_person_authority_loss(
-            db, user_id, session, deleting,
+            db,
+            user_id,
+            session,
+            departure_actor,
         )
         .await?;
     }
@@ -1576,7 +1582,8 @@ mod tests {
                 State(state),
                 test_auth_user(&admin_id),
                 HeaderMap::new(),
-                Path(org_id)
+                Path(org_id),
+                axum::extract::Query(crate::handlers::users::ErasureResponseQuery::default()),
             )
             .await,
             Err(AppError::ValidationError(_))

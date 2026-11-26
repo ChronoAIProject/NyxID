@@ -217,21 +217,10 @@ pub async fn android_asset_links(State(state): State<AppState>) -> Response {
 /// from the existing APNs configuration; without it, claiming links would be
 /// worse than returning a cacheable 404.
 pub async fn apple_app_site_association(State(state): State<AppState>) -> Response {
-    let team_id = state
-        .config
-        .apns_team_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let bundle_id = state
-        .config
-        .apns_topic
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let (Some(team_id), Some(bundle_id)) = (team_id, bundle_id) else {
+    let Some(app_id) = crate::config::mobile_app_links::apple_app_id(&state.config) else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let app_id = format!("{team_id}.{bundle_id}");
     let body = serde_json::json!({
         "applinks": {
             "details": [{
@@ -414,9 +403,17 @@ mod tests {
 
     #[tokio::test]
     async fn apple_app_site_association_is_not_found_without_apns_identity() {
-        let state = crate::test_utils::test_app_state_no_db().await;
-        let response = apple_app_site_association(State(state)).await;
-        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        for (team, bundle) in [
+            (None, None),
+            (Some("TEAM123"), Some(" ")),
+            (Some("\t"), Some("com.example.nyxid")),
+        ] {
+            state.config.apns_team_id = team.map(str::to_owned);
+            state.config.apns_topic = bundle.map(str::to_owned);
+            let response = apple_app_site_association(State(state.clone())).await;
+            assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

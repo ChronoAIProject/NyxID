@@ -10,6 +10,7 @@ import {
   useState,
   type ComponentProps,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { FileText, Paperclip, Plus, X } from "lucide-react";
 import {
@@ -65,6 +66,7 @@ type Pending = {
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
   readonly attachmentMenuItems?: ReactNode;
+  readonly attachmentTriggerRef?: RefObject<HTMLButtonElement | null>;
   readonly imageWarning?: string;
   readonly onVoiceSettings?: () => void;
   readonly onVoicePrepare?: () => boolean;
@@ -73,7 +75,7 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, imageWarning, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, attachmentTriggerRef, imageWarning, ...props }: Props) {
   useUiTranslation();
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
@@ -83,7 +85,8 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
   const [attachmentEdges, setAttachmentEdges] = useState({ left: false, right: false });
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
-  const attach = useRef<HTMLButtonElement>(null);
+  const localAttach = useRef<HTMLButtonElement>(null);
+  const attach = attachmentTriggerRef ?? localAttach;
   const uploadQueue = useRef(Promise.resolve());
   const openingVoice = useRef<PreparedMicrophone | null>(null);
   const [preparingVoice, setPreparingVoice] = useState(false);

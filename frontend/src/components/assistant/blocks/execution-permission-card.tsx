@@ -1,7 +1,8 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
-import { getFormattingLocale } from "@/lib/formatting-locale";
-import { useRef, useState } from "react";
+import { useCardTranslation } from "@/components/assistant/card-language";
+import { useEffect, useRef, useState } from "react";
+import { usePinnedDecisionCard } from "../decision-card-presentation";
+import { DecisionCardActions } from "../decision-card-actions";
+import { DecisionReview } from "../decision-review";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -32,12 +33,15 @@ export function ExecutionPermissionCard({
   requestId,
   proposal,
   disabled = false,
+  onStateChange,
 }: {
   readonly requestId: string;
   readonly proposal: ExecutionProposal;
   readonly disabled?: boolean;
+  readonly onStateChange?: () => void;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
+  const pinned = usePinnedDecisionCard();
   const queryClient = useQueryClient();
   const [choiceId, setChoiceId] = useState("operation");
   const [busy, setBusy] = useState(false);
@@ -60,6 +64,11 @@ export function ExecutionPermissionCard({
         : false,
   });
   const current = query.data;
+  const couldDecide = useRef(proposal.can_decide);
+  useEffect(() => {
+    if (couldDecide.current && !current.can_decide) onStateChange?.();
+    couldDecide.current = current.can_decide;
+  }, [current.can_decide, onStateChange]);
   const choice = current.choices.find((c) => c.id === choiceId);
   async function decide(approved: boolean) {
     if (busy || disabled || !current.can_decide || (approved && !choice))
@@ -99,13 +108,13 @@ export function ExecutionPermissionCard({
       setBusy(false);
     }
   }
-  return (
-    <section
-      className="max-w-xl space-y-3 rounded-xl border border-border bg-card p-4"
-      aria-label={translateUi("Execution permission")}
-    >
+  const actions = current.can_decide && current.supported ? <div className="flex flex-wrap justify-end gap-2">
+    <Button variant="outline" disabled={disabled || busy} onClick={() => void decide(false)}>{translateUi("Deny")}</Button>
+    <Button disabled={disabled || busy || !choice} onClick={() => void decide(true)}>{translateUi("Allow")}{" "}{choice?.id === "operation" ? translateUi("this operation") : translateUi("selected permission")}</Button>
+  </div> : null;
+  const content = <>
       <p className="type-card-title">
-        {statusLabel[current.state] ?? translateUi("Permission status unavailable")}
+        {translateUi(statusLabel[current.state] ?? "Permission status unavailable")}
       </p>
       {current.review && (
         <dl className="space-y-1 text-12">
@@ -140,7 +149,7 @@ export function ExecutionPermissionCard({
           </div>
           <div>
             <dt className="text-muted-foreground">{translateUi("Inputs")}</dt>
-            <dd className="max-h-48 overflow-auto whitespace-pre-wrap break-all">
+            <dd className={pinned ? "whitespace-pre-wrap break-all" : "max-h-48 overflow-auto whitespace-pre-wrap break-all"}>
               {current.review.inputs}
             </dd>
           </div>
@@ -164,7 +173,7 @@ export function ExecutionPermissionCard({
                 <span>
                   {c.label}
                   {c.valid_until && (
-                    <span className="block text-muted-foreground">{translateUi("Until ")}{new Date(c.valid_until).toLocaleString(getFormattingLocale())}
+                    <span className="block text-muted-foreground">{translateUi("Until ")}{new Date(c.valid_until).toLocaleString(language)}
                     </span>
                   )}
                 </span>
@@ -172,7 +181,7 @@ export function ExecutionPermissionCard({
             ))}
           </fieldset>
           {choice?.context_scope && (
-            <p className="text-12 text-muted-foreground">{translateUi("Applies to: ")}{executionContextLabel(choice.context_scope)}
+            <p className="text-12 text-muted-foreground">{translateUi("Applies to: ")}{translateUi(executionContextLabel(choice.context_scope) ?? "")}
             </p>
           )}
           {current.review?.reusable_unavailable && (
@@ -181,21 +190,6 @@ export function ExecutionPermissionCard({
             </p>
           )}
           <p className="text-12 text-muted-foreground">{translateUi("This saves the displayed permission and resumes the retained operation. Other required reviews still apply.")}</p>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              disabled={disabled || busy}
-              onClick={() => void decide(false)}
-            >{translateUi("Deny")}</Button>
-            <Button
-              disabled={disabled || busy || !choice}
-              onClick={() => void decide(true)}
-            >{translateUi("Allow")}{" "}
-              {choice?.id === "operation"
-                ? translateUi("this operation")
-                : translateUi("selected permission")}
-            </Button>
-          </div>
         </>
       )}
       {current.state === "expired" && (
@@ -207,7 +201,7 @@ export function ExecutionPermissionCard({
       )}
       {error && (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       )}
       {query.isError && (
@@ -222,6 +216,18 @@ export function ExecutionPermissionCard({
       {current.grant_id && (
         <a href="/approvals/grants" className="text-12 underline">{translateUi("Inspect or revoke the saved permission")}</a>
       )}
-    </section>
-  );
+  </>;
+  if (pinned && current.can_decide && current.supported) {
+    return <DecisionReview title={translateUi("Execution permission required")} actions={actions} busy={disabled || busy} onDeny={() => void decide(false)}
+      summary={<>
+        {current.review ? <><p className="line-clamp-1 break-words">{current.review.connection}</p><p className="line-clamp-2 break-words">{current.review.operation}</p></> : null}
+        <p>{translateUi("Review the exact inputs and permission scope before allowing.")}</p>
+        {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+      </>}
+    ><div className="space-y-3">{content}</div></DecisionReview>;
+  }
+  return <section lang={language} className={pinned ? "space-y-3 p-4" : "max-w-xl space-y-3 rounded-xl border border-border bg-card p-4"} aria-label={translateUi("Execution permission")}>
+    {content}
+    <DecisionCardActions>{actions}</DecisionCardActions>
+  </section>;
 }

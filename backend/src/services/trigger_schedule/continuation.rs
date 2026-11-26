@@ -364,7 +364,7 @@ async fn cancel_in_session(
         db,
         doc! {"_id": id, "outcome": {"$in": ["pending", "started", "waiting"]}},
         RunOutcome::Failed,
-        Some(reason),
+        FinishReason::Scheduler(Some(reason)),
         frontend,
         session,
     )
@@ -681,6 +681,22 @@ pub async fn fence_work(
         "_id": &work.run_id, "user_id": owner, "coordinator.protocol": 2,
         "coordinator.deadline": {"$gt": date(Utc::now())}, "outcome": {"$in": ["started", "waiting"]},
     }).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
+    if let Some(org) = run.org_specialist_owner_id.as_deref()
+        && super::super::org_agent_service::fence_member_use(
+            db,
+            session,
+            owner,
+            org,
+            run.agent_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            false,
+        )
+        .await?
+            != run.org_use_revision
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let pending = match work.role.as_str() {
         "coordinator" => run.thread_id.as_deref() == Some(thread) && *work == context(&run, thread),
         "direct" => {

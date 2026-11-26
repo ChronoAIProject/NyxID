@@ -678,14 +678,13 @@ impl TokenBucketStore {
     }
 }
 
+pub use crate::models::coordination::SlotToken;
+
+/// Local dispatch time bounds the confirmed TTL. Only the fence token travels between replicas.
 #[derive(Debug, Clone)]
-pub struct SlotToken {
-    pub id: String,
-    pub namespace: String,
-    pub scope_hash: String,
-    pub slot: u32,
-    pub holder: CoordinationHolder,
-    pub lease_id: String,
+pub struct SlotGrant {
+    pub token: SlotToken,
+    pub dispatched_at: tokio::time::Instant,
 }
 
 pub struct SlotStore;
@@ -698,7 +697,7 @@ impl SlotStore {
         limit: u32,
         holder: &CoordinationHolder,
         ttl: Duration,
-    ) -> AppResult<Option<SlotToken>> {
+    ) -> AppResult<Option<SlotGrant>> {
         if limit == 0 {
             return Ok(None);
         }
@@ -724,6 +723,7 @@ impl SlotStore {
                             "$cond": ["$__claimable", &scope_hash, "$scope_hash"]
                         },
                         "slot": { "$cond": ["$__claimable", i64::from(slot), "$slot"] },
+                        "order_id": { "$cond": ["$__claimable", &lease_id, "$order_id"] },
                         "holder": {
                             "$cond": ["$__claimable", holder_bson.clone(), "$holder"]
                         },
@@ -743,6 +743,7 @@ impl SlotStore {
                 },
                 doc! { "$unset": "__claimable" },
             ];
+            let dispatched_at = tokio::time::Instant::now();
             let result = db
                 .collection::<CoordinationSlot>(SLOT_COLLECTION_NAME)
                 .find_one_and_update(doc! { "_id": &id }, update)
@@ -751,13 +752,19 @@ impl SlotStore {
                 .await;
             match result {
                 Ok(Some(record)) if record.lease_id == lease_id => {
-                    return Ok(Some(SlotToken {
+                    let token = SlotToken {
                         id,
                         namespace: namespace.to_string(),
                         scope_hash,
                         slot,
                         holder: holder.clone(),
+                        acquired_at: record.acquired_at,
+                        order_id: lease_id.clone(),
                         lease_id,
+                    };
+                    return Ok(Some(SlotGrant {
+                        token,
+                        dispatched_at,
                     }));
                 }
                 Ok(Some(_)) => continue,
@@ -791,7 +798,7 @@ impl SlotStore {
                 }],
             )
             .await?;
-        Ok(result.modified_count == 1)
+        Ok(result.matched_count == 1)
     }
 
     pub async fn release(db: &mongodb::Database, token: &SlotToken) -> AppResult<bool> {
@@ -821,13 +828,77 @@ impl SlotStore {
     /// and scope, so slots can be granted in the order they were taken.
     /// Same-millisecond claims are ordered by their time-ordered lease IDs.
     pub async fn is_oldest_live(db: &mongodb::Database, token: &SlotToken) -> AppResult<bool> {
-        let oldest = db
-            .collection::<Document>(SLOT_COLLECTION_NAME)
-            .find_one(live_slot_filter(&token.namespace, &token.scope_hash))
-            .sort(doc! { "acquired_at": 1, "lease_id": 1 })
-            .projection(doc! { "lease_id": 1 })
-            .await?;
+        use futures::TryStreamExt;
+        let oldest = db.collection::<Document>(SLOT_COLLECTION_NAME).aggregate([
+            doc! {"$match": live_slot_filter(&token.namespace, &token.scope_hash)},
+            doc! {"$project": {"acquired_at":1,"lease_id":1,"order_id":{"$ifNull":["$order_id","$lease_id"]}}},
+            doc! {"$sort":{"acquired_at":1,"order_id":1}}, doc! {"$limit":1},
+        ]).await?.try_next().await?;
         Ok(oldest.is_some_and(|row| row.get_str("lease_id") == Ok(token.lease_id.as_str())))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn transfer(
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        token: &SlotToken,
+        namespace: &str,
+        scope: &str,
+        holder: &CoordinationHolder,
+        ttl: Duration,
+        limit: u32,
+    ) -> AppResult<Option<SlotGrant>> {
+        if token.namespace != namespace
+            || token.scope_hash != hash_parts(&[scope])
+            || token.id != hash_parts(&[namespace, scope, &token.slot.to_string()])
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let mut next = token.clone();
+        next.holder = holder.clone();
+        next.lease_id = uuid::Uuid::now_v7().to_string();
+        let slots = db.collection::<Document>(SLOT_COLLECTION_NAME);
+        let update = doc! {"holder":bson::to_bson(holder).map_err(|error| AppError::Internal(error.to_string()))?,
+        "namespace":namespace,"scope_hash":&token.scope_hash,"lease_id":&next.lease_id,"order_id":&next.order_id,
+        "acquired_at":DateTime::from_chrono(token.acquired_at),"updated_at":"$$NOW","expires_at":date_add_now(duration_millis(ttl,"slot TTL")?)};
+        for slot in std::iter::once(token.slot).chain((0..limit).filter(|slot| *slot != token.slot))
+        {
+            let id = hash_parts(&[namespace, scope, &slot.to_string()]);
+            let current = slots
+                .find_one(doc! {"_id":&id})
+                .session(&mut *session)
+                .await?;
+            let mut filter = doc! {"_id":&id};
+            if let Some(current) = &current {
+                if slot == token.slot && current.get_str("lease_id") == Ok(token.lease_id.as_str())
+                {
+                    filter = exact_lease_filter(&id, &token.holder, &token.lease_id);
+                } else if slot >= limit {
+                    continue;
+                } else {
+                    filter.insert("$expr", doc! {"$lte":["$expires_at","$$NOW"]});
+                }
+            } else if slot >= limit {
+                continue;
+            }
+            let mut values = update.clone();
+            values.insert("slot", i64::from(slot));
+            let dispatched_at = tokio::time::Instant::now();
+            let saved = slots
+                .update_one(filter, vec![doc! {"$set":values}])
+                .session(&mut *session)
+                .upsert(current.is_none())
+                .await?;
+            if saved.matched_count == 1 || saved.upserted_id.is_some() {
+                next.id = id;
+                next.slot = slot;
+                return Ok(Some(SlotGrant {
+                    token: next,
+                    dispatched_at,
+                }));
+            }
+        }
+        Ok(None)
     }
 }
 

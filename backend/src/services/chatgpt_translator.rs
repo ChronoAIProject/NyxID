@@ -916,13 +916,14 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10));
 
+    // This translator uses a fixed ChatGPT origin and its deployment-configured forward proxy.
     if let Ok(proxy_url) = std::env::var("CHATGPT_PROXY_URL")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
         .or_else(|_| std::env::var("https_proxy"))
     {
-        tracing::debug!("ChatGPT HTTP via proxy: {proxy_url}");
+        tracing::debug!(host = %crate::services::url_validation::url_host_for_logs(&proxy_url), "ChatGPT HTTP via proxy");
         let proxy = reqwest::Proxy::https(&proxy_url)
-            .map_err(|e| AppError::Internal(format!("Invalid proxy URL: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("Invalid proxy URL: {}", e.without_url())))?;
         builder = builder.proxy(proxy);
     }
 
@@ -969,7 +970,9 @@ fn build_chatgpt_request(
         .header("User-Agent", codex_user_agent())
         .body(request_text)
         .build()
-        .map_err(|e| AppError::Internal(format!("Failed to build HTTP request: {e}")))
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to build HTTP request: {}", e.without_url()))
+        })
 }
 
 fn build_chatgpt_api_url(api_url: &str, query: Option<&str>) -> String {
@@ -1040,14 +1043,13 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
         translate_response,
         is_streaming,
         request_len = request_text.len(),
-        api_url,
-        "ChatGPT HTTP request body: {}",
-        &request_text,
+        host = %crate::services::url_validation::url_host_for_logs(&api_url),
+        "Sending ChatGPT HTTP request",
     );
 
     let client = chatgpt_http_client()?;
 
-    let request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
+    let mut request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
 
     if let Some(target) = execution_target {
         if let Some(context) = &target.execution_request {
@@ -1059,6 +1061,10 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
         }
     }
 
+    request.headers_mut().insert(
+        http::header::ACCEPT_ENCODING,
+        http::HeaderValue::from_static("identity"),
+    );
     let result =
         tokio::time::timeout(std::time::Duration::from_secs(30), client.execute(request)).await;
     if let Some(permit) = execution_target.and_then(|target| target.execution_permission.as_ref()) {
@@ -1070,10 +1076,15 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
             AppError::Internal("ChatGPT backend did not respond within 30 seconds".to_string())
         })?
         .map_err(|e| {
+            let e = e.without_url();
             tracing::error!("ChatGPT HTTP request failed: {e}");
             AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
         })?;
 
+    let service_id = execution_target
+        .map(|target| target.service.id.as_str())
+        .unwrap_or("openai-codex");
+    super::llm_usage_service::warn_http_usage_encoding(service_id, &response);
     let status = response.status();
     tracing::debug!("ChatGPT HTTP response status: {status}");
 
@@ -2155,6 +2166,12 @@ mod tests {
                 assert!(read > 0, "ChatGPT request closed before headers");
                 request.extend_from_slice(&chunk[..read]);
             }
+
+            assert!(
+                String::from_utf8_lossy(&request)
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("accept-encoding: identity"))
+            );
 
             let event = "event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\n";
             let response = format!(

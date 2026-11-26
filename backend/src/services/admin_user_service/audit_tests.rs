@@ -332,10 +332,13 @@ async fn admin_audit_request_command_counts() {
         assert_eq!(
             commands.len(),
             match action {
-                Action::Create | Action::Role | Action::Sessions => 12,
+                // One live-person lookup and one read for each schedule timing.
+                Action::Create => 15,
+                Action::Role => 12,
+                Action::Sessions => 13,
                 Action::Update => 10,
                 Action::Status => 13,
-                Action::Password => 14,
+                Action::Password => 15,
                 Action::Email => 7,
             },
             "{action:?}: {commands:?}"
@@ -522,7 +525,7 @@ async fn admin_shared_session_revocation_adds_no_commands_or_audit() {
         1
     );
     let commands = f.monitor.lock().unwrap().commands.clone();
-    assert_eq!(commands.len(), 7, "shared revocation: {commands:?}");
+    assert_eq!(commands.len(), 8, "shared revocation: {commands:?}");
     assert_eq!(
         f.state
             .db

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
@@ -30,24 +31,36 @@ const row = (id: string, overrides: Record<string, unknown>) =>
 
 function setup(options: {
   enabled?: boolean;
+  cornerWindow?: boolean;
   pages?: unknown[];
   pending?: boolean;
   error?: Error;
   hasNextPage?: boolean;
   summary?: unknown;
+  active?: boolean;
+  online?: boolean;
+  marking?: boolean;
 } = {}) {
   const reads: unknown[] = [];
   const opened: unknown[] = [];
   const pushed: unknown[] = [];
   const filters: NotificationFilter[] = [];
   const fetched: string[] = [];
+  let headerOptions: any;
+  let sheet: { options: any; select: (index: number) => void } | undefined;
+  let epoch = 1;
   const h = hookHarness<E>({
+    "../../components/workspace/WorkspaceLayoutContext": {WorkspaceCornerSensorContext:{value:options.cornerWindow ?? false}},
     "react/jsx-runtime": {
       Fragment: "Fragment",
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "react-native": {
+      ActionSheetIOS: { showActionSheetWithOptions: (options: any, select: (index: number) => void) => { sheet = { options, select }; } },
+      Platform: { OS: "ios" },
+      Keyboard: { dismiss() {} },
+      TextInput: "TextInput",
       ActivityIndicator: "ActivityIndicator",
       FlatList: "FlatList",
       Pressable: "Pressable",
@@ -58,8 +71,11 @@ function setup(options: {
     "lucide-react-native": new Proxy({}, { get: (_t, name) => (name === "__esModule" ? false : String(name)) }),
     "../../app/WorkspaceHeader": {
       useOpenWorkspaceChat: () => (params: unknown) => opened.push(params),
-      useWorkspaceBack: () => {},
+      useWorkspaceBack: (props: any) => { headerOptions = props.options; },
+      WorkspaceHeaderVisibility: "HeaderVisibility",
     },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "../../components/FloatingControl": { FloatingButton: "FloatingButton" },
     "../../components/DynamicTypeText": { DynamicTypeText: "Text" },
     "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar", AgentAvatarStack: "AgentAvatarStack" },
     "../../components/ChannelPlatformGlyph": { ChannelPlatformGlyph: "ChannelPlatformGlyph" },
@@ -76,7 +92,7 @@ function setup(options: {
     "../../lib/env": { firstPartyFrontendUrls: () => ["https://app.nyxid.test"] },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "./useNotifications": {
-      useNotificationRuntime: () => ({ active: true, online: true }),
+      useNotificationRuntime: () => ({ active: options.active ?? true, online: options.online ?? true }),
       useNotificationsEnabled: () => options.enabled ?? true,
       useNotificationsLive: () => false,
       useNotificationFeed: (filter: NotificationFilter) => {
@@ -96,7 +112,7 @@ function setup(options: {
         };
       },
       useNotificationSummary: () => ({ data: options.summary, refetch: () => Promise.resolve() }),
-      useMarkNotificationsRead: () => ({ mutate: (scope: unknown) => reads.push(scope), isPending: false }),
+      useMarkNotificationsRead: () => ({ mutate: (scope: unknown) => reads.push(scope), isPending: options.marking ?? false }),
     },
   });
   const module = h.load(fileURLToPath(new URL("./NotificationsScreen.tsx", import.meta.url))) as Record<string, any>;
@@ -116,8 +132,67 @@ function setup(options: {
   const all = () => nodes(h.value());
   const list = () => all().find((n) => n.type === "FlatList")!;
   const renderedRows = () => (list().props.data as any[]).map((item) => expand(list().props.renderItem({ item })));
-  return { h, module, all, list, renderedRows, reads, opened, pushed, filters, fetched, footer: () => { const button = all().find((n) => n.props.testID === "notifications-mark-all")!; return { label: button.props.accessibilityLabel, enabled: !button.props.disabled, onPress: button.props.onPress }; } };
+  const optionsButton = () => nodes(expand(headerOptions.headerRight())).find(n => n.props.testID === "notifications-options")!;
+  const menuReadAction = () => {
+    optionsButton().props.onPress();
+    assert.ok(sheet);
+    const current = sheet;
+    return {
+      label: current.options.options[0],
+      enabled: !current.options.disabledButtonIndices.includes(0),
+      onPress: () => current.select(0),
+      cancel: () => current.select(1),
+    };
+  };
+  return { h, module, all, list, renderedRows, reads, opened, pushed, filters, fetched, menuReadAction, optionsButton, options, changeEpoch: () => { epoch++; } };
+
 }
+
+test("the page leaves its title to the navigation header and shows filter labels without counts", () => {
+  const x = setup({ summary: { unread_count: 123, needs_decision_count: 2 } });
+  const page = x.all().find(n => n.type === "WorkspacePage")!;
+  assert.equal(page.props.showHeading, false);
+  const filters = x.all().find(n => n.type === "SegmentControl")!;
+  assert.deepEqual(JSON.parse(JSON.stringify(filters.props.segments.slice(0, 2))), [
+    { id: "all", label: "All" },
+    { id: "needs_you", label: "Needs you" },
+  ]);
+  assert.equal(x.all().some(n => n.props.testID === "notification-bell"), false);
+  x.h.unmount();
+});
+
+test("an open options menu cannot mark read after leaving the page, changing accounts, or starting a mutation", () => {
+  for (const change of ["blur", "account", "pending", "offline", "unmount"] as const) {
+    const x = setup({ pages: [{ items: [], as_of: AS_OF, next_cursor: null }], summary: { unread_count: 3 } });
+    const action = x.menuReadAction();
+    assert.equal(action.enabled, true);
+    if (change === "blur") x.options.active = false;
+    if (change === "pending") x.options.marking = true;
+    if (change === "offline") x.options.online = false;
+    if (change === "account") x.changeEpoch();
+    if (change === "unmount") x.h.unmount();
+    else x.h.render();
+    action.onPress();
+    assert.deepEqual(x.reads, [], change);
+    if (change !== "unmount") x.h.unmount();
+  }
+});
+
+test("search filters the loaded pages without marking anything read and clearing restores the feed", () => {
+  const x = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [
+    row("match", { title: "Daily report", preview: "Booking verified", actor: { type: "automation", name: "Jolly A2" } }),
+    row("other", { title: "Weekly summary" }),
+  ] }] });
+  const input = () => x.all().find(n => n.type === "TextInput")!;
+  input().props.onChangeText("ＪＯＬＬＹ verified");
+  x.h.flush();
+  assert.deepEqual(Array.from(x.list().props.data, (item: any) => item.id), ["match"]);
+  assert.deepEqual(x.reads, []);
+  x.all().find(n => n.props.accessibilityLabel === "Clear notification search")!.props.onPress();
+  x.h.flush();
+  assert.equal(x.list().props.data.length, 2);
+  x.h.unmount();
+});
 
 test("rows show title, preview, counts and unread state; tapping marks read and opens the thread", () => {
   const x = setup({
@@ -209,14 +284,14 @@ test("mark all read uses the server fence, filters re-query by kind and the end 
     hasNextPage: true,
     summary: { unread_count: 1, needs_decision_count: 2, by_source: [], by_source_truncated: false },
   });
-  const header = x.footer();
-  assert.equal(header.label, "Mark all notifications as read");
+  const header = x.menuReadAction();
+  assert.equal(header.label, "Mark all as read");
   assert.equal(header.enabled, true);
   header.onPress();
   assert.deepEqual(JSON.parse(JSON.stringify(x.reads)), [{ all: true, before: AS_OF }]);
   const segments = x.all().find((n) => n.type === "SegmentControl")!;
   assert.deepEqual(segments.props.segments.map((s: any) => s.label), ["All", "Needs you", "Automations", "Chats"]);
-  assert.equal(segments.props.segments[1].count, 2);
+  assert.equal(segments.props.segments[1].count, undefined);
   assert.equal(segments.props.activeIndex, 0);
   segments.props.onPress(1);
   x.h.flush();
@@ -229,7 +304,7 @@ test("mark all read uses the server fence, filters re-query by kind and the end 
   assert.deepEqual(x.fetched, ["needs_you", "needs_you"]);
   x.h.unmount();
   const none = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [] }], summary: { unread_count: 0, needs_decision_count: 0, by_source: [], by_source_truncated: false } });
-  assert.equal(none.footer().enabled, false, "nothing to mark");
+  assert.equal(none.menuReadAction().enabled, false, "nothing to mark");
   assert.ok(nodes(none.list().props.ListEmptyComponent).some((n) => n.type === "Text" && n.props.children === "You're all caught up."));
   assert.deepEqual(none.fetched, [], "an exhausted feed asks for nothing more");
   none.h.unmount();
@@ -343,11 +418,94 @@ test("each notification kind renders the source avatar, corner badge and client-
   x.h.unmount();
 });
 
-test("all filters use per-kind unread counts and the global read action lives after the list", () => {
+test("all filters omit unread counts and mark-all belongs to the header options", () => {
   const x = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [] }], summary: { unread_count: 21, needs_decision_count: 3, by_source: [], by_kind: { automation_result: 2, automation_problem: 4, needs_decision: 3, agent_update: 5, chat_update: 6, group_mention: 1 } } });
   const segments = x.all().find((n) => n.type === "SegmentControl")!;
-  assert.deepEqual(JSON.parse(JSON.stringify(segments.props.segments.map((s: any) => s.count))), [21, 3, 6, 12]);
+  for (const segment of segments.props.segments) {
+    assert.equal("count" in segment, false);
+  }
   const all = x.all();
-  assert.ok(all.findIndex((n) => n.props.testID === "notifications-mark-all") > all.findIndex((n) => n.type === "FlatList"));
+  assert.equal(all.some(n => n.props.testID === "notifications-mark-all"), false);
+  assert.equal(x.optionsButton().props.accessibilityLabel, "Notification options");
+  x.h.unmount();
+});
+
+test("a Duo row grows with its text: two title lines and three body lines end in an ellipsis, the time always shows", () => {
+  const x = setup({
+    cornerWindow:true,
+    pages: [
+      {
+        as_of: AS_OF,
+        next_cursor: null,
+        items: [
+          row("n1", {
+            kind: "automation_problem",
+            title: "Simulator notification check failed",
+            preview: "The assistant could not complete this turn. Try again.",
+            source: { type: "trigger", id: T },
+          }),
+        ],
+      },
+    ],
+    summary: { unread_count: 1, needs_decision_count: 0, by_source: [], by_source_truncated: false },
+  });
+  const [rendered] = x.renderedRows();
+  const style = (n: E) => Object.assign({}, ...[n.props.style].flat(Infinity).filter(Boolean));
+  const rowStyle = style(rendered!);
+  // No fixed or capped height: the row is as tall as its text.
+  assert.equal(rowStyle.height, undefined);
+  assert.equal(rowStyle.maxHeight, undefined);
+  assert.equal(rowStyle.alignItems, "flex-start", "the icon stays top-aligned");
+  const texts = nodes(rendered).filter((n) => n.type === "Text");
+  const title = texts.find((n) => text(n).includes("Simulator notification check failed"))!;
+  assert.equal(title.props.numberOfLines, 2);
+  assert.equal(title.props.ellipsizeMode, "tail");
+  const body = texts.find((n) => n.props.children === "The assistant could not complete this turn. Try again.")!;
+  assert.equal(body.props.numberOfLines, 3);
+  assert.equal(body.props.ellipsizeMode, "tail");
+  const time = nodes(rendered).find((n) => n.props.testID === "notification-time")!;
+  assert.equal(time.props.numberOfLines, 1);
+  assert.ok(text(time).length > 0);
+  // The time may move to its own line but never shrinks away.
+  assert.equal(style(time).flexShrink, 0);
+  for (const n of texts) {
+    assert.equal(style(n).height, undefined);
+    assert.equal(n.props.adjustsFontSizeToFit, undefined);
+  }
+  assert.ok(x.optionsButton());
+  x.h.unmount();
+  // Live text-size changes re-measure every row (DynamicTypeText).
+  const source = readFileSync(new URL("./NotificationsScreen.tsx", import.meta.url), "utf8");
+  assert.match(source, /DynamicTypeText as Text/);
+});
+
+
+test("ordinary notifications retain the base title and preview scaling", () => {
+  const x = setup({
+    pages: [
+      {
+        as_of: AS_OF,
+        next_cursor: null,
+        items: [
+          row("ordinary", {
+            title: "Ordinary title",
+            preview: "Ordinary preview",
+          }),
+        ],
+      },
+    ],
+  });
+  const [rendered] = x.renderedRows();
+  const texts = nodes(rendered).filter((n) => n.type === "Text");
+  assert.equal(
+    texts.find((n) => text(n).includes("Ordinary title"))!.props.numberOfLines,
+    3,
+  );
+  assert.equal(
+    texts.find((n) => n.props.children === "Ordinary preview")!.props
+      .numberOfLines,
+    2,
+  );
+  assert.equal(x.all().some(n => n.props.testID === "notifications-mark-all"), false);
   x.h.unmount();
 });

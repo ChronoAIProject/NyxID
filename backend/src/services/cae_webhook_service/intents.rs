@@ -2,11 +2,10 @@ use std::time::Duration;
 
 use bson::doc;
 use mongodb::Database;
-use zeroize::Zeroizing;
 
 use crate::{
     crypto::aes::EncryptionKeys,
-    errors::AppResult,
+    errors::{AppError, AppResult},
     models::{
         oauth_broker_binding::{COLLECTION_NAME as BINDINGS, OauthBrokerBinding},
         oauth_client::{COLLECTION_NAME as CLIENTS, OauthClient},
@@ -62,10 +61,15 @@ pub(in crate::services) async fn deliver_intent(
     let Some(encrypted) = client.revocation_webhook_secret_encrypted.as_ref() else {
         return Ok(Outcome::Failed("signing_key_missing"));
     };
-    let secret = match keys.decrypt(encrypted).await {
-        Ok(secret) if !secret.is_empty() && std::str::from_utf8(&secret).is_ok() => {
-            Zeroizing::new(secret)
-        }
+    let secret = match crate::services::oauth_client_webhook_record::open(
+        keys,
+        &client,
+        crate::services::oauth_client_webhook_record::REVOCATION,
+        encrypted,
+    )
+    .await
+    {
+        Ok(secret) if !secret.is_empty() && std::str::from_utf8(&secret).is_ok() => secret,
         Ok(_) => return Ok(Outcome::Failed("signing_key_invalid")),
         Err(_) => return Ok(Outcome::Retry("signing_key_unavailable")),
     };
@@ -81,13 +85,13 @@ pub(in crate::services) async fn deliver_intent(
         Err(_) => return Ok(Outcome::Failed("event_encoding_failed")),
     };
     let signature = webhook_delivery_service::compute_body_signature(&secret, &body);
-    // Reuse the hardened connection-link transport: it rechecks the resolved addresses, rejects
-    // private addresses, disables proxies and redirects, then pins the
-    // validated addresses in reqwest so DNS cannot rebind between validation
-    // and connect. The test-only origin is passed as the trusted base solely
-    // to preserve the existing loopback fixture.
-    let http = match super::super::channel_media_service::media_client(url, None, Some(url)).await {
-        Ok(http) => http,
+    let (url, http) = match super::super::proxy_destination::http::signed_webhook(url) {
+        Ok(target) => target,
+        Err(AppError::ValidationError(_)) => {
+            return Ok(Outcome::Failed(
+                webhook_delivery_service::DESTINATION_REFUSED,
+            ));
+        }
         Err(_) => return Ok(Outcome::Retry("destination_unavailable")),
     };
     if !security_effect_service::begin_send(db, intent).await? {
@@ -115,7 +119,13 @@ pub(in crate::services) async fn deliver_intent(
         Ok(Ok(response)) if response.status().is_server_error() => {
             Outcome::Uncertain("receiver_server_error")
         }
+        Ok(Ok(response)) if response.status().is_redirection() => {
+            Outcome::Failed(webhook_delivery_service::DESTINATION_REFUSED)
+        }
         Ok(Ok(_)) => Outcome::Failed("receiver_rejected"),
+        Ok(Err(error)) if super::super::proxy_destination::http::denied_address(&error) => {
+            Outcome::Failed(webhook_delivery_service::DESTINATION_REFUSED)
+        }
         Ok(Err(error)) if error.is_connect() => Outcome::Retry("connection_failed"),
         Ok(Err(_)) | Err(_) => Outcome::Uncertain("dispatch_response_missing"),
     })

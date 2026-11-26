@@ -62,7 +62,7 @@ impl Transport<'_> {
         }
         let effect = guard.effect(row, phase);
         let response = proxy::forward_request_with_resource_proof(
-            proxy::no_redirect_http_client(),
+            proxy::Redirects::Return,
             self.target,
             method,
             path,

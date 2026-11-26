@@ -22,9 +22,14 @@ function visit(node: ts.Node, inspect: (node: ts.Node) => void) {
   ts.forEachChild(node, (child) => visit(child, inspect));
 }
 function literalPhrases(node: ts.Node, phrases: Set<string>) {
-  visit(node, (child) => {
-    if (ts.isStringLiteralLike(child)) phrases.add(child.text);
-  });
+  if (ts.isConditionalExpression(node)) {
+    // Only the result branches provide copy; the test may compare internal IDs.
+    literalPhrases(node.whenTrue, phrases);
+    literalPhrases(node.whenFalse, phrases);
+    return;
+  }
+  if (ts.isStringLiteralLike(node)) phrases.add(node.text);
+  ts.forEachChild(node, (child) => literalPhrases(child, phrases));
 }
 function translatedBranches(node: ts.Expression, phrases: Set<string>) {
   if (ts.isStringLiteralLike(node)) phrases.add(node.text);
@@ -70,6 +75,7 @@ test("every WS2 fixed UI phrase passed to t, including dynamic login, terminal, 
     }
   });
   assert.ok(loginCopyFound, "scan the actual login request copy provider");
+  const terminalPhrases = new Set<string>();
   visit(source("../features/auth/LoginRequestTerminalView.tsx"), (node) => {
     if (
       ts.isVariableDeclaration(node) &&
@@ -81,8 +87,19 @@ test("every WS2 fixed UI phrase passed to t, including dynamic login, terminal, 
       ) &&
       node.initializer
     )
-      literalPhrases(node.initializer, phrases);
+      literalPhrases(node.initializer, terminalPhrases);
   });
+  for (const phrase of [
+    "Return to your browser to continue.",
+    "Return to where you started signing in.",
+  ])
+    assert.ok(terminalPhrases.has(phrase), `scan terminal copy: ${phrase}`);
+  assert.equal(
+    terminalPhrases.has("browser"),
+    false,
+    "the client-kind discriminator is not terminal copy",
+  );
+  for (const phrase of terminalPhrases) phrases.add(phrase);
   for (const path of [
     "../features/assistant/saveAttachmentImage.ts",
     "../lib/api/accountSchema.ts",

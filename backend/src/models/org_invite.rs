@@ -32,6 +32,7 @@ pub struct OrgInvite {
     #[serde(default)]
     pub allowed_service_ids: Option<Vec<String>>,
     /// User id of the org admin who issued this invite.
+    #[serde(default, deserialize_with = "deserialize_issuer")]
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
@@ -43,6 +44,10 @@ pub struct OrgInvite {
     pub redeemed_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+fn deserialize_issuer<'de, D: serde::Deserializer<'de>>(input: D) -> Result<String, D::Error> {
+    Option::<String>::deserialize(input).map(Option::unwrap_or_default)
 }
 
 impl std::fmt::Debug for OrgInvite {

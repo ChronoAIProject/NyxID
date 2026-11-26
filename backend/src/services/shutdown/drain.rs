@@ -12,6 +12,7 @@ use super::{Counts, Runtime};
 
 const CLEANUP_RESERVE_DIVISOR: u32 = 10;
 const MAX_CLEANUP_RESERVE: Duration = Duration::from_secs(5);
+pub(crate) const TURN_OFFER_MARGIN: Duration = Duration::from_secs(3);
 // Above half the default cleanup reserve, so that half is the effective bound.
 const SNAPSHOT_AUDIT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -80,7 +81,12 @@ impl Drain {
         tokio::select! {
             biased;
             () = self.progress_stopped.cancelled() => {},
-            () = records => {},
+            _ = async {
+                tokio::join!(records, async {
+                    tokio::time::sleep_until(self.turn_offer_at()).await;
+                    self.runtime.0.turn_offer_due.cancel();
+                })
+            } => {},
         }
         std::future::pending().await
     }
@@ -95,6 +101,10 @@ impl Drain {
 
     pub fn work_deadline(&self) -> Instant {
         self.deadline - self.cleanup_reserve()
+    }
+
+    fn turn_offer_at(&self) -> Instant {
+        self.started + (self.timeout - self.cleanup_reserve()).saturating_sub(TURN_OFFER_MARGIN)
     }
 
     /// Zero does not change readiness or stop background intake.
@@ -257,42 +267,30 @@ impl Drain {
             "end": end,
         });
         tracing::info!(target: "nyxid::shutdown", event = "backend_shutdown_drain", metadata = %metadata, "Backend shutdown drain finished");
-        if !matches!(
-            tokio::time::timeout_at(
-                audit_deadline,
-                crate::services::audit_service::log_system_event(
-                    state.db.clone(),
-                    "backend_shutdown_drain",
-                    Some(metadata)
-                )
-            )
-            .await,
-            Ok(Ok(()))
-        ) {
-            tracing::warn!(target: "nyxid::shutdown", "Shutdown audit unavailable");
-        }
+        snapshot_audit(
+            state.db.clone(),
+            "backend_shutdown_drain",
+            metadata,
+            audit_deadline,
+        )
+        .await;
     }
 }
 
-/// Shared bounded chained append for start and progress. The start is joined
-/// through spawn_cleanup; progress is owned directly by the shutdown coordinator
-/// and cancelled at finish, so its IO never adds an idle/cleanup dependency.
-async fn snapshot_audit(
+pub(super) async fn snapshot_audit(
     db: mongodb::Database,
     event: &'static str,
     metadata: serde_json::Value,
     deadline: Instant,
 ) {
-    if !matches!(
-        tokio::time::timeout_at(
-            deadline,
-            crate::services::audit_service::log_system_event(db, event, Some(metadata)),
-        )
-        .await,
-        Ok(Ok(()))
-    ) {
-        tracing::warn!(target: "nyxid::shutdown", event, "Shutdown snapshot audit unavailable or timed out");
-    }
+    let append =
+        crate::services::audit_service::log_system_event(db, event, Some(metadata.clone()));
+    let audit_outcome = match tokio::time::timeout_at(deadline, append).await {
+        Ok(Ok(())) => return,
+        Ok(Err(_)) => "failed",
+        Err(_) => "timed_out",
+    };
+    tracing::warn!(target: "nyxid::shutdown", event, audit_outcome, metadata = %metadata, "Shutdown audit unavailable");
 }
 
 pub(super) fn shutdown_candidates_filter() -> mongodb::bson::Document {
@@ -349,6 +347,14 @@ pub async fn settle_remaining(
                 &state.db, &row, &worker.id,
             )
             .await;
+            if matches!(&result, Ok(Some(_)))
+                && row
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.stop_requested && turn.restart_admission.is_some())
+            {
+                crate::handlers::assistant_nyxagent::survivor::cancel(state, &row).await;
+            }
             (row, result)
         })
         .buffer_unordered(16);
@@ -410,6 +416,32 @@ pub async fn release_owned(state: &AppState, deadline: Instant) -> BTreeMap<&'st
 mod startup_budget_tests {
     use super::*;
     use crate::services::shutdown::signals::Received;
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_offer_uses_original_work_deadline_and_saturates_for_small_budgets() {
+        for (budget, expected_ms) in [(25, 19_500), (2, 0)] {
+            let state = crate::test_utils::test_app_state_no_db().await;
+            let drain = Drain::begin(&state, Duration::from_secs(budget), "SIGTERM").unwrap();
+            assert_eq!(
+                drain.turn_offer_at() - drain.started,
+                Duration::from_millis(expected_ms)
+            );
+            let progress = drain.progress(&state);
+            tokio::pin!(progress);
+            tokio::select! {
+                biased;
+                never = &mut progress => match never {},
+                () = tokio::time::sleep_until(drain.turn_offer_at()) => {},
+            }
+            tokio::select! {
+                biased;
+                never = &mut progress => match never {},
+                () = state.shutdown.turn_offer_due() => {},
+                () = tokio::time::sleep(Duration::from_millis(1)) => panic!("turn offer was late"),
+            }
+            state.shutdown.stop();
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn startup_signal_budget_includes_completed_startup_steps() {

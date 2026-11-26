@@ -617,7 +617,7 @@ async fn run_inner(
         fence_admin(db, &row.user_id, &agent.user_id, tx).await?;
         let event=team::bound_event(KIND,INSTRUCTION.into(),None,None);
         engine::append_events_in_session(db,&row.user_id,&row.id,&[event],tx).await?;
-        Ok(engine::begin_owner_turn_in_session(db,tx,keys,&row.user_id,start,ids,agent,None,None,None).await?.into_started()?.conversation)
+        Ok(engine::begin_owner_turn_in_session(db,tx,keys,&row.user_id,start,ids,agent,None,None,None, None).await?.into_started()?.conversation)
     })).await?;
     if let Some(turn) = active.active_turn.as_ref() {
         crate::turn_trace::admitted(&turn.turn_id, turn.started_at, turn.retry_of.as_deref());
@@ -866,6 +866,7 @@ pub(crate) async fn failure(
     if let Some(reason) = reason.filter(|s| failure_code(s)) {
         error = error.with_model_route_reason(Some(&reason));
         error.metadata = Some(Box::new(TurnMetadata {
+            continued_after_restart: false,
             voice_link_publication: None,
             links_in_chat: None,
             artifact_recovery_target: None,
@@ -1016,6 +1017,7 @@ mod tests {
                         start,
                         ids,
                         agent,
+                        None,
                         None,
                         None,
                         None,
@@ -1672,6 +1674,7 @@ async fn org_follow_setup_revocation(change: &str) {
         None,
         None,
         None,
+        None,
     ))
     .await
     .unwrap()
@@ -1718,6 +1721,7 @@ async fn org_follow_setup_revocation(change: &str) {
                     service_ids: None,
                     daily_credits: None,
                 },
+                None,
             )
             .await
             .unwrap();

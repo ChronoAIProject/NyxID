@@ -36,13 +36,9 @@ pub(crate) async fn rewrap(
     let row = decode(source)?;
     let path = context_path(&row);
     let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &path)?;
-    let plain = record_field_service::decrypt_context(
-        keys,
-        &context,
-        row.encryption_version,
-        &row.data_encrypted,
-    )
-    .await?;
+    let plain =
+        record_field::decrypt_context(keys, &context, row.encryption_version, &row.data_encrypted)
+            .await?;
     let text = std::str::from_utf8(&plain).map_err(|_| missing())?;
     if text.len() != row.size as usize || row.boundaries != boundaries(text) {
         return Err(missing());

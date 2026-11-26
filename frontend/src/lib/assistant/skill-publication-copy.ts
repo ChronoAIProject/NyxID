@@ -6,7 +6,7 @@ const failureCopy: Record<string, string> = {
   base_interface_incompatible: "The source skill interface cannot be preserved. Deny or discard this draft and ask NyxBot for a revised one.",
   ornn_validation_failed: "Ornn rejected the package format. Deny or discard this draft and ask NyxBot for a revised one.",
   ornn_interface_change_requires_major: "Ornn requires a major version for this interface change. Deny or discard this draft and ask NyxBot for a revised one.",
-  ornn_write_forbidden: "Ornn update permission or skill write access denied.",
+  ornn_write_forbidden: "Ornn denied publication. Your account needs ornn:skill:create for a new skill, or ornn:skill:update and write access for an existing skill. Approval does not grant these account permissions. Ask an administrator to check your Ornn role before retrying.",
   ornn_read_forbidden: "Ornn read access is denied. Check your Ornn permissions and try again.",
   ornn_auth_missing: "Connect your Ornn access and try again.",
   ornn_skill_not_found: "The source skill is unavailable through your Ornn access.",

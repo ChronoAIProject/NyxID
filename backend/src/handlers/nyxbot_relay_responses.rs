@@ -78,12 +78,9 @@ pub(super) async fn prepare(
         });
     }
     let binding = row.binding_id.as_deref().expect("checked binding");
-    let identity = format!(
-        "nyxbot_{}",
-        &sha256_hex(format!("{}:{binding}:{}", row.id, event.partition))[..32]
-    );
+    let identity = recovery::conversation_identity(&row.id, binding, &event.partition);
     let payload = recovery::Payload::new(response_id, &identity, metadata);
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: response_id.into(),
         user_id: row.user_id.clone(),
@@ -94,11 +91,14 @@ pub(super) async fn prepare(
         request_hash: sha256_hex(request.to_string()),
         conversation_id: None,
         terminal: false,
+        answer_delivery: None,
         revision: 0,
-        payload_ciphertext: payload.seal(&state.encryption_keys).await?,
+        payload_context_version: None,
+        payload_ciphertext: Vec::new(),
         created_at: event.created_at,
         expires_at: event.created_at + ChronoDuration::hours(recovery::RETENTION_HOURS),
     };
+    recovery::storage::install(&state.encryption_keys, &mut stored, &payload).await?;
     let db = state.db.clone();
     let admitted = stored.clone();
     let mut session = db.client().start_session().await?;
@@ -274,10 +274,20 @@ pub(super) async fn settle_admission(
     let stored = current.as_ref().unwrap_or(stored);
     let (text, failed) = match result {
         Ok(Inbound::Turn(_)) | Ok(Inbound::Queued) => return,
-        Ok(Inbound::Reply(text)) => (Some(text.as_str()), false),
+        Ok(Inbound::Reply(text)) => (Some(text.text.as_str()), false),
         Ok(Inbound::Silent(_)) => (None, false),
         Ok(Inbound::Busy) => (
-            Some("NyxBot is busy. This message was not started. Please try again shortly."),
+            Some(
+                Notice::RelayBusy.text(
+                    crate::services::channel_notices::chat_language(
+                        &state.db,
+                        &stored.channel_id,
+                        &stored.partition,
+                    )
+                    .await
+                    .unwrap_or_default(),
+                ),
+            ),
             false,
         ),
         Err(_) => {
@@ -364,18 +374,11 @@ impl Drop for Observer {
         let id = self.response.clone();
         crate::services::shutdown::process().spawn_cleanup(async move {
             if let Ok(Some(stored)) = recovery::load(&state.db, &row, &id).await {
-                // Also fence admission which has not created delivery metadata yet.
-                let _ = state
-                    .db
-                    .collection::<NyxbotEvent>(EVENTS)
-                    .update_one(
-                        doc! {"_id":&stored.event_key},
-                        doc! {"$set":{"gateway_observer_detached":true}},
-                    )
-                    .await;
-                let _ =
-                    crate::services::channel_turn_delivery::detach(&state.db, &stored.event_key)
-                        .await;
+                let _ = crate::services::channel_turn_delivery::detach_observer(
+                    &state.db,
+                    &stored.event_key,
+                )
+                .await;
                 if !state.shutdown.is_stopped() {
                     late_delivery::process(&state, &stored.event_key).await;
                 }

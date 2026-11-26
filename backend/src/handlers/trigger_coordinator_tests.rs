@@ -7,6 +7,11 @@ use crate::models::assistant_message::COLLECTION_NAME as MESSAGES;
 use crate::services::trigger_schedule::{continuation as v2, direct, group as work_groups};
 use futures::TryStreamExt;
 
+#[path = "trigger_scheduled_group_workflow_tests.rs"]
+mod scheduled_group_workflow_tests;
+#[path = "trigger_workflow_completion_tests.rs"]
+mod workflow_completion_tests;
+
 fn start(thread: &str, text: &str) -> engine::TurnStart {
     engine::TurnStart::from(
         &serde_json::from_value::<engine::TurnRequest>(
@@ -19,6 +24,35 @@ fn start(thread: &str, text: &str) -> engine::TurnStart {
 async fn root(
     name: &str,
     specialist_coordinator: bool,
+) -> (
+    AppState,
+    Trigger,
+    TriggerRun,
+    AssistantConversation,
+    tokio::task::JoinHandle<()>,
+) {
+    root_with_enrollment(name, specialist_coordinator, true).await
+}
+
+async fn root_with_enrollment(
+    name: &str,
+    specialist_coordinator: bool,
+    enroll_v2: bool,
+) -> (
+    AppState,
+    Trigger,
+    TriggerRun,
+    AssistantConversation,
+    tokio::task::JoinHandle<()>,
+) {
+    root_occurrence(name, specialist_coordinator, enroll_v2, false).await
+}
+
+async fn root_occurrence(
+    name: &str,
+    specialist_coordinator: bool,
+    enroll_v2: bool,
+    deliver_occurrence: bool,
 ) -> (
     AppState,
     Trigger,
@@ -63,7 +97,35 @@ async fn root(
     } else {
         automation(&state, &agent.id, None).await
     };
-    let run = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    let run = if !deliver_occurrence {
+        schedules::enqueue_now(&state.db, &trigger).await.unwrap()
+    } else if specialist_coordinator {
+        webhook(
+            &state,
+            &trigger,
+            "event-1",
+            &json!({"event":"scheduled review"}),
+        )
+        .await
+        .unwrap();
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"trigger_id":&trigger.id})
+            .await
+            .unwrap()
+            .unwrap()
+    } else {
+        make_due(&state, &trigger).await;
+        let job = schedules::claim(&state.db, &format!("schedule:{}", trigger.id), Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        schedules::claim_occurrence(&state.db, &job, Utc::now())
+            .await
+            .unwrap()
+            .unwrap()
+    };
     let thread = schedules::run_thread(&state.db, &state.encryption_keys, &run, &trigger)
         .await
         .unwrap();
@@ -84,7 +146,7 @@ async fn root(
     request.execution_enrollment = true;
     request.origin = TurnOrigin::Trigger;
     request.trigger = Some(schedules::TurnClaim {
-        enroll_v2: true,
+        enroll_v2,
         run_id: run.id.clone(),
         fence: job.get_str("fence").unwrap().into(),
         trigger_updated_at: trigger.updated_at,
@@ -100,7 +162,10 @@ async fn root(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.coordinator.as_ref().unwrap().protocol, 2);
+    assert_eq!(
+        run.coordinator.as_ref().map(|c| c.protocol),
+        enroll_v2.then_some(2)
+    );
     assert!(row.active_turn.as_ref().unwrap().execution_task.is_none());
     assert_eq!(row.automation_thread, specialist_coordinator);
     let chat = crate::services::assistant_acknowledgement_service::for_key(
@@ -164,6 +229,245 @@ async fn child(state: &AppState, parent: &AssistantConversation) -> AssistantCon
     engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
         .await
         .unwrap()
+}
+
+async fn park_for_takeover(
+    state: &AppState,
+    mut row: AssistantConversation,
+) -> AssistantConversation {
+    use crate::models::assistant_conversation::{EngineWorkerInstance, ReattachDeployment};
+    use crate::services::{
+        assistant_turn_restart as restart, platform_manager_contract::NyxAgentDestination,
+    };
+    let service = state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! {"slug":engine::SERVICE_SLUG})
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = row.active_turn.as_mut().unwrap();
+    let predecessor = Uuid::new_v4().to_string();
+    turn.worker_instance = Some(EngineWorkerInstance {
+        id: predecessor.clone(),
+        hostname: None,
+    });
+    let message = state.db.collection::<Document>(MESSAGES).find_one(doc! {
+        "conversation_id": &row.id, "turn_id":&turn.turn_id, "seq":turn.initiating_message_seq.unwrap(),
+    }).await.unwrap().unwrap();
+    let request = start(&row.id, "");
+    engine::enroll_restart(&mut row, &request, message.get_str("_id").unwrap(), ReattachDeployment {
+        destination_hash: NyxAgentDestination::for_service(&service.id, &service.base_url).0,
+        limits:serde_json::from_value(json!({"protocol":"nyxagent-reattach-v1","credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15},"max_events":64,"recent_events":32,"max_event_bytes":65536,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32})).unwrap(),
+    }, false);
+    state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    assert!(
+        restart::offer(&state.db, &row, restart::Loss::Shutdown(&predecessor))
+            .await
+            .unwrap()
+    );
+    engine::get(&state.db, OWNER, &row.id).await.unwrap()
+}
+
+async fn finish_handoff(state: &AppState, row: &AssistantConversation) {
+    use crate::{handlers::assistant_nyxagent::survivor, services::assistant_engine_worker};
+    let admission = row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .restart_admission
+        .as_ref()
+        .unwrap();
+    let mut survivor = test_app_state(state.db.clone());
+    survivor.encryption_keys = state.encryption_keys.clone();
+    assert!(
+        survivor::take_one(&survivor, row, assistant_engine_worker::instance())
+            .await
+            .unwrap()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if let Some(reply) = state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(MESSAGES)
+                .find_one(doc! {"_id":&admission.reply_id})
+                .await
+                .unwrap()
+            {
+                assert_eq!(reply.text, "Work finished", "{:?}", reply.error_code);
+                assert!(reply.turn_metadata.unwrap().continued_after_restart);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn coordinator_handoff_publishes_each_occurrence_with_one_debit() {
+    for (specialist, occurrence) in [(false, false), (false, true), (true, true)] {
+        let (state, trigger, run, row, server) =
+            root_occurrence("coordinator_handoff", specialist, true, occurrence).await;
+        let budgets = state.db.collection::<Document>(schedules::BUDGETS);
+        let before = budgets.find_one(doc! {"_id":OWNER}).await.unwrap().unwrap();
+        let parked = park_for_takeover(&state, row).await;
+        finish_handoff(&state, &parked).await;
+        let finished = completed(&state, &trigger).await;
+        assert_eq!(finished.id, run.id);
+        assert_eq!(finished.outcome, RunOutcome::Completed);
+        settle_result(&state, &parked, &run, "Work finished", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            budgets.find_one(doc! {"_id":OWNER}).await.unwrap().unwrap(),
+            before
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(MESSAGES)
+                .count_documents(doc! {"turn_id": &run.turn_id,"role":"assistant"})
+                .await
+                .unwrap(),
+            1
+        );
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn coordinator_handoff_preserves_uncertain_push_receipt() {
+    let (state, trigger, run, row, server) = root("coordinator_handoff_uncertain", false).await;
+    let parked = park_for_takeover(&state, row).await;
+    let sending = schedules::notification_delivery::status("sending", None, 1, None);
+    state
+        .db
+        .collection::<Document>(RUNS)
+        .update_one(
+            doc! {"_id":&run.id},
+            doc! {"$set": {
+                "deliver_to":mongodb::bson::to_bson(&DeliverTo::Notification).unwrap(),
+                "notification_delivery":mongodb::bson::to_bson(&sending).unwrap()
+            }},
+        )
+        .await
+        .unwrap();
+    finish_handoff(&state, &parked).await;
+    let saved = completed(&state, &trigger).await;
+    assert_eq!(saved.outcome, RunOutcome::Failed);
+    let receipt = saved.notification_delivery.unwrap();
+    assert_eq!(receipt.state, "unknown");
+    assert_eq!(receipt.reason.as_deref(), Some("push_delivery_unknown"));
+    assert_eq!(receipt.attempts, 1);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn coordinator_handoff_direct_child_receipt_waits_for_recovery() {
+    let (state, _, run, parent, server) = root("direct_child_handoff", false).await;
+    let parked = park_for_takeover(&state, child(&state, &parent).await).await;
+    let threads = state.db.collection::<Document>(CONVERSATIONS);
+    threads.update_one(doc! {"_id": &parked.id},doc! {"$set":{"active_turn.lease_expires_at":schedules::date(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+    direct::recover(&state.db, &run).await.unwrap();
+    assert!(
+        engine::get(&state.db, OWNER, &parent.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    threads
+        .update_one(
+            doc! {"_id": &parked.id},
+            doc! {"$unset":{"active_turn.lease_expires_at":""}},
+        )
+        .await
+        .unwrap();
+    let cards = state
+        .db
+        .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let work = parked
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .automation_work
+        .as_ref()
+        .unwrap();
+    cards.insert_one(doc! {"_id":"handoff-card", "user_id": OWNER, "automation_work":mongodb::bson::to_bson(work).unwrap(),
+        "status":"pending", "expires_at":schedules::date(Utc::now()+Duration::minutes(10))}).await.unwrap();
+    finish_handoff(&state, &parked).await;
+    direct::recover(&state.db, &run).await.unwrap();
+    assert!(
+        engine::get(&state.db, OWNER, &parent.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    cards.delete_one(doc! {"_id":"handoff-card"}).await.unwrap();
+    for _ in 0..2 {
+        direct::recover(&state.db, &run).await.unwrap();
+    }
+    let parent = engine::get(&state.db, OWNER, &parent.id).await.unwrap();
+    assert_eq!(parent.pending_events.len(), 1);
+    assert!(parent.pending_events[0].text.contains("Work finished"));
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn coordinator_handoff_group_member_publishes_one_reply() {
+    use crate::services::assistant_group_service as groups;
+    let (state, _, _, parent, server) = root("group_member_handoff", true).await;
+    let editor = named_specialist(&state, "editor").await;
+    let reviewer = named_specialist(&state, "reviewer").await;
+    let group = groups::create(
+        &state.db,
+        OWNER,
+        "Editors",
+        &[editor.id.clone(), reviewer.id.clone()],
+        "user",
+    )
+    .await
+    .unwrap();
+    work_groups::post(
+        &state.db,
+        &authority(&parent),
+        &group,
+        "@editor draft the report",
+    )
+    .await
+    .unwrap();
+    let group = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    let member = group_turn(&state, &group, &editor.id).await;
+    let parked = park_for_takeover(&state, member).await;
+    finish_handoff(&state, &parked).await;
+    for _ in 0..2 {
+        let current = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+        work_groups::recover(&state.db, &current).await.unwrap();
+    }
+    let messages = groups::messages(&state.db, OWNER, &group.id, 50, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.agent_id.as_ref() == Some(&editor.id)
+                && message.text == "Work finished")
+            .count(),
+        1
+    );
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -595,6 +899,7 @@ fn authority(
 ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
     let turn = row.active_turn.as_ref().unwrap();
     crate::services::assistant_acknowledgement_service::ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: turn.automation_work.clone(),
@@ -637,6 +942,20 @@ async fn group_turn(
     group: &crate::models::assistant_group::AssistantGroup,
     agent: &str,
 ) -> AssistantConversation {
+    engine::begin_turn(
+        &state.db,
+        OWNER,
+        &group_request(group, agent),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap()
+}
+
+fn group_request(
+    group: &crate::models::assistant_group::AssistantGroup,
+    agent: &str,
+) -> engine::TurnStart {
     let work = work_groups::queued(group)
         .into_iter()
         .find(|(_, id)| id == agent)
@@ -648,9 +967,7 @@ async fn group_turn(
     request.origin = TurnOrigin::Group;
     request.group_id = Some(group.id.clone());
     request.automation_work = Some(work);
-    engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
-        .await
-        .unwrap()
+    request
 }
 
 #[tokio::test]
@@ -1677,8 +1994,13 @@ async fn legacy_turn_stop_and_group_paths_do_not_read_or_persist_v2_state() {
 
 #[tokio::test]
 async fn v2_slow_committed_admission_keeps_its_driver_and_expired_fence_aborts() {
-    let (mut state, _, server) = setup("v2_slow_admission").await;
-    state.config.automation_continuation_v2_enabled = true;
+    let (fixture, _, server) = setup("v2_slow_admission").await;
+    let mut config = fixture.config.clone();
+    config.automation_continuation_v2_enabled = true;
+    // The 31-second clock jump tests admission. A real chat capacity permit
+    // must remain valid while its independent renewal timer catches up.
+    config.cluster_slot_ttl_secs = schedules::continuation::ADMISSION_LEASE_SECONDS as u64;
+    let state = crate::test_utils::test_app_state_with_config(fixture.db, config);
     crate::services::security_readiness_service::ready_automation_test_replica(&state.db).await;
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let trigger = automation(&state, &agent.id, None).await;
@@ -1690,20 +2012,28 @@ async fn v2_slow_committed_admission_keeps_its_driver_and_expired_fence_aborts()
     let pause = crate::test_utils::install_admission_pause(&state.db);
     let worker_state = state.clone();
     let worker = tokio::spawn(async move { run_job_once(&worker_state, &job).await });
-    tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
-        .await
-        .unwrap();
+    pause.entered.notified().await;
     // The old 30-second timeout dropped this future after begin_turn committed.
-    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
     assert!(
         !worker.is_finished(),
         "Committed admission must retain its future until it spawns the driver"
     );
     pause.resume.notify_one();
     worker.await.unwrap().unwrap();
+    state.shutdown.idle().await;
+    let finished = completed(&state, &trigger).await;
     assert_eq!(
-        completed(&state, &trigger).await.outcome,
-        RunOutcome::Completed
+        finished.outcome,
+        RunOutcome::Completed,
+        "reason={:?}, stage={:?}",
+        finished.reason,
+        finished
+            .failure_reason
+            .as_ref()
+            .map(|reason| reason.stage.as_str())
     );
 
     let next = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
@@ -1986,16 +2316,35 @@ async fn v2_direct_after_turn_keeps_delivery_and_queued_pool_duties() {
     )
     .await
     .unwrap();
-    state.db.collection::<Document>(CONVERSATIONS).update_one(doc! {"_id": &child.id}, doc! {"$set": {"deliver_also": [{"nyxbot_channel_id": "missing-channel", "partition": "chat", "platform": "telegram"}]}}).await.unwrap();
+    let turn_id = &child.active_turn.as_ref().unwrap().turn_id;
+    assert!(engine::also_deliver(
+        &state.db, OWNER, &child.id, turn_id,
+        &bson::from_document(doc! {"nyxbot_channel_id": "missing-channel", "partition": "chat", "platform": "telegram"}).unwrap(),
+    ).await.unwrap());
     save_reply(&state, &child, "Research finished", None).await;
     crate::handlers::assistant_team::after_turn(&state, &child, "Research finished", None).await;
-    assert!(
-        engine::get(&state.db, OWNER, &child.id)
-            .await
-            .unwrap()
-            .deliver_also
-            .is_empty()
-    );
+    let saved = engine::post_turn_reply(&state.db, OWNER, &child.id, turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.post_turn_deliver_also.len(), 1);
+    let delivery_audits = state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {
+            "event_type": "nyxbot_channel_supplemental_delivery",
+            "event_data.conversation_id": &child.id,
+            "event_data.turn_id": turn_id,
+            "event_data.purpose": "team_additional_result",
+        })
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(delivery_audits.len(), 1, "one extra-chat delivery decision");
+    let delivery = delivery_audits[0].get_document("event_data").unwrap();
+    assert_eq!(delivery.get_str("reason"), Ok("no_destination"));
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             if state

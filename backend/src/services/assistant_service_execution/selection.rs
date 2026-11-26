@@ -120,10 +120,11 @@ async fn reload_authority(
             "Service grant revoked".into(),
         ));
     }
-    let live = acks::for_key_with_access(
+    let live = acks::chat_for_key_version(
         db,
         &original.user_id,
         Some(&original.api_key_id),
+        original.key_version,
         auth.org_agent_access.as_ref(),
     )
     .await?

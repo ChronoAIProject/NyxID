@@ -210,15 +210,30 @@ impl Fixture {
         }
     }
     async fn flag(&self, enabled: bool) {
-        flags::set_platform_override(
+        let result = flags::set_platform_override(
             &self.state.db,
             "assistant:org-agents",
             &flags::FlagTarget::Global,
             enabled,
             &self.admin,
         )
-        .await
-        .unwrap();
+        .await;
+        if matches!(
+            result,
+            Err(crate::errors::AppError::SecurityReadinessUnavailable)
+        ) {
+            let report = super::security_readiness_service::serving_report(
+                &self.state.db,
+                "assistant:org-agents",
+            )
+            .await
+            .expect("assess org-agent fixture readiness");
+            panic!(
+                "org-agent flag readiness: enabled={enabled}, activated={}, live_generations={}, blockers={:?}",
+                report.activated, report.live_generations, report.serving_blockers
+            );
+        }
+        result.expect("configure org-agent fixture flag");
     }
     pub(crate) fn request(&self, name: &str) -> team::CreateRequest {
         team::CreateRequest {
@@ -2714,4 +2729,610 @@ async fn delegation_qualified_flag_error_precedes_org_selector_resolution() {
         );
     }
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_specialist_independent_rights_governance_memory_and_old_keys() {
+    use crate::handlers::assistant_team;
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    let f = Fixture::new("org_specialist_independent_rights").await;
+    let db = &f.state.db;
+    let (agent, thread) = f.create().await;
+    let old_key = f.key(&thread).await;
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    team::remember(db, &f.admin, &agent.id, "Organization playbook", None)
+        .await
+        .unwrap();
+    let before = org_agents::governed_agent(db, &f.admin, &agent.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            before.org_maintainer_user_ids,
+            before.org_user_ids,
+            before.org_access_revision
+        ),
+        (None, None, 0)
+    );
+
+    agents.update_one(doc! {"_id":&agent.id},doc! {"$set":{"org_maintainer_user_ids":[&f.admin],"org_user_ids":[&f.member],"org_use_revision":1_i64,"org_maintain_revision":1_i64,"org_access_revision":1_i64}}).await.unwrap();
+    let current = team::agent(db, &f.member, &agent.id).await.unwrap();
+    assert!(
+        org_agents::require_use(db, &f.admin, &current)
+            .await
+            .is_err()
+    );
+    assert!(
+        org_agents::require_maintain(db, &f.admin, &current)
+            .await
+            .is_ok()
+    );
+    assert!(
+        team::remember(db, &f.member, &agent.id, "private", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        org_agents::governed_agent(db, &f.member, &agent.id)
+            .await
+            .is_err()
+    );
+    assert!(engine::get(db, &f.admin, &thread.id).await.is_err());
+    assert!(
+        engine::rename(db, &f.admin, &thread.id, "Renamed")
+            .await
+            .is_err()
+    );
+    assert!(
+        org_agents::resolve_credential_access(db, &old_key)
+            .await
+            .is_err()
+    );
+    let member_thread = team::home_thread_for(db, &f.state.encryption_keys, &f.member, &current)
+        .await
+        .unwrap();
+    let model_agent = team::agent_for_conversation(db, &member_thread)
+        .await
+        .unwrap();
+    assert!(
+        model_agent
+            .memory
+            .iter()
+            .any(|note| note.text == "Organization playbook")
+    );
+    let summaries = team::summaries_for_agents(db, &f.member, vec![current.clone()], 0)
+        .await
+        .unwrap();
+    assert!(summaries[0].can_use);
+    assert!(!summaries[0].can_maintain && !summaries[0].can_govern);
+    assert_eq!(summaries[0].memory_count, 0);
+    for role in [OrgRole::Admin, OrgRole::Member, OrgRole::Viewer] {
+        let rights = org_agents::member_rights(&f.outsider, &current, role);
+        assert!(!rights.can_use && !rights.can_maintain);
+        assert_eq!(rights.can_govern, role == OrgRole::Admin);
+    }
+
+    agents.update_one(doc! {"_id":&agent.id},doc! {"$set":{"org_maintainer_user_ids":[],"org_user_ids":[&f.member,&f.admin],"org_maintain_revision":2_i64,"org_access_revision":2_i64}}).await.unwrap();
+    flags::set_platform_override(
+        db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::User(f.admin.clone()),
+        false,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        assistant_team::get_org_access(
+            State(f.state.clone()),
+            test_auth_user(&f.admin),
+            Path(agent.id.clone())
+        )
+        .await,
+        Err(crate::errors::AppError::NotFound(_))
+    ));
+    flags::set_platform_override(
+        db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::User(f.admin.clone()),
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    let Json(policy) = assistant_team::get_org_access(
+        State(f.state.clone()),
+        test_auth_user(&f.admin),
+        Path(agent.id.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(policy).unwrap(),
+        serde_json::json!({"maintainers":[],"users":[&f.member,&f.admin],"revision":2,"authoring_available":false})
+    );
+    assert!(
+        assistant_team::get_org_access(
+            State(f.state.clone()),
+            test_auth_user(&f.viewer),
+            Path(agent.id.clone())
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        org_agents::resolve_credential_access(db, &old_key)
+            .await
+            .is_err()
+    );
+    let resumed = engine::begin_turn(
+        db,
+        &f.admin,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            conversation_id: Some(thread.id.clone()),
+            agent_id: None,
+            text: "Resume".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_ne!(resumed.credential_api_key_id, old_key.id);
+    assert!(
+        org_agents::resolve_credential_access(db, &f.key(&resumed).await)
+            .await
+            .is_ok()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_demotion_prunes_only_explicit_selections_and_invalidates_pending_work() {
+    let f = Fixture::new("org_agent_demotion_prunes").await;
+    let db = &f.state.db;
+    let (a, _) = f.create().await;
+    let agents = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
+    agents.update_one(doc! {"_id":&a.id}, doc! {"$set":{"org_user_ids":[&f.member,&f.admin],"org_use_revision":4_i64,"org_access_revision":7_i64}}).await.unwrap();
+    let membership = super::org_service::get_active_membership(db, &f.org, &f.member)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut event = team::event("subagent_settled", "Queued result".into(), Some(&a.id));
+    event.source_owner_id = Some(f.org.clone());
+    event.source_org_use_revision = 4;
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    assert!(
+        org_agents::event_source_is_live(db, &mut tx, &f.member, &event)
+            .await
+            .unwrap()
+    );
+    tx.commit_transaction().await.unwrap();
+    super::org_service::update_membership(db, &membership.id, Some(OrgRole::Viewer), None, None)
+        .await
+        .unwrap();
+    let pruned = agents.find_one(doc! {"_id":&a.id}).await.unwrap().unwrap();
+    assert_eq!(pruned.org_user_ids, Some(vec![f.admin.clone()]));
+    assert_eq!(pruned.org_maintainer_user_ids, None);
+    assert_eq!(
+        (
+            pruned.org_access_revision,
+            pruned.org_use_revision,
+            pruned.org_maintain_revision
+        ),
+        (8, 5, 0)
+    );
+    super::org_service::update_membership(db, &membership.id, Some(OrgRole::Member), None, None)
+        .await
+        .unwrap();
+    assert!(
+        org_agents::require_use(db, &f.member, &pruned)
+            .await
+            .is_err()
+    );
+    agents
+        .update_one(
+            doc! {"_id":&a.id},
+            doc! {"$addToSet":{"org_user_ids":&f.member}},
+        )
+        .await
+        .unwrap();
+    tx.start_transaction().await.unwrap();
+    assert!(
+        !org_agents::event_source_is_live(db, &mut tx, &f.member, &event)
+            .await
+            .unwrap()
+    );
+    tx.commit_transaction().await.unwrap();
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_page_batches_memberships_and_stale_maintenance_cannot_commit() {
+    use std::sync::atomic::Ordering;
+    let (f, members, reads) = Fixture::observed("org_agent_batch_and_fence").await;
+    let db = &f.state.db;
+    let (a, _) = f.create().await;
+    let mut b = a.clone();
+    b.id = Uuid::new_v4().to_string();
+    b.name = "second-specialist".into();
+    b.org_maintainer_user_ids = Some(vec![]);
+    let agents = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
+    agents.insert_one(&b).await.unwrap();
+    members.store(0, Ordering::SeqCst);
+    let both = team::summaries_for_agents(db, &f.member, vec![a.clone(), b.clone()], 0)
+        .await
+        .unwrap();
+    assert_eq!(members.load(Ordering::SeqCst), 1);
+    assert!(both[0].can_maintain && !both[1].can_maintain && both[1].can_use);
+    reads.store(0, Ordering::SeqCst);
+    org_agents::owners_for_page(
+        db,
+        &f.member,
+        std::collections::HashSet::from([f.member.as_str()]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+
+    // The actor fetched a writable profile before a concurrent policy edit committed.
+    let stale = team::maintained_agent(db, &f.member, &a.id).await.unwrap();
+    agents
+        .update_one(
+            doc! {"_id":&a.id},
+            doc! {"$set":{"org_maintainer_user_ids":[]}, "$inc":{"org_maintain_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        org_agents::update_maintained(
+            db,
+            &f.member,
+            &stale,
+            doc! {"_id":&a.id},
+            doc! {"$set":{"description":"stale write"}}
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        agents
+            .find_one(doc! {"_id":&a.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .description,
+        a.description
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_concurrent_member_admissions_avoid_shared_document_writes() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    const MEMBERS: usize = 6;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let settlements = Arc::new(AtomicUsize::new(0));
+    let settlement_attempts = settlements.clone();
+    let observed = attempts.clone();
+    let handler = EventHandler::callback(move |event| {
+        let CommandEvent::Started(event) = event else {
+            return;
+        };
+        if event.command.get_bool("startTransaction") == Ok(true)
+            && event.command.get_str("find")
+                == Ok(crate::models::assistant_message::COLLECTION_NAME)
+        {
+            settlement_attempts.fetch_add(1, Ordering::SeqCst);
+        }
+        if event.command.get_str("find") == Ok("assistant_conversations")
+            && event
+                .command
+                .get_document("filter")
+                .is_ok_and(|filter| filter.get_bool("platform_cleanup_pending") == Ok(true))
+        {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let db = connect_test_database_with_command_handler("org_acl_contention", handler)
+        .await
+        .unwrap();
+    let f = Fixture::with_db(db.clone()).await;
+    let (one, warmup) = f.create().await;
+    let (two, _) = team::create_specialist_for(
+        &db,
+        &f.state.encryption_keys,
+        &f.admin,
+        &f.org,
+        f.request("second"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // The first turn creates several collections in an empty test database.
+    // Finish that catalog work before measuring concurrent member admissions.
+    let admit = |thread: AssistantConversation| {
+        let db = db.clone();
+        let keys = f.state.encryption_keys.clone();
+        async move {
+            engine::begin_turn(
+                &db,
+                &thread.user_id,
+                &engine::TurnRequest {
+                    conversation_id: Some(thread.id),
+                    agent_id: None,
+                    text: "Start".into(),
+                    attachment_ids: vec![],
+                    model: None,
+                    access_mode: None,
+                    acknowledgement_id: None,
+                    retry_of: None,
+                },
+                &keys,
+            )
+            .await
+        }
+    };
+    let settle = |row: AssistantConversation| {
+        let state = f.state.clone();
+        async move {
+            let result = engine::TurnResult {
+                text: "Finished".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            };
+            let error = engine::finish_turn(
+                &state.db,
+                &row,
+                &row.credential_api_key_id,
+                &Uuid::new_v4().to_string(),
+                &result,
+            )
+            .await
+            .unwrap();
+            assert!(error.is_none());
+            crate::handlers::assistant_team::after_turn_boxed(state, row, result.text, error).await;
+        }
+    };
+    settle(admit(warmup).await.unwrap()).await;
+    for split in [false, true] {
+        let mut threads = Vec::new();
+        for n in 0..MEMBERS {
+            let person = Uuid::new_v4().to_string();
+            db.collection(crate::models::user::COLLECTION_NAME)
+                .insert_one(test_user(&person, UserType::Person))
+                .await
+                .unwrap();
+            db.collection(crate::models::org_membership::COLLECTION_NAME)
+                .insert_one(test_membership(&f.org, &person, OrgRole::Member, None))
+                .await
+                .unwrap();
+            let agent = if split && n % 2 == 1 { &two } else { &one };
+            threads.push(
+                team::home_thread_for(&db, &f.state.encryption_keys, &person, agent)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let read_fence = |collection, id: String, field| {
+            let db = db.clone();
+            async move {
+                db.collection::<bson::Document>(collection)
+                    .find_one(doc! {"_id":id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get(field)
+                    .cloned()
+            }
+        };
+        let before = [
+            read_fence("users", f.org.clone(), "org_channel_fence").await,
+            read_fence("assistant_agents", one.id.clone(), "thread_fence").await,
+            read_fence("assistant_agents", two.id.clone(), "thread_fence").await,
+        ];
+        attempts.store(0, Ordering::SeqCst);
+        let results = futures::future::join_all(threads.into_iter().map(admit)).await;
+        let admitted: Vec<_> = results.into_iter().map(Result::unwrap).collect();
+        assert!(admitted.iter().all(|row| row.active_turn.is_some()));
+        let total = attempts.load(Ordering::SeqCst);
+        assert!(
+            (MEMBERS..=MEMBERS + 1).contains(&total),
+            "{total} attempts for {MEMBERS} admissions, split={split}"
+        );
+        settlements.store(0, Ordering::SeqCst);
+        futures::future::join_all(admitted.into_iter().map(settle)).await;
+        let total = settlements.load(Ordering::SeqCst);
+        assert!(
+            (MEMBERS..=MEMBERS + 1).contains(&total),
+            "{total} attempts for {MEMBERS} settlements, split={split}"
+        );
+        assert_eq!(
+            before,
+            [
+                read_fence("users", f.org.clone(), "org_channel_fence").await,
+                read_fence("assistant_agents", one.id.clone(), "thread_fence").await,
+                read_fence("assistant_agents", two.id.clone(), "thread_fence").await,
+            ]
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_settled_hook_reaches_queue_after_read_failures() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let queue_scans = Arc::new(AtomicUsize::new(0));
+    let observed = queue_scans.clone();
+    let handler = EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && event.command.get_str("find") == Ok("assistant_conversations")
+            && event
+                .command
+                .get_document("filter")
+                .is_ok_and(|f| f.contains_key("pending_events.created_at"))
+        {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let db = connect_test_database_with_command_handler("org_hook_queue", handler)
+        .await
+        .unwrap();
+    let f = Fixture::with_db(db.clone()).await;
+    let (agent, thread) = f.create().await;
+    let row = engine::begin_turn(
+        &db,
+        &f.admin,
+        &engine::TurnRequest {
+            conversation_id: Some(thread.id),
+            agent_id: None,
+            text: "Start".into(),
+            attachment_ids: vec![],
+            model: None,
+            access_mode: None,
+            acknowledgement_id: None,
+            retry_of: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let result = engine::TurnResult {
+        text: "Finished".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    let reply_id = Uuid::new_v4().to_string();
+    let error = engine::finish_turn(&db, &row, &row.credential_api_key_id, &reply_id, &result)
+        .await
+        .unwrap();
+    assert!(error.is_none());
+    let agents = db.collection::<bson::Document>("assistant_agents");
+    agents
+        .update_one(doc! {"_id":&agent.id}, doc! {"$set":{"name":false}})
+        .await
+        .unwrap();
+    queue_scans.store(0, Ordering::SeqCst);
+    crate::handlers::assistant_team::after_turn_boxed(
+        f.state.clone(),
+        row.clone(),
+        result.text.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(queue_scans.load(Ordering::SeqCst), 1);
+
+    // A failure reading the saved report must also leave the independent wakes reachable.
+    agents
+        .update_one(doc! {"_id":&agent.id}, doc! {"$set":{"name":&agent.name}})
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(doc! {"_id":reply_id}, doc! {"$set":{"text":false}})
+        .await
+        .unwrap();
+    queue_scans.store(0, Ordering::SeqCst);
+    crate::handlers::assistant_team::after_turn_boxed(f.state.clone(), row, result.text, None)
+        .await;
+    assert_eq!(queue_scans.load(Ordering::SeqCst), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_settlement_retries_ordinary_report_and_consumes_with_live_authority() {
+    let f = Fixture::new("org_acl_report_replay").await;
+    let db = &f.state.db;
+    let (agent, thread) = f.create().await;
+    let source = assigned_thread(&f, &f.admin, &thread).await;
+    let turn = source.active_turn.as_ref().unwrap();
+    let target = turn.report_to.as_deref().unwrap();
+    let conversations = db.collection::<bson::Document>("assistant_conversations");
+    let result = engine::TurnResult {
+        text: "Completed".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    let reply = Uuid::new_v4().to_string();
+    // A recipient read fails after the source has been admitted.
+    conversations
+        .update_one(doc! {"_id":target}, doc! {"$set":{"title":false}})
+        .await
+        .unwrap();
+    assert!(
+        engine::finish_turn(db, &source, &source.credential_api_key_id, &reply, &result)
+            .await
+            .is_err()
+    );
+    assert!(
+        conversations
+            .find_one(doc! {"_id":&source.id,"active_turn.turn_id":&turn.turn_id})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    conversations
+        .update_one(doc! {"_id":target}, doc! {"$set":{"title":"NyxBot"}})
+        .await
+        .unwrap();
+    engine::finish_turn(db, &source, &source.credential_api_key_id, &reply, &result)
+        .await
+        .unwrap();
+    let target_row = db
+        .collection::<AssistantConversation>("assistant_conversations")
+        .find_one(doc! {"_id":target})
+        .await
+        .unwrap()
+        .unwrap();
+    let reports: Vec<_> = target_row
+        .pending_events
+        .iter()
+        .filter(|e| e.id == turn.turn_id && e.kind == "subagent_settled")
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].source_owner_id.as_deref(), Some(f.org.as_str()));
+    db.collection::<bson::Document>("assistant_agents")
+        .update_one(
+            doc! {"_id":&agent.id},
+            doc! {"$inc":{"org_use_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        !org_agents::event_source_is_live(db, &mut session, &f.admin, reports[0])
+            .await
+            .unwrap()
+    );
+    session.abort_transaction().await.unwrap();
+    db.drop().await.unwrap();
 }

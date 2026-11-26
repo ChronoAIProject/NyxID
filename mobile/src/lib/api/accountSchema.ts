@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { normalizeUrlInput } from "./normalizeUrlInput";
 
@@ -18,15 +19,18 @@ const compatibleAvatarUrl = z
   .refine((value) => utf8Length(value) <= 2048);
 
 export const updateProfileSchema = z.object({
-  display_name: z
+  get display_name() {
+    return z
     .string()
     .trim()
     .refine(
-      (value) => utf8Length(value) <= 200,
-      "Display name must be 200 bytes or less",
-    )
-    .optional(),
-  avatar_url: z
+      (value) => utf8Length(value) <= 200, {
+        error: () => translateApp("Display name must be 200 bytes or less"),
+      })
+    .optional();
+  },
+  get avatar_url() {
+    return z
     .string()
     .transform((input, ctx) => {
       const value = normalizeUrlInput(input);
@@ -36,16 +40,17 @@ export const updateProfileSchema = z.object({
       const original = compatibleAvatarUrl.safeParse(input);
       if (original.success) return original.data;
       const message = !/^https?:\/\//.test(value)
-        ? "Avatar URL must start with https:// or http://."
+        ? translateApp("Avatar URL must start with https:// or http://.")
         : utf8Length(value) > 2048
-          ? "Avatar URL is too long (maximum 2048 bytes)."
+          ? translateApp("Avatar URL is too long (maximum 2048 bytes).")
           : /[\s\p{Cc}\p{Cf}]/u.test(value)
-            ? "Remove spaces or hidden characters from inside the avatar URL."
-            : "Avatar URL isn't a complete web address.";
+            ? translateApp("Remove spaces or hidden characters from inside the avatar URL.")
+            : translateApp("Avatar URL isn't a complete web address.");
       ctx.addIssue({ code: "custom", message });
       return z.NEVER;
     })
-    .optional(),
+    .optional();
+  },
 });
 
 export const sessionSchema = z.object({
@@ -61,7 +66,12 @@ export const sessionSchema = z.object({
 export const totpCodeSchema = z
   .string()
   .trim()
-  .regex(/^\d{6}$/, "Enter the six-digit code from your authenticator");
+  .regex(/^\d{6}$/, {
+    get error() {
+      return () =>
+        translateApp("Enter the six-digit code from your authenticator");
+    },
+  });
 export const mfaSetupSchema = z.object({
   factor_id: z.string().min(1),
   secret: z.string().regex(/^[A-Z2-7]+=*$/),

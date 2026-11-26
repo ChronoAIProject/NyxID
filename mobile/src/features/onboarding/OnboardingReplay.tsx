@@ -1,3 +1,6 @@
+import { onboardingText } from "../../../../shared/onboardingCopy";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useMemo, useRef } from "react";
 import {
   ScrollView,
@@ -37,14 +40,15 @@ export function OnboardingReplay({
   topics?: readonly string[];
   label: string;
 }) {
+  const appLanguage = useAppLanguage().language;
   const { colors, mode, bubblePalette } = useTheme();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const { height } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
   const topicKey = topics.join(",");
   const beats = useMemo(
-    () => replayScript(kind, topicKey.split(",")),
-    [kind, topicKey],
+    () => replayScript(kind, topicKey.split(","), appLanguage),
+    [kind, topicKey, appLanguage],
   );
   const scene = useReplayScene(beats, reducedMotion);
   const transcript = useRef<ScrollView>(null);
@@ -66,7 +70,7 @@ export function OnboardingReplay({
           agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
           size="sm"
         />
-        <Label style={styles.name}>NyxBot</Label>
+        <Label style={styles.name}>{"NyxBot"}</Label>
       </View>
       <ScrollView
         ref={transcript}
@@ -87,7 +91,7 @@ export function OnboardingReplay({
             <View key={entry.id}>
               {entry.continuation_of ? (
                 <Label muted style={chatSurfaceStyles.message}>
-                  Continuing after your decision
+                  {translateApp("Continuing after your decision")}
                 </Label>
               ) : (
                 <ChatMessageTurn user={entry.role === "user"}>
@@ -107,11 +111,11 @@ export function OnboardingReplay({
               )}
               {scene.specialist?.after === entry.id ? (
                 <View style={styles.specialist}>
-                  <AgentAvatar agent={RESEARCH} size="xs" />
+                  <AgentAvatar agent={{ ...RESEARCH, display_name: onboardingText(appLanguage, RESEARCH.display_name) }} size="xs" />
                   <Label muted style={styles.flex}>
                     {scene.specialist.state === "working"
-                      ? "Research is working on it"
-                      : "Research replied to NyxBot"}
+                      ? translateApp("Research is working on it")
+                      : translateApp("Research replied to NyxBot")}
                   </Label>
                 </View>
               ) : null}
@@ -125,8 +129,7 @@ export function OnboardingReplay({
                     onDecision={() => {}}
                   />
                 ) : (
-                  <Label muted style={chatSurfaceStyles.message}>
-                    You allowed: {scene.card.row.summary}
+                  <Label muted style={chatSurfaceStyles.message}>{translateApp("You allowed: {{summary}}", { summary: scene.card.row.summary })}
                   </Label>
                 )
               ) : null}
@@ -154,11 +157,11 @@ export function OnboardingReplay({
                 },
               ]}
             >
-              {scene.typed || "Message NyxBot"}
+              {scene.typed || translateApp("Message NyxBot")}
             </Text>
             <ComposerSubmitButton
               kind="send"
-              label="Replay send"
+              label={translateApp("Replay send")}
               disabled={!scene.typed}
               onPress={() => {}}
             />

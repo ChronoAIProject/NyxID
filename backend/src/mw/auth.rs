@@ -122,6 +122,13 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
+    pub(crate) fn thread_key_version(&self) -> i64 {
+        self.assistant_chat
+            .as_deref()
+            .filter(|chat| Some(chat.api_key_id.as_str()) == self.api_key_id.as_deref())
+            .map_or(0, |chat| chat.key_version)
+    }
+
     pub fn derived_mfa_authority(&self) -> crate::services::session_authority::DerivedMfaAuthority {
         crate::services::session_authority::DerivedMfaAuthority {
             mfa_enabled: self.mfa_enabled,
@@ -205,9 +212,10 @@ impl AuthUser {
     /// channels, groups) are refused to conversation keys regardless of the
     /// flag: an agent must never widen its own or a peer's authority through
     /// the REST API.
-    pub async fn ensure_conversation_key_route_if_enabled(
+    pub async fn ensure_conversation_key_route_if_enabled_with_method(
         &self,
         db: &mongodb::Database,
+        method: &Method,
         path: &str,
     ) -> AppResult<()> {
         if self.assistant_turn_fence.is_some()
@@ -216,7 +224,7 @@ impl AuthUser {
                 .unwrap_or(path)
                 .starts_with("/assistant/")
         {
-            return self.ensure_conversation_key_route(path);
+            return self.ensure_conversation_key_route_with_method(method, path);
         }
         if self.assistant_turn_fence.is_none()
             || (!self
@@ -232,10 +240,14 @@ impl AuthUser {
         {
             return Ok(());
         }
-        self.ensure_conversation_key_route(path)
+        self.ensure_conversation_key_route_with_method(method, path)
     }
 
-    pub fn ensure_conversation_key_route(&self, path: &str) -> AppResult<()> {
+    pub fn ensure_conversation_key_route_with_method(
+        &self,
+        method: &Method,
+        path: &str,
+    ) -> AppResult<()> {
         if self.assistant_turn_fence.is_none() {
             return Ok(());
         }
@@ -244,6 +256,8 @@ impl AuthUser {
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         let execution_route = path.starts_with("/proxy")
             || path.starts_with("/llm/")
+            || (path == "/keys" && *method == Method::GET)
+            || path == "/monitoring/invocation-diagnostics"
             || matches!(path, "/mcp" | "/mcp/config")
             || path.starts_with("/oracle/pools/")
                 && (path.ends_with("/tasks")
@@ -560,6 +574,14 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
             ))
         };
     }
+    if api_key.purpose == ApiKeyPurpose::General
+        && !api_key.allow_all_services
+        && path_matches_prefix(path, "/api/v1/providers")
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Provider management requires provider-wide access. Use a human session or an unrestricted service allowlist.".into(),
+        ));
+    }
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
     }
@@ -578,6 +600,12 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
     // A restricted login credential can always revoke itself. The handler
     // requires the calling child identity and cannot revoke another credential.
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
+        return false;
+    }
+    // Diagnostic redemption is an operational follow-up to a failed proxy
+    // call. The handler still enforces proxy scope, caller identity, exact
+    // service authorization, and handle binding.
+    if *method == Method::POST && path == "/api/v1/monitoring/invocation-diagnostics" {
         return false;
     }
     if !matches!(
@@ -816,6 +844,69 @@ fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppErr
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessScheme {
+    Bearer,
+    Dpop,
+}
+
+impl AccessScheme {
+    pub(crate) fn parse(header: &str) -> Option<(Self, &str)> {
+        let (scheme, token) = header.split_once(' ')?;
+        match scheme {
+            "Bearer" => Some((Self::Bearer, token)),
+            "DPoP" => Some((Self::Dpop, token)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn require_binding(self, claims: &jwt::Claims) -> AppResult<()> {
+        if self == Self::Dpop
+            && claims
+                .cnf
+                .as_ref()
+                .and_then(|cnf| cnf.jkt.as_ref())
+                .is_none()
+        {
+            return Err(AppError::Unauthorized(
+                "DPoP requires a key-bound access token".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn request_token(headers: &HeaderMap) -> Option<&str> {
+    AccessScheme::parse(headers.get(header::AUTHORIZATION)?.to_str().ok()?).map(|(_, token)| token)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OAuthConsentRoute;
+
+#[derive(Clone, Copy)]
+struct ServiceAccountsExcluded;
+
+fn relay_execution_route(method: &Method, path: &str) -> bool {
+    if path_matches_prefix(path, "/api/v1/proxy") || path_matches_prefix(path, "/api/v1/llm") {
+        return true;
+    }
+    let Some(segments) = api_v1_path_segments(path) else {
+        return false;
+    };
+    matches!(
+        (method, segments.as_slice()),
+        (
+            &Method::GET,
+            ["approvals", "requests", _, "status"]
+                | ["approvals", "exact-service", "requests", _, "status"]
+        ) | (
+            &Method::POST,
+            ["approvals", "exact-service", "requests"]
+                | ["approvals", "exact-service", "requests", _, "redeem"]
+        )
+    )
+}
+
 pub(crate) async fn validate_dpop_bound_access(
     parts: &Parts,
     state: &AppState,
@@ -830,7 +921,10 @@ pub(crate) async fn validate_dpop_bound_access(
     let proof_jkt = crate::crypto::dpop::validate_configured_proof(
         proof,
         parts.method.as_str(),
-        parts.uri.path(),
+        parts
+            .extensions
+            .get::<OriginalUri>()
+            .map_or_else(|| parts.uri.path(), |uri| uri.path()),
         &state.config,
         &state.db,
     )
@@ -983,10 +1077,9 @@ async fn api_key_auth_user_inner(
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
     let mut assistant_chat = if is_assistant_conversation_key_candidate(key) {
-        crate::services::assistant_acknowledgement_service::for_key_with_access(
+        crate::services::assistant_acknowledgement_service::chat_for_authenticated_key(
             db,
-            &key.user_id,
-            Some(&key.id),
+            key,
             org_agent_access.as_ref(),
         )
         .await
@@ -994,7 +1087,9 @@ async fn api_key_auth_user_inner(
             // An unavailable live turn lookup is not credential revocation.
             // Preserve the retryable authority distinction for every caller,
             // including Ornn's purpose-limited membership callback.
-            if error.status_code().is_server_error() {
+            if matches!(error, AppError::AssistantTurnRequired) {
+                error
+            } else if error.status_code().is_server_error() {
                 AppError::OAuthAuthorityUnavailable
             } else {
                 AppError::Unauthorized("Invalid authentication credentials".to_string())
@@ -1206,6 +1301,37 @@ pub(crate) fn is_assistant_conversation_key_candidate(
             || key.allow_auto_connected_services)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AccountManagementRoute;
+
+async fn check_app_management(state: &AppState, parts: &Parts, client_id: &str) -> AppResult<()> {
+    if parts.extensions.get::<AccountManagementRoute>().is_none() {
+        return Ok(());
+    }
+    let route = parts
+        .extensions
+        .get::<axum::extract::MatchedPath>()
+        .map_or("<unmatched>", axum::extract::MatchedPath::as_str);
+    if parts.method == Method::GET
+        && matches!(
+            route,
+            "/api/v1/channel-bots" | "/api/v1/channel-conversations"
+        )
+    {
+        return Ok(());
+    }
+    state
+        .app_management_observations
+        .record(&state.shutdown, client_id, &parts.method, route);
+    if crate::services::feature_flag_service::app_token_management_enforced(&state.db).await? {
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            CredentialType::OauthClient,
+        ));
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -1235,10 +1361,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     AppError::Unauthorized("Invalid authorization header".to_string())
                 })?;
 
-                let bearer_token = auth_str.strip_prefix("Bearer ");
-                let dpop_token = auth_str.strip_prefix("DPoP ");
-                if let Some(token) = bearer_token.or(dpop_token) {
-                    let allow_api_key_fallback = bearer_token.is_some();
+                if let Some((scheme, token)) = AccessScheme::parse(auth_str) {
+                    let allow_api_key_fallback = scheme == AccessScheme::Bearer;
                     // Try JWT verification first. If it fails for a reason
                     // other than expiry, fall back to API-key validation so
                     // that OpenAI-compatible clients (which send API keys as
@@ -1265,8 +1389,9 @@ impl FromRequestParts<AppState> for AuthUser {
                                         return Err(AppError::NotFound("Execution request unavailable".into()));
                                     }
                                     auth_user
-                                        .ensure_conversation_key_route_if_enabled(
+                                        .ensure_conversation_key_route_if_enabled_with_method(
                                             &state.db,
+                                            &parts.method,
                                             request_path,
                                         )
                                         .await?;
@@ -1290,6 +1415,14 @@ impl FromRequestParts<AppState> for AuthUser {
 
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
+                    }
+
+                    scheme.require_binding(&claims)?;
+                    if claims.relay == Some(true) && !relay_execution_route(&parts.method, request_path) {
+                        return Err(AppError::unsupported_credential("Relay tokens cannot access this endpoint", CredentialType::Relay));
+                    }
+                    if claims.sa == Some(true) && parts.extensions.get::<ServiceAccountsExcluded>().is_some() {
+                        return Err(AppError::unsupported_credential("Service accounts cannot access this endpoint", CredentialType::ServiceAccount));
                     }
 
                     if let Some(claims_jkt) = claims.cnf.as_ref().and_then(|c| c.jkt.as_deref()) {
@@ -1401,7 +1534,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
 
                     let user_id_str = user_id.to_string();
-                    crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
+                    let unflagged_client = crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
+                    if let Some(client_id) = unflagged_client.as_deref() {
+                        check_app_management(state, parts, client_id).await?;
+                    }
 
                     // Verify the user account is still active
                     let user_model = state
@@ -1568,10 +1704,10 @@ impl FromRequestParts<AppState> for AuthUser {
                     let assistant_chat = if let Some(key) = relay_key.as_ref()
                         && is_assistant_conversation_key_candidate(key)
                     {
-                        crate::services::assistant_acknowledgement_service::for_key(
+                        crate::services::assistant_acknowledgement_service::chat_for_authenticated_key(
                             &state.db,
-                            &key.user_id,
-                            Some(&key.id),
+                            key,
+                            None,
                         )
                         .await?
                         .map(std::sync::Arc::new)
@@ -1750,7 +1886,11 @@ impl FromRequestParts<AppState> for AuthUser {
                     return Err(AppError::NotFound("Execution request unavailable".into()));
                 }
                 auth_user
-                    .ensure_conversation_key_route_if_enabled(&state.db, request_path)
+                    .ensure_conversation_key_route_if_enabled_with_method(
+                        &state.db,
+                        &parts.method,
+                        request_path,
+                    )
                     .await?;
                 auth_user.ensure_management_write_scope(&parts.method, request_path)?;
                 return Ok(auth_user);
@@ -1858,6 +1998,11 @@ pub async fn ensure_relay_agent_key_active(
             AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
         })?;
     crate::services::key_service::require_ordinary_purpose(key.purpose)?;
+    if crate::services::erasure_admission::is_erasure_accepted(db, &key.user_id).await? {
+        return Err(AppError::Unauthorized(
+            "Relay token's agent key is inactive or revoked".into(),
+        ));
+    }
     Ok(key)
 }
 
@@ -1884,15 +2029,7 @@ pub async fn reject_relay_tokens(
 
 /// Check if the request bears a relay token.
 fn is_relay_request(request: &axum::http::Request<axum::body::Body>) -> bool {
-    if let Some(auth_header) = request.headers().get("authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-        && is_jwt_relay(token)
-    {
-        return true;
-    }
-
-    false
+    request_token(request.headers()).is_some_and(is_jwt_relay)
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `relay`
@@ -1900,24 +2037,8 @@ fn is_relay_request(request: &axum::http::Request<axum::body::Body>) -> bool {
 /// is still rejected later by signature verification in the `AuthUser`
 /// extractor.
 fn is_jwt_relay(token: &str) -> bool {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        },
-    };
-
-    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
-        return claims.get("relay") == Some(&serde_json::Value::Bool(true));
-    }
-
-    false
+    peek_jwt_claims(token)
+        .is_some_and(|claims| claims.get("relay") == Some(&serde_json::Value::Bool(true)))
 }
 
 /// Fail-fast middleware for delegated tokens on management routers.
@@ -1928,7 +2049,7 @@ pub async fn reject_delegated_tokens(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
-    if let Some(token) = delegated_bearer_token(&request)
+    if let Some(token) = request_token(request.headers())
         && is_jwt_delegated(token)
     {
         let scope = peek_jwt_scope(token).unwrap_or_default();
@@ -1945,15 +2066,6 @@ pub async fn reject_delegated_tokens(
         }
     }
     Ok(next.run(request).await)
-}
-
-fn delegated_bearer_token(request: &axum::http::Request<axum::body::Body>) -> Option<&str> {
-    request
-        .headers()
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `delegated` field.
@@ -1997,7 +2109,7 @@ fn peek_jwt_claims(token: &str) -> Option<serde_json::Value> {
 
 /// Middleware that rejects service account tokens from human-only endpoints.
 pub async fn reject_service_account_tokens(
-    request: axum::http::Request<axum::body::Body>,
+    mut request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_service_account_request(&request) {
@@ -2006,6 +2118,7 @@ pub async fn reject_service_account_tokens(
             CredentialType::ServiceAccount,
         ));
     }
+    request.extensions_mut().insert(ServiceAccountsExcluded);
     Ok(next.run(request).await)
 }
 
@@ -2021,15 +2134,7 @@ pub async fn reject_oauth_client_tokens(
         .path()
         .split('/')
         .any(|part| part == "nyxagent")
-        && let Some(token) = request
-            .headers()
-            .get("authorization")
-            .and_then(|header| header.to_str().ok())
-            .and_then(|header| {
-                header
-                    .strip_prefix("Bearer ")
-                    .or_else(|| header.strip_prefix("DPoP "))
-            })
+        && let Some(token) = request_token(request.headers())
         && let Some(claims) = peek_jwt_claims(token)
         && claims
             .get("client_id")
@@ -2062,11 +2167,7 @@ fn is_api_key_request(request: &axum::http::Request<axum::body::Body>) -> bool {
         return true;
     }
 
-    request
-        .headers()
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    request_token(request.headers())
         .map(|token| {
             token.starts_with("nyx_")
                 || token.starts_with("nyxid_")
@@ -2078,49 +2179,21 @@ fn is_api_key_request(request: &axum::http::Request<axum::body::Body>) -> bool {
 
 /// Check if the request bears a service account token.
 fn is_service_account_request(request: &axum::http::Request<axum::body::Body>) -> bool {
-    // Check Authorization header
-    if let Some(auth_header) = request.headers().get("authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-        && is_jwt_service_account(token)
-    {
-        return true;
-    }
-
-    false
+    request_token(request.headers()).is_some_and(is_jwt_service_account)
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `sa` field.
 fn is_jwt_service_account(token: &str) -> bool {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        },
-    };
-
-    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
-        return claims.get("sa") == Some(&serde_json::Value::Bool(true));
-    }
-
-    false
+    peek_jwt_claims(token)
+        .is_some_and(|claims| claims.get("sa") == Some(&serde_json::Value::Bool(true)))
 }
 
-/// Non-rejecting version of `AuthUser`.
-///
-/// Returns `None` instead of 401 when no valid credentials are found.
-/// Used by the OAuth authorize endpoint to support unauthenticated browser
-/// visits (MCP clients that haven't logged in yet).
+/// Optional identity for browser entry and callback protocols. OAuth consent
+/// permits anonymous entry but propagates explicit credential failures.
 pub struct OptionalAuthUser(pub Option<AuthUser>);
 
 impl FromRequestParts<AppState> for OptionalAuthUser {
-    type Rejection = std::convert::Infallible;
+    type Rejection = AppError;
 
     #[allow(clippy::manual_async_fn)]
     fn from_request_parts(
@@ -2128,12 +2201,25 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
+            let consent = parts.extensions.get::<OAuthConsentRoute>().is_some();
+            let explicit = parts.headers.contains_key(header::AUTHORIZATION)
+                || parts.headers.contains_key("x-api-key");
             let result = AuthUser::from_request_parts(parts, state).await;
+            if consent {
+                if let Ok(user) = &result {
+                    require_first_party_human(user)?;
+                }
+                if explicit {
+                    return result.map(|user| OptionalAuthUser(Some(user)));
+                }
+            }
             match result {
                 Ok(user) => Ok(OptionalAuthUser(Some(user))),
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
+                Err(error @ AppError::ApiKeyScopeForbidden(_)) => Err(error),
+                Err(error) if consent => Err(error),
                 Err(AppError::Forbidden(error))
                 | Err(AppError::ForbiddenWithGuidance { message: error, .. }) => {
                     tracing::debug!(%error, "OptionalAuthUser rejected credentials");
@@ -2599,6 +2685,8 @@ mod tests {
             "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
+            "/api/v1/auth/social/google/mobile-code",
+            "/login/device",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
             "/api/v1/services",
@@ -3117,6 +3205,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_events_authorizes_method_before_polling_body() {
+        let db = crate::test_utils::connect_test_database("events_auth_order")
+            .await
+            .unwrap();
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db);
+        let session = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "proxy:*",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(state.clone());
+        let app = private.with_state(state);
+        for credential in [None, Some(session)] {
+            let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = polled.clone();
+            let body = Body::from_stream(futures::stream::once(async move {
+                observed.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"invalid"))
+            }));
+            let mut request = Request::post("/api/v1/channel-events/device")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(token) = credential {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!polled.load(std::sync::atomic::Ordering::Relaxed));
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_events_bounds_authenticated_stream() {
+        use futures::StreamExt;
+        let db = crate::test_utils::connect_test_database("events_body_cap")
+            .await
+            .unwrap();
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw = "nyxid_ag_event_cap_fixture";
+        let key = delegated_fixture_api_key(
+            &Uuid::new_v4().to_string(),
+            &actor.to_string(),
+            &hash_token(raw),
+        );
+        db.collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let mut state = crate::test_utils::test_app_state(db);
+        state.config.proxy_max_body_size = 8;
+        let (_, private) = crate::routes::build_router_with_state(state.clone());
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = polls.clone();
+        let chunks = futures::stream::iter([b"12345", b"67890", b"abcde"]).map(move |chunk| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(chunk))
+        });
+        let request = Request::post("/api/v1/channel-events/device")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {raw}"))
+            .body(Body::from_stream(chunks))
+            .unwrap();
+        let response = private.with_state(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
     async fn channel_platform_catalog_accepts_all_management_auth_and_denies_media_delegation() {
         use crate::{crypto::jwt, models::user::UserType};
         let Some(db) = crate::test_utils::connect_test_database("channel_catalog_auth").await
@@ -3198,7 +3379,7 @@ mod tests {
                 .await
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["platforms"].as_array().unwrap().len(), 10);
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 12);
         }
         for token in [&delegated, &service] {
             let response = delegated_router_response(
@@ -3251,6 +3432,43 @@ mod tests {
             assert!(delegated_read_denied_path(path));
         }
         db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn provider_management_requires_provider_wide_authority() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        for path in [
+            "/api/v1/providers",
+            "/api/v1/providers/my-tokens",
+            "/api/v1/providers/provider",
+            "/api/v1/providers/provider/icon",
+            "/api/v1/providers/provider/services",
+            "/api/v1/providers/provider/services/service",
+            "/api/v1/providers/provider/connect/api-key",
+            "/api/v1/providers/provider/connect/oauth",
+            "/api/v1/providers/provider/connect/device-code/initiate",
+            "/api/v1/providers/provider/connect/device-code/poll",
+            "/api/v1/providers/provider/connect/telegram",
+            "/api/v1/providers/provider/connect/telegram/callback",
+            "/api/v1/providers/provider/disconnect",
+            "/api/v1/providers/provider/authorization",
+            "/api/v1/providers/provider/refresh",
+            "/api/v1/providers/provider/credentials",
+            "/api/v1/providers/provider/credentials/authorization",
+            "/api/v1/providers/callback",
+        ] {
+            key.allow_all_services = true;
+            assert!(ensure_api_key_purpose_route(&key, path).is_ok(), "{path}");
+            key.allow_all_services = false;
+            key.allowed_service_ids = vec!["service".into()];
+            assert!(
+                matches!(
+                    ensure_api_key_purpose_route(&key, path),
+                    Err(AppError::ApiKeyScopeForbidden(_))
+                ),
+                "{path}"
+            );
+        }
     }
 
     pub(super) fn delegated_fixture_api_key(
@@ -3734,11 +3952,13 @@ mod tests {
                 delegation_scopes: "proxy:*".to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: Some(actor_id.to_string()),
                 created_at: chrono::Utc::now(),
@@ -4132,8 +4352,12 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    auth.ensure_conversation_key_route_if_enabled(&db, path)
-                        .await,
+                    auth.ensure_conversation_key_route_if_enabled_with_method(
+                        &db,
+                        &Method::GET,
+                        path,
+                    )
+                    .await,
                     Err(AppError::Forbidden(_))
                 ),
                 "{path}"
@@ -4142,24 +4366,30 @@ mod tests {
         // Attachment reads stay available, and other routes keep their
         // flag-off behavior.
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(
+            auth.ensure_conversation_key_route_if_enabled_with_method(
                 &db,
+                &Method::GET,
                 "/api/v1/assistant/nyxagent/conversations/c/attachments/a",
             )
             .await
             .is_ok()
         );
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await
-                .is_ok()
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await
+            .is_ok()
         );
         // Ordinary keys are not conversation keys.
         let ordinary = test_auth_user(AuthMethod::ApiKey, "proxy");
         assert!(
             ordinary
-                .ensure_conversation_key_route_if_enabled(
+                .ensure_conversation_key_route_if_enabled_with_method(
                     &db,
+                    &Method::GET,
                     "/api/v1/assistant/nyxagent/settings"
                 )
                 .await
@@ -4208,9 +4438,13 @@ mod tests {
             "the rollout flag is off by default"
         );
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await
-                .is_ok(),
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await
+            .is_ok(),
             "route restrictions must preserve legacy behavior while the flag is off"
         );
         crate::services::security_readiness_service::ready_test_replica(&db).await;
@@ -4224,13 +4458,18 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await,
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await,
             Err(AppError::Forbidden(_))
         ));
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(
+            auth.ensure_conversation_key_route_if_enabled_with_method(
                 &db,
+                &Method::GET,
                 "/api/v1/assistant-attachments/attachment/content",
             )
             .await
@@ -4249,7 +4488,7 @@ mod tests {
             "/api/v1/assistant-attachments/attachment/content",
         ] {
             assert!(
-                auth.ensure_conversation_key_route_if_enabled(&db, path)
+                auth.ensure_conversation_key_route_if_enabled_with_method(&db, &Method::GET, path)
                     .await
                     .is_ok(),
                 "NyxAgent endpoint must remain reachable with a live turn: {path}"
@@ -4376,6 +4615,8 @@ mod tests {
         for path in [
             "/api/v1/proxy/service/path",
             "/api/v1/llm/provider",
+            "/api/v1/keys",
+            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/oracle/pools/pool/tasks",
             "/api/v1/approvals/exact-service/requests/request/redeem",
             "/api/v1/assistant-attachments/attachment/content",
@@ -4385,12 +4626,20 @@ mod tests {
             "/mcp",
         ] {
             assert!(
-                user.ensure_conversation_key_route(path).is_ok(),
+                user.ensure_conversation_key_route_with_method(&Method::GET, path)
+                    .is_ok(),
                 "execution route should remain available: {path}"
             );
         }
+        assert!(
+            user.ensure_conversation_key_route_with_method(&Method::GET, "/api/v1/keys")
+                .is_ok()
+        );
+        assert!(
+            user.ensure_conversation_key_route_with_method(&Method::POST, "/api/v1/keys")
+                .is_err()
+        );
         for path in [
-            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/users/me",
             "/api/v1/assistant/agents",
             "/api/v1/channel-relay/conversations",
@@ -4398,7 +4647,8 @@ mod tests {
             "/api/v1/channel-events",
         ] {
             assert!(
-                user.ensure_conversation_key_route(path).is_err(),
+                user.ensure_conversation_key_route_with_method(&Method::GET, path)
+                    .is_err(),
                 "management/channel route must reject conversation keys: {path}"
             );
         }
@@ -4408,7 +4658,7 @@ mod tests {
     fn ordinary_keys_have_no_conversation_route_restriction() {
         let user = test_auth_user(AuthMethod::ApiKey, "proxy");
         assert!(
-            user.ensure_conversation_key_route("/api/v1/users/me")
+            user.ensure_conversation_key_route_with_method(&Method::GET, "/api/v1/users/me")
                 .is_ok()
         );
     }
@@ -4674,7 +4924,6 @@ mod tests {
     fn api_key_management_write_routes_require_write_scope() {
         let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
         let write_routes = [
-            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/api/v1/api-keys"),
             (Method::POST, "/api/v1/api-keys/key-1/rotate"),
             (Method::POST, "/api/v1/keys"),
@@ -4728,6 +4977,7 @@ mod tests {
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
+            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/oauth/token"),
         ];
 
@@ -5378,4 +5628,26 @@ pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> App
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod crash_management_boundary_tests {
+    #[test]
+    fn delegated_reads_cannot_open_crash_report_routes() {
+        for path in [
+            "/api/v1/admin/crash-reports",
+            "/api/v1/admin/crash-reports/summary",
+            "/api/v1/admin/crash-reports/123",
+            "/api/v1/admin/crash-reports/releases",
+        ] {
+            assert!(super::delegated_read_denied_path(path));
+        }
+        assert!(!super::delegated_read_denied_path(
+            "/api/v1/administer/crash-reportsX"
+        ));
+        // The existing entire admin segment also denies adjacent admin resources.
+        assert!(super::delegated_read_denied_path(
+            "/api/v1/admin/crash-reportsX"
+        ));
+    }
 }

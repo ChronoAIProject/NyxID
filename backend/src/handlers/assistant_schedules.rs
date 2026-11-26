@@ -51,10 +51,12 @@ pub(crate) async fn dispatch(
     }
     let zone = settings.timezone.as_deref().unwrap_or("UTC");
     if name == "list_schedules" {
-        let rows = trigger_service::list_for_owner(&state.db, owner).await?;
+        let (rows, next_cursor) =
+            trigger_service::list_schedules_for_owner(&state.db, owner, parse(args)?).await?;
         return Ok(json!({
             "timezone": settings.timezone,
-            "schedules": rows.into_iter().filter(|t|t.source==TriggerSource::Schedule || matches!(t.delivery, TriggerDelivery::Assistant { .. })).map(|t|super::triggers::response(state,t,zone)).collect::<Vec<_>>(),
+            "schedules": rows.into_iter().map(|t| super::triggers::response(state, t, zone)).collect::<Vec<_>>(),
+            "next_cursor": next_cursor,
         }));
     }
     if name == "create_schedule" {

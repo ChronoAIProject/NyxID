@@ -40,7 +40,7 @@ test('late parsed body and retry response are guarded before session effects', a
   }
 });
 
-test('MFA refusal retains the session when invalidation is disabled; default 401 invalidates', async () => {
+test('retry-disabled resource 401 preserves the session with either invalidation option', async () => {
   for (const invalidateOnAuthFailure of [false, undefined]) {
     let invalidations = 0;
     let guardChecks = 0;
@@ -53,7 +53,7 @@ test('MFA refusal retains the session when invalidation is disabled; default 401
       requiresAuth: true, retry: false, invalidateOnAuthFailure,
       failure: () => new Error('invalid_mfa_code'),
     }), /invalid_mfa_code/);
-    assert.equal(invalidations, invalidateOnAuthFailure === false ? 0 : 1);
+    assert.equal(invalidations, 0);
     assert.ok(guardChecks >= 4);
   }
 });

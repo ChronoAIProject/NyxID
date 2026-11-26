@@ -116,7 +116,12 @@ pub(crate) fn message_response(
         feedback: None,
         activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
-        attachments: row.attachments.into_iter().map(Into::into).collect(),
+        attachments: row.attachments.into_iter().map(|mut item| {
+            // The shared post is common to every recipient. Coverage belongs
+            // to the individual execution that inspected the file.
+            item.pdf = None;
+            item.into()
+        }).collect(),
         id: row.id,
         seq: row.seq,
         role: row.role,
@@ -250,7 +255,7 @@ async fn advance_inner(state: &AppState, owner: &str, group_id: &str, background
         }
         if group.followers.iter().any(|f| f.automation.is_some()) {
             crate::services::trigger_schedule::group::recover(&state.db, &group).await?;
-            let current = groups::get(&state.db, owner, group_id).await?;
+            let current = groups::get_for_automation_dispatch(&state.db, owner, group_id).await?;
             for (work, agent_id) in crate::services::trigger_schedule::group::queued(&current) {
                 let _claim = if background {
                     let Some(work) = state.shutdown.background() else {
@@ -439,7 +444,7 @@ async fn run_member_with_work(
     if groups::members(&state.db, owner, group)
         .await?
         .iter()
-        .any(|m| m.id == agent_id && m.shared && !m.available)
+        .any(|m| m.id == agent_id && !m.available)
     {
         if durable {
             crate::services::assistant_wake_service::group::retire(
@@ -475,6 +480,7 @@ async fn run_member_with_work(
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -523,12 +529,25 @@ async fn run_member_with_work(
     crate::services::durable_wake_tests::after("member_prepared").await;
     let limit = team_pool_limit(state, owner).await + 1;
     let attempt = start_server_turn(state, owner, start, Pool::Team { owner, limit });
-    let result = if durable {
+    let org_revision = if work.is_none() && agent.user_id != owner {
+        Some(
+            group
+                .pending_org_use_revisions
+                .get(agent_id)
+                .copied()
+                .unwrap_or(0),
+        )
+    } else {
+        None
+    };
+    let result = if durable || org_revision.is_some() {
         crate::services::assistant_wake_service::group::with_member(
             crate::services::assistant_wake_service::group::Member {
                 group_id: group.id.clone(),
                 agent_id: agent_id.to_owned(),
                 upper_seq: newest,
+                org_revision,
+                durable,
             },
             attempt,
         )
@@ -537,6 +556,7 @@ async fn run_member_with_work(
         attempt.await
     };
     let started = match result {
+        Err(AppError::AssistantTurnRequired) if work.is_some() => return Ok(()),
         Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
             if durable {
                 crate::services::assistant_wake_service::group::retire(
@@ -691,7 +711,7 @@ pub(crate) async fn member_settled(
                     })
                     .collect();
                 let handed = spend_handoffs(state, owner, group_id, mentioned).await?;
-                groups::address(&state.db, owner, group_id, &handed).await?;
+                groups::address_members(&state.db, owner, group_id, &handed, &members).await?;
             }
             None => {}
             Some("cancelled") => {
@@ -958,7 +978,7 @@ async fn post_with_uploads(
     // cannot post from inside) restores the hand-off budget. Follow-up loops
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
     groups::reset_hops(&state.db, owner, group_id).await?;
-    groups::address(&state.db, owner, group_id, &addressed).await?;
+    groups::address_members(&state.db, owner, group_id, &addressed, &members).await?;
     advance(state, owner, group_id).await;
     Ok((message, addressed))
 }
@@ -1036,9 +1056,9 @@ async fn confirm_in_group(
                 identifier(&decided.summary),
                 decided.id,
                 if allowed {
-                    "Retry it now with that acknowledgement_id."
+                    format!("Retry it now with that acknowledgement_id. {}", crate::services::assistant_acknowledgement_service::allowed_card_continuation())
                 } else {
-                    "Do not retry it."
+                    "Do not retry it.".to_owned()
                 }
             ),
             None,
@@ -1316,10 +1336,10 @@ pub async fn update_group(
             "Participant settings require an organization group".into(),
         ));
     }
-    let group = groups::update(
-        &state.db,
+    let group = update_personal(
+        &state,
         &owner,
-        &id,
+        &access.group,
         body.name.as_deref(),
         body.member_agent_ids.as_deref(),
     )
@@ -1354,11 +1374,11 @@ pub async fn delete_group(
         return Ok(StatusCode::NO_CONTENT);
     }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
-    stop_group_threads(&state, &access).await?;
+    let attempts = stop_group_threads(&state, &access).await?;
     if access.org.is_some() {
         crate::services::org_group_service::delete(&state.db, &access).await?;
     } else {
-        groups::delete(&state.db, &owner, &id).await?;
+        groups::delete_prepared(&state.db, &owner, &id, attempts).await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1368,19 +1388,46 @@ pub async fn delete_group(
 pub(crate) async fn stop_group_threads(
     state: &AppState,
     access: &crate::services::org_group_service::Access,
-) -> AppResult<()> {
+) -> AppResult<groups::RetirementWindows> {
     let rows = if access.org.is_some() {
         crate::services::org_group_service::threads(&state.db, &access.group).await?
     } else {
         groups::member_threads(&state.db, &access.group.user_id, &access.group.id).await?
     };
+    let mut attempts = groups::RetirementWindows::new();
     for row in rows {
-        engine::request_stop(&state.db, &row.user_id, &row.id).await?;
+        groups::stop_member_for_retirement(&state.db, &row, |target| async move { super::assistant_nyxagent::survivor::cancel(state, &target).await }, &mut attempts).await?;
         super::mcp_transport::async_operations::cancel_conversation(state, &row.user_id, &row.id)
             .await?;
         super::machine_cancel::conversation(state, &row.user_id, &row.id).await?;
     }
-    Ok(())
+    Ok(attempts)
+}
+
+pub(crate) async fn update_personal(
+    state: &AppState,
+    owner: &str,
+    group: &AssistantGroup,
+    name: Option<&str>,
+    member_ids: Option<&[String]>,
+) -> AppResult<AssistantGroup> {
+    if crate::services::assistant_group_kind::classify(group)
+        != crate::services::assistant_group_kind::GroupKind::Personal
+    {
+        return Err(AppError::ValidationError(
+            "Use the group's membership settings".into(),
+        ));
+    }
+    let (name, members) = groups::prepare_update(&state.db, owner, name, member_ids).await?;
+    groups::update_prepared(
+        &state.db,
+        owner,
+        group,
+        name,
+        members,
+        |target| async move { super::assistant_nyxagent::survivor::cancel(state, &target).await },
+    )
+    .await
 }
 
 #[derive(Deserialize, Default)]

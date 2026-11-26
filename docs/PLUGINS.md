@@ -18,6 +18,8 @@ Server changes therefore reach every installed plugin when the backend deploys. 
 
 Each package's README, LICENSE and `assets/` stay hand-written.
 
+`nyxid ai-setup install` and `update` fetch skills from the release tag matching the CLI version. They require access to GitHub and to the configured NyxID server for its deployment-specific playbook. Installed skills remain available offline. For the hosted Claude Code plugin, the CLI selects the same release tag on the NyxID marketplace. This also sets the marketplace revision used for subsequent updates of the hosted MCP edition.
+
 The Claude marketplace lists two plugins:
 - `nyxid` is the package submitted to the Claude directory. Its MCP server is registered as `plugin:nyxid:nyxid`.
 - `nyxid-cli` is the CLI skill bundle at the repository root, including the Aevatar family and the service skills.
@@ -104,3 +106,8 @@ which does not include future connections. The server rejects unsupported
 instead of silently granting more access than the page describes. Existing
 grants have no stored read/write distinction; users who intended read-only
 access must revoke those grants and review access again.
+
+The ordinary and incremental consent screens show credential provenance,
+recorded upstream OAuth permissions and known catalog operations when details
+are available. These details describe full service access and do not restrict
+the grant. See [OAuth consent disclosure](OIDC.md#oauth-consent-disclosure).

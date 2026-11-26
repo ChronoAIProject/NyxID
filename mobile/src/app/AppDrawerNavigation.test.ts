@@ -1,3 +1,5 @@
+import { newAssistantChatParams } from "./assistantChatParams";
+import { translateApp } from "../i18n/appTranslation";
 import { workspaceAccessibilityState } from "../lib/accessibility/workspaceAccessibility";
 import { createWorkspaceFocusState } from "../lib/accessibility/workspaceFocusState";
 import assert from "node:assert/strict";
@@ -12,6 +14,7 @@ import {
   type PartialState,
 } from "@react-navigation/routers";
 import {
+  openScannerSheetAction,
   openWorkspaceSheetAction,
   isWorkspaceSidebarRoot,
   workspaceNavigateAction,
@@ -52,6 +55,7 @@ import {
   content,
   pushContent,
 } from "./workspaceNavigationTestHarness";
+import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { dismissWorkspaceSheetAction } from "./navigationHierarchy";
 import {
   workspaceContentAnimation,
@@ -74,9 +78,10 @@ function shellSource() {
     true,
     ts.ScriptKind.TSX,
   );
+  // App only wraps AppContent in LanguageProvider; AppContent owns the guards.
   const app = source.statements.find(
     (node): node is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(node) && node.name?.text === "App",
+      ts.isFunctionDeclaration(node) && node.name?.text === "AppContent",
   );
   assert.ok(app?.body);
   const names = new Set([
@@ -126,9 +131,11 @@ function setup(
   deferFade = false,
   initialWidth = 390,
   initiallyAuthenticated = true,
+  cornerWindow = false,
 ) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
+  let keyboardDismissals = 0;
   let timerId = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let rootState = fixture();
@@ -262,7 +269,10 @@ function setup(
     },
     clearTimeout: (id: number) => timers.delete(id),
     useTheme: () => ({ mode: "dark" }),
-    useSafeAreaInsets: () => ({ top: 40 }),
+    useSafeAreaInsets: () => ({ top: 40, right: cornerWindow ? 83 : 0 }),
+    Platform: {OS:"ios"},
+    workspaceCornerSensor,
+    useDiagnosticsNotice: () => {},
     useAuthSession: () => ({ isAuthenticated: authenticated }),
     getAuthAccountId: () => accountId,
     getAuthEpoch: () => authEpoch,
@@ -271,8 +281,12 @@ function setup(
       return () => accountListeners.delete(listener);
     },
     useWindowDimensions: () => ({ width, height: 1024 }),
+    useAppLanguage: () => ({ language: "en", t: translateApp }),
+    translateApp,
+    newAssistantChatParams,
     workspaceSidebarLayout,
     findNodeHandle: () => 300,
+    Keyboard: { dismiss: () => { keyboardDismissals++; } },
     ...Object.fromEntries(
       [
         "NavigationContainer",
@@ -281,11 +295,20 @@ function setup(
         "View",
         "ToastOverlay",
         "WorkspaceDrawer",
-        "WorkspacePushShell",
+          "WorkspacePushShell",
+        "WorkspaceQuickRail",
       ].map((name) => [name, name]),
     ),
     WorkspaceAccessibilityContext: {
       Provider: "WorkspaceAccessibilityProvider",
+    },
+    WorkspaceSidebarToggleContext: {
+      Provider: "WorkspaceSidebarToggleProvider",
+    },
+    // The saved sidebar choice: restored and closed, as on a fresh device.
+    useSidebarOpen: () => {
+      const [open, setOpen] = react.useState(false);
+      return [open, setOpen, true] as const;
     },
     workspaceAccessibilityState,
     workspaceFocus: focus,
@@ -294,6 +317,7 @@ function setup(
     appRootStyles: { fill: { flex: 1 } },
     workspaceNavigateAction,
     workspaceChatNavigationAction,
+    openScannerSheetAction,
     openWorkspaceSheetAction,
     isWorkspaceSidebarRoot,
     activeWorkspaceChatTarget,
@@ -366,6 +390,7 @@ function setup(
   };
   return {
     sequence,
+    keyboardDismissals: () => keyboardDismissals,
     watchdogs: () => [...timers.values()],
     expireWatchdog: () => {
       const pending = [...timers.values()];
@@ -396,6 +421,7 @@ function setup(
         },
       };
     },
+    find,
     shell: () => find("WorkspacePushShell"),
     accessibilityValue: () => find("WorkspaceAccessibilityProvider").props.value,
     navigator: () => find("AppNavigator"),
@@ -538,6 +564,7 @@ function postLoginSession(env: ReturnType<typeof setup>) {
           clear() {},
         }),
       },
+      "../../lib/crashReporting/runtime": { crashLifecycle: { disarm() {}, setRestoring() {}, refresh() {} } },
       "../../lib/auth/authEpoch": { advanceAuthEpoch() {} },
       "../../lib/auth/authAccount": {
         getAuthAccountId: () => accountId,
@@ -941,6 +968,41 @@ test("a content destination inside Settings closes the sidebar only after the sh
   assert.equal(env.shell().props.visible, false);
 });
 
+test("with the sidebar closed, rail destinations and a sheet closing onto a thread keep later selections and the menu usable", () => {
+  const env = setup();
+  env.readyNavigation();
+  const rail = () => env.shell().props.quickRail(() => {}) as Element;
+  // Repeated rail destinations each dispatch directly; nothing waits for a
+  // sidebar that was never opened.
+  rail().props.onOpen({ kind: "destination", id: "notifications" });
+  env.commitLast();
+  assert.equal(env.sequence.includes("fade out"), false, "no slab swap");
+  rail().props.onOpen({ kind: "destination", id: "new_chat" });
+  env.commitLast();
+  assert.equal(env.dispatched.length, 2);
+  assert.equal(env.shell().props.visible, false);
+  // Recent chats closes onto another thread (the sheet's own reset).
+  rail().props.onOpen({ kind: "destination", id: "recent_chats" });
+  env.commitLast();
+  env.setState(
+    apply(
+      env.state(),
+      workspaceChatNavigationAction(env.state(), {
+        kind: "agent",
+        agentId: "researcher",
+        conversationId: "chat-recent",
+      }),
+    ),
+  );
+  env.changedNavigation();
+  env.paint();
+  rail().props.onOpen({ kind: "destination", id: "notifications" });
+  env.flush();
+  assert.equal(env.dispatched.length, 4, "selections are not left fenced");
+  env.open();
+  assert.equal(env.shell().props.visible, true, "the menu still opens");
+});
+
 test("the shell owns sidebar AX settlement without a duplicate background exclusion, including sign-out cleanup", () => {
   const env = setup();
   assert.equal(env.shell().props.presented, false);
@@ -1101,6 +1163,134 @@ test("sidebar Quick actions present above the unchanged expanded base", () => {
   }
 });
 
+test("the folded Duo quick rail reuses the sidebar's chat, Notifications and sheet actions", () => {
+  const rail = (
+    env: ReturnType<typeof setup>,
+    onToggle = () => {},
+    fullScreen = false,
+  ) => env.shell().props.quickRail(fullScreen, onToggle) as Element;
+  {
+    const env = setup();
+    env.readyNavigation();
+    let toggles = 0;
+    for (const fullScreen of [false, true]) {
+      const element = rail(env, () => toggles++, fullScreen);
+      assert.equal(element.type, "WorkspaceQuickRail");
+      assert.equal(element.props.fullScreen, fullScreen);
+      element.props.onToggleFullScreen();
+    }
+    assert.equal(toggles, 2, "the shell owns full screen in both directions");
+  }
+  for (const [id, page, params] of [
+    ["scan_qr", "DeviceLogin", { start_scanner: true }],
+    ["recent_chats", "RecentChats", undefined],
+    ["terminal_login_code", "AgentKeyLogin", { mint: true }],
+  ] as const) {
+    const env = setup();
+    env.readyNavigation();
+    const before = content(env.state());
+    rail(env).props.onOpen({ kind: "destination", id });
+    env.commitLast();
+    assert.strictEqual(content(env.state()), before, "the page stays beneath");
+    const sheet = env
+      .state()
+      .routes.find((r) => r.name === "WorkspaceSheet")!.state!;
+    const shown = sheet.routes[sheet.index ?? sheet.routes.length - 1]!;
+    assert.equal(shown.name, page);
+    assert.deepEqual(structuredClone(shown.params), params);
+  }
+  {
+    const env = setup();
+    env.readyNavigation();
+    const before = env.state();
+    rail(env).props.onOpen({ kind: "destination", id: "notifications" });
+    env.flush();
+    assert.deepEqual(
+      comparable(env.dispatched),
+      comparable([workspaceNavigateAction("Notifications", undefined, before)]),
+    );
+  }
+  // Every side-menu destination quick access can hold opens the side menu's
+  // own action for it.
+  for (const [id, expected] of [
+    ["automations", (state: any) => workspaceNavigateAction("Automations", undefined, state)],
+    ["machines", (state: any) => workspaceNavigateAction("Machines", undefined, state)],
+    ["plugins", (state: any) => workspaceNavigateAction("Plugins", undefined, state)],
+    ["activity", (state: any) => workspaceNavigateAction("Activity", undefined, state)],
+    ["create_agent", (state: any) => workspaceNavigateAction("AgentCreate", undefined, state)],
+    ["agents", (state: any) => workspaceNavigateAction("Agents", { tab: "agents" }, state)],
+    ["crews", (state: any) => workspaceNavigateAction("Agents", { tab: "groups" }, state)],
+  ] as const) {
+    const env = setup();
+    env.readyNavigation();
+    const before = env.state();
+    rail(env).props.onOpen({ kind: "destination", id });
+    env.flush();
+    assert.deepEqual(comparable(env.dispatched), comparable([expected(before)]), id);
+  }
+  // A pinned agent or crew opens its chat, as its side-menu row does.
+  for (const target of [
+    { kind: "agent", agentId: "6f9619ff-8b86-d011-b42d-00c04fc964ff" },
+    { kind: "group", groupId: "nyxg-0123456789abcdef0123456789abcdef" },
+  ] as const) {
+    const env = setup();
+    env.readyNavigation();
+    const before = env.state();
+    rail(env).props.onOpen(
+      target.kind === "agent"
+        ? { kind: "agent", id: target.agentId }
+        : { kind: "crew", id: target.groupId },
+    );
+    env.flush();
+    // A fresh draft's id is time-based: compare everything else.
+    const withoutDraft = (value: unknown) =>
+      JSON.parse(
+        JSON.stringify(comparable(value), (key, entry) =>
+          key === "draftId" ? undefined : entry,
+        ),
+      );
+    assert.deepEqual(
+      withoutDraft(env.dispatched),
+      withoutDraft([workspaceChatNavigationAction(before, target)]),
+      target.kind,
+    );
+  }
+  {
+    // Settings: the sidebar gear's destination.
+    const env = setup();
+    env.readyNavigation();
+    const before = env.state();
+    rail(env).props.onOpen({ kind: "destination", id: "settings" });
+    env.flush();
+    assert.deepEqual(
+      comparable(env.dispatched),
+      comparable([workspaceNavigateAction("AccountSettings", undefined, before)]),
+    );
+  }
+  {
+    const env = setup();
+    env.readyNavigation();
+    rail(env).props.onOpen({ kind: "destination", id: "new_chat" });
+    env.flush();
+    const reset = env.dispatched.at(-1) as any;
+    const workspace = reset.payload.routes.find(
+      (route: any) => route.name === "Workspace",
+    );
+    const chat = workspace.state.routes.at(-1);
+    assert.equal(chat.name, "Assistant");
+    assert.equal(chat.params.draft, true, "a fresh, empty compose");
+    assert.equal(chat.params.conversationId, undefined);
+  }
+  {
+    const env = setup();
+    env.readyNavigation();
+    env.blockNavigation(true);
+    rail(env).props.onOpen({ kind: "destination", id: "scan_qr" });
+    rail(env).props.onOpen({ kind: "destination", id: "recent_chats" });
+    assert.equal(env.dispatched.length, 0, "critical writes block rail sheets");
+  }
+});
+
 test("destination fades old root before the animation:none swap and reveals only its matching paint", () => {
   const env = setup(true);
   env.open();
@@ -1194,24 +1384,87 @@ test("persistent sidebar opens account sheets without hiding or resetting the se
   assert.equal(x.hasDrawer(), false);
 });
 
+test("sidebar menu and edge reveal dismiss the composer keyboard without navigating", () => {
+  const menu = setup();
+  menu.open();
+  assert.equal(menu.keyboardDismissals(), 1);
+  assert.equal(menu.shell().props.visible, true);
+  assert.equal(menu.dispatched.length, 0);
+  const edge = setup();
+  edge.shell().props.onRevealStart();
+  edge.flush();
+  assert.equal(edge.keyboardDismissals(), 1);
+  assert.equal(edge.dispatched.length, 0);
+  const blocked = setup();
+  blocked.blockNavigation(true);
+  blocked.open();
+  assert.equal(blocked.keyboardDismissals(), 0, "blocked navigation keeps the current editor focus");
+  const wide = setup(false, 1194, true, true);
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(wide.keyboardDismissals(), 1);
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(wide.keyboardDismissals(), 1, "hiding a sidebar does not change input focus");
+});
+
 test("deferred persistent menu focus cannot land on a compact or sheet-covered sidebar", () => {
-  const resized = setup(false, 1194);
+  // The wide sidebar starts closed; Menu opens it and moves focus there.
+  const resized = setup(false, 1194, true, true);
   resized.navigator().props.onOpenMenu();
+  resized.flush();
   resized.resize(507);
   resized.flushFocus();
   assert.deepEqual(resized.focused, []);
 
-  const covered = setup(false, 1194);
+  const covered = setup(false, 1194, true, true);
   covered.navigator().props.onOpenMenu();
+  covered.flush();
   covered.drawer().props.onNavigate("AccountSettings");
   covered.commitLast();
   covered.flushFocus();
   assert.deepEqual(covered.focused, []);
 
-  const active = setup(false, 1194);
+  const active = setup(false, 1194, true, true);
   active.navigator().props.onOpenMenu();
+  active.flush();
   active.flushFocus();
   assert.deepEqual(active.focused, [300]);
+  active.navigator().props.onOpenMenu();
+  active.flush();
+  active.flushFocus();
+  assert.deepEqual(active.focused, [300], "hiding never moves focus");
+});
+
+test("on Duo wide windows the sidebar starts closed; Menu opens and hides it, labelled for VoiceOver; narrow windows keep the drawer", () => {
+  const wide = setup(false, 1194, true, true);
+  const shell = () => wide.find("WorkspacePushShell");
+  const toggle = () => wide.find("WorkspaceSidebarToggleProvider");
+  assert.equal(shell().props.sidebarCollapsed, true, "closed by default");
+  assert.equal(shell().props.sidebarRestored, true);
+  assert.deepEqual({ ...toggle().props.value }, { persistent: true, collapsed: true });
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(shell().props.sidebarCollapsed, false);
+  assert.deepEqual({ ...toggle().props.value }, { persistent: true, collapsed: false });
+  assert.equal(shell().props.visible, false, "no drawer opens on a wide window");
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(shell().props.sidebarCollapsed, true);
+  // Critical writes block the toggle like other sidebar actions.
+  wide.blockNavigation(true);
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(shell().props.sidebarCollapsed, true);
+
+  const narrow = setup(false, 390);
+  assert.equal(
+    narrow.find("WorkspaceSidebarToggleProvider").props.value.persistent,
+    false,
+  );
+  narrow.navigator().props.onOpenMenu();
+  narrow.flush();
+  assert.equal(narrow.find("WorkspacePushShell").props.visible, true, "the drawer opens");
 });
 
 test("critical writes block persistent sidebar Settings and QR/terminal sheet shortcuts", () => {
@@ -1957,4 +2210,11 @@ test("session boundaries clear selected chat metadata and stale drawer focus res
   env.flush();
   env.flushFocus();
   assert.deepEqual(env.focused, [72]);
+});
+
+
+test("P9 ordinary wide App retains a visible sidebar despite a stored Duo choice", () => {
+  const wide = setup(false,1194);
+  assert.equal(wide.find("WorkspacePushShell").props.sidebarCollapsed, false);
+  assert.deepEqual({...wide.find("WorkspaceSidebarToggleProvider").props.value}, {persistent:false, collapsed:false});
 });

@@ -36,6 +36,11 @@ pub async fn send_reply(
     .map_err(|failure| failure.error)
 }
 
+pub(crate) struct ThreadReplyToken<'a> {
+    pub usage: crate::models::reply_token_use::ReplyTokenUse,
+    pub claims: &'a crate::crypto::jwt::RelayReplyClaims,
+}
+
 pub(crate) async fn send_reply_with_token(
     db: &mongodb::Database,
     adapter: &dyn PlatformAdapter,
@@ -43,7 +48,7 @@ pub(crate) async fn send_reply_with_token(
     credentials: &BotCredentials<'_>,
     target: &ThreadReplyTarget,
     reply: &crate::services::channel_platform::OutboundReply,
-    one_use: Option<&crate::models::reply_token_use::ReplyTokenUse>,
+    one_use: Option<&ThreadReplyToken<'_>>,
 ) -> ReplyResult<ThreadDelivery> {
     send_reply_inner(
         db,
@@ -59,7 +64,7 @@ pub(crate) async fn send_reply_with_token(
 
 enum ReplyAuthority<'a> {
     Bound,
-    Gateway(Option<&'a crate::models::reply_token_use::ReplyTokenUse>),
+    Gateway(Option<&'a ThreadReplyToken<'a>>),
 }
 
 async fn send_reply_inner(
@@ -81,44 +86,79 @@ async fn send_reply_inner(
     {
         return Err(ReplyError::target(unavailable()));
     }
-    let components = components(reply, adapter.platform_id())?;
+    let components = components(
+        reply,
+        adapter.platform_id(),
+        matches!(&authority, ReplyAuthority::Bound),
+    )?;
     let http = resolution::client()?;
     let mut result = ThreadDelivery {
         message_ids: Vec::new(),
         delivered_kinds: Vec::new(),
         error: None,
     };
-    if let ReplyAuthority::Gateway(one_use) = &authority {
-        validate_target(db, bot, &source, target).await?;
-        // The unique capability insert is the dispatch barrier. A losing
-        // request must never open or modify the winner's delivery record.
-        if let Some(usage) = one_use {
-            crate::services::channel_relay_service::consume_reply_token_use(db, usage).await?;
+    let send = |part| {
+        adapter.send_bound_reply_outcome(
+            db,
+            &http,
+            bot,
+            &source,
+            credentials,
+            &target.facts.chat_id,
+            part,
+            Some(target),
+        )
+    };
+    let (mut delivery, mut notice_outcome) = match (&authority, &target.authority) {
+        (ReplyAuthority::Gateway(token), ReplyBinding::Notice(proof)) => {
+            let [part] = components.as_slice() else {
+                return Err(ReplyError::target(gateway::reply_unavailable()));
+            };
+            let (delivery, outcome) =
+                gateway::notice::dispatch(db, bot, &source, proof, *token, part, send(part))
+                    .await?;
+            (delivery, Some(outcome))
         }
-    }
-    let mut delivery = Delivery::begin(db, bot, &source, components.len()).await?;
-    for (index, part) in components.into_iter().enumerate() {
-        let mut dispatched = false;
-        let sent = Box::pin(async {
+        (ReplyAuthority::Gateway(token), _) => {
             validate_target(db, bot, &source, target).await?;
-            delivery.attempting(db, index).await?;
-            dispatched = true;
-            let outcome = crate::services::telegram_formatting::scope(
-                db,
-                delivery.formatting_receipt(index),
-                Some(&bot.id),
-                adapter.send_bound_reply_outcome(
+            if let Some(token) = token {
+                crate::services::channel_relay_service::consume_reply_token_use(
                     db,
-                    &http,
-                    bot,
-                    &source,
-                    credentials,
-                    &target.facts.chat_id,
-                    &part,
-                    Some(target),
-                ),
+                    &token.usage,
+                    &source.user_id,
+                )
+                .await?;
+            }
+            (
+                Delivery::begin(db, bot, &source, components.len()).await?,
+                None,
             )
-            .await?;
+        }
+        (ReplyAuthority::Bound, ReplyBinding::Notice(_)) => {
+            return Err(ReplyError::target(unavailable()));
+        }
+        (ReplyAuthority::Bound, _) => (
+            Delivery::begin(db, bot, &source, components.len()).await?,
+            None,
+        ),
+    };
+    for (index, part) in components.iter().enumerate() {
+        let mut dispatched = notice_outcome.is_some();
+        let sent = Box::pin(async {
+            let outcome = if let Some(sent) = notice_outcome.take() {
+                sent?
+            } else {
+                validate_target(db, bot, &source, target).await?;
+                delivery.attempting(db, index).await?;
+                dispatched = true;
+                crate::services::telegram_formatting::scope(
+                    db,
+                    delivery.formatting_receipt(index),
+                    Some(&bot.id),
+                    send(part),
+                )
+                .await?
+            };
             let kinds = outcome
                 .delivered_kinds
                 .clone()
@@ -191,6 +231,7 @@ async fn send_reply_inner(
         let mut record = source.clone();
         record.id = uuid::Uuid::new_v4().to_string();
         record.direction = "outbound".into();
+        record.text_completeness = None;
         record.platform_message_id = Some(id.clone());
         record.sender_platform_id = Some(bot.platform_bot_id.clone());
         record.sender_display_name = None;
@@ -232,22 +273,34 @@ async fn validate_target(
     source: &ChannelMessage,
     target: &ThreadReplyTarget,
 ) -> ReplyResult<()> {
-    let eligible = if let Some((owner, origin, conversation)) = &target.admitted {
-        crate::services::channel_thread_follow_service::validate_delivery(
-            db,
-            owner,
-            origin,
-            conversation,
-        )
-        .await
-        .map_err(ReplyError::authority)?;
-        resolution::eligible_source_live(db, bot, source)
+    let eligible = match &target.authority {
+        ReplyBinding::Notice(proof) => {
+            return gateway::notice::validate(db, bot, source, proof).await;
+        }
+        ReplyBinding::Turn(owner, origin, conversation) => {
+            crate::services::channel_thread_follow_service::validate_delivery(
+                db,
+                owner,
+                origin,
+                conversation,
+            )
             .await
-            .map_err(ReplyError::authority)?
-    } else {
-        resolution::eligible_source(db, bot, source)
+            .map_err(ReplyError::authority)?;
+            resolution::eligible_source_live(db, bot, source)
+                .await
+                .map_err(ReplyError::authority)?
+        }
+        ReplyBinding::Source
+            if source
+                .nyxbot_admission
+                .as_ref()
+                .is_some_and(|a| a.requires_org_notice) =>
+        {
+            false
+        }
+        ReplyBinding::Source => resolution::eligible_source(db, bot, source)
             .await
-            .map_err(ReplyError::authority)?
+            .map_err(ReplyError::authority)?,
     };
     if !eligible {
         return Err(ReplyError::target(unavailable()));
@@ -255,7 +308,11 @@ async fn validate_target(
     Ok(())
 }
 
-fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundReply>> {
+fn components(
+    reply: &OutboundReply,
+    platform: &str,
+    allow_pre_rendered: bool,
+) -> AppResult<Vec<OutboundReply>> {
     if reply.attachments.len() > 64 {
         return Err(unavailable());
     }
@@ -278,21 +335,36 @@ fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundRe
         }
         Ok(())
     };
-    push_text(
-        reply.text.as_deref().unwrap_or_default(),
-        reply.metadata.clone(),
-    )?;
+    let telegram = matches!(platform, "telegram" | "telegram-new");
+    let mut metadata = reply.metadata.clone();
+    // Only NyxID-owned callers can pass parts rendered before thread delivery.
+    // Public callers can ask this planner to render their CommonMark here.
+    if !allow_pre_rendered
+        && telegram
+        && let Some(object) = metadata.as_mut().and_then(serde_json::Value::as_object_mut)
+        && object
+            .get("text_format")
+            .and_then(serde_json::Value::as_str)
+            == Some("telegram_entities")
+    {
+        object.remove("text_format");
+    }
+    push_text(reply.text.as_deref().unwrap_or_default(), metadata.clone())?;
     for attachment in &reply.attachments {
         if let Some(caption) = &attachment.caption {
             push_text(caption, None)?;
         }
     }
-    if parts.is_empty() && reply.metadata.is_some() {
+    // A formatting opt-in alone cannot produce a Telegram text send.
+    if parts.is_empty()
+        && metadata.is_some()
+        && !(telegram && crate::services::channel_reply_plan::commonmark(metadata.as_ref()))
+    {
         parts.push(OutboundReply {
             text: None,
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
-            metadata: reply.metadata.clone(),
+            metadata,
         });
     }
     for attachment in &reply.attachments {
@@ -310,6 +382,10 @@ fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundRe
     }
     Ok(parts)
 }
+
+#[cfg(test)]
+#[path = "telegram_formatting_tests.rs"]
+mod telegram_formatting_tests;
 
 #[cfg(test)]
 mod tests {
@@ -330,7 +406,7 @@ mod tests {
             "{}\n\n[Event details](https://example.com/events/agent-meetup)",
             "活动安排。".repeat(500)
         );
-        let parts = components(&reply(text.clone()), "lark").unwrap();
+        let parts = components(&reply(text.clone()), "lark", false).unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].text.as_deref(), Some(text.as_str()));
     }
@@ -338,7 +414,7 @@ mod tests {
     #[test]
     fn lark_parts_fit_serialized_content_even_with_json_escaping() {
         let text = "\"\\\n\t\u{01}🦉活动".repeat(4000);
-        let parts = components(&reply(text.clone()), "lark").unwrap();
+        let parts = components(&reply(text.clone()), "lark", false).unwrap();
         assert!(parts.len() > 1);
         let mut reassembled = String::new();
         for part in parts {
@@ -350,7 +426,7 @@ mod tests {
     }
 
     fn assert_malformed_components(reply: &OutboundReply, expected_code: u32) {
-        let failure = ReplyError::from(components(reply, "telegram").err().unwrap());
+        let failure = ReplyError::from(components(reply, "telegram", false).err().unwrap());
         assert_eq!(failure.error.error_code(), expected_code);
         if expected_code == 10011 {
             assert_eq!(

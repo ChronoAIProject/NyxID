@@ -671,7 +671,7 @@ async fn run_billing_route_coverage_smoke() {
     .await;
     let (node_tx, node_rx) = mpsc::channel(256);
     crate::test_utils::register_test_node_connection(&state, &node.id, node_tx).await;
-    let node_responder = spawn_node_http_responder(&state, &node.id, node_rx, 3);
+    let node_responder = spawn_node_http_responder(&state, &node.id, node_rx, 5);
 
     call_mounted_route(
         &app,
@@ -695,6 +695,36 @@ async fn run_billing_route_coverage_smoke() {
     )
     .await;
     assert_route_settled_count(&db, &node_proxy.slug, BillingMetric::Requests, 2).await;
+
+    let node_model = insert_route_service(
+        &db,
+        &owner_id,
+        "llm-node-json",
+        "https://node-route.invalid",
+        None,
+        Some(&node.id),
+    )
+    .await;
+    for path in ["json", "chunked-json"] {
+        call_mounted_route(
+            &app,
+            route_request(
+                Method::GET,
+                &format!("/api/v1/proxy/s/{}/{path}", node_model.slug),
+                &token,
+                Body::empty(),
+            ),
+        )
+        .await;
+    }
+    assert_route_settled_count(&db, &node_model.slug, BillingMetric::Tokens, 2).await;
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {"service_slug": &node_model.slug, "quantity": 15})
+            .await
+            .unwrap(),
+        2
+    );
 
     for (path, stream, mounted_route) in [
         (
@@ -924,6 +954,7 @@ async fn run_billing_route_coverage_smoke() {
     }));
     db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
         .insert_one(ApprovalRequest {
+            org_policy: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -2069,6 +2100,15 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
                 "output":[{"type":"message","status":"completed","content":[{"type":"output_text","text":"OK\n"}]}],
                 "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})).into_response();
         }
+        if path == "/buffered" {
+            assert_eq!(request.headers()["accept-encoding"], "gzip");
+        }
+        if matches!(
+            path.as_str(),
+            "/v1/chat/completions" | "/v1/stream" | "/chat/completions" | "/mcp-query"
+        ) {
+            assert_eq!(request.headers()["accept-encoding"], "identity");
+        }
         if path == "/mcp-query" {
             assert_eq!(
                 request.uri().query(),
@@ -2395,6 +2435,7 @@ fn route_request(method: Method, uri: &str, token: &str, body: Body) -> Request<
         .method(method)
         .uri(uri)
         .header("authorization", format!("Bearer {token}"))
+        .header("accept-encoding", "gzip")
         .header("content-type", "application/json")
         .body(body)
         .expect("build mounted route request")
@@ -2576,16 +2617,41 @@ fn spawn_node_http_responder(
             let request_id = parsed["request_id"]
                 .as_str()
                 .expect("node proxy request id");
-            let path = parsed["path"].as_str().unwrap_or_default();
+            let path = parsed["path"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_start_matches('/');
 
             if path == "mcp-query" {
+                assert_eq!(parsed["headers"]["accept-encoding"], "identity");
                 assert_eq!(
                     parsed["query"].as_str(),
                     Some("tag=a&tag=b&name=Nyx%20ID&empty=")
                 );
             }
 
-            if path.contains("stream") {
+            if matches!(path, "json" | "chunked-json") {
+                assert_eq!(parsed["headers"]["accept-encoding"], "identity");
+                let headers = vec![("content-type".into(), "application/json".into())];
+                let body = br#"{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}"#;
+                if path == "json" {
+                    manager.deliver_proxy_response(
+                        &node_id,
+                        NodeProxyResponse {
+                            request_id: request_id.to_string(),
+                            status: 200,
+                            headers,
+                            body: body.to_vec(),
+                        },
+                    );
+                } else {
+                    assert!(manager.deliver_stream_start(&node_id, request_id, 200, headers));
+                    for chunk in body.chunks(23) {
+                        manager.deliver_stream_chunk(&node_id, request_id, chunk.to_vec());
+                    }
+                    manager.deliver_stream_end(&node_id, request_id);
+                }
+            } else if path.contains("stream") {
                 assert!(manager.deliver_stream_start(
                     &node_id,
                     request_id,
@@ -2676,6 +2742,162 @@ fn spawn_node_ssh_tunnel_responder(
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         manager.deliver_ssh_tunnel_closed(&node_id, &session_id, None);
     })
+}
+
+#[tokio::test]
+async fn http_ssh_exec_falls_back_only_before_delivery() {
+    ssh_exec_delivery_boundary(false).await;
+}
+
+#[tokio::test]
+async fn mcp_ssh_exec_falls_back_only_before_delivery() {
+    ssh_exec_delivery_boundary(true).await;
+}
+
+async fn ssh_exec_delivery_boundary(mcp: bool) {
+    let db = connect_test_database("ssh_exec_handover").await.unwrap();
+    let owner = insert_owner(&db).await;
+    set_billing_fixture_approval_required(&db, &owner, false).await;
+    let mut config = test_app_config();
+    config.node_hmac_signing_enabled = false;
+    let state = test_app_state_with_config(db.clone(), config);
+    let token = route_access_token(&state, &owner);
+    let (_, private) = crate::routes::build_router();
+    let app =
+        private
+            .with_state(state.clone())
+            .layer(axum::extract::connect_info::MockConnectInfo(
+                std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+            ));
+    let first = insert_route_node(&state, &owner, "first").await;
+    let second = insert_route_node(&state, &owner, "second").await;
+    let mode = if mcp {
+        SshAuthMode::Cert
+    } else {
+        SshAuthMode::NodeKey
+    };
+    let (service, binding) = insert_ssh_route_service(
+        &state,
+        &owner,
+        "ssh-handover",
+        "ssh.invalid",
+        22,
+        mode,
+        Some(&first.id),
+    )
+    .await;
+    crate::services::node_service::create_binding(&db, &owner, &second.id, &service.id)
+        .await
+        .unwrap();
+    for delivered in [false, true] {
+        let (primary_tx, mut primary_rx) = mpsc::channel(8);
+        crate::test_utils::register_test_node_connection(&state, &first.id, primary_tx).await;
+        let (fallback_tx, mut fallback_rx) = mpsc::channel(8);
+        crate::test_utils::register_test_node_connection(&state, &second.id, fallback_tx).await;
+        let args =
+            serde_json::json!({"command":"test-command","principal":"route","timeout_secs":1});
+        let request = if mcp {
+            let mut args = args;
+            args["service"] = serde_json::json!(binding.slug);
+            let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"nyx__ssh_exec","arguments":args}});
+            let init = serde_json::json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
+                "protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ssh-test","version":"1"}}});
+            let initialized = app
+                .clone()
+                .oneshot(route_request(
+                    Method::POST,
+                    "/mcp",
+                    &token,
+                    Body::from(init.to_string()),
+                ))
+                .await
+                .unwrap();
+            let mut request =
+                route_request(Method::POST, "/mcp", &token, Body::from(call.to_string()));
+            request.headers_mut().insert(
+                "mcp-session-id",
+                initialized.headers()["mcp-session-id"].clone(),
+            );
+            request
+        } else {
+            route_request(
+                Method::POST,
+                &format!("/api/v1/ssh/{}/exec", service.id),
+                &token,
+                Body::from(args.to_string()),
+            )
+        };
+        // A closed receiver proves that try_send cannot have enqueued the command.
+        if !delivered {
+            primary_rx.close();
+        }
+        let mut call = tokio::spawn(app.clone().oneshot(request));
+        let receiver = if delivered {
+            &mut primary_rx
+        } else {
+            &mut fallback_rx
+        };
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                frame = receiver.recv() => frame.expect("SSH writer closed"),
+                early = &mut call => {
+                    let response = early.unwrap().unwrap();
+                    let status = response.status();
+                    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    panic!("SSH request ended before dispatch: {status} {}", String::from_utf8_lossy(&body));
+                }
+            }
+        }).await.expect("SSH command on the selected node");
+        let NodeOutboundMessage::Text(frame) = frame else {
+            panic!("expected SSH command")
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(
+            frame["type"],
+            if mcp {
+                "ssh_exec"
+            } else {
+                "ssh_node_exec_open"
+            }
+        );
+        if delivered {
+            state.node_ws_manager.unregister_connection(&first.id);
+        } else {
+            state.node_ws_manager.deliver_ssh_exec_result(
+                &second.id,
+                NodeSshExecResult {
+                    request_id: frame["request_id"].as_str().unwrap().into(),
+                    exit_code: 0,
+                    stdout: "fallback-result".into(),
+                    stderr: String::new(),
+                    duration_ms: 1,
+                    timed_out: false,
+                    error: None,
+                    error_code: None,
+                },
+            );
+        }
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains(if delivered {
+                "outcome is unknown"
+            } else {
+                "fallback-result"
+            }),
+            "{body}"
+        );
+        assert!(
+            fallback_rx.try_recv().is_err(),
+            "unexpected second SSH command"
+        );
+    }
 }
 
 fn spawn_node_ssh_exec_responder(

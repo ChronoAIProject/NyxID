@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState, type ComponentProps } from "react";
 import { Keyboard } from "react-native";
 import {
@@ -18,12 +20,12 @@ const signature = (value: readonly string[]) =>
 export function selectionSummary(
   options: readonly WorkspaceSelectionOption[],
   value: readonly string[],
-  placeholder = "None",
+  placeholder = translateApp("None"),
 ) {
   const labels = new Map(options.map((option) => [option.value, option.label]));
   const selected = [...new Set(value)];
   if (!selected.length) return placeholder;
-  if (selected.length > 2) return `${selected.length} selected`;
+  if (selected.length > 2) return translateApp("{{count}} selected", { count: selected.length});
   return selected.map((id) => labels.get(id) ?? id).join(", ");
 }
 
@@ -36,6 +38,7 @@ export function SettingsSelectionRow({
   detail,
   ...props
 }: SheetProps & { detail?: string }) {
+  useAppLanguage();
   const [open, setOpen] = useState(false);
   const valueKey = signature(props.value);
   useEffect(() => {
@@ -54,7 +57,8 @@ export function SettingsSelectionRow({
         disabled={blocked}
         accessibilityState={{ expanded: open }}
         accessibilityHint={
-          props.readOnly ? `Shows ${props.label}` : `Changes ${props.label}`
+          props.readOnly ? translateApp("Shows {{label}}", { label: props.label})
+            : translateApp("Changes {{label}}", { label: props.label })
         }
         onPress={() => {
           if (blocked) return;

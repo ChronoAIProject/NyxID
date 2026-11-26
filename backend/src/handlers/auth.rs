@@ -727,6 +727,10 @@ pub(crate) async fn finish_password_login(
                 let factor = completion.commit().await?;
                 crate::services::mfa_service::notify_recovery_use(&state, &user.id, factor);
             }
+            crate::services::billing::schedules::eligibility::after_human_login(
+                &state.db, &user.id,
+            )
+            .await;
 
             audit_service::log_async(
                 state.db.clone(),
@@ -819,6 +823,10 @@ pub(crate) async fn finish_password_login(
                 crate::services::transaction_service::commit(&mut transaction).await?;
                 prepared.tokens
             };
+            crate::services::billing::schedules::eligibility::after_human_login(
+                &state.db, &user.id,
+            )
+            .await;
             audit_service::log_async(
                 state.db.clone(),
                 Some(user.id.clone()),
@@ -1292,6 +1300,8 @@ pub async fn cli_token(
     )
     .await?;
 
+    crate::services::billing::schedules::eligibility::after_human_login(&state.db, &user_id_str)
+        .await;
     Ok(Json(CliTokenResponse {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,

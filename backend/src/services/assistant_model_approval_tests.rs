@@ -198,6 +198,7 @@ async fn model_approval_live_specialist_llm_policy_uses_same_exemption() {
                 Some(&f.owner),
                 false,
                 false,
+                None,
                 false,
             ),
         )

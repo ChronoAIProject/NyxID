@@ -768,6 +768,20 @@ pub async fn send_apns_silent(
     }
 }
 
+/// Notification category that carries Approve/Deny actions on iPhone and
+/// Apple Watch. Only a service approval request that can be decided from the
+/// notification gets it; execution proposals (`can_decide: false`) need the
+/// app's review, and every other push type is informational.
+const APPROVAL_REQUEST_CATEGORY: &str = "APPROVAL_REQUEST";
+
+fn apns_alert_category(data: &HashMap<String, String>) -> Option<&'static str> {
+    let approval_request = data
+        .get("type")
+        .is_some_and(|kind| kind == "approval_request");
+    let review_only = data.get("can_decide").is_some_and(|value| value == "false");
+    (approval_request && !review_only).then_some(APPROVAL_REQUEST_CATEGORY)
+}
+
 fn apns_alert_payload(
     title: &str,
     body: &str,
@@ -781,16 +795,11 @@ fn apns_alert_payload(
             },
             "sound": "default",
             "mutable-content": 1,
-            "category": "APPROVAL_REQUEST",
         }
     });
 
-    // Group mentions are informational; never show approval action buttons.
-    if data.get("type").is_some_and(|kind| kind == "group_mention") {
-        payload["aps"]
-            .as_object_mut()
-            .expect("alert object")
-            .remove("category");
+    if let Some(category) = apns_alert_category(data) {
+        payload["aps"]["category"] = serde_json::Value::from(category);
     }
 
     // Merge data fields into the top-level payload
@@ -1196,18 +1205,54 @@ mod tests {
 mod group_mention_payload_tests {
     use super::*;
     #[test]
-    fn group_mentions_have_no_approval_actions_and_other_notifications_keep_their_category() {
+    fn group_mentions_have_no_approval_actions() {
         let mentions = HashMap::from([("type".into(), "group_mention".into())]);
         let payload = apns_alert_payload("Group", "Sender mentioned you", &mentions);
         assert!(payload["aps"].get("category").is_none());
         assert_eq!(payload["type"], "group_mention");
-        assert_eq!(
-            apns_alert_payload(
-                "Approval",
-                "A service is requesting access",
-                &HashMap::new()
-            )["aps"]["category"],
-            "APPROVAL_REQUEST"
+    }
+
+    #[test]
+    fn only_decidable_approval_requests_carry_approval_actions() {
+        let decidable = HashMap::from([
+            ("type".into(), "approval_request".into()),
+            ("request_id".into(), "req-1".into()),
+        ]);
+        let payload = apns_alert_payload("Approval", "A service is requesting access", &decidable);
+        assert_eq!(payload["aps"]["category"], "APPROVAL_REQUEST");
+        assert_eq!(payload["request_id"], "req-1");
+
+        let review_only = HashMap::from([
+            ("type".into(), "approval_request".into()),
+            ("decision_kind".into(), "execution_permission".into()),
+            ("can_decide".into(), "false".into()),
+        ]);
+        assert!(
+            apns_alert_payload("Approval", "Review in NyxID", &review_only)["aps"]
+                .get("category")
+                .is_none()
+        );
+
+        for kind in [
+            "approval_decision",
+            "machine_lifecycle",
+            "trigger_event",
+            "connection_expired",
+            "channel_bot_failed",
+            "chat_update",
+        ] {
+            let data = HashMap::from([("type".into(), kind.into())]);
+            let payload = apns_alert_payload("Title", "Body", &data);
+            assert!(
+                payload["aps"].get("category").is_none(),
+                "{kind} must not offer Approve/Deny"
+            );
+            assert_eq!(payload["aps"]["mutable-content"], 1);
+        }
+        assert!(
+            apns_alert_payload("Title", "Body", &HashMap::new())["aps"]
+                .get("category")
+                .is_none()
         );
     }
 }

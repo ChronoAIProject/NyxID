@@ -156,7 +156,7 @@ pub async fn finish_unrecoverable(
                         } else {
                             RunOutcome::Failed
                         },
-                        if accepted {
+                        FinishReason::Scheduler(if accepted {
                             None
                         } else {
                             Some(
@@ -164,7 +164,7 @@ pub async fn finish_unrecoverable(
                                     .and_then(|s| s.reason.as_deref())
                                     .unwrap_or("result_delivery_interrupted"),
                             )
-                        },
+                        }),
                         frontend,
                         session,
                     )
@@ -214,7 +214,7 @@ pub async fn finish(
     db: &Database,
     claim: &DeliveryClaim,
     outcome: RunOutcome,
-    reason: Option<&str>,
+    reason: FinishReason<'_>,
     frontend: &str,
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;

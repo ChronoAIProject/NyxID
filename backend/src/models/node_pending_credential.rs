@@ -106,6 +106,11 @@ impl InjectionMethod {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NodePendingCredential {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unconfirmed_nodes: Vec<String>,
+    /// The forwarding call ended without a conclusive reply for these targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_delivery_nodes: Vec<String>,
     #[serde(rename = "_id")]
     pub id: String,
     pub node_id: String,
@@ -325,6 +330,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -357,6 +364,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: vec![FanOutNodeState {
                 node_id: "node-1".to_string(),
                 generation: 0,
@@ -422,6 +431,8 @@ mod tests {
             ciphertext_queued_at: Some(now),
             ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -475,6 +486,8 @@ mod tests {
             ciphertext_queued_at: Some(now),
             ciphertext_expires_at: Some(now + chrono::Duration::minutes(15)),
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -510,6 +523,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: vec![FanOutNodeState {
                 node_id: "node-1".to_string(),
                 generation: 0,
@@ -563,6 +578,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -595,6 +612,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: false,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };

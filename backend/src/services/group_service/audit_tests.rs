@@ -354,10 +354,20 @@ async fn group_audit_request_command_counts() {
                 Action::Create => 8,
                 Action::Update => 10,
                 Action::Delete => 9,
-                Action::Add => 8,
+                Action::Add => 11,
                 Action::Remove => 6,
             },
             "{action:?}: {commands:?}"
+        );
+        // The join checks live group membership and both schedule timings.
+        assert_eq!(
+            commands
+                .iter()
+                .filter(
+                    |(command, collection)| command == "find" && collection == "credit_schedules"
+                )
+                .count(),
+            usize::from(matches!(action, Action::Add))
         );
         println!(
             "GROUP_COMMANDS {action:?} total={} commands={commands:?}",

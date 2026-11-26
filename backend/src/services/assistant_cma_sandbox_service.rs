@@ -22,7 +22,10 @@ use super::assistant_cma_gateway::{
     validate_remote_id,
 };
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::assistant_cma_sandbox::{
         AssistantCmaSandbox, COLLECTION_NAME, SandboxAdmissionState, SandboxCapacitySource,
@@ -53,6 +56,23 @@ fn occupied() -> AppError {
 
 pub(super) fn created_filter(owner_id: &str) -> Document {
     doc! {"user_id": owner_id, "source": NYXID_CREATED_SOURCE}
+}
+
+pub(super) async fn audit_occupied_slot(db: &Database, row: &AssistantCmaSandbox) -> AppResult<()> {
+    super::assistant_cma_slot_audit::record(db, row).await
+}
+pub(super) fn occupied_holding(row: &AssistantCmaSandbox) -> &'static str {
+    if row.retire_requested_at.is_some() || row.admission_state == SandboxAdmissionState::Retiring {
+        "retiring"
+    } else if row.cma_sandbox_id.is_some() {
+        "live_sandbox"
+    } else if row.admission_state == SandboxAdmissionState::Unknown
+        || row.submission_state == "unknown"
+    {
+        "creation_unknown"
+    } else {
+        "creation_in_progress"
+    }
 }
 
 /// Previous versions let discovery occupy the account slot. Release only
@@ -182,6 +202,9 @@ pub fn prepare_creation_request(request: &[u8]) -> AppResult<NormalizedCreationR
 pub fn indexes() -> Vec<IndexModel> {
     vec![
         IndexModel::builder()
+            .keys(doc! {"source": 1, "occupies_account_slot": 1, "_id": 1})
+            .build(),
+        IndexModel::builder()
             .keys(doc! {"user_id": 1})
             .options(
                 IndexOptions::builder()
@@ -292,6 +315,7 @@ pub async fn begin_creation(
         if row.idempotency_key.as_deref() == Some(idempotency_key) {
             return same_creation(row, &service_id, &normalized.hash);
         }
+        let _ = audit_occupied_slot(&db, &row).await;
         return Err(occupied());
     }
     let previous = db
@@ -308,12 +332,9 @@ pub async fn begin_creation(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let field = ["request_ciphertext"];
     let context = RecordContext::new(COLLECTION_NAME, &id, owner_id, &field)?;
-    let ciphertext = super::record_field_service::encrypt_context(
-        encryption_keys,
-        &context,
-        normalized.bytes.as_slice(),
-    )
-    .await?;
+    let ciphertext =
+        record_field::encrypt_context(encryption_keys, &context, normalized.bytes.as_slice())
+            .await?;
     let now = Utc::now();
     let row = AssistantCmaSandbox {
         id,
@@ -387,7 +408,10 @@ pub async fn begin_creation(
                     &normalized.hash,
                 );
             }
-            Err(error) if duplicate_app_key(&error) => return Err(occupied()),
+            Err(error) if duplicate_app_key(&error) => {
+                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
+                return Err(occupied());
+            }
             Err(error) => return Err(error),
         }
     }
@@ -397,6 +421,7 @@ pub async fn begin_creation(
             if let Some(row) = creation_by_key(&db, owner_id, idempotency_key).await? {
                 same_creation(row, &service_id, &normalized.hash)
             } else {
+                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
                 Err(occupied())
             }
         }
@@ -413,36 +438,20 @@ pub(super) async fn recover_creation_request(
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
-    let version = match row.request_context_version {
-        None => None,
-        Some(3) => Some(3),
-        // The persisted marker is i32: never truncate unknown versions to u8.
-        Some(_) => {
-            return Err(AppError::Conflict(
-                "cma_creation_recovery_unavailable".into(),
-            ));
-        }
-    };
-    let field = ["request_ciphertext"];
-    let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &field)?;
-    let bytes = super::record_field_service::decrypt_context(
+    let context = RecordContext::new(
+        COLLECTION_NAME,
+        &row.id,
+        &row.user_id,
+        &["request_ciphertext"],
+    )?;
+    super::assistant_cma_request_record::open(
         keys,
         &context,
-        version,
-        row.request_ciphertext
-            .as_deref()
-            .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?,
+        row.request_context_version,
+        row.request_ciphertext.as_deref(),
+        row.request_hash.as_deref(),
     )
-    .await?;
-    if bytes.len() > MAX_RECOVERY_BYTES {
-        return Err(invalid_request());
-    }
-    if prepare_creation_request(&bytes)?.hash != row.request_hash.as_deref().unwrap_or("") {
-        return Err(AppError::Conflict(
-            "cma_creation_recovery_unavailable".into(),
-        ));
-    }
-    Ok(bytes)
+    .await
 }
 
 pub async fn get_owned(db: &Database, owner_id: &str, id: &str) -> AppResult<AssistantCmaSandbox> {
@@ -488,7 +497,7 @@ fn has_confirmed_capacity(row: &AssistantCmaSandbox) -> bool {
         && row.memory_mib.is_some_and(|value| value > 0)
 }
 
-fn apply_observation(
+pub(super) fn apply_observation(
     row: &mut AssistantCmaSandbox,
     observation: &CmaSandbox,
     expected_generation: i64,
@@ -582,11 +591,15 @@ async fn persist_observation(
     // Network I/O is not repeated. Reconcile only local observation/registration
     // contention; a changed immutable binding still fails closed.
     for _ in 0..3 {
+        let mut set = observation_set(&changed)?;
+        // A live observation can outlast a storage rewrap. Only a terminal
+        // observation clears retained bytes under this generation's fence.
+        if changed.admission_state != SandboxAdmissionState::Retired {
+            set.remove("request_ciphertext");
+            set.remove("request_context_version");
+        }
         if let Some(saved) = collection
-            .find_one_and_update(
-                observation_filter(&expected),
-                doc! {"$set": observation_set(&changed)?},
-            )
+            .find_one_and_update(observation_filter(&expected), doc! {"$set": set})
             .return_document(ReturnDocument::After)
             .await?
         {
@@ -612,8 +625,6 @@ async fn persist_observation(
                 changed.admission_state = SandboxAdmissionState::Retiring;
             }
             changed.submission_state = current.submission_state.clone();
-            changed.request_ciphertext = current.request_ciphertext.clone();
-            changed.request_context_version = current.request_context_version;
         }
         expected = current;
     }
@@ -728,32 +739,7 @@ pub async fn associate_created(
             {
                 return Ok(current);
             }
-            let duplicate = collection.find_one(doc! {
-                "_id":{"$ne":&current.id},"user_id":&current.user_id,
-                "cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,
-            }).session(&mut *tx).await?;
-            let mut changed = current.clone();
-            if let Some(duplicate) = duplicate {
-                if duplicate.occupies_account_slot
-                    || duplicate.idempotency_key.is_some()
-                    || duplicate.request_hash.is_some()
-                    || duplicate.request_ciphertext.is_some()
-                    || !matches!(duplicate.source.as_str(), "discovered" | "conflict" | "claimed")
-                {
-                    return Err(stale());
-                }
-                changed.retire_requested_at = changed.retire_requested_at.or(duplicate.retire_requested_at);
-                if changed.label == "Sandbox" { changed.label = duplicate.label.clone(); }
-                if collection.delete_one(observation_filter(&duplicate)).session(&mut *tx).await?.deleted_count != 1 {
-                    return Err(stale());
-                }
-                // Agent refs use the remote parent identity, so only its local
-                // generation changes when the provisional reference is folded.
-                db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
-                    .update_many(doc! {"user_id":&current.user_id,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
-                    .session(&mut *tx).await?;
-            }
-            apply_observation(&mut changed, observation, current.generation, Utc::now())?;
+            let changed = fold_created_observation(db, tx, &current, observation).await?;
             let mut set = observation_set(&changed)?;
             set.insert("retire_requested_at", changed.retire_requested_at.map(bson::DateTime::from_chrono));
             set.insert("label", &changed.label);
@@ -761,6 +747,60 @@ pub async fn associate_created(
                 .return_document(ReturnDocument::After).session(tx).await?.ok_or_else(stale)
         })
     }).await
+}
+
+/// The existing association fold, shared with explicit admin resolution.
+/// The caller holds the owner-erasure and parent-revision fences in this transaction.
+pub(super) async fn fold_created_observation(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    current: &AssistantCmaSandbox,
+    observation: &CmaSandbox,
+) -> AppResult<AssistantCmaSandbox> {
+    let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
+    let duplicate = collection
+        .find_one(doc! {
+            "_id":{"$ne":&current.id},"user_id":&current.user_id,
+            "cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,
+        })
+        .session(&mut *tx)
+        .await?;
+    let mut changed = current.clone();
+    if let Some(duplicate) = duplicate {
+        if duplicate.occupies_account_slot
+            || duplicate.idempotency_key.is_some()
+            || duplicate.request_hash.is_some()
+            || duplicate.request_ciphertext.is_some()
+            || !matches!(
+                duplicate.source.as_str(),
+                "discovered" | "conflict" | "claimed"
+            )
+        {
+            return Err(stale());
+        }
+        changed.retire_requested_at = changed
+            .retire_requested_at
+            .or(duplicate.retire_requested_at);
+        if changed.label == "Sandbox" {
+            changed.label = duplicate.label.clone();
+        }
+        if collection
+            .delete_one(observation_filter(&duplicate))
+            .session(&mut *tx)
+            .await?
+            .deleted_count
+            != 1
+        {
+            return Err(stale());
+        }
+        // Agent refs use the remote parent identity, so only its local
+        // generation changes when the provisional reference is folded.
+        db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
+                    .update_many(doc! {"user_id":&current.user_id,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
+                    .session(&mut *tx).await?;
+    }
+    apply_observation(&mut changed, observation, current.generation, Utc::now())?;
+    Ok(changed)
 }
 
 /// Persist submission before network I/O and retain the same identity on a
@@ -2259,6 +2299,114 @@ mod tests {
         other.id = "different-sandbox".into();
         assert!(apply_observation(&mut row, &other, 1, Utc::now()).is_err());
         assert!(row.occupies_account_slot);
+    }
+
+    #[tokio::test]
+    async fn observation_after_crypto_rewrap_preserves_the_installed_request() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("cma_observation_rewrap").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut before = fixture_row();
+        let body = br#"{"name":"unchanged observation"}"#;
+        before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
+        before.request_ciphertext = Some(keys.encrypt(body).await.unwrap());
+        before.request_context_version = None;
+        let mut after = before.clone();
+        apply_observation(
+            &mut after,
+            &remote_sandbox(SandboxObservationState::Ready),
+            before.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        let source = bson::to_document(&before).unwrap();
+        rows.insert_one(&source).await.unwrap();
+        assert!(
+            crate::services::assistant_cma_request_record::migrate(
+                &db,
+                &keys,
+                COLLECTION_NAME,
+                &source
+            )
+            .await
+            .unwrap()
+        );
+        let installed = rows
+            .find_one(doc! {"_id":&before.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = persist_observation(&db, &before, &after).await.unwrap();
+        assert_eq!(observed.request_context_version, Some(3));
+        assert_eq!(
+            observed.request_ciphertext.as_ref(),
+            installed.get_binary_generic("request_ciphertext").ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_observation_from_empty_snapshot_preserves_request_until_retirement() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("cma_observation_install").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut before = fixture_row();
+        before.request_ciphertext = None;
+        before.request_context_version = None;
+        let body = br#"{"name":"concurrent install"}"#;
+        before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        rows.insert_one(bson::to_document(&before).unwrap())
+            .await
+            .unwrap();
+
+        let mut live = before.clone();
+        apply_observation(
+            &mut live,
+            &remote_sandbox(SandboxObservationState::Ready),
+            before.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let context = RecordContext::new(
+            COLLECTION_NAME,
+            &before.id,
+            &before.user_id,
+            &["request_ciphertext"],
+        )
+        .unwrap();
+        let bytes = keys.encrypt_record(body, &context).await.unwrap();
+        let installed = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes,
+        };
+        rows.update_one(
+            doc! {"_id": &before.id},
+            doc! {"$set": {
+                "request_ciphertext": installed.clone(),
+                "request_context_version": 3_i32,
+            }},
+        )
+        .await
+        .unwrap();
+        let observed = persist_observation(&db, &before, &live).await.unwrap();
+        assert_eq!(
+            observed.request_ciphertext.as_deref(),
+            Some(installed.bytes.as_slice())
+        );
+        assert_eq!(observed.request_context_version, Some(3));
+
+        let mut retired = observed.clone();
+        apply_observation(
+            &mut retired,
+            &remote_sandbox(SandboxObservationState::Retired),
+            observed.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let saved = persist_observation(&db, &observed, &retired).await.unwrap();
+        assert!(saved.request_ciphertext.is_none());
+        assert!(saved.request_context_version.is_none());
     }
 
     #[tokio::test]

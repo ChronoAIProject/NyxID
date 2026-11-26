@@ -487,7 +487,9 @@ async fn commit_service_update(
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
     }
-    if let Some(url) = request.endpoint_url.as_deref() {
+    if let Some(url) = request.endpoint_url.as_deref()
+        && access.service.node_id.as_deref().is_none_or(str::is_empty)
+    {
         crate::services::url_validation::validate_user_endpoint_url(
             url,
             state.config.is_production(),
@@ -624,39 +626,17 @@ async fn commit_service_route(
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
     }
-    if let Some(node_id) = request.via_node_id.as_deref() {
-        node_service::ensure_node_writable_by_actor(&state.db, actor, node_id).await?;
-    }
-    let mut extra = doc! {};
-    match request.via_node_id.as_deref() {
-        Some(node_id) => {
-            extra.insert("node_id", node_id);
-        }
-        None => {
-            extra.insert("node_id", mongodb::bson::Bson::Null);
-        }
-    }
-    let db = state.db.clone();
-    let owner_id = access.owner_id.clone();
-    let service_id = request.user_service_id.clone();
-    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
-        let db = db.clone();
-        let owner_id = owner_id.clone();
-        let service_id = service_id.clone();
-        let extra = extra.clone();
-        let operation = user_service_service::commit_user_service_mutation(
-            &db,
-            &mut *session,
-            &owner_id,
-            &service_id,
-            extra,
-        )
-        .await
-        .map(|_| ());
-        crate::services::api_key_mutation_service::transaction_result(operation)
-    })
-    .await
-    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+    let target = match request.via_node_id.as_deref() {
+        Some(id) => Some(node_service::RouteNode::authorize(&state.db, actor, id).await?),
+        None => None,
+    };
+    user_service_service::set_service_route(
+        &state.db,
+        &access.owner_id,
+        &request.user_service_id,
+        target,
+    )
+    .await?;
     mark_completed(&state.db, &receipt).await?;
     Ok(false)
 }
@@ -1006,6 +986,7 @@ impl std::fmt::Debug for RotateAssistantServiceCredentialRequest {
 
 #[cfg(test)]
 mod tests {
+    mod route_sync;
     use axum::{
         Router,
         body::{Body, to_bytes},
@@ -1040,17 +1021,24 @@ mod tests {
     use crate::models::ws_frame_injection::{
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
+    use crate::services::oauth_token_authority_service::{
+        with_fixture_read_budget, with_unavailable_user_read,
+    };
     use crate::test_utils::{
         connect_test_database, connect_transaction_test_database, test_app_state,
         test_encryption_keys, test_user, test_user_endpoint, test_user_service,
     };
 
     fn access_token(state: &AppState, user_id: &str) -> String {
+        access_token_with_scope(state, user_id, "")
+    }
+
+    fn access_token_with_scope(state: &AppState, user_id: &str, scope: &str) -> String {
         crate::crypto::jwt::generate_access_token(
             &state.jwt_keys,
             &state.config,
             &Uuid::parse_str(user_id).expect("valid user id"),
-            "",
+            scope,
             None,
             None,
             None,
@@ -1095,10 +1083,10 @@ mod tests {
             }
             None => Body::empty(),
         };
-        let response = app
-            .oneshot(builder.body(body).expect("build request"))
-            .await
-            .expect("route response");
+        let response =
+            with_fixture_read_budget(app.oneshot(builder.body(body).expect("build request")))
+                .await
+                .expect("route response");
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1196,7 +1184,7 @@ mod tests {
             &Uuid::new_v4().to_string(),
             actor_id,
             "Example",
-            "https://api.example.com",
+            "https://127.0.0.1",
             None,
             None,
         );
@@ -1446,7 +1434,7 @@ mod tests {
             "actionRequestId": "update-normalize",
             "userServiceId": service.id,
             "name": "  Trimmed Label  ",
-            "endpointUrl": "https://api.example.com/v2",
+            "endpointUrl": "https://127.0.0.1/v2",
         });
 
         let (status, created) = request(
@@ -1475,7 +1463,7 @@ mod tests {
             .expect("load endpoint")
             .expect("endpoint exists");
         assert_eq!(endpoint.label, "Trimmed Label");
-        assert_eq!(endpoint.url, "https://api.example.com/v2");
+        assert_eq!(endpoint.url, "https://127.0.0.1/v2");
 
         let (status, replayed) = request(
             app(state),
@@ -1652,6 +1640,46 @@ mod tests {
         assert!(stored.state_version > version_after_set);
     }
 
+    fn assert_authority_unavailable((status, body): &(StatusCode, Value)) {
+        assert_eq!(*status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "oauth_authority_unavailable");
+        assert_eq!(body["error_code"], 12900);
+    }
+
+    async fn assert_service_action_state(
+        db: &mongodb::Database,
+        expected: &UserService,
+        credentials: u64,
+        receipts: u64,
+    ) {
+        let stored = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"_id": &expected.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state_version, expected.state_version);
+        assert_eq!(stored.api_key_id, expected.api_key_id);
+        assert_eq!(
+            stored.rotation_predecessor_id,
+            expected.rotation_predecessor_id
+        );
+        assert_eq!(stored.node_id, expected.node_id);
+        for (collection, count) in [
+            (USER_API_KEYS, credentials),
+            (ASSISTANT_ACTION_RECEIPTS, receipts),
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                count,
+                "{collection}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn service_rotate_credential_never_returns_credential_material() {
         let Some((db, actor_id)) = prepare_actor("svc_rotate_secret_free").await else {
@@ -1667,14 +1695,20 @@ mod tests {
             "credential": "sk-live-replacement-credential",
         });
 
-        let (status, rotated) = request(
-            app(state.clone()),
-            &token,
-            "POST",
-            "/assistant/actions/services/rotate-credential",
-            Some(body.clone()),
-        )
-        .await;
+        let rotate = async || {
+            request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/assistant/actions/services/rotate-credential",
+                Some(body.clone()),
+            )
+            .await
+        };
+        let refused = with_unavailable_user_read(rotate()).await;
+        assert_authority_unavailable(&refused);
+        assert_service_action_state(&db, &service, 1, 0).await;
+        let (status, rotated) = rotate().await;
         assert_eq!(status, StatusCode::OK, "{rotated}");
         assert_eq!(rotated["replayed"], false);
         let serialized = rotated.to_string();
@@ -1699,16 +1733,13 @@ mod tests {
         );
         assert_eq!(stored.state_version, 2);
 
-        let (status, replayed) = request(
-            app(state),
-            &token,
-            "POST",
-            "/assistant/actions/services/rotate-credential",
-            Some(body),
-        )
-        .await;
+        let refused = with_unavailable_user_read(rotate()).await;
+        assert_authority_unavailable(&refused);
+        assert_service_action_state(&db, &stored, 2, 1).await;
+        let (status, replayed) = rotate().await;
         assert_eq!(status, StatusCode::OK, "{replayed}");
         assert_eq!(replayed["replayed"], true);
+        assert_service_action_state(&db, &stored, 2, 1).await;
         assert!(
             !replayed
                 .to_string()
@@ -2017,18 +2048,23 @@ mod tests {
         let state = test_app_state(db);
         let token = access_token(&state, &actor_id);
 
-        let (status, routed) = request(
-            app(state.clone()),
-            &token,
-            "POST",
-            "/assistant/actions/services/route",
-            Some(json!({
-                "actionRequestId": "route-evidence",
-                "userServiceId": service.id,
-                "viaNodeId": node_id,
-            })),
-        )
-        .await;
+        let route = async || {
+            request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/assistant/actions/services/route",
+                Some(json!({
+                    "actionRequestId": "route-evidence",
+                    "userServiceId": service.id,
+                    "viaNodeId": node_id,
+                })),
+            )
+            .await
+        };
+        assert_authority_unavailable(&with_unavailable_user_read(route()).await);
+        assert_service_action_state(&state.db, &service, 0, 0).await;
+        let (status, routed) = route().await;
         assert_eq!(status, StatusCode::OK, "{routed}");
 
         let (status, evidence) = request(
@@ -2041,11 +2077,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{evidence}");
         assert_eq!(evidence["node_id"], node_id);
-        assert!(
-            evidence["state_version"]
-                .as_i64()
-                .is_some_and(|value| value >= 1)
-        );
+        assert_eq!(evidence["state_version"], service.state_version + 1);
         assert_eq!(
             crate::test_utils::aevatar_secret_free_violation(&evidence),
             None

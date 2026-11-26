@@ -273,6 +273,30 @@ pub static JOINED_CHILD_SPECS: &[JoinedChildSpec] = &[
 
 pub static ENTRIES: &[Entry] = &[
     Entry {
+        collection: "client_error_reports",
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
+        why: "client_error_reports stores consented crash/error diagnostics linked to the reporting account by user_id (sanitized categories, versions and code locations; no message content); the local inventory erases them with the account, and crash_ttl otherwise expires them within 30 days (CRASH_REPORTS_RETENTION_DAYS, at most 30). Exports include diagnostic metadata without stack frames or native images.",
+    },
+    Entry {
+        collection: "client_error_report_counters",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("hourly anonymous crash-ingestion counters"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "client_error_report_counters stores hourly aggregate ingestion counts keyed only by time bucket, platform and outcome (no account, device or network identifiers); the counters expire after 30 days.",
+    },
+    Entry {
+        collection: "client_release_registry",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "client_release_registry stores shared app-release identities used to interpret crash reports; registered_by keeps only the opaque id of the administrator who registered a release (also in the audit log), retained as shared attribution without names or emails.",
+    },
+    Entry {
         collection: "agent_key_login_requests",
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
@@ -436,11 +460,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "assistant_agents",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["user_id", "org_user_ids", "org_maintainer_user_ids"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "assistant_agents stores the person-owned assistant agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "Local cleanup deletes assistant_agents owned by the person and prunes the person's access-list entries from surviving specialists. Only the owner can export the agent.",
     },
     Entry {
         collection: "assistant_analytics_settings",
@@ -504,7 +528,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "assistant_checkpoints stores the person-owned assistant checkpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "assistant_checkpoints stores the person-owned assistant checkpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence. Original checkpoint goal/source turn UUIDs record bounded content derivation for grant-specific redaction after finite-lived joins expire; they share the checkpoint's existing account/conversation lifetime, contain no provider subject or copied content, and are excluded from its public checkpoint DTO.",
     },
     Entry {
         collection: "assistant_cma_agents",
@@ -521,6 +545,14 @@ pub static ENTRIES: &[Entry] = &[
         export: Export::Section("assistant"),
         export_selector: ExportSelector::Person("user_id"),
         why: "assistant_cma_creations stores the person-owned assistant cma creations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+    },
+    Entry {
+        collection: "assistant_cma_slot_audit_claims",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::FeatureRetention("assistant_cma_slot_audit one-hour expires_at TTL"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "assistant_cma_slot_audit_claims stores only the owner/reservation hourly diagnostic claim; the one-hour expires_at TTL removes it independently of account lifecycle and no request or credential is retained.",
     },
     Entry {
         collection: "assistant_cma_sandboxes",
@@ -1264,6 +1296,62 @@ pub static ENTRIES: &[Entry] = &[
         why: "channel_event_logs is lifecycle data owned through channel_conversations; cleanup removes the child only after that parent is removed.",
     },
     Entry {
+        collection: "channel_meta_controls",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_controls stores provider participant IDs under a bot_id parent, alongside shared platform suspension rows. Channel-bot erasure deletes participant controls by bot_id before removing the parent's credentials; platform-only holds contain no person or participant identity.",
+    },
+    Entry {
+        collection: "channel_meta_erasure_fences",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_erasure_fences retains the retired bot/grant UUIDs, keyed grant fingerprint, platform and application ID, creation/authorization/cleanup times and an opaque personal-erasure job reference. Existing transfer records and that job supply exact owner scope after account retirement; no raw provider subject, asset, credential, participant ID or customer content is copied. This bookkeeping preserves independent signed deletion obligations and prevents late outbound persistence; only verified provider cleanup writes provider completion.",
+    },
+    Entry {
+        collection: "channel_meta_grant_scopes",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_grant_scopes retains one bot/grant UUID pair, keyed subject identity, platform/application ID, binding fingerprint, generation range and authorization/cleanup progress per installation grant. It contains no raw provider subject, credentials, participant IDs, copied owner list or source records. A sealed grant remains independently discoverable for signed deletion after reconnect or account retirement; exact completion releases its app-drain obligation, removes the subject/binding fingerprints, app ID, generation bounds and attribution timestamps, and retains only opaque bot/grant identity and typed replay proof. Subjectless manual account retirement removes its unused scope.",
+    },
+    Entry {
+        collection: "channel_meta_grant_authority",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_grant_authority retains a keyed, domain-separated grant fingerprint and revocation times, never a raw provider subject or NyxID account ID. Keeping this fence prevents delayed OAuth sessions from reinstalling an erased or revoked grant.",
+    },
+    Entry {
+        collection: "channel_meta_oauth_sessions",
+        owner: OwnerSelector::Fields(&["owner_id", "actor_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_oauth_sessions stores short-lived consent state and encrypted candidate credentials, bound separately to the initiating actor and inbox owner. Local inventory removes sessions matching either identity; session expiry and provider erasure also remove retained credentials.",
+    },
+    Entry {
+        collection: "channel_meta_provider_targets",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_provider_targets is a child of the signed provider request, uniquely keyed by request/bot/grant UUIDs, with optional scope UUID, retry state and typed completion time. It contains no raw subject, owner identifiers or copied source/content. Pending proof has no TTL; after parent completion, bounded cleanup assigns the parent's 90-day proof expiry before enabling parent TTL.",
+    },
+    Entry {
+        collection: "channel_meta_provider_requests",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "channel_meta_provider_requests retains signed-request hashes, opaque target bot/grant UUIDs and cleanup progress without raw provider subjects or credentials. Pending erasure obligations have no TTL; completed receipts expire after their documented retention period.",
+    },
+    Entry {
         collection: "channel_messages",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
@@ -1410,6 +1498,22 @@ pub static ENTRIES: &[Entry] = &[
         why: "credit_schedule_periods stores frozen scheduled-grant policy and recipient snapshots; financial retention preserves other recipients; deletion retains this record for its documented lifecycle.",
     },
     Entry {
+        collection: "credit_schedule_recipient_scans",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("shared schedule discovery progress"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "credit_schedule_recipient_scans holds one disposable cursor per shared schedule, not a person's resource. cursor_user_id is only an opaque ordering boundary, is replaced as discovery advances and resets at the end of each pass; keeping it after account erasure neither restores the account nor grants credits. It contains no personal content or financial entitlement and is excluded from account export.",
+    },
+    Entry {
+        collection: "credit_schedule_recipients",
+        owner: OwnerSelector::Fields(&["recipient_user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Section("billing"),
+        export_selector: ExportSelector::Person("recipient_user_id"),
+        why: "credit_schedule_recipients retains the opaque recipient identity and immutable renewal anchor alongside grants and their journal history. Deleting an anchor could change financial identity and permit duplicate issuance; account erasure preserves this financial evidence, while live eligibility prevents issuance to deleted people. Export exposes only the requesting recipient's own cycle metadata.",
+    },
+    Entry {
         collection: "credit_schedules",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
@@ -1520,6 +1624,14 @@ pub static ENTRIES: &[Entry] = &[
         export: Export::Excluded(ExclusionReason::NotPersonal),
         export_selector: ExportSelector::None,
         why: "feature_flag_definitions is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
+    },
+    Entry {
+        collection: "feature_flag_enrollment_fences",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("shared platform enrollment coordination"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "feature_flag_enrollment_fences contains one platform-keyed revision that serializes rollout flag changes with Meta installation and lifecycle commits. It holds no person-owned data and account erasure must retain the shared coordination row.",
     },
     Entry {
         collection: "feature_flag_metadata",
@@ -1830,6 +1942,22 @@ pub static ENTRIES: &[Entry] = &[
         export: Export::Excluded(ExclusionReason::SecretMaterial),
         export_selector: ExportSelector::None,
         why: "mcp_sessions stores the person-owned mcp sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+    },
+    Entry {
+        collection: "mobile_social_deliveries",
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
+        why: "mobile_social_deliveries holds a short-lived encrypted sign-in response. Account erasure deletes it by user_id.",
+    },
+    Entry {
+        collection: "mobile_social_flows",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("pre-authentication flow with TTL"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "mobile_social_flows binds an anonymous, expiring social login attempt before the provider identifies a person.",
     },
     Entry {
         collection: "mfa_challenges",
@@ -2835,11 +2963,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "service_approval_configs",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["user_id", "approver_user_ids"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "service_approval_configs stores the person-owned service approval configs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "Erasure deletes service_approval_configs by personal owner and prunes named approver IDs from organization policies, advancing the policy revision and grant cutoff.",
     },
     Entry {
         collection: "service_change_events",
@@ -3198,7 +3326,6 @@ pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
 /// complete account export. Each addition is owned by its writer module.
 #[cfg(test)]
 pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
-    ("assistant_attachments", "user_id"),
     ("assistant_checkpoints", "user_id"),
     ("assistant_group_requests", "actor_user_id"),
     ("org_channel_messages", "author_user_id"),
@@ -3210,6 +3337,9 @@ pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
 /// blanket "one index per field" loop: existing indexes are reused whenever
 /// their first key covers the predicate.
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
+    ("assistant_agents", "org_maintainer_user_ids"),
+    ("service_approval_configs", "approver_user_ids"),
+    ("assistant_agents", "org_user_ids"),
     ("assistant_group_mention_notifications", "user_id"),
     ("assistant_group_messages", "author_user_id"),
     ("assistant_group_messages", "user_id"),
@@ -3219,7 +3349,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("channel_email_batches", "user_id"),
     ("channel_email_receipts", "user_id"),
     ("channel_email_sends", "user_id"),
-    ("channel_reply_deliveries", "user_id"),
     ("nyxbot_events", "user_id"),
     ("refresh_tokens", "user_id"),
     ("service_change_events", "actor.person_id"),
@@ -3242,6 +3371,16 @@ enum OwnerIndexBoundedReason {
 
 #[cfg(test)]
 const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
+    (
+        "channel_meta_oauth_sessions",
+        "owner_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "channel_meta_oauth_sessions",
+        "actor_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
     (
         "user_services",
         "created_by.actor.person_id",
@@ -3346,11 +3485,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         "assistant_skill_draft_attempts",
         "user_id",
         OwnerIndexBoundedReason::ShortTtl,
-    ),
-    (
-        "assistant_voice_announcements",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
         "assistant_voice_windows",
@@ -4902,6 +5036,7 @@ mod tests {
             ("org_channel_messages", &["author_user_id", "actor_id"][..]),
             ("billing_wallet", &["owner_id"][..]),
             ("credit_grants", &["recipient_user_id"][..]),
+            ("credit_schedule_recipients", &["recipient_user_id"][..]),
             ("usage_meter", &["billing_owner_id"][..]),
             ("platform_setups", &["owner_user_id"][..]),
             ("platform_bot_installations", &["owner_user_id"][..]),

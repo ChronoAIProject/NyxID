@@ -44,7 +44,7 @@ pub async fn resolve_catalog(
     if super::retired_service_service::is_retired(&catalog) {
         return Err(missing());
     }
-    super::catalog_service::enforce_catalog_read_access(db, actor, &catalog).await?;
+    super::catalog_service::require_connection_access(db, actor, &catalog).await?;
     Ok(catalog)
 }
 

@@ -1,5 +1,6 @@
 //! One org-owned public transcript per chat/topic; keys and private execution
 //! history remain per actor. Reuses the org-group message shape and renderer.
+use crate::models::channel_message::TextCompleteness;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -11,6 +12,14 @@ use crate::{
 use bson::{Document, doc};
 use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
+
+#[derive(serde::Deserialize)]
+struct TranscriptRow {
+    #[serde(flatten)]
+    message: GroupMessage,
+    #[serde(default)]
+    text_completeness: Option<TextCompleteness>,
+}
 
 /// A verified gateway private chat adopts the relay partition atomically with
 /// its actor-owned histories. Retain the relay alias for flag-off return. Never
@@ -28,7 +37,7 @@ pub(crate) async fn adopt_private_partition(
         gateway.to_owned(),
     );
     crate::services::transaction_service::run_db_only(db, &context, |tx, (db, channel, relay, gateway)| Box::pin(async move {
-        super::fence_management(db, tx, channel, &channel.user_id).await?;
+        super::fence_binding_authority(db, tx, channel, &channel.user_id,false).await?;
         let binding = channel.org_specialist.as_ref().ok_or_else(super::denied)?;
         let threads = db.collection::<crate::models::nyxbot_channel::NyxbotThread>("nyxbot_threads");
         let Some(legacy) = threads.find_one(doc!{"channel_id":&channel.id,"user_id":&channel.user_id,"kind":"private",
@@ -61,16 +70,52 @@ pub(crate) async fn adopt_private_partition(
     })).await
 }
 
+#[cfg(test)]
 pub(crate) async fn lane(
     db: &Database,
     origin: &ChannelOrigin,
     actor: &str,
     agent: &str,
 ) -> AppResult<(String, bool)> {
+    lane_for_grant(db, origin, actor, agent, None).await
+}
+
+pub(crate) async fn lane_for_grant(
+    db: &Database,
+    origin: &ChannelOrigin,
+    actor: &str,
+    agent: &str,
+    grant: Option<&crate::models::channel_meta::GrantRef>,
+) -> AppResult<(String, bool)> {
     let e = origin.org_execution.as_ref().ok_or_else(super::denied)?;
     let filter = doc! {"channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":actor,
     "agent_id":agent,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,"sender_hash":if e.guest {e.sender_hash.as_str()} else {""}};
     let rows = db.collection::<Document>(LANES);
+    if let Some(grant) = grant {
+        let reserved = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+        let lane=crate::services::transaction_service::run_db_only(db,&(db,grant,&filter,&reserved,e),|tx,&(db,grant,filter,reserved,e)| {
+            Box::pin(async move {
+                crate::services::channel_meta_service::scopes::fence_reference(db,tx,grant,true).await?;
+                db.collection::<Document>(LANES).find_one_and_update(filter.clone(),vec![doc! {"$set":{
+                    "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},"org_id":{"$literal":&e.org_id},
+                    "created_at":{"$ifNull":["$created_at","$$NOW"]},
+                    "conversation_id":{"$cond":[{"$eq":["$meta_grant.grant_id",&grant.grant_id]},"$conversation_id",reserved]},
+                    "meta_grant":{"$literal":bson::to_bson(grant).map_err(|_|super::denied())?},
+                    "channel_bot_id":{"$literal":&grant.bot_id},
+                }}]).upsert(true).return_document(mongodb::options::ReturnDocument::After).session(tx).await?.ok_or_else(super::denied)
+            })
+        }).await?;
+        let id = lane
+            .get_str("conversation_id")
+            .map_err(|_| super::denied())?
+            .to_owned();
+        let exists = db
+            .collection::<Document>("assistant_conversations")
+            .find_one(doc! {"_id":&id,"user_id":actor})
+            .await?
+            .is_some();
+        return Ok((id, exists));
+    }
     let result=rows.update_one(filter.clone(),doc!{"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),
         "org_id":&e.org_id,"conversation_id":format!("nyxa-{}",uuid::Uuid::new_v4().simple()),"created_at":bson::DateTime::now()}}).upsert(true).await;
     if let Err(error) = result
@@ -93,7 +138,7 @@ pub(crate) async fn lane(
 
 pub(crate) async fn context(db: &Database, origin: &ChannelOrigin) -> AppResult<String> {
     let e = origin.org_execution.as_ref().ok_or_else(super::denied)?;
-    let mut rows: Vec<GroupMessage> = db
+    let mut rows: Vec<TranscriptRow> = db
         .collection(MESSAGES)
         .find(doc! {"user_id":&e.org_id,"group_id":group_id(origin)})
         .sort(doc! {"seq":-1})
@@ -104,8 +149,56 @@ pub(crate) async fn context(db: &Database, origin: &ChannelOrigin) -> AppResult<
     rows.reverse();
     Ok(format!(
         "\nEveryone in this chat sees only the public transcript below. Never publish private memory, tool traces or another actor's cards. Only the initiating verified member can decide their cards.\n{}",
-        crate::services::org_group_service::render_transcript(&rows)
+        render_context(&rows)
     ))
+}
+
+fn render_context(rows: &[TranscriptRow]) -> String {
+    // Reserve space for the marker so a partial final row identifies its own loss.
+    let mut output = String::new();
+    let mut remaining: usize = 12_000;
+    for (index, entry) in rows.iter().enumerate() {
+        let row = &entry.message;
+        let author = if row.role == "user" {
+            format!(
+                "member {}",
+                crate::services::assistant_nyxagent::identifier(
+                    row.author_display_name.as_deref().unwrap_or("Member")
+                )
+            )
+        } else {
+            crate::services::assistant_nyxagent::identifier(
+                row.agent_name.as_deref().unwrap_or("agent"),
+            )
+        };
+        let header = format!("[{author}]: ");
+        let indented = row.text.replace('\n', "\n    ");
+        let original_bytes = entry
+            .text_completeness
+            .map_or(row.text.len(), |info| info.original_bytes);
+        let budget = remaining.saturating_sub(header.chars().count() + 100);
+        if budget < 100 {
+            output.push_str(&format!(
+                "[{} further transcript messages omitted]",
+                rows.len() - index
+            ));
+            break;
+        }
+        let (text, info) = crate::services::channel_turn_context::bounded_message(
+            &indented,
+            budget,
+            original_bytes,
+            false,
+        );
+        let line = if info.truncated || entry.text_completeness.is_some_and(|info| info.truncated) {
+            format!("{header}[truncated=true, original_bytes={original_bytes}] {text}\n")
+        } else {
+            format!("{header}{text}\n")
+        };
+        remaining -= line.chars().count();
+        output.push_str(&line);
+    }
+    output
 }
 
 fn group_id(origin: &ChannelOrigin) -> String {
@@ -122,6 +215,7 @@ pub(crate) async fn publish(
     id: &str,
     text: &str,
     role: &str,
+    source: Option<TextCompleteness>,
 ) -> AppResult<()> {
     if row.guest_model_setup {
         return Ok(());
@@ -134,6 +228,17 @@ pub(crate) async fn publish(
     let Some(thread)=db.collection::<Document>("nyxbot_threads").find_one_and_update(doc!{
         "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"kind":{"$ne":"private"}},
         doc!{"$inc":{"public_message_seq":1_i64}}).return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await? else {return Ok(())};
+    let (text, mut completeness) = crate::services::channel_turn_context::bounded_message(
+        text,
+        if role == "user" {
+            crate::services::assistant_nyxagent::MAX_MESSAGE_CHARS
+        } else {
+            12_000
+        },
+        source.map_or(text.len(), |info| info.original_bytes),
+        false,
+    );
+    completeness.truncated |= source.is_some_and(|info| info.truncated);
     let message = GroupMessage {
         collaboration: None,
         activities: Vec::new(),
@@ -158,13 +263,14 @@ pub(crate) async fn publish(
         role: role.into(),
         agent_id: (role == "agent").then(|| e.agent_id.clone()),
         agent_name: None,
-        text: crate::services::assistant_nyxagent::excerpt(text, 12000),
+        text,
         recipient_agent_ids: Vec::new(),
         mentioned_participant_ids: Vec::new(),
         created_at: chrono::Utc::now(),
     };
     let mut document = bson::to_document(&message)
         .map_err(|_| AppError::Internal("Channel transcript unavailable".into()))?;
+    document.insert("text_completeness", doc! {"original_bytes":completeness.original_bytes as i64,"truncated":completeness.truncated});
     document.insert("channel_id", &origin.nyxbot_channel_id);
     document.insert("partition", &origin.partition);
     document.insert("conversation_id", &row.id);

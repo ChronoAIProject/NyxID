@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { useMemo, type ReactElement } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { spacing, typeScale } from "../theme/designTokens";
@@ -28,24 +30,45 @@ type PresetConfig = {
 //   - activeEmpty   →  SmartLockIllustration     (web 1:1 from pages/approval-grants.tsx)
 //   - historyEmpty  →  SeoKeywordIllustration    (web 1:1 from pages/approval-history.tsx)
 const presetConfigs: Record<EmptyStatePreset, PresetConfig> = {
-  pendingEmpty: {
+  get pendingEmpty() {
+    return {
     Illustration: BiometricLockIllustration,
-    title: "No pending challenges",
-    subtitle: "New high-risk requests will appear here.",
+      get title() {
+        return translateApp("No pending challenges");
+      },
+      get subtitle() {
+        return translateApp("New high-risk requests will appear here.");
+      },
+  };
   },
-  activeEmpty: {
+  get activeEmpty() {
+    return {
     Illustration: SmartLockIllustration,
-    title: "No active approvals",
-    subtitle: "Approvals appear here after challenge decisions.",
+      get title() {
+        return translateApp("No active approvals");
+      },
+      get subtitle() {
+        return translateApp("Approvals appear here after challenge decisions.");
+      },
+  };
   },
-  historyEmpty: {
+  get historyEmpty() {
+    return {
     Illustration: SeoKeywordIllustration,
-    title: "No decision history",
-    subtitle: "Past approvals, denials, and expirations appear here.",
+      get title() {
+        return translateApp("No decision history");
+      },
+      get subtitle() {
+        return translateApp(
+          "Past approvals, denials, and expirations appear here.",
+        );
+      },
+    };
   },
 };
 
 export function EmptyState({ preset }: EmptyStateProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const { Illustration, title, subtitle } = presetConfigs[preset];

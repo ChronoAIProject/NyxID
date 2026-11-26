@@ -129,9 +129,9 @@ impl client::Handler for HostKeyVerifier {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let fingerprint = host_key_sha256(server_public_key);
+        let fingerprint = host_key_sha256(&server_public_key.public_key());
         *self.observed_sha256.lock().expect("host key lock poisoned") = Some(fingerprint.clone());
 
         match &self.policy {
@@ -631,7 +631,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     fn test_entry_with_cert(certificate_openssh: Option<String>) -> SshKeyEntry {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand_10::rng();
         let private_key =
             russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("private key");
         let private_key_pem = private_key.to_openssh(LineEnding::LF).expect("openssh");
@@ -652,7 +652,7 @@ mod tests {
     }
 
     fn user_certificate_for_entry(entry: &SshKeyEntry) -> String {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand_10::rng();
         let subject_key = decode_secret_key(entry.private_key_pem.as_str(), None).unwrap();
         let ca_key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("ca key");
         let mut builder = certificate::Builder::new_with_random_nonce(
@@ -815,5 +815,41 @@ mod tests {
             }
             HostKeyPolicy::StaticExpected(_) => panic!("cert entry must use TOFU policy"),
         }
+    }
+
+    #[tokio::test]
+    async fn cert_exec_host_key_callback_pins_the_first_key_and_checks_reconnections() {
+        use russh::client::Handler;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = test_entry_with_cert(None);
+        entry.cert_host_key_store = Some(Arc::new(Mutex::new(
+            CertHostKeyStore::load(dir.path()).unwrap(),
+        )));
+        let mut verifier = HostKeyVerifier {
+            policy: host_key_policy(&entry),
+            observed_sha256: Arc::default(),
+        };
+        let mut rng = rand_10::rng();
+        let host_key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let expected = host_key_sha256(host_key.public_key());
+        let presented = host_key.public_key().clone().into();
+        assert!(verifier.check_server_key(&presented).await.unwrap());
+        assert!(verifier.check_server_key(&presented).await.unwrap());
+        assert_eq!(
+            verifier.observed_sha256.lock().unwrap().as_ref(),
+            Some(&expected)
+        );
+
+        let other = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let error = verifier
+            .check_server_key(&other.public_key().clone().into())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            map_client_connect_error(error).code,
+            SSH_HOST_KEY_MISMATCH_CODE
+        );
+        assert!(verifier.check_server_key(&presented).await.unwrap());
     }
 }

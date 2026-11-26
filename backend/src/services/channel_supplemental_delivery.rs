@@ -2,13 +2,13 @@
 use bson::{Document, doc};
 use chrono::{DateTime, Utc};
 use mongodb::Database;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     errors::AppResult,
     models::{
-        assistant_conversation::{AssistantConversation, ChannelOrigin, TurnOrigin},
+        assistant_conversation::{ChannelOrigin, TurnOrigin},
         channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
         nyxbot_channel::{
             EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel, NyxbotEvent, NyxbotThread,
@@ -56,6 +56,7 @@ pub enum Reason {
     InvalidAnchor,
     StaleReferenceAnchor,
     NativeProgressUnsupported,
+    MissingResultIdentity,
     AuthorityRefused,
     SourceUnavailable,
     ReferenceUnavailable,
@@ -124,35 +125,173 @@ pub enum Source {
     Missing,
 }
 
-pub async fn source(
-    db: &Database,
-    row: &AssistantConversation,
-    origin: &ChannelOrigin,
-) -> AppResult<Source> {
-    let Some(turn) = &row.active_turn else {
-        return Ok(Source::Unbound);
-    };
-    let mut ids = Vec::new();
-    let mut expected =
-        turn.origin == TurnOrigin::Channel && turn.asked_from.as_ref() == Some(origin);
-    if let Some(id) = &turn.channel_event_id {
-        ids.push(id.clone());
-    }
-    for event in &turn.events {
-        if event.reply_to.iter().any(|candidate| candidate == origin)
-            && !event.source_event_ids.is_empty()
-        {
-            expected = true;
-            ids.extend(event.source_event_ids.iter().cloned());
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ResultSource {
+    pub turn_id: String,
+    pub event_id: Option<String>,
+    ids: Vec<String>,
+    expected: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SavedDestination {
+    pub origin: ChannelOrigin,
+    pub source: ResultSource,
+    pub additional: bool,
+}
+
+impl SavedDestination {
+    pub(crate) fn purpose(&self) -> Purpose {
+        if self.additional {
+            Purpose::TeamAdditionalResult
+        } else {
+            Purpose::TeamResult
         }
     }
+}
+
+#[derive(Deserialize)]
+struct SavedHandoffTargets {
+    handoff_delivery: SavedHandoffRouting,
+}
+
+#[derive(Deserialize)]
+struct SavedHandoffRouting {
+    targets: Vec<SavedDestination>,
+}
+
+/// A pending or leased handoff can still deliver unsent parts. Only a handoff
+/// whose delivery worker cleared both fields has completed its delivery work.
+pub(crate) async fn finished_handoff_targets(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    reply_id: &str,
+) -> AppResult<Vec<SavedDestination>> {
+    let mut filter = settled_reply_filter(owner, conversation, turn);
+    filter.extend(doc! {
+        "_id": reply_id, "handoff_delivery.targets": {"$exists": true},
+        "handoff_delivery_due_at": {"$exists": false},
+        "handoff_delivery_lease": {"$exists": false},
+    });
+    Ok(db
+        .collection::<SavedHandoffTargets>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(filter)
+        .projection(doc! {"handoff_delivery.targets": 1})
+        .await?
+        .map_or_else(Vec::new, |reply| reply.handoff_delivery.targets))
+}
+
+pub(crate) fn managed_source(
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> Option<&crate::models::assistant_conversation::ChatRestartSource> {
+    turn.restart_admission
+        .as_deref()
+        .and_then(|admission| admission.chat_source.as_deref())
+        .or_else(|| {
+            turn.execution_attempt
+                .as_ref()?
+                .foreground_delivery
+                .as_deref()
+        })
+        .filter(|source| {
+            !matches!(
+                source,
+                crate::models::assistant_conversation::ChatRestartSource::PersonalManager { .. }
+            )
+        })
+}
+
+pub(crate) fn saved_destinations(
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    source: &crate::models::assistant_conversation::ChatRestartSource,
+    failed: bool,
+) -> Vec<SavedDestination> {
+    use crate::models::assistant_conversation::ChatRestartSource;
+    if turn
+        .execution_task
+        .as_ref()
+        .and_then(|task| task.channel_source.as_ref())
+        .is_some_and(|source| source.original_turn_id != turn.turn_id)
+    {
+        return Vec::new();
+    }
+    let primary = match source {
+        ChatRestartSource::Wake { reply_channel, .. }
+            if !failed
+                && turn
+                    .events
+                    .iter()
+                    .all(|event| event.source_event_ids.is_empty()) =>
+        {
+            reply_channel.as_ref()
+        }
+        _ => None,
+    };
+    primary
+        .into_iter()
+        .map(|origin| (origin, false))
+        .chain(
+            turn.also_deliver
+                .iter()
+                .filter(|origin| Some(*origin) != primary)
+                .map(|origin| (origin, true)),
+        )
+        .filter(|(origin, _)| {
+            origin.org_execution.is_none() && origin.thread.is_none() && !row.guest_turn
+        })
+        .map(|(origin, additional)| SavedDestination {
+            origin: origin.clone(),
+            source: ResultSource::capture(turn, origin),
+            additional,
+        })
+        .collect()
+}
+
+impl ResultSource {
+    pub(crate) fn capture(
+        turn: &crate::models::assistant_conversation::ActiveTurn,
+        origin: &ChannelOrigin,
+    ) -> Self {
+        let asked_here = turn.asked_from.as_ref() == Some(origin);
+        let mut ids: Vec<_> = turn.channel_event_id.iter().cloned().collect();
+        let mut expected = turn.origin == TurnOrigin::Channel && asked_here;
+        for event in &turn.events {
+            if event.reply_to.contains(origin) && !event.source_event_ids.is_empty() {
+                expected = true;
+                ids.extend(event.source_event_ids.iter().cloned());
+            }
+        }
+        Self {
+            turn_id: turn.turn_id.clone(),
+            event_id: origin
+                .native_event_id
+                .clone()
+                .or_else(|| asked_here.then(|| turn.channel_event_id.clone()).flatten()),
+            ids,
+            expected,
+        }
+    }
+}
+
+pub(crate) async fn source_for(
+    db: &Database,
+    conversation: &str,
+    origin: &ChannelOrigin,
+    binding: Option<&ResultSource>,
+) -> AppResult<Source> {
+    let Some(binding) = binding else {
+        return Ok(Source::Unbound);
+    };
     // IDs come from admission, never from the thread's current event reference.
-    for id in ids {
+    for id in &binding.ids {
         if let Some(event) = db
             .collection::<NyxbotEvent>(EVENTS)
             .find_one(doc! {
                 "_id":id,"channel_id":&origin.nyxbot_channel_id,
-                "conversation_id":&row.id,"turn_id":&turn.turn_id,
+                "conversation_id":conversation,"turn_id":&binding.turn_id,
                 "delivery.origin.partition":&origin.partition,
             })
             .await?
@@ -160,7 +299,7 @@ pub async fn source(
             return Ok(Source::Event(Box::new(event)));
         }
     }
-    Ok(if expected {
+    Ok(if binding.expected {
         Source::Missing
     } else {
         Source::Unbound
@@ -269,12 +408,64 @@ fn result_destination(origin: &ChannelOrigin) -> String {
         .thread
         .as_ref()
         .map(|b| (&b.child_id, b.generation, b.channel_generation, &b.agent_id));
-    let encoded = serde_json::to_vec(&(&origin.nyxbot_channel_id, &origin.partition, binding))
+    destination_hash(
+        &origin.nyxbot_channel_id,
+        &origin.partition,
+        binding.map(|(child, generation, channel_generation, agent)| {
+            (
+                child.as_str(),
+                generation,
+                channel_generation,
+                agent.as_str(),
+            )
+        }),
+    )
+}
+
+fn destination_hash(
+    channel: &str,
+    partition: &str,
+    binding: Option<(&str, i64, i64, &str)>,
+) -> String {
+    let encoded = serde_json::to_vec(&(channel, partition, binding))
         .expect("destination identifiers serialize");
     let mut hash = Sha256::new();
     hash.update(b"nyxbot-supplemental-result-v1\0");
     hash.update(encoded);
     format!("{:x}", hash.finalize())
+}
+
+pub(crate) fn saved_destination_key(
+    turn: &str,
+    channel: &str,
+    partition: &str,
+    binding: Option<(&str, i64, i64, &str)>,
+) -> String {
+    format!(
+        "saved-result:{turn}:{}",
+        destination_hash(channel, partition, binding)
+    )
+}
+
+pub(crate) fn saved_key(turn: &str, origin: &ChannelOrigin) -> String {
+    format!("saved-result:{turn}:{}", result_destination(origin))
+}
+
+/// Hash the local dispatch identity and part, keeping gateway headers printable
+/// and independent of the sealed event reference and text.
+pub(crate) fn side_message_key<T: Serialize>(identity: &T, part: usize) -> String {
+    let encoded = serde_json::to_vec(&(identity, part)).expect("dispatch identifiers serialize");
+    let digest = Sha256::digest(encoded);
+    format!("nyxbot-side-v1:{digest:x}")
+}
+
+tokio::task_local! {pub(crate) static SAVED_RELAY_KEY: String;}
+
+pub(crate) fn settled_reply_filter(owner: &str, conversation: &str, turn: &str) -> Document {
+    doc! {
+        "user_id": owner, "conversation_id": conversation, "turn_id": turn, "role": "assistant",
+        "status": {"$in": ["completed", "failed", "cancelled"]},
+    }
 }
 
 /// A possibly committed claim never authorizes dispatch. This marker has no retry path.
@@ -289,8 +480,7 @@ pub async fn claim_result(
         return Ok(Err(Reason::SourceUnavailable));
     };
     let messages = db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
-    let identity = doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,"role":"assistant",
-    "status":{"$in":["completed","failed","cancelled"]}};
+    let identity = settled_reply_filter(owner, conversation, turn);
     let Some(saved) = messages
         .find_one(identity.clone())
         .projection(doc! {"_id":1})

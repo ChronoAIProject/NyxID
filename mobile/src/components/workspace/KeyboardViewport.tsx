@@ -13,6 +13,7 @@ import {
   StyleSheet,
   View,
 } from "react-native";
+import { requireOptionalNativeModule } from "expo";
 import { observeKeyboardFrames } from "./keyboardFrameEvents";
 import {
   useSafeAreaFrame,
@@ -20,6 +21,10 @@ import {
 } from "react-native-safe-area-context";
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { keyboardOverlap, type KeyboardFrame } from "./keyboardOverlap";
+
+const windowInsets = Platform.OS === "android"
+  ? requireOptionalNativeModule<{ contentBottom(): number | null }>("NyxWindowInsets")
+  : null;
 
 export type KeyboardViewportFrame = { y: number; height: number };
 
@@ -62,6 +67,7 @@ export function KeyboardViewport({
         // iOS keyboard events already use the same window as measureInWindow.
         // A nested provider can describe an already-lifted sheet, not the window.
         frame,
+        Platform.OS,
       );
       // The sheet's KeyboardAvoidingView lifts after will-change. Do not
       // reserve or reveal against its old position before native layout settles.
@@ -80,7 +86,11 @@ export function KeyboardViewport({
       keyboard: Keyboard,
       appState: AppState,
       dimensions: Dimensions,
-      windowHeight: () => Dimensions.get("window").height,
+      // Android IME frames use screen coordinates even after adjustResize
+      // shortens Dimensions.window. Validate against the matching screen.
+      windowHeight: () =>
+        Dimensions.get(Platform.OS === "android" ? "screen" : "window").height,
+      androidContentBottom: windowInsets ? () => windowInsets.contentBottom() : undefined,
       afterLayout: requestAnimationFrame,
       cancelLayout: cancelAnimationFrame,
       onFrame: (frame, event) => {

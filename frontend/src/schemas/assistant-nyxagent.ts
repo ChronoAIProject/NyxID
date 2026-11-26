@@ -23,6 +23,12 @@ export const nyxAgentTurnActivitySchema = z.object({
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
   failure: z.object({ reason: z.string().max(64).nullish().transform((value) => value ?? undefined).optional(), kind: z.string(), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
+  memory_recovery: z.object({
+    failed_activity_id: z.uuid(),
+    part: z.number().int().min(1).max(10),
+    total: z.number().int().min(1).max(10),
+    committed: z.boolean().default(false),
+  }).refine(({ part, total }) => part <= total).nullish().catch(undefined),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
@@ -38,6 +44,13 @@ export const nyxAgentAttachmentSchema = z.object({
   origin: z.string().optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
+  pdf: z.object({
+    classification: z.enum(["no_text", "mixed", "text", "unknown"]),
+    text_pages: z.array(z.number().int().positive()).max(200),
+    image_pages: z.array(z.number().int().positive()).max(200),
+    unread_pages: z.array(z.number().int().positive()).max(200),
+    reason: z.string().max(64).nullish(),
+  }).nullish().catch(undefined),
   image_input: historyEnum(["sent", "unavailable"]).nullable().optional(),
   image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported", "guest_media_unavailable"]).nullish().catch(undefined),
   size: z.number().int().nonnegative(),
@@ -86,6 +99,8 @@ export const nyxAgentChannelOriginSchema = z.object({
 });
 export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
+  /** Server-authored privacy boundary for the specialist handoff UI. */
+  handoff_eligible: z.boolean().optional(),
   id: conversationId,
   title: z.string(),
   platform_thread: platformThreadSchema.nullish(),
@@ -117,6 +132,7 @@ export const nyxAgentConversationSchema = z.object({
       stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
       activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
+      continued_after_restart: z.boolean().optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -217,6 +233,7 @@ export const nyxAgentMessageSchema = z.object({
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
   activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
+  continued_after_restart: z.boolean().optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
@@ -528,6 +545,7 @@ export const assistantAgentSchema = z.object({
   org_role: z.enum(["admin", "member", "viewer"]).nullable().optional(),
   can_maintain: z.boolean().optional(),
   can_use: z.boolean().optional(),
+  can_govern: z.boolean().optional(),
   id: z.string(),
   kind: assistantAgentKindSchema,
   /** The @handle (fixed "NyxBot" for NyxBot). */
@@ -813,6 +831,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  guest_conversation_id: z.string().optional(),
   can_manage: z.boolean().optional(),
   guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),

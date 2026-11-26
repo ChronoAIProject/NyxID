@@ -30,7 +30,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
-    associatedUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    associatedUrls: r.associatedUrls,
     androidHttpsAppLinks: r.androidHttpsAppLinks,
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,
@@ -46,6 +46,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "automatic",
+    locales: {
+      "zh-Hans": "./locales/zh-Hans.json",
+      "zh-Hant": "./locales/zh-Hant.json",
+    },
     assetBundlePatterns: ["**/*"],
     ios: {
       supportsTablet: true,
@@ -101,7 +105,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       intentFilters: androidIntentFilters,
     },
     plugins: [
+      "./plugins/withFontScaleChanges",
       "./plugins/withVoiceAudio",
+      "./plugins/withSceneLifecycle",
+      "./plugins/withWatchCompanion",
       [
         "./plugins/withAndroidGoogleServicesValidation",
         {
@@ -165,6 +172,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
     ],
     extra: {
+      crashArtifactId: process.env.NYXID_CRASH_ARTIFACT_ID,
       APP_ENV: appEnv,
       TELEMETRY_DSN: r.telemetryDsn,
       TELEMETRY_HOST: r.telemetryHost,

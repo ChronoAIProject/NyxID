@@ -1,14 +1,16 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 const SCALE = 1_000_000_000_000n;
 const MAX = 10n ** 34n - 1n;
 const DECIMAL = /^-?\d+(?:\.\d{1,12})?$/;
 
 /** API Credits are canonical decimal strings at a precision of 10^-12. */
 export function creditUnits(value: string): bigint {
-  if (value.length > 80 || !DECIMAL.test(value)) throw new Error("Invalid credit amount");
+  if (value.length > 80 || !DECIMAL.test(value)) throw localizedError("Invalid credit amount");
   const negative = value.startsWith("-");
   const [whole, fraction = ""] = (negative ? value.slice(1) : value).split(".");
   const units = BigInt(whole!) * SCALE + BigInt(fraction.padEnd(12, "0"));
-  if (units > MAX) throw new Error("Credit amount exceeds supported precision");
+  if (units > MAX) throw localizedError("Credit amount exceeds supported precision");
   return negative ? -units : units;
 }
 
@@ -19,7 +21,7 @@ export function decimalCredits(units: bigint): string {
 }
 
 export function formatCredits(value: string | null | undefined): string {
-  if (value == null) return "Unavailable";
+  if (value == null) return translateApp("Unavailable");
   const canonical = decimalCredits(creditUnits(value));
   const [whole, fraction] = canonical.split(".");
   return `${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${fraction ? `.${fraction}` : ""}`;
@@ -73,19 +75,19 @@ export function sumCredits(values: readonly (string | null)[]): string | null {
 
 /** Compatibility integers are admitted only when JS can represent them exactly. */
 export function legacyCredits(value: number, scale: "whole" | "micros"): string {
-  if (!Number.isSafeInteger(value)) throw new Error("Unsafe legacy credit amount");
+  if (!Number.isSafeInteger(value)) throw localizedError("Unsafe legacy credit amount");
   return decimalCredits(BigInt(value) * (scale === "whole" ? SCALE : 1_000_000n));
 }
 
 export function expiryLabel(value: string | null | undefined, now = Date.now()): string {
-  if (!value) return "No expiry";
+  if (!value) return translateApp("No expiry");
   const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) throw new Error("Invalid expiry");
-  return `${date.getTime() <= now ? "Expired" : "Expires"} ${date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })} (UTC)`;
+  if (!Number.isFinite(date.getTime())) throw localizedError("Invalid expiry");
+  return (date.getTime() <= now ? translateApp("Expired {{time}} (UTC)", { time: date.toLocaleDateString(appLocale(), { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }) }) : translateApp("Expires {{time}} (UTC)", { time: date.toLocaleDateString(appLocale(), { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }) }));
 }
 
 export function billingDate(value: string): string {
-  return new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+  return new Date(value).toLocaleDateString(appLocale(), { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 export const formatQuantity = (value: number) => BigInt(value).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");

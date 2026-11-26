@@ -3080,6 +3080,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
             chat_delivery: Some(delivery),
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: Some(false),
             pages: None,
         });
@@ -3245,6 +3246,64 @@ async fn collaboration_service_approval_resumes_its_request_and_cannot_outlive_d
         response.collaboration.unwrap()["your_request_ids"],
         serde_json::json!([binding.request_id])
     );
+    // Reject only this decision occurrence after the continuation and its fences.
+    let db = &f.state.db;
+    svc::security_effect_service::ensure_indexes(db)
+        .await
+        .unwrap();
+    let intents = crate::models::security_effect_intent::COLLECTION_NAME;
+    let groups = db.collection::<bson::Document>(GROUPS);
+    let before = groups
+        .find_one(doc! {"_id":&group.id})
+        .await
+        .unwrap()
+        .unwrap();
+    db.run_command(
+        doc! {"collMod":intents,"validator":{"event.event_type":{"$ne":"approval_decision"}}},
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        svc::approval_service::process_decision(
+            db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &id,
+            true,
+            None,
+            None,
+            "web"
+        )
+        .await,
+        Err(crate::errors::AppError::DatabaseError(_))
+    ));
+    let after = groups
+        .find_one(doc! {"_id":&group.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before.get("collaboration_fence"),
+        after.get("collaboration_fence")
+    );
+    assert!(
+        requests::pending(db, Some(&group.id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        svc::approval_service::get_request(db, &id)
+            .await
+            .unwrap()
+            .status,
+        "pending"
+    );
+    db.run_command(doc! {"collMod":intents,"validator":{}})
+        .await
+        .unwrap();
     let updated = svc::approval_service::process_decision(
         &f.state.db,
         &f.state.config,
@@ -3260,6 +3319,16 @@ async fn collaboration_service_approval_resumes_its_request_and_cannot_outlive_d
     .await
     .unwrap();
     assert_eq!(updated.status, "approved");
+    assert_eq!(
+        db.collection::<bson::Document>(intents)
+            .count_documents(
+                doc! {"event.event_type":"approval_decision","event.event_data.request_id":&id}
+            )
+            .await
+            .unwrap(),
+        1
+    );
+
     let pending = requests::pending(&f.state.db, Some(&group.id))
         .await
         .unwrap();
@@ -3420,6 +3489,7 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
         "block",
         &mut String::new(),
         &mut None,
+        None,
     )
     .await
     .unwrap();
@@ -3453,7 +3523,8 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
             &mut events,
             "block",
             &mut String::new(),
-            &mut None
+            &mut None,
+            None,
         )
         .await
         .is_err()
@@ -3807,6 +3878,7 @@ async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_p
             .collection("service_approval_configs")
             .insert_one(
                 crate::models::service_approval_config::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: Uuid::new_v4().to_string(),
                     user_id: f.member.clone(),
                     service_id: catalog.id.clone(),

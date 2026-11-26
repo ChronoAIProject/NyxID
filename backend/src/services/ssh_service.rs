@@ -163,15 +163,40 @@ pub fn target_base_url(host: &str, port: u16) -> String {
     format!("ssh://{}:{port}", host.trim())
 }
 
-/// Validate an SSH target hostname and port.
-///
-/// Unlike HTTP base_url validation, SSH targets are always allowed to use
-/// private/internal IPs. SSH services are admin-configured infrastructure
-/// (not user-supplied URLs), so SSRF is not a concern. The NyxID server or
-/// node agent connects to these hosts on behalf of authenticated users.
+/// Validate the configured host without resolving names on behalf of a node.
 pub async fn validate_resolved_ssh_target(host: &str, port: u16) -> AppResult<()> {
     validate_ssh_target_syntax(host, port)?;
     Ok(())
+}
+
+pub(crate) async fn resolve_direct_ssh_target(
+    host: &str,
+    port: u16,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use super::url_validation::{AddressClass, address_class, is_cloud_metadata_host};
+    use std::io::{Error, ErrorKind};
+    let refused = || {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "SSH destination is not permitted",
+        )
+    };
+    if is_cloud_metadata_host(host) {
+        return Err(refused());
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|peer| address_class(peer.ip()) == AddressClass::Reserved)
+    {
+        return Err(refused());
+    }
+    Ok(addresses)
 }
 
 /// Validate SSH target syntax only (non-empty host, valid port, blocked
@@ -574,6 +599,25 @@ mod tests {
             .expect("resolve org SSH payer");
         assert_eq!(personal_payer.owner_id, personal_owner_id);
         assert_eq!(org_payer.owner_id, org_owner_id);
+    }
+
+    #[tokio::test]
+    async fn direct_ssh_resolution_checks_address_class() {
+        for ip in [
+            "169.254.20.1",
+            "[fe80::1]",
+            "100.100.100.200",
+            "[fd00:ec2::254]",
+        ] {
+            let err = super::resolve_direct_ssh_target(ip, 22).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+        assert_eq!(
+            super::resolve_direct_ssh_target("10.20.30.40", 22)
+                .await
+                .unwrap(),
+            vec!["10.20.30.40:22".parse::<std::net::SocketAddr>().unwrap()]
+        );
     }
 
     #[test]

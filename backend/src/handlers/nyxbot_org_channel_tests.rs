@@ -255,6 +255,44 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     org::links::confirm(&state.db, OWNER, &row, challenge["id"].as_str().unwrap())
         .await
         .unwrap();
+    // The same guest-enabled binding must distinguish a denied verified member from a guest.
+    let mut guest_enabled = row.clone();
+    guest_enabled
+        .org_specialist
+        .as_mut()
+        .unwrap()
+        .guests
+        .enabled = true;
+    let agents = state.db.collection::<bson::Document>("assistant_agents");
+    agents
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"org_user_ids": [], "org_use_revision": 1_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        org::sender(&state.db, &guest_enabled, "7", true, &agent.id)
+            .await
+            .is_err()
+    );
+    let (guest, _) = org::sender(
+        &state.db,
+        &guest_enabled,
+        "unverified-sender",
+        true,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    assert!(guest.guest && guest.actor_id == org_id);
+    agents
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"org_user_ids": [OWNER]}},
+        )
+        .await
+        .unwrap();
     let body = event("Summarize today's request", "7", "org-first");
     let answer = body_text(respond(&state, &key, &body, "org-first").await).await;
     assert!(answer.contains("Here is your answer"), "{answer}");
@@ -298,6 +336,79 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     assert_eq!(calls.lock().await.len(), 1);
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_channel_chat_override_requires_maintenance_on_both_specialists() {
+    let (state, _, server) = setup("org_channel_override_maintenance").await;
+    let (row, _, agent, _) = org_channel(&state, false).await;
+    let db = &state.db;
+    let mut other = agent.clone();
+    other.id = Uuid::new_v4().to_string();
+    other.name = "chat-override".into();
+    other.org_maintainer_user_ids = Some(Vec::new());
+    use crate::models::assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS};
+    let agents = db.collection::<AssistantAgent>(AGENTS);
+    agents.insert_one(&other).await.unwrap();
+    let chat = chats::record_chat(
+        &state,
+        &row,
+        &chats::group_partition("test-group", None),
+        &chats::ChatFacts {
+            kind: "group",
+            chat_id: "test-group".into(),
+            thread_id: None,
+            owner: false,
+            title: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let update = chats::ChatSettings {
+        agent_id: Some(other.id.clone()),
+        ..Default::default()
+    };
+    assert!(
+        chats::update_chat(&state, OWNER, &chat.id, &update)
+            .await
+            .is_err()
+    );
+    agents
+        .update_one(
+            doc! {"_id":&other.id},
+            doc! {"$set":{"org_maintainer_user_ids":[OWNER]}},
+        )
+        .await
+        .unwrap();
+    chats::update_chat(&state, OWNER, &chat.id, &update)
+        .await
+        .unwrap();
+    agents
+        .update_one(
+            doc! {"_id":&other.id},
+            doc! {"$set":{"org_maintainer_user_ids":[]},"$inc":{"org_maintain_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let restore = chats::ChatSettings {
+        agent_id: Some("default".into()),
+        ..Default::default()
+    };
+    assert!(
+        chats::update_chat(&state, OWNER, &chat.id, &restore)
+            .await
+            .is_err()
+    );
+    let saved = db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id":&chat.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.agent_id, Some(other.id));
+    server.abort();
+    db.drop().await.unwrap();
 }
 
 pub(super) async fn org_channel(
@@ -428,10 +539,24 @@ async fn ensure_org_partition(state: &AppState, key: &str) {
 
 #[tokio::test]
 async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_the_org() {
+    cold_guest_model_setup(false).await;
+}
+
+#[tokio::test]
+async fn native_discord_notification_releases_org_guest_for_next_paid_answer() {
+    cold_guest_model_setup(true).await;
+}
+
+async fn cold_guest_model_setup(native: bool) {
     use tower::ServiceExt;
-    let (mut state, _, old) = setup("org_channel_cold_model").await;
+    let db_name = if native {
+        "org_guest_discord_deleted"
+    } else {
+        "org_channel_cold_model"
+    };
+    let (mut state, _, old) = setup(db_name).await;
     old.abort();
-    let (row, key, agent, org_id) = org_channel(&state, false).await;
+    let (row, key, agent, org_id) = org_channel(&state, native).await;
     crate::test_utils::set_test_approval_preference(&state.db, &org_id, false).await;
     crate::billing_integration_tests::create_usage_index(&state.db).await;
     state.billing = Arc::new(crate::billing_integration_tests::billing_service(
@@ -539,18 +664,20 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         )
         .await
         .unwrap();
-    assert_eq!(
-        put_binding(
-            State(state.clone()),
-            Path("bnd_turns".into()),
-            bearer(&key),
-            Json(binding_body(&key, OWNER))
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    ensure_org_partition(&state, &key).await;
+    if !native {
+        assert_eq!(
+            put_binding(
+                State(state.clone()),
+                Path("bnd_turns".into()),
+                bearer(&key),
+                Json(binding_body(&key, OWNER))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        ensure_org_partition(&state, &key).await;
+    }
     // A historical untouched binding is enabled without requiring a wallet.
     state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&row.id},
         doc! {"$set":{"org_specialist.guests.enabled":false,"org_specialist.guests.revision":""}}).await.unwrap();
@@ -563,7 +690,17 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         .await
         .unwrap();
     assert_eq!(settings["health"]["action"], "enable_billing");
-    let unavailable = event("Hello without billing", "7", "org-default-no-wallet");
+    let message = |id: &str, text: &str| {
+        if native {
+            let mut request = native_tests::native_event(&row, id, text);
+            request["event_context"]["activity"]["actor"]["id"] = json!("8");
+            request["metadata"]["cmaeg.actor"] = json!("8");
+            request
+        } else {
+            event(text, "7", id)
+        }
+    };
+    let unavailable = message("501", "Hello without billing");
     let reply = body_text(respond(&state, &key, &unavailable, "org-default-no-wallet").await).await;
     assert!(reply.contains(org::UNAVAILABLE), "{reply}");
     assert!(observations.lock().await.is_empty());
@@ -583,7 +720,23 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         );
     }
     state.billing.ensure_wallet(&org_id).await.unwrap();
-    let body = event("Hello, first visitor", "7", "org-cold-first");
+    if native {
+        let delete = native_tests::deletion(&row, "501", "8");
+        let accepted = respond(&state, &key, &delete, "guest-delete").await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let id = accepted.headers()["x-cma-response-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        drop(accepted); // CMA releases the POST observer and resumes by response ID.
+        let response =
+            native_responses::snapshot(State(state.clone()), Path(id), bearer(&key)).await;
+        let snapshot: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(snapshot["status"], "completed");
+        assert_eq!(snapshot["output"], json!([]));
+        assert!(observations.lock().await.is_empty());
+    }
+    let body = message("502", "Hello, first visitor");
     let response = body_text(respond(&state, &key, &body, "org-cold-first").await).await;
     assert!(
         response.contains("Organization answer"),
@@ -626,6 +779,7 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
     let input = seen[1]["input"].as_str().unwrap();
     assert!(input.contains("The linking administrator supplies transport only"));
     assert!(input.contains("Guest model and tool use is charged to the organization"));
+    assert!(input.contains("including writes that meet the tool's stated conditions"));
     assert!(
         input.contains(
             "Guest execution cannot use account tools, machines, saved logins or approvals"
@@ -776,6 +930,7 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             service_ids: Some(vec![]),
             daily_credits: Some(crate::models::credits::Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -877,12 +1032,13 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
             sink.lock().await[observation_index] = json!({"conversation_id":conversation.id,"api_key_id":key.id,"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
+                "request_key":headers["idempotency-key"].to_str().unwrap(),
                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
                 "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context});
             completed_calls.send_modify(|count| *count += 1);
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":if status.is_success(){"response.completed"}else{"response.failed"},"sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
-                "conversation":{"id":session},"status":if status.is_success(){"completed"}else{"failed"},"error":if status.is_success(){Value::Null}else{json!({"code":"model_error","message":"Model callback refused"})},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
+                "conversation":{"id":session},"status":if status.is_success(){"completed"}else{"failed"},"error":if status.is_success(){Value::Null}else{json!({"code":"model_error","message":"Model callback refused"})},"output":if status.is_success(){json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}])}else{json!([])}}});
             let setup = conversation.guest_model_setup;
             axum::response::Sse::new(futures::stream::once(async move {
                 if setup {futures::future::pending::<()>().await;}
@@ -995,6 +1151,16 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
         )
         .await
         .unwrap();
+
+    if route_retry {
+        let settings = chats::ChatSettings {
+            notice_language: Some("zh-CN".into()),
+            ..Default::default()
+        };
+        chats::update_chat(&state, OWNER, &parent.id, &settings)
+            .await
+            .unwrap();
+    }
 
     let mut event_id = Uuid::new_v4().to_string();
     let facts = ChannelThreadFacts {
@@ -1188,6 +1354,12 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             .await
             .unwrap()
             .unwrap();
+        if route_retry {
+            assert_eq!(
+                event.delivery.as_ref().unwrap().notice_language,
+                Some(NoticeLanguage::Simplified)
+            );
+        }
         assert!(event.turn_id.is_some());
         let guest = state
             .db
@@ -1313,6 +1485,24 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
     let refused: Vec<_> = seen.iter().filter(|call| call["status"] != 200).collect();
     assert_eq!(refused.len(), usize::from(route_retry));
     if route_retry {
+        let repaired = &seen[3];
+        assert_eq!(refused[0]["conversation_id"], repaired["conversation_id"]);
+        assert_eq!(repaired["status"], 200);
+        assert_ne!(
+            refused[0]["request_key"], repaired["request_key"],
+            "the repaired model execution must not replay the rejected request"
+        );
+        let Json(health) = crate::handlers::channel_bots::health(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(OWNER),
+            Path(row.channel_bot_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            health.diagnostics.inbound_outcomes["guest_model_route_mismatch"].count,
+            1
+        );
         assert!(
             refused[0]["body"]
                 .as_str()
@@ -1516,6 +1706,7 @@ async fn org_channel_native_discord_recovery_keeps_member_identity_and_refuses_r
             &stored.id,
             "already-settled",
             stored.reply_channel.as_ref().unwrap(),
+            None,
         )
         .await
         .unwrap()
@@ -1637,6 +1828,7 @@ async fn org_channel_signed_relay_uses_verified_actor_and_deduplicates() {
             "conversation":{"id":row.route_id,"platform_id":"org-private","type":"private"},
             "sender":{"platform_id":"org-member"},"content":{"type":"text","text":text},
             "raw_platform_data":{"event":{"sender":{"sender_type":"user"}}}});
+        store_direct_source(&state, &row, &body).await;
         let bytes = serde_json::to_vec(&body).unwrap();
         let token = crate::crypto::jwt::generate_relay_callback_token(
             &state.jwt_keys,

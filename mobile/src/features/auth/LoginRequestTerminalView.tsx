@@ -12,12 +12,14 @@ import type { LoginTerminal } from "./loginRequestResolver";
 
 export function LoginRequestTerminalView({
   state,
+  clientKind,
   inSheet,
   onDone,
   onRestart,
   disabled = false,
 }: {
   state: LoginTerminal;
+  clientKind?: string;
   inSheet: boolean;
   onDone: () => void;
   onRestart: () => void;
@@ -30,7 +32,9 @@ export function LoginRequestTerminalView({
     {
       approved: [
         "Login approved",
-        "Return to the requesting device to continue.",
+        clientKind === "browser"
+          ? "Return to your browser to continue."
+          : "Return to where you started signing in.",
       ],
       denied: [
         "Request denied",

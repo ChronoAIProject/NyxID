@@ -1,5 +1,7 @@
 # Remote Nyx Machine MVP：Agent Sandbox 托管方案
 
+> **Status:** Historical — design record with layered amendments; parts no longer match the code. Current spec: [Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
+
 ## Backend Kubernetes credentials (2026-10-15 scoped goal and acceptance)
 
 Add explicitly selected Google metadata access-token authentication for trusted
@@ -34,7 +36,7 @@ receives them. Existing untrusted metadata/private-network restrictions remain.
 | M3 actual consumers | Sandbox API and workload verifier use Bearer, including separately reconstructed production factories sharing one cache; TLS/CA and selected-mode readiness |
 | M4 bootstrap boundary | Original Pod-bound Kubernetes token stays in TokenReview with audience `nyxid-remote-machine-v1`; Google token is only Kubernetes request authorization; UID/owner/generation/epoch/fence checks remain |
 | M5 disclosure and regression | Redacted diagnostics; existing metadata restrictions and relevant native lifecycle/bootstrap regression tests; identify real Rust paths versus HTTP/TLS doubles |
-| M6 environment pending | Verify actual Google `chrono-nyxid` principal, target Kubernetes permissions, API reachability and CA in target environment; existing `nyxid-machine-manager` Kubernetes ServiceAccount RBAC is not evidence of Google-principal authorization |
+| M6 environment pending | Verify the principal of the backend's Google service account, target Kubernetes permissions, API reachability and CA in target environment; existing `nyxid-machine-manager` Kubernetes ServiceAccount RBAC is not evidence of Google-principal authorization |
 
 Update these goal/MVP/acceptance contracts before implementation source. Local
 fixtures do not establish real metadata identity or GKE permissions. This task
@@ -127,7 +129,7 @@ npm --prefix frontend test -- --run remote-machine use-machines machines.test.ts
 
 ## 0c. 单一当前实现（2026-10-15，实施前优先合同）
 
-owner 已确认开发阶段 v1 从未部署。本次仅收敛新增 Remote Machine 规格和政策，不保留历史规格、模板、报价、展示或迁移兼容。当前内部标识唯一为：profile `remote-machine`、产品政策 `remote-machine-mvp`、单机数据政策 `remote-machine-data`、账号删除政策 `machine-data`。字段名称不变；既有 API、签名、AAD、deadline、Billing 费率/账本协议版本不变。
+owner 已确认开发阶段 v1 从未部署。本次仅收敛新增 Remote Machine 规格和政策，不保留历史规格、模板、报价、展示或迁移兼容。当前内部标识唯一为：profile `remote-machine`、产品政策 `remote-machine-mvp`、单机数据政策 `remote-machine-data`、账号删除政策 `machine-data-provider-revocation-v2`。字段名称不变；既有 API、签名、AAD、deadline、Billing 费率/账本协议版本不变。
 
 固定 **2 vCPU、2 GiB RAM、20 GiB `/workspace`**；临时容量未声明。Commands/Files 默认启用，Browser/Computer 可选，Computer 依赖 Browser。个人/免费/付费、费用、保留、暂停保盘不收费和手动恢复政策不变。原生生命周期与平台延期边界不变；镜像入口按 0d 整理为原始普通 Machine 与包含 Heca/CMA 的完整 hosted 目标。
 

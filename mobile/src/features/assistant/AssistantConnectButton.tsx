@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { findNodeHandle, Pressable, Text, View } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -26,6 +28,7 @@ export function AssistantConnectButton({
   href?: string;
   onPress: (trigger?: number) => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const anchor = useRef<View>(null);
   const focused = useIsFocused();
@@ -58,7 +61,8 @@ export function AssistantConnectButton({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={state.label}
-        accessibilityHint={state.disabled ? state.detail : "Opens a secure NyxID page"}
+        accessibilityHint={state.disabled ? state.detail : translateApp("Opens a secure NyxID page")
+        }
         accessibilityState={{ disabled: state.disabled }}
         disabled={state.disabled}
         onPress={() => {
@@ -82,7 +86,9 @@ export function AssistantConnectButton({
           shadowOffset: { width: 0, height: 1 },
         })}
       >
-        {slug ? <ServiceIcon slug={slug} size="md" color={colors.textPrimary} /> : null}
+        {slug ? (
+          <ServiceIcon slug={slug} size="md" color={colors.textPrimary} />
+        ) : null}
         <Text
           numberOfLines={1}
           style={{

@@ -202,15 +202,32 @@ sanitized attachment label, and supplies the mandatory JSON-string `extra` with
 match. Success requires HTTP 2xx, `code: 0` and a nonempty `data.file_token`;
 the upload does not create a Base record.
 
+Original safe filenames, including meaningful extensionless names and a newly
+supplied literal `attachment`, are preserved. New human/Lark uploads retain
+optional filename provenance; absent provenance keeps legacy rows compatible.
+Missing names and ambiguous legacy generic `attachment` labels receive a canonical suffix
+from the stored content type: PNG/JPEG/GIF/WebP, PDF, DOCX, plain text, Markdown,
+CSV, JSON and explicitly recognized audio/video types. Opaque or unknown types
+keep a generic name. Filename bounds retain the original suffix when truncating
+a named original, including browser uploads before retention. Explicit `file_name` overrides are preserved exactly. Direct
+uploads and managed record-with-attachments operations share this default policy;
+the file bytes and content identity do not change. See issue #2453.
+
 Attachment access is granted only by the compiled overlay's trusted projection
 on matching stored SYSTEM catalog operations for `api-lark`, `api-lark-bot`,
 `api-feishu` and `api-feishu-bot`. Custom services, edited contracts and mounted
 specifications, including a mounted copy of the hosted overlay, cannot grant
 this capability. User uploads retain their live conversation/key/retention checks;
 tool images retain their producing-live-turn fence. Consent binds the exact
-canonical multipart bytes and boundary content type. Body-constrained operation
-scopes still require JSON and therefore refuse this multipart upload: they cannot
-constrain its Base through `parent_node`. The upload is excluded from
+canonical multipart bytes and boundary content type. When admission to this live-chat
+operation requires a body limit, NyxID checks the caller's JSON arguments before
+attachment lookup. Uploads authorized without a body limit retain the original
+multipart encoding and confirmation identity. To pin
+the destination Base, require an exact `parent_node` and declare
+`attachment_id` and `parent_type` in the same closed object. NyxID uses those
+arguments to resolve the file and write the multipart fields. During a rolling
+upgrade, older replicas still return `body requires application/json` for a
+body-limited upload. The upload is excluded from
 `/mcp/config`, exact-operation views and descriptors, and refuses non-chat,
 feature-off, exact, durable and async execution before provider effects. Existing
 `bitable_record_create` discovery and JSON execution remain unchanged.

@@ -129,12 +129,35 @@ Readiness checks the selected configuration, then existing async API probes
 exercise actual credentials/authorization; metadata mode never requires a token
 file. Managed bootstrap still uses a Pod-bound Kubernetes token with audience
 `nyxid-remote-machine-v1`. Tokens remain backend-only; untrusted metadata/network
-restrictions are not relaxed. Google `chrono-nyxid` is not the Kubernetes
-`nyxid-machine-manager` ServiceAccount: its actual principal, target permissions,
-API connectivity and CA must be verified in the deployment environment. See
+restrictions are not relaxed. The backend's Google service account is distinct from the
+Kubernetes `nyxid-machine-manager` ServiceAccount. Verify the Google principal,
+its target permissions, API connectivity and CA in the deployment environment. See
 [Remote Machine deployment](../deploy/remote-machine/README.md) for the distinction,
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
+
+### Remote Machine runtime, funding and bootstrap verification
+
+Missing or invalid required values do not stop the server; they keep managed
+Machine admission closed and appear as platform readiness blockers. The
+signed-ticket verification settings below are not part of that readiness report:
+an invalid or incomplete key makes bootstrap verification unavailable (an error is
+logged) without appearing as a readiness blocker.
+
+| Variable | Requirement | Default | Description |
+|---|---|---|---|
+| `NYXID_REMOTE_MACHINE_IMAGE_DIGEST` | Required | *(none)* | Runtime image pinned by digest, `<image>@sha256:<64 hex>`. Absent or invalid values report `runtime_image_reference_missing_or_invalid`. |
+| `NYXID_REMOTE_MACHINE_BOOTSTRAP_BASE_URL` | Defaulted | `BASE_URL` | HTTPS origin that managed Machines use to bootstrap; credentials, query and fragment are rejected (`bootstrap_origin_invalid`). |
+| `NYXID_REMOTE_MACHINE_FUNDING_WINDOW_SECONDS` | Defaulted | `120` | Funded runtime window length, clamped to 60–300 seconds; unparseable values use the default. |
+| `NYXID_REMOTE_MACHINE_FUNDING_RENEWAL_MARGIN_SECONDS` | Defaulted | `45` | Renewal margin before a window ends, clamped to 20 seconds through half the window; unparseable values use the default. |
+| `NYXID_REMOTE_MACHINE_STORAGE_CLASS` | Optional | Cluster default | Unset or blank omits the PVC `storageClassName`; a configured name must be a valid, existing StorageClass. |
+| `NYXID_REMOTE_MACHINE_RUNTIME_CLASS` | Optional | Node default | Unset or blank omits `runtimeClassName`. |
+| `NYXID_REMOTE_MACHINE_PROVIDER_PUBLIC_KEY_FILE`, `NYXID_REMOTE_MACHINE_PROVIDER_ISSUER` | Mode-specific | *(none)* | Signed workload-ticket verification, used only when `NYXID_REMOTE_MACHINE_KUBE_API` is unset. Set both or neither; one alone or an invalid key keeps admission closed. When `NYXID_REMOTE_MACHINE_KUBE_API` is set, bootstrap uses Kubernetes TokenReview and ignores both. |
+| `NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE`, `NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT`, `NYXID_REMOTE_MACHINE_CONTROLLER_IMAGE_DIGEST`, `NYXID_REMOTE_MACHINE_CONTROLLER_CONTAINER` | Optional | *(none)* | Sandbox controller health on the admin platform view only; the first three are needed together (`sha256:<64 lowercase hex>` digest), the container is optional. Not a lifecycle prerequisite. |
+| `NYXID_REMOTE_MACHINE_KUBELET_ENDPOINTS`, `NYXID_REMOTE_MACHINE_KUBELET_CA_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_TOKEN_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_AUDIENCE` | Optional | *(none)* | Direct kubelet Pod-storage collector. Unset or blank endpoints disable it; once endpoints (a JSON map of node name to HTTPS origin) are set, the other three are required. |
+
+See [Remote Machine deployment](../deploy/remote-machine/README.md) for the
+matching approved-runtime ConfigMap values.
 
 ## Cluster coordination
 
@@ -233,7 +256,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BILLING_ALLOCATIONS_ENABLED` | `false` | Authoring capability for exact credit allocations, service/group ceilings and reclaim during holds. Enable only after upgrading every API replica and billing worker; see the allocation rollout contract below. Does not disable enforcement on existing allocations. |
+| `BILLING_ALLOCATIONS_ENABLED` | `false` | Authoring capability for exact credit allocations, service/group ceilings and reclaim during holds. Enable only after upgrading every API replica and billing worker; see the allocation rollout contract below. Does not disable enforcement on existing allocations. Recipient schedules additionally require `billing:recipient-schedules-v1` fleet readiness. |
 | `BILLING_ENABLED` | `false` | Enables platform usage capture and the prepaid wallet charging gate. When Lago is configured, owner wallets are provisioned idempotently on startup backfill, wallet access, registration best-effort, and first proxy use. |
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
@@ -314,21 +337,21 @@ The Lago client is configured only when both `LAGO_API_URL` and `LAGO_API_KEY` a
 
 Admins may set an exact `credits_per_unit` price in a catalog service's `billing.platform_pricing` block. NyxID owns those prices and synchronizes a stable `platform_svc_{slug}` sum metric plus its standard charge onto `LAGO_PLAN_CODE`. Lago plan updates always round-trip the complete plan and every existing charge because `PUT /plans/{code}` replaces the charge array; existing charge ids and unrelated pricing must never be omitted. The saved row records `pending`, `synced`, or `failed`; failed and pending updates are retried by the reconcile sweep. Traffic switches to the service-specific metric only after synchronization succeeds, so a partial Lago update cannot silently apply a stale local price. Clearing a price immediately restores the legacy metric and persists a cleanup marker until the NyxID charge is removed and the local rate-cache row is marked `retired_at` (retained for historical usage pricing). Catalog services without `platform_pricing` continue using the legacy plan-authored platform metric and rate.
 
-Credit benefits use five financial/policy collections. A separate `credit_allocation_requests` collection stores durable actor-scoped request snapshots for retry-safe issuance; it does not hold funds. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints. Operators with the Credits Manager role may issue and reclaim one-time allocations; schedules and allowance writes remain admin-only. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
+Credit benefits use five base financial/policy collections. A separate `credit_allocation_requests` collection stores durable actor-scoped request snapshots for retry-safe issuance; it does not hold funds. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived calendar walk progress. Recipient schedules retain durable individual anchors in `credit_schedule_recipients`; `credit_schedule_recipient_scans` stores disposable discovery progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints. Operators with the Credits Manager role may issue and reclaim one-time allocations; schedules and allowance writes remain admin-only. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
 
 All three benefits support four recipient kinds: `all_users` (all active person and organization wallets), `selected_users` with `target_user_ids` (specific person or organization wallets), `org_members` with `target_org_ids` (the personal wallets of active people with non-revoked membership in the selected organizations, including viewers), and `groups` with `target_group_ids` (active people's direct `User.group_ids` membership, without parent/child expansion). Organization-member and group-member benefits never fund an organization wallet. Select the organization under `selected_users` to fund its shared wallet instead. Exactly the matching list must be non-empty; all other lists must be empty. Each selected list accepts 1–500 unique ids; organizations must be active organization users and groups must exist. New org/group one-shot expansion is capped at 100,000 resolved recipients before any grants are written; use a schedule for larger populations. Overlapping organizations or groups produce one benefit per person. A kind change in a partial update must supply the matching list; omitted previous lists are cleared.
 
-One-shot grants snapshot recipients at issuance and retain the selected organization/group ids as provenance. Schedule periods freeze the kind and all target lists at claim time, then walk active recipients by user `_id`: organization memberships and users must have been created by the claim timestamp; group recipients use the user creation cutoff. Membership revocation and user deactivation ahead of the cursor take effect while walking. Direct group membership has no join timestamp, so changes to an existing person's groups can affect pages still ahead of the cursor; this is a policy/signup snapshot, not a historical copy of group membership. Allowances use live active organization membership and direct groups for both displayed balances and funding. Removal immediately prevents new matching, but existing `usage_allowance_periods` and already-admitted reservation settlement remain intact. An organization `owner_id` never matches either member kind.
+One-shot grants snapshot recipients at issuance and retain the selected organization/group ids as provenance. Calendar schedule periods freeze the kind and all target lists at claim time, then walk active recipients by user `_id`: organization memberships and users must have been created by the claim timestamp; group recipients use the user creation cutoff. Person signup and successful human sign-in catch up matching open calendar periods. Organization and group joins catch up open periods that target the committed membership. The ordinary worker or admin seeding opens each period. Membership revocation and user deactivation ahead of the cursor take effect while walking. Direct group membership has no join timestamp, so changes to an existing person's groups can affect calendar pages still ahead of the cursor; this is a policy/signup snapshot, not a historical copy of group membership. Recipient schedules continuously enroll eligible owners and renew from their individual UTC anchors. Signup, sign-in and qualifying joins can issue due recipient credits before worker discovery. See [recipient schedules and calendar catch-up](BILLING_EXACT_ACCOUNTING.md#recipient-credit-schedules). Allowances use live active organization membership and direct groups for both displayed balances and funding. Removal immediately prevents new matching, but existing `usage_allowance_periods` and already-admitted reservation settlement remain intact. An organization `owner_id` never matches either member kind.
 
 The new provenance vectors default to empty when absent. This is an additive wire/storage change for upgraded replicas; older replicas cannot deserialize the new enum values. Upgrade all readers and writers before enabling the new target kinds, and migrate every persisted new-kind row before rolling back to older binaries.
 
-An "all users" one-shot grant snapshots active person and organization owners at issuance. A recurring schedule takes that snapshot when it claims the UTC period. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up opens only the current window and never backfills elapsed credits. A paused schedule finishes an open period but opens no later period.
+An "all users" one-shot grant snapshots active person and organization owners at issuance. A calendar schedule takes that snapshot when it claims the UTC period, and a person who signs up or signs in later can receive that opened period's grant immediately. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up uses the current window without backfilling elapsed credits. Only the worker and explicit admin seeding can open a calendar period. A paused calendar schedule finishes an open period but opens no later period; a paused recipient schedule issues nothing until resumed.
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
 
 Credit allocation policies use the existing grant identity and exact Decimal128 credit fields. `BILLING_ALLOCATIONS_ENABLED=true` exposes authoring capability through `GET /api/v1/admin/credits/allocations/summary`. New clients use the dedicated `/allocations` and `/allocations/schedules` mutations so an older server returns an error instead of ignoring service ceilings. Upgrade and drain ALL old API replicas and billing workers before enabling the flag. This is an operator assertion, not automatic worker-version attestation. Turning it off later stops new authoring but does not remove existing ceilings or pending reclaim fences; never restart an older binary while such rows exist. The legacy revoke endpoint retains immediate-only behavior with the flag off and rejects held allocations without marking a pending request. Financial enforcement and recovery always honor persisted policies, regardless of this authoring flag.
 
-Funding order is free allowance units, exact promotional grant credits (soonest expiry first), then exact wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
+Funding order is free allowance units, exact promotional grant credits (soonest expiry first), then exact wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Calendar schedule and allowance daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Recipient schedule windows instead follow each owner's anchor. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
 
 Purchased credits expire 365 days after the Lago wallet transaction settles. Lago v1.50 exposes a wallet-level `expiration_at`, but that expires the entire wallet at one instant and cannot represent independently rolling purchases, so NyxID performs FIFO per-purchase expiry from traceable `remaining_credit_amount` values (with a conservative legacy wallet-balance fallback) and debits Lago with `voided_credits`. A durable operation embedded in `billing_wallet` holds expiring credits out of availability, recovers a provider debit by its unique operation name after a crash, reads back the exact Lago balance, updates top-up history, and confirms every `topup_expired` ledger entry before clearing. The existing reconcile interval drives grant expiry and purchased-credit expiry; no new environment variable is required. Keep `BILLING_RECONCILE_INTERVAL_SECS` non-zero in production.
 
@@ -605,6 +628,7 @@ The same interval schedules an independent [bot-link recovery and delivery sweep
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTH_DEVICE_EIGHT_CHAR_CODES` | `true` | Issue eight-character public codes for installed app compatibility. All backend readers and writers must support the shared public-code namespace. Set `false` to restore prefixed v2 issuance during rollback. Legacy account requests always use eight characters. |
+| `STAGING_QR_PRODUCTION_PUBLIC_KEY_PATH` | unset | On the staging API, path to the PEM containing the active production JWT **public** key. Enables verification of production approvals for staging device logins. See [staging QR rollout](DEVICE_LOGIN_PROTOCOL.md#production-ios-approvals-for-staging). |
 
 When upgrading servers that predate public-code reservations, explicitly deploy
 with this flag off, drain older servers, then enable it across the upgraded fleet.
@@ -666,6 +690,22 @@ Webhook-target dedup uses durable delivery records. Agent and notification targe
 
 FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
+## Verified Mobile Login Links (Optional)
+
+Android uses the existing [Android App Links](#android-app-links) identity settings
+below. iOS uses the existing `APNS_TEAM_ID` and `APNS_TOPIC` to serve
+`/.well-known/apple-app-site-association`; the APNs push private key is not
+required for that file.
+
+The additive `app_verification_uri` in device-login responses requires an HTTPS
+origin-only `BASE_URL`, a different `FRONTEND_URL` origin (scheme, host and port),
+and a configured Apple (nonblank team + topic) or Android app-link identity.
+Identity configuration alone does not verify that external associations work.
+Its `/login/device?user_code=…` fallback redirects to the configured frontend
+approval page; the backend returns 404 for a same-origin target to avoid a loop.
+HTTP local development retains the ordinary web verification QR without a tap target. See the
+[mobile app-link runbook](../mobile/docs/APP_LINKS.md) for rollout and device checks.
+
 ## SMTP (Reserved; currently unused)
 
 | Variable | Description |
@@ -695,13 +735,36 @@ These variables are reserved for a future mail transport. The current NyxID serv
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for authenticated proxy and MCP routes in bytes (100 MiB). Direct and node-routed proxy requests share this raw-body cap; upgraded node agents advertise their capacity, while legacy agents are limited to 11 MiB because their WebSocket frame cap predates capacity negotiation. |
+| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for authenticated proxy, MCP and channel-event routes in bytes (100 MiB). Direct and node-routed proxy requests share this raw-body cap; upgraded node agents advertise their capacity, while legacy agents are limited to 11 MiB because their WebSocket frame cap predates capacity negotiation. |
 | `LLM_MAX_BODY_SIZE` | `10485760` | Maximum request body size for `/api/v1/llm/*` provider and gateway routes in bytes (10 MiB). |
 | `PUBLIC_PROXY_MAX_BODY_SIZE` | `1048576` | Maximum request body size for anonymous public proxy and public MCP routes in bytes (1 MiB). |
 | `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE` | `60` | Dedicated per-IP rate limit for `/public/s/{slug}/{path}` anonymous proxy requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE` | `30` | Dedicated per-IP rate limit for `POST /public/mcp` anonymous MCP discovery requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
+| `NYXID_PROXY_ALLOW_DEV_LOOPBACK` | `false` | Allow direct proxy connections to loopback for local development. Startup rejects this setting in production. |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
 | `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections across the cluster. MongoDB capacity slots enforce the global cap. |
+
+Direct HTTP requests reuse pooled connections. Each new HTTP or WebSocket connection resolves
+and checks every downstream address before dialing. Literal IPs are checked at request selection.
+Ordinary buffered HTTP requests follow up to five redirects on the same scheme, host and port.
+A cross-origin redirect or a redirect for a one-shot upload comes back to the caller with its
+Location. Operation-scoped calls keep their single-destination contract.
+
+A platform Admin can approve a catalog-owned private destination. Check the service ID and its
+base URL in the catalog, then run `nyxid admin catalog private-destination <service-id>`, or
+send `{"approve_private_destination":true}` to `PUT /api/v1/services/{id}`. To revoke it,
+add `--revoke` or send `false`. Approval covers that exact base URL. A change to the base
+requires a fresh approval. Loopback also requires the development opt-in. The audit event
+records the row ID and approval state.
+
+On the first upgraded startup, NyxID approves eligible active catalog rows with private or
+loopback IP literals, single-label names, or names ending in `.svc`, `.cluster.local`,
+`.internal` or `.local`. When a public-looking name resolves privately, the server logs
+the service ID and returns `Direct proxy destination is not permitted`. Check the row and
+approve its catalog base if appropriate. User-chosen private endpoints use a credential node.
+Node transfer and deletion release route bindings. A direct request after release checks its
+destination when used. The Codex translator uses its fixed ChatGPT origin and the deployment's
+configured forward proxy.
 
 Other forwarding surfaces remain intentionally fixed and bounded: assistant direct/chat
 requests are capped at 256 KiB, SSH exec JSON requests at 64 KiB, and Oracle consumer
@@ -747,7 +810,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 |----------|---------|-------------|
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
-| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/send`, `/reply` and `/thread-reply` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64; `/reply` and `/thread-reply` accept at least 2 MiB. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
@@ -873,7 +936,7 @@ unsupported. Roll back only to a v3-compatible binary while retaining its keys.
 After authenticated migration readiness across every field adapter, separately
 turn legacy reads off. Old backups and historical KMS key versions retain their
 own decryption requirements; the currently configured KMS resource can still
-serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.
+serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Verify the retained rows after every serving replica upgrades.
 
 
 ### CMA Sandbox prepaid admission
@@ -900,11 +963,54 @@ introduced. Upgrade all API readers and billing workers before enabling the
 three Sandbox metrics; old enum readers are unsafe
 once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 
+### PDF vision renderer
+
+`NYXID_PDF_RENDERER` optionally supplies an absolute path to `pdftoppm` for native
+development. The backend image installs Poppler for both supported Linux
+architectures and defaults to `/usr/bin/pdftoppm`. The runtime
+`assistant:pdf-vision` feature flag controls fallback; see
+[uploads](chat/10-uploads.md#scanned-pdf-pages) for bounds and rollout.
+
 
 ## Android App Links
 
 `ANDROID_APP_PACKAGE` is the Android application id (for example `fun.chronoai.nyxid`). `ANDROID_APP_SHA256_CERT_FINGERPRINTS` is a comma-separated list of SHA-256 signing-certificate fingerprints, each exactly 32 colon-delimited hexadecimal bytes (`AA:BB:…`). Empty or whitespace-only comma-separated segments are ignored; surrounding whitespace is trimmed and fingerprints are normalized to uppercase and deduplicated. Malformed nonempty values fail startup, consistent with other validated configuration. Missing either value makes `GET /.well-known/assetlinks.json` return 404. With both configured, it returns standard Digital Asset Links JSON with `application/json` and `Cache-Control: public, max-age=300`. These values are public identity metadata.
 
-Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
+Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Mobile `DEV_NATIVE_LINK_HOSTS` and `PROD_NATIVE_LINK_HOSTS` select `api` (default) or `api+frontend`; the latter also requires that active profile's explicit `*_FRONTEND_URL`, never a fallback from the other profile or legal URL. The shared path manifest is `shared/native-app-links.json`. See [business-link configuration](../mobile/docs/APP_LINKS.md#business-links-on-frontend-hosts) and [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
 
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
+
+`MOBILE_SOCIAL_REDIRECT_URIS` lists additional exact mobile account sign-in destinations, separated by commas. The released app's `nyxid://auth/social/callback` works by default. Configure a custom app's complete `<scheme>://auth/social/callback` URI on every replica before distribution. In development an explicitly listed Expo URI may use `exp://<host>:<port>/--/auth/social/callback`. Production refuses Expo returns. Malformed configuration fails at startup.
+
+## Crash diagnostics
+
+See [CRASH_REPORTING.md](CRASH_REPORTING.md) for owner acceptance, project
+settings and readiness required before activation. All diagnostics defaults off.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CRASH_REPORTS_SENTRY_DSN_WEB` | empty | Optional HTTPS Sentry web project DSN; invalid values fail startup. |
+| `CRASH_REPORTS_SENTRY_DSN_MOBILE` | empty | Optional separate mobile project DSN; no vendor SDK on clients. |
+| `CRASH_REPORTS_RETENTION_DAYS` | `30` | Local retention, integer 1–30; empty or whitespace uses the default. |
+| `CRASH_REPORTS_EXPORT_INTERVAL_SECS` | `10` | Export batch cadence, 0 disables worker, maximum 86400; empty or whitespace uses the default. |
+| `CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN` | empty | Build-only symbol upload token; never VITE-prefixed or in runtime image. |
+| `CRASH_ARTIFACTS_SENTRY_ORG` | empty | Build-only Sentry organization. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_WEB` | empty | Build-only web artifact project. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_MOBILE` | empty | Build-only mobile artifact project. |
+| `NYXID_CRASH_ARTIFACT_ID` | generated per mobile build | UUID embedded in `extra.crashArtifactId`; no authority or secret. |
+
+Docker accepts optional BuildKit secret `crash_artifacts_sentry`, a JSON object
+containing the auth-token, organization and web-project variables. Configuring
+only part of the required upload settings fails the build. Runtime export and
+build upload credentials are independent. Vendor projects must have retention
+≤30 days, IP storage prevention and server-side scrubbing on, separate projects,
+and owner acceptance of local-link deletion plus vendor expiry.
+
+`CRASH_REPORTS_EXPORT_INTERVAL_SECS=0` disables crash export even with configured
+DSNs: new rows have export status `disabled`, existing pending rows are not
+worked and TTL-expire, and ingestion health displays “Export disabled”. Web
+private maps are retained only when upload is configured or
+`CRASH_ARTIFACTS_RETAIN=1`; all builds remove public maps and assert no public
+`sourceMappingURL`. The frontend image publication workflow passes optional
+GitHub secret `CRASH_ARTIFACTS_SENTRY` as BuildKit `crash_artifacts_sentry`.
+Missing/empty secrets perform no upload or uploader dependency installation.

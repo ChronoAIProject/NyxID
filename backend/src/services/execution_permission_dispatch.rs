@@ -618,7 +618,7 @@ fn target_digest(target: &proxy_service::ProxyTarget) -> String {
     super::mcp_service::canonical_sha256(json!({
         "catalog":target.service.id,"base":target.base_url,"destination":target.target_id,
         "auth":target.auth_method,"key_name":target.auth_key_name,
-        "catalog_headers":target.catalog_default_headers,"connection_headers":target.user_service_default_headers,
+        "catalog_headers":target.catalog_header_binding(std::convert::identity),"connection_headers":target.user_service_default_headers,
         "policy":target.service.proxy_operation_policy,
         "forward_access_token":target.service.forward_access_token,
         "delegation":target.service.inject_delegation_token,
@@ -814,6 +814,7 @@ pub(crate) fn prepare<'a>(
         {
             proposals::existing_effect(
                 db,
+                context,
                 chat,
                 effect.connection,
                 &digest,
@@ -1026,6 +1027,12 @@ pub(crate) fn prepare<'a>(
                 .copied()
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
+        // Voice can continue through ordinary dispatch when there is no
+        // outstanding approval to request, even without an execution grant.
+        if effect.floors.is_empty() && chat.is_some_and(|c| c.execution_voice_task) {
+            let _ = context.decision.set(Resolution::Gap);
+            return Ok(None);
+        }
         context.observation.stage(diagnostics::Stage::Proposal);
         super::assistant_model_observer::before_approval_request(None).await?;
         chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
@@ -1051,6 +1058,9 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
+            if let Ok(p) = proposals::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
+            }
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
@@ -1102,6 +1112,9 @@ pub(crate) fn prepare<'a>(
                     .await?;
                 }
                 return prepare(state, Some(context), chat, key, effect).await;
+            }
+            if let Ok(p) = proposals::v2::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));
         }
@@ -1436,7 +1449,7 @@ impl Permit {
         let actual = proxy_service::collect_forward_headers_with_defaults(
             headers,
             &[
-                target.catalog_default_headers.as_slice(),
+                target.catalog_headers(),
                 target.user_service_default_headers.as_slice(),
             ],
         );
@@ -1632,6 +1645,31 @@ impl Permit {
         })
     }
 
+    pub(crate) fn single_dispatch(&self) -> bool {
+        self.resume.is_some() || self.one_use()
+    }
+
+    fn one_use(&self) -> bool {
+        matches!(
+            self.grant
+                .execution
+                .as_ref()
+                .and_then(|e| e.v1.as_ref())
+                .map(|c| &c.validity),
+            Some(Validity::Operation { .. })
+        )
+    }
+
+    /// The owner transport proved this attempt did not reach the node.
+    /// The consumed claim remains terminal, including on ordinary caller retry.
+    pub(crate) async fn node_not_sent(&self) -> AppResult<()> {
+        self.finish(ExecutionUseState::NotSent).await?;
+        if let Some(resume) = &self.resume {
+            resume.node_not_sent(&self.db).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn complete(&self, received: bool) -> AppResult<()> {
         self.finish(if received {
             ExecutionUseState::Completed
@@ -1648,14 +1686,7 @@ impl Permit {
     }
 
     async fn finish(&self, state: ExecutionUseState) -> AppResult<()> {
-        if !matches!(
-            self.grant
-                .execution
-                .as_ref()
-                .and_then(|e| e.v1.as_ref())
-                .map(|c| &c.validity),
-            Some(Validity::Operation { .. })
-        ) {
+        if !self.one_use() {
             return Ok(());
         }
         let now = Utc::now();
@@ -1788,6 +1819,7 @@ pub(crate) fn admit_http<'a>(
             &actor,
             owner,
             &target.service.id,
+            Some(connection),
             descriptor,
             auth.approval_requester_type(),
             &auth.approval_requester_id(),
@@ -1847,7 +1879,7 @@ pub(crate) fn admit_http<'a>(
                     &proxy_service::collect_forward_headers_with_defaults(
                         headers,
                         &[
-                            target.catalog_default_headers.as_slice(),
+                            target.catalog_headers(),
                             target.user_service_default_headers.as_slice(),
                         ],
                     ),
@@ -1936,7 +1968,7 @@ pub(crate) fn admit_http<'a>(
             proxy_service::collect_forward_headers_with_defaults(
                 headers,
                 &[
-                    target.catalog_default_headers.as_slice(),
+                    target.catalog_headers(),
                     target.user_service_default_headers.as_slice(),
                 ],
             )
@@ -2011,6 +2043,7 @@ pub(crate) fn approval<'a>(
     actor: &'a str,
     owner: &'a str,
     catalog: &'a str,
+    connection: Option<&'a str>,
     descriptor: &'a super::operation_descriptor::OperationDescriptor,
     requester_type: Option<&'a str>,
     requester_id: &'a str,
@@ -2030,12 +2063,13 @@ pub(crate) fn approval<'a>(
                 requester_id,
                 bypass,
                 auto_connected,
+                connection,
                 chat,
             )
             .await;
         };
         let key = format!(
-            "{actor}:{owner}:{catalog}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}"
+            "{actor}:{owner}:{catalog}:{connection:?}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}"
         );
         let mut cache = context.policies.lock().await;
         if let Some((_, value)) = cache.iter().find(|(k, _)| k == &key) {
@@ -2070,6 +2104,7 @@ pub(crate) fn approval<'a>(
             requester_id,
             bypass,
             auto_connected,
+            connection,
             chat,
         )
         .await?;

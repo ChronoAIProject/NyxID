@@ -91,96 +91,181 @@ pub(crate) async fn update_as(
     row: &NyxbotChannel,
     manager: &str,
     settings: &AccessSettings,
+    callback: Option<&str>,
+) -> AppResult<u64> {
+    update_inner(db, row, manager, settings, false, callback).await
+}
+
+/// Customer setup confirms one specialist and assignment revision before
+/// evaluating readiness. Opening access must commit against that exact choice.
+pub(crate) async fn update_confirmed_as(
+    db: &Database,
+    row: &NyxbotChannel,
+    manager: &str,
+    settings: &AccessSettings,
+    callback: Option<&str>,
+) -> AppResult<u64> {
+    update_inner(db, row, manager, settings, true, callback).await
+}
+
+async fn update_inner(
+    db: &Database,
+    row: &NyxbotChannel,
+    manager: &str,
+    settings: &AccessSettings,
+    confirm_assignment: bool,
+    callback: Option<&str>,
 ) -> AppResult<u64> {
     settings.validate()?;
+    #[cfg(test)]
+    if confirm_assignment {
+        super::durable_wake_tests::after("channel_access_before_confirmed_update").await;
+    }
     let context = (
         db.clone(),
         row.clone(),
         settings.clone(),
         manager.to_owned(),
+        confirm_assignment,
+        callback.map(str::to_owned),
     );
-    super::transaction_service::run_db_only(db, &context, |tx, (db, row, settings, manager)| {
-        Box::pin(async move {
-            if row.org_specialist.is_some() {
-                super::org_channel_service::fence_management(db, tx, row, manager).await?;
-            }
-            if let Some(org) = row.bot_owner_id.as_deref() {
-                super::org_membership_authority::fence_live_member(db, &row.user_id, tx).await?;
-                // Contend with role changes/revocation, not just a snapshot read.
-                let changed = db
-                    .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
-                    .update_one(
-                        doc! {"org_user_id": org, "member_user_id": &row.user_id,
-                            "role": "admin", "revoked_at": null},
-                        doc! {"$inc": {"channel_settings_revision": 1_i64}},
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |tx, (db, row, settings, manager, confirm_assignment, callback)| {
+            Box::pin(async move {
+                let row = if settings.private_chats.as_deref() == Some("everyone")
+                    || settings.private_chat_posts == Some(true)
+                {
+                    super::nyxbot_channel_query_service::fence_meta_default(
+                        db,
+                        row,
+                        callback.as_deref(),
+                        tx,
                     )
-                    .session(&mut *tx)
-                    .await?;
-                if changed.matched_count != 1 {
-                    return Err(AppError::Forbidden("org_access_lost".into()));
-                }
-            }
-            let mut set = doc! {"updated_at": bson::DateTime::now()};
-            if let Some(access) = &settings.private_chats {
-                set.insert("private_chats", access);
-            }
-            if let Some(posts) = settings.private_chat_posts {
-                set.insert("private_chat_posts", posts);
-            }
-            let mut channel_filter = doc! {
-                "_id": &row.id, "user_id": &row.user_id, "bot_owner_id": &row.bot_owner_id,
-            };
-            // Preserve the ability to narrow private access on a failed link.
-            if settings.private_chats.as_deref() == Some("everyone")
-                || settings.private_chat_posts == Some(true)
-            {
-                channel_filter.insert("status", doc! {"$in": ["active", "pending"]});
-            }
-            let changed = db.collection::<Document>(CHANNELS)
-                .update_one(channel_filter, doc! {"$set": set,"$inc":{"execution_policy_revision":1_i64}})
-                .session(&mut *tx)
-                .await?;
-            if changed.matched_count != 1 {
-                return Err(AppError::Conflict("Channel authority changed".into()));
-            }
-            if !settings.apply_to_existing {
-                return Ok(0);
-            }
-            let allow = settings.private_chat_posts.expect("validated setting");
-            let mut filter = doc! {
-                "channel_id": &row.id, "user_id": &row.user_id, "kind": "private",
-                "record_scope": {"$ne": "platform_thread"}, "platform_thread_id": null,
-                "partition": {"$not": {"$regex": "^custom:"}}, "allow_posts": {"$ne": allow},
-            };
-            let threads = db.collection::<Document>(THREADS);
-            let mut cursor = threads.find(filter.clone())
-                .projection(doc! {"_id": 1})
-                .limit(APPLY_LIMIT + 1)
-                .max_time(std::time::Duration::from_secs(5))
-                .session(&mut *tx)
-                .await?;
-            let mut ids = Vec::new();
-            while let Some(chat) = cursor.next(&mut *tx).await.transpose()? {
-                ids.push(chat.get_str("_id")
-                    .map_err(|_| AppError::Internal("Invalid chat identity".into()))?
-                    .to_owned());
-            }
-            if ids.len() > APPLY_LIMIT as usize {
-                return Err(AppError::ValidationError(format!(
-                    "At most {APPLY_LIMIT} private chats can change at once; save the default without apply_to_existing and update existing chats individually"
-                )));
-            }
-            filter.insert("_id", doc! {"$in": ids});
-            Ok(threads.update_many(
+                    .await?
+                } else {
+                    row.clone()
+                };
+                update_in_session(db, tx, &row, manager, settings, *confirm_assignment, false).await
+            })
+        },
+    )
+    .await
+}
+
+/// Apply settings using the caller's existing authorized transaction.
+pub(crate) async fn update_in_session(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    row: &NyxbotChannel,
+    manager: &str,
+    settings: &AccessSettings,
+    confirm_assignment: bool,
+    management_fenced: bool,
+) -> AppResult<u64> {
+    if row.org_specialist.is_some() {
+        if management_fenced {
+            super::org_channel_service::fence_binding(db, tx, row).await?;
+        } else {
+            super::org_channel_service::fence_management(db, tx, row, manager).await?;
+        }
+    }
+    if let Some(org) = row.bot_owner_id.as_deref().filter(|_| !management_fenced) {
+        super::org_membership_authority::fence_live_member(db, &row.user_id, tx).await?;
+        // Contend with role changes/revocation, not just a snapshot read.
+        let changed = db
+            .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": org, "member_user_id": &row.user_id,
+                "role": "admin", "revoked_at": null},
+                doc! {"$inc": {"channel_settings_revision": 1_i64}},
+            )
+            .session(&mut *tx)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Forbidden("org_access_lost".into()));
+        }
+    }
+    let mut set = doc! {"updated_at": bson::DateTime::now()};
+    if let Some(access) = &settings.private_chats {
+        set.insert("private_chats", access);
+    }
+    if let Some(posts) = settings.private_chat_posts {
+        set.insert("private_chat_posts", posts);
+    }
+    let mut channel_filter = doc! {
+        "_id": &row.id, "user_id": &row.user_id, "bot_owner_id": &row.bot_owner_id,
+    };
+    if confirm_assignment {
+        channel_filter.insert("agent_id", &row.agent_id);
+        channel_filter.insert("channel_bot_id", &row.channel_bot_id);
+        channel_filter.insert(
+            "$expr",
+            doc! {"$eq": [
+                {"$ifNull": ["$execution_policy_revision", 0_i64]},
+                row.execution_policy_revision,
+            ]},
+        );
+    }
+    if row.org_specialist.is_none() {
+        channel_filter.insert("org_specialist", bson::Bson::Null);
+    }
+    // Preserve the ability to narrow private access on a failed link.
+    if settings.private_chats.as_deref() == Some("everyone")
+        || settings.private_chat_posts == Some(true)
+    {
+        channel_filter.insert("status", doc! {"$in": ["active", "pending"]});
+    }
+    let changed = db
+        .collection::<Document>(CHANNELS)
+        .update_one(
+            channel_filter,
+            doc! {"$set": set,"$inc":{"execution_policy_revision":1_i64}},
+        )
+        .session(&mut *tx)
+        .await?;
+    if changed.matched_count != 1 {
+        return Err(AppError::Conflict("Channel authority changed".into()));
+    }
+    if !settings.apply_to_existing {
+        return Ok(0);
+    }
+    let allow = settings.private_chat_posts.expect("validated setting");
+    let mut filter = doc! {
+        "channel_id": &row.id, "user_id": &row.user_id, "kind": "private",
+        "record_scope": {"$ne": "platform_thread"}, "platform_thread_id": null,
+        "partition": {"$not": {"$regex": "^custom:"}}, "allow_posts": {"$ne": allow},
+    };
+    let threads = db.collection::<Document>(THREADS);
+    let mut cursor = threads
+        .find(filter.clone())
+        .projection(doc! {"_id": 1})
+        .limit(APPLY_LIMIT + 1)
+        .max_time(std::time::Duration::from_secs(5))
+        .session(&mut *tx)
+        .await?;
+    let mut ids = Vec::new();
+    while let Some(chat) = cursor.next(&mut *tx).await.transpose()? {
+        ids.push(
+            chat.get_str("_id")
+                .map_err(|_| AppError::Internal("Invalid chat identity".into()))?
+                .to_owned(),
+        );
+    }
+    if ids.len() > APPLY_LIMIT as usize {
+        return Err(AppError::ValidationError(format!(
+            "At most {APPLY_LIMIT} private chats can change at once; save the default without apply_to_existing and update existing chats individually"
+        )));
+    }
+    filter.insert("_id", doc! {"$in": ids});
+    Ok(threads.update_many(
                     filter,
                     doc! {"$set": {"allow_posts": allow, "updated_at": bson::DateTime::now()},"$inc":{"execution_policy_revision":1_i64}},
                 )
                 .session(&mut *tx)
                 .await?
                 .modified_count)
-        })
-    })
-    .await
 }
 
 /// Remove the provider's exact chat, its derived delivery state and feed rows.

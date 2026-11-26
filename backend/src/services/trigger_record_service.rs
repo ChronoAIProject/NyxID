@@ -31,7 +31,7 @@ pub(crate) async fn encrypt_secret(
     if !TRIGGER_FIELDS.contains(&field) || plain.is_empty() || plain.len() > 8192 {
         return Err(invalid());
     }
-    super::record_field_service::encrypt(keys, TRIGGERS, id, owner, field, plain).await
+    crate::crypto::record_field::encrypt(keys, TRIGGERS, id, owner, field, plain).await
 }
 pub(crate) async fn secret(
     keys: &EncryptionKeys,
@@ -44,7 +44,7 @@ pub(crate) async fn secret(
         _ => return Err(invalid()),
     }
     .ok_or_else(invalid)?;
-    let plain = super::record_field_service::decrypt(
+    let plain = crate::crypto::record_field::decrypt(
         keys,
         TRIGGERS,
         &row.id,
@@ -65,7 +65,7 @@ pub(crate) async fn encrypt_envelope(
     plain: &[u8],
 ) -> AppResult<Vec<u8>> {
     validate_envelope(row, plain)?;
-    super::record_field_service::encrypt_context(
+    crate::crypto::record_field::encrypt_context(
         keys,
         &RecordContext::new(
             DELIVERIES,
@@ -114,7 +114,7 @@ pub(crate) async fn envelope(
             invalid()
         });
     };
-    let plain = super::record_field_service::decrypt_context(
+    let plain = crate::crypto::record_field::decrypt_context(
         keys,
         &RecordContext::new(
             DELIVERIES,
@@ -174,7 +174,7 @@ pub(crate) async fn verify_current_snapshot(
             (TRIGGER_FIELDS[1], row.delivery_secret_encrypted.as_deref()),
         ] {
             if let Some(bytes) = bytes {
-                super::record_field_service::verify_current(
+                crate::crypto::record_field::verify_current(
                     keys,
                     TRIGGERS,
                     &row.id,

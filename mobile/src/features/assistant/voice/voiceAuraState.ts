@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import type { VoicePreferences, VoiceSnapshot } from "./voiceContracts";
 
 /** What the call is doing right now; the status line names it, the aura shows it. */
@@ -53,17 +54,18 @@ export function voiceAuraStatus(
 ) {
   switch (phase) {
     case "connecting":
-      return "Connecting…";
+      return translateApp("Connecting…");
     case "listening":
-      return "Listening";
+      return translateApp("Listening");
     case "thinking":
-      return "Thinking";
+      return translateApp("Thinking");
     case "speaking":
-      return "Speaking";
+      return translateApp("Speaking");
     case "muted":
-      return "Muted";
+      return translateApp("Muted");
     default:
-      return inputMode === "push_to_talk" ? "Ready" : "Connected";
+      return inputMode === "push_to_talk" ? translateApp("Ready")
+        : translateApp("Connected");
   }
 }
 

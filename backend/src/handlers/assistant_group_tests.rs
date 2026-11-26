@@ -1463,6 +1463,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
             execution_enrollment: false,
             execution_parent: None,
             channel_context: None,
+            capacity: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),

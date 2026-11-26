@@ -424,6 +424,7 @@ fn release(state: &AppState, catalog: &Catalog) -> NyxbotGatewayRelease {
         state: ReleaseState::ReviewRequired,
         reason: ReleaseReason::Disconnect,
         dispatch_started_at: None,
+        create_provider_refused: false,
         provisional_expires_at: None,
         due_at: Some(now),
         next_attempt_at: None,

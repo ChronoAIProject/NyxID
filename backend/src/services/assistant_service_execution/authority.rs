@@ -88,7 +88,7 @@ fn connection_projection<'a>(
         .await?;
         let nodes =
             crate::services::org_agent_service::key_nodes(db, &key, access.as_deref()).await?;
-        let mode = if let Some(chat) = acks::for_key(db, &key.user_id, Some(api_key_id)).await? {
+        let mode = if let Some(chat) = acks::chat_for_authenticated_key(db, &key, None).await? {
             acks::effective_access_mode(db, &chat).await?
         } else {
             crate::services::assistant_settings_service::get(db, &key.user_id)

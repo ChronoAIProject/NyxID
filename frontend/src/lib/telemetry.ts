@@ -12,8 +12,9 @@ let generation = 0;
 let admissions = 0;
 const MAX_ADMISSIONS = 16;
 
-function isDntActive(): boolean {
+export function isDntActive(): boolean {
   if (typeof navigator === "undefined") return false;
+  if ((navigator as Navigator & { globalPrivacyControl?: boolean }).globalPrivacyControl === true) return true;
   // Modern browsers: navigator.doNotTrack
   const nav = (navigator as Navigator & { msDoNotTrack?: string }).doNotTrack;
   if (nav === "1" || nav === "yes") return true;
@@ -36,11 +37,12 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /\/verify-email\/[^/]+/,
   /\/reset-password\/[^/]+/,
   /\/oauth\/callback/,
+  /^\/channel-bots\/meta-callback(?:\/|$)/,
   /^\/oauth-complete$/,
   /\/approve\/[^/]+/,
 ];
 
-function isSensitivePath(path: string): boolean {
+export function isSensitivePath(path: string): boolean {
   return SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(path));
 }
 

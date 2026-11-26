@@ -218,6 +218,8 @@ test("Quick actions precede Workspace with no placeholders and a live Activity p
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 10,
+    flexShrink: 0,
+    minWidth: 52,
     color: lightColors.textPrimary,
   });
   assert.deepEqual(

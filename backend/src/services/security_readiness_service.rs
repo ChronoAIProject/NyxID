@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Runtime {
+    turn_restart_ready_until: Arc<Mutex<[Option<Instant>; 3]>>,
     pub identity: ReplicaIdentity,
     pub config: RolloutConfig,
     pub platform_policy_required: bool,
@@ -35,6 +36,7 @@ impl Runtime {
         platform_policy_required: bool,
     ) -> Self {
         Self {
+            turn_restart_ready_until: Default::default(),
             identity,
             config,
             platform_policy_required,
@@ -99,6 +101,29 @@ pub(crate) fn local_generation() -> Option<&'static str> {
         .get()
         .map(|runtime| runtime.identity.generation_id.as_str())
 }
+
+pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v2";
+pub(crate) const TEAM_HANDOFF: &str = "assistant:turn-handoff-v3";
+pub(crate) const CHAT_HANDOFF: &str = "assistant:turn-handoff-v4";
+
+pub(crate) fn turn_restart_enrollment_ready() -> bool {
+    handoff_ready(0)
+}
+
+pub(crate) fn team_restart_enrollment_ready() -> bool {
+    handoff_ready(1)
+}
+
+pub(crate) fn chat_restart_enrollment_ready() -> bool {
+    handoff_ready(2)
+}
+
+fn handoff_ready(index: usize) -> bool {
+    RUNTIME
+        .get()
+        .and_then(|local| local.turn_restart_ready_until.lock().ok()?[index])
+        .is_some_and(|until| Instant::now() < until)
+}
 fn runtime() -> AppResult<&'static Runtime> {
     RUNTIME.get().ok_or(AppError::SecurityReadinessUnavailable)
 }
@@ -115,7 +140,11 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::billing::schedules::recipients::READINESS,
     super::assistant_wake_service::READINESS,
+    TURN_HANDOFF,
+    TEAM_HANDOFF,
+    CHAT_HANDOFF,
     super::assistant_platform_model::READINESS,
     super::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
     super::platform_model_service::REGISTRY_READINESS,
@@ -125,6 +154,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::billing::model_tariffs::READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
+    super::feature_flag_service::ORG_AGENT_ACCESS_FLAG_KEY,
     super::org_channel_service::FLAG,
     super::org_channel_service::GUEST_GRANTS_READINESS,
     "assistant:shared-agents",
@@ -147,6 +177,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::execution_permission_channel::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
+    super::org_service_approvers::FLAG,
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
@@ -154,6 +185,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::nyxbot_dispatch_identity::READINESS,
     super::channel_media_authority::READINESS,
     super::billing::usage_comparison::coverage::READINESS,
+    super::feature_flag_service::CRASH_REPORTS_FLAG_KEY,
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 pub(crate) const MAX_AGE_SECS: i64 = 45;
@@ -251,7 +283,28 @@ pub async fn observe_with_automation(
     if automation_enabled {
         capabilities.push(AUTOMATION_COMPLETION);
     }
-    observe_for(db, local, &capabilities).await
+    let observed = observe_for(db, local, &capabilities).await;
+    let started = Instant::now();
+    let mut deadlines = [None; 3];
+    for (deadline, capability) in
+        deadlines
+            .iter_mut()
+            .zip([TURN_HANDOFF, TEAM_HANDOFF, CHAT_HANDOFF])
+    {
+        if observed.is_err()
+            || !serving_report_for(db, local, capability)
+                .await
+                .is_ok_and(|report| report.activated && report.serving_ready)
+        {
+            break;
+        }
+        *deadline = Some(started + std::time::Duration::from_secs(15));
+    }
+    *local
+        .turn_restart_ready_until
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = deadlines;
+    observed
 }
 
 #[cfg(test)]
@@ -782,7 +835,60 @@ async fn activation_audit(
     }
 }
 
+/// First activation freezes the service set visible to Grants on existing Meta
+/// bindings. Serialize it with legacy saves that could expand that set.
+pub(crate) async fn fence_org_guest_grants_activation(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<bson::Document>(ROLLOUTS)
+        .update_one(
+            doc! {"_id":"nyxbot-org-guest-grants-activation-fence"},
+            doc! {"$inc":{"revision":1_i64}},
+        )
+        .upsert(true)
+        .session(session)
+        .await?;
+    Ok(())
+}
+
+/// A recorded activation is durable even while an incompatible replica returns.
+/// Inspect the indexed marker under the same transaction as the legacy edit.
+pub(crate) async fn org_guest_grants_activated_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<bool> {
+    Ok(db.collection::<bson::Document>(ROLLOUTS)
+        .find_one(doc! {"record_kind":RECORD_KIND,"capability":super::org_channel_service::GUEST_GRANTS_READINESS})
+        .projection(doc! {"_id":1})
+        .session(session)
+        .await?
+        .is_some())
+}
+
 async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
+    if capability != super::org_channel_service::GUEST_GRANTS_READINESS {
+        return publish_activation(db, capability, None).await;
+    }
+    super::transaction_service::run_db_only(db, &db, |session, db| {
+        Box::pin(async move {
+            fence_org_guest_grants_activation(db, session).await?;
+            publish_activation(
+                db,
+                super::org_channel_service::GUEST_GRANTS_READINESS,
+                Some(session),
+            )
+            .await
+        })
+    })
+    .await
+}
+
+async fn publish_activation(
+    db: &Database,
+    capability: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<bool> {
     let record = SecurityCapabilityActivation {
         id: uuid::Uuid::new_v4().to_string(),
         record_kind: RECORD_KIND.into(),
@@ -791,15 +897,18 @@ async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
     };
     // Equal unique-index predicates plus $setOnInsert make concurrent
     // heartbeats converge on one immutable first activation timestamp.
-    let result = db
-        .collection::<SecurityCapabilityActivation>(ROLLOUTS)
+    let activations = db.collection::<SecurityCapabilityActivation>(ROLLOUTS);
+    let update = activations
         .update_one(
             doc! {"record_kind": RECORD_KIND, "capability": capability},
             doc! {"$setOnInsert": bson::to_document(&record)
             .map_err(|_| AppError::SecurityReadinessUnavailable)?},
         )
-        .upsert(true)
-        .await?;
+        .upsert(true);
+    let result = match session {
+        Some(session) => update.session(session).await?,
+        None => update.await?,
+    };
     Ok(result.upserted_id.is_some())
 }
 
@@ -863,6 +972,8 @@ pub async fn require_flag_enable(db: &Database, key: &str) -> AppResult<()> {
             return Err(AppError::SecurityReadinessUnavailable);
         }
         &model_capabilities[..]
+    } else if key == super::feature_flag_service::TURN_HANDOFF_FLAG_KEY {
+        &[TURN_HANDOFF][..]
     } else if known_capability(key) {
         &individual[..]
     } else {
@@ -892,6 +1003,59 @@ mod diagnostics;
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
     drop(ready_test_replica_inner(db, false, None).await);
+}
+
+#[cfg(test)]
+pub(crate) async fn refresh_test_replica_heartbeat(db: &Database) {
+    let result = db
+        .collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "test-process"},
+            doc! {"$currentDate": {"observed_at": true}},
+        )
+        .await
+        .expect("refresh the fixture replica heartbeat");
+    assert_eq!(
+        result.matched_count, 1,
+        "fixture replica must be registered"
+    );
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_test_handoff_readiness(db: &Database, ready: bool) {
+    ready_test_replica(db).await;
+    stop_test_replica(db).await;
+    if !ready {
+        let legacy = overlapping_test_replica(db).await;
+        remove_test_replica_capability(db, &legacy, TURN_HANDOFF).await;
+    }
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert_eq!(turn_restart_enrollment_ready(), ready);
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_v2_only_test_fleet(db: &Database) {
+    let legacy = overlapping_test_replica(db).await;
+    remove_test_replica_capability(db, &legacy, TEAM_HANDOFF).await;
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert!(turn_restart_enrollment_ready());
+    assert!(!team_restart_enrollment_ready());
+    assert!(!chat_restart_enrollment_ready());
+}
+
+#[cfg(test)]
+pub(crate) async fn observe_v3_only_test_fleet(db: &Database) {
+    let legacy = overlapping_test_replica(db).await;
+    remove_test_replica_capability(db, &legacy, CHAT_HANDOFF).await;
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert!(team_restart_enrollment_ready());
+    assert!(!chat_restart_enrollment_ready());
 }
 
 #[cfg(test)]
@@ -966,6 +1130,7 @@ async fn ready_test_replica_inner(
 ) -> tokio::task::JoinHandle<()> {
     stop_test_replica(db).await;
     let local = Runtime {
+        turn_restart_ready_until: Default::default(),
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
             generation_id: "test-process".into(),

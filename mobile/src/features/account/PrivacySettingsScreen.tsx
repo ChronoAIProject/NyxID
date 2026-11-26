@@ -1,6 +1,8 @@
+import { localizedToast } from "../../i18n/localizedToast";
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useState } from "react";
-import { Switch } from "react-native";
+import { Alert, Switch } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChartColumn, Download, Smartphone } from "lucide-react-native";
 import { Directory, File, Paths } from "expo-file-system";
@@ -54,6 +56,10 @@ export function PrivacySettingsScreen(
       return permission;
     },
   });
+  const diagnosticsEnabled =
+    analyticsPermission.data?.diagnostics_available &&
+    deviceConsent.enabled &&
+    deviceConsent.policy === 2;
   const saveAnalytics = useMutation({
     mutationFn: (enabled: boolean) =>
       saveAnalyticsPermission(
@@ -62,16 +68,22 @@ export function PrivacySettingsScreen(
         requestJson,
         analyticsConsentState.getSnapshot,
         deviceConsent.setConsent,
+        analyticsPermission.data?.diagnostics_offered &&
+          (analyticsPermission.data?.policy_version === "2" ||
+            deviceConsent.policy === 2)
+          ? 2
+          : 1,
       ),
     onSuccess: () => {
       void analyticsPermission.refetch();
     },
     onError: () =>
-      setToast({
-        message:
+      setToast(localizedToast(() => ({
+        message: translateApp(
           "Could not save account analytics permission. This device remains off; retry to withdraw across devices.",
+        ),
         kind: "error",
-      }),
+      }))),
   });
   const exportData = useMutation({
     mutationFn: async () => {
@@ -100,56 +112,89 @@ export function PrivacySettingsScreen(
       });
     },
     onSuccess: () =>
-      setToast({ message: t("Export share sheet closed."), kind: "info", lines: 2 }),
+      setToast(localizedToast(() => ({ message: translateApp("Export share sheet closed."), kind: "info", lines: 2 }))),
     onError: (error: unknown) => {
       if (error instanceof ApiError && error.statusCode === 429) {
         const seconds = error.retryAfterMs ? Math.ceil(error.retryAfterMs / 1000) : 0;
         const minutes = seconds
           ? Math.max(1, Math.ceil(seconds / 60))
           : undefined;
-        setToast({
+        setToast(localizedToast(() => ({
           message:
             minutes === undefined
-              ? t("Your data export is temporarily rate limited.")
+              ? translateApp("Your data export is temporarily rate limited.")
               : seconds && seconds < 60
                 ? seconds === 1
-                  ? t("Your data export is temporarily rate limited. Try again in 1 second.")
-                  : t("Your data export is temporarily rate limited. Try again in {{seconds}} seconds.", { seconds })
+                  ? translateApp("Your data export is temporarily rate limited. Try again in 1 second.")
+                  : translateApp("Your data export is temporarily rate limited. Try again in {{seconds}} seconds.", { seconds })
                 : minutes === 1
-                ? t(
+                ? translateApp(
                     "Your data export is temporarily rate limited. Try again in 1 minute.",
                   )
-                : t(
+                : translateApp(
                     "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
                     { minutes },
                   ),
           kind: "error",
           lines: 2,
-        });
+        })));
       } else if (
         error instanceof ApiError &&
         (error.statusCode === 404 || error.statusCode === 405)
       ) {
-        setToast({
-          message: t("Data export is not available on this server yet."),
+        setToast(localizedToast(() => ({
+          message: translateApp("Data export is not available on this server yet."),
           kind: "error",
           lines: 2,
-        });
+        })));
       } else {
-        setToast({
-          message: t("We couldn't create your data export. Please try again."),
+        setToast(localizedToast(() => ({
+          message: translateApp("We couldn't create your data export. Please try again."),
           kind: "error",
           lines: 2,
-        });
+        })));
       }
     },
   });
+  const reviewDiagnostics = useMutation({
+    mutationFn: () =>
+      saveAnalyticsPermission(
+        deviceConsent.accountId!,
+        true,
+        requestJson,
+        analyticsConsentState.getSnapshot,
+        deviceConsent.setConsent,
+        2,
+      ),
+    onSuccess: () => {
+      void analyticsPermission.refetch();
+    },
+    onError: () =>
+      setToast({
+        message: t("Could not save updated analytics permission."),
+        kind: "error",
+      }),
+  });
+  const review = () =>
+    Alert.alert(
+      t("Review updated analytics"),
+      t(
+        "Optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Review to allow updated analytics, or keep your current choice.",
+      ),
+      [
+        { text: t("Not now"), style: "cancel" },
+        {
+          text: t("Allow updated analytics"),
+          onPress: () => reviewDiagnostics.mutate(),
+        },
+      ],
+    );
   // The row names the setting; the switch shows its state. Only an error
   // needs words; a load disables the switch without placeholder text.
   const accountDetail = analyticsPermission.isFetching
     ? undefined
     : analyticsPermission.isError
-      ? "Permission unavailable"
+      ? translateApp("Permission unavailable")
       : undefined;
   return (
     <>
@@ -211,11 +256,47 @@ export function PrivacySettingsScreen(
                     analyticsPermission.isError ||
                     analyticsPermission.isFetching)
                 }
-                onValueChange={deviceConsent.setConsent}
+                onValueChange={(value) =>
+                  deviceConsent.setConsent(
+                    value,
+                    deviceConsent.policy === 2 ? 2 : 1,
+                  )
+                }
               />
             }
           />
         </SettingsGroup>
+        {analyticsPermission.data?.diagnostics_offered === true && (
+          <SettingsGroup
+            title={t("Crash diagnostics")}
+            footer={t(
+              "iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured.",
+            )}
+          >
+            <SettingsRow
+              icon={ChartColumn}
+              label={t("Crash diagnostics")}
+              detail={t(
+                diagnosticsEnabled
+                  ? "Crash diagnostics enabled"
+                  : "Crash diagnostics need updated permission",
+              )}
+              chevron={false}
+            />
+            {!diagnosticsEnabled && (
+              <SettingsRow
+                label={t("Review updated analytics")}
+                onPress={
+                  analyticsPermission.data?.current_policy_version === "2" &&
+                  !reviewDiagnostics.isPending &&
+                  !saveAnalytics.isPending
+                    ? review
+                    : undefined
+                }
+              />
+            )}
+          </SettingsGroup>
+        )}
         {analyticsPermission.isError && (
           <PrimaryButton
             refreshLabelOnFontScaleChange

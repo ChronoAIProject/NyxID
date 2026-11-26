@@ -60,7 +60,7 @@ type SharedEntryParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
   OpenSourceNotices: undefined;
-  DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
+  DeviceLogin: { user_code?: string; start_scanner?: boolean; staging_scan?: true } | undefined;
   AgentKeyLogin:
     | { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean }
     | undefined;
@@ -73,7 +73,7 @@ export type WorkspaceContentParamList = Omit<
 > & {
   AssistantContext: AssistantParams | undefined;
   GroupChat: { groupId: string };
-  AssistantDetails: { agentId?: string; conversationId?: string };
+  AssistantDetails: { agentId?: string; conversationId?: string; draftKey?: string; draftEpoch?: number };
   AssistantTitleEdit: { conversationId: string; agentId?: string };
   AssistantHistory: { agentId?: string } | undefined;
   AssistantWorkingContext: { conversationId: string };
@@ -138,12 +138,17 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   NotificationSettings: undefined;
   DisplaySettings: undefined;
   LanguageSettings: undefined;
+  /** The Duo rail's quick-access list (saved to the account). */
+  QuickAccessSettings: undefined;
   /** `voice` false: only dictation settings (no live voice for this account). */
   VoiceSettings: { voice?: boolean } | undefined;
+  AppleWatchSettings: undefined;
   PrivacySettings: undefined;
   ProfileEdit: { field: "display_name" | "avatar_url" };
   SessionDetail: { sessionId: string };
   ChatLayoutEdit: { key: "columnWidth" | "composerMaxHeight" };
+  /** The folded Duo quick rail's Recent chats. */
+  RecentChats: undefined;
 };
 
 export type RootStackParamList = SharedEntryParamList & {
@@ -229,10 +234,13 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "NotificationSettings",
   "DisplaySettings",
   "LanguageSettings",
+  "QuickAccessSettings",
   "VoiceSettings",
+  "AppleWatchSettings",
   "PrivacySettings",
   "DeviceLogin",
   "AgentKeyLogin",
+  "RecentChats",
   "TermsOfService",
   "PrivacyPolicy",
   "OpenSourceNotices",

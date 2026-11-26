@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -38,17 +39,20 @@ import {
   type ConnectorCardItem,
 } from "./pluginConnectors";
 import { PluginSkills } from "./PluginSkills";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 type Tab = "connectors" | "skills";
 const ROOT = ["workspace", "services"] as const;
 const errorText = (error: unknown) =>
-  error instanceof Error ? error.message : "Could not load plugins. Try again.";
+  error instanceof Error ? error.message : translateApp("Could not load plugins. Try again.");
 
 export function PluginsScreen({
   agentId,
   initialTab = "connectors",
   connectorId,
 }: { agentId?: string; initialTab?: Tab; connectorId?: string } = {}) {
+  const railIndicator = useRailScrollIndicator();
+  const appLanguage = useAppLanguage().language;
   const { t } = useAppLanguage();
   const { colors } = useTheme();
   const navigation = useNavigation<WorkspaceNavigationProp>();
@@ -125,12 +129,13 @@ export function PluginsScreen({
     return () => subscription.remove();
   }, [focused, isConnected, connections.refetch, catalog.refetch]);
   useEffect(() => {
-    navigation.setOptions({ title: manageItem?.name ?? "Plugins" });
-  }, [navigation, manageItem?.name]);
+    navigation.setOptions({ title: manageItem?.name ?? translateApp("Plugins"),
+    });
+  }, [navigation, manageItem?.name, appLanguage]);
   useWorkspaceBack({
     active: false,
     defaultRole: manageId ? "back" : "menu",
-    label: "Back to plugins",
+    label: translateApp("Back to plugins"),
     onBack: navigation.goBack,
   });
 
@@ -147,7 +152,7 @@ export function PluginsScreen({
   if (manageId)
     return (
       <WorkspacePage
-        title={manageItem?.name ?? "Connections"}
+        title={manageItem?.name ?? translateApp("Connections")}
         showHeading={false}
         contentStyle={styles.grouped}
         refreshing={refreshing}
@@ -160,7 +165,7 @@ export function PluginsScreen({
         {manageItem ? (
           <SettingsGroup
             title={manageItem.name}
-            footer="Choose a connection to manage."
+            footer={translateApp("Choose a connection to manage.")}
           >
             {manageItem.connections.map((connection) => (
               <SettingsRow
@@ -186,9 +191,11 @@ export function PluginsScreen({
                 value={
                   connection.is_active
                     ? sentence(connection.status.replaceAll("_", " "))
-                    : "Disabled"
+                    : translateApp("Disabled")
                 }
-                accessibilityLabel={`Manage ${connection.label}`}
+                accessibilityLabel={translateApp("Manage {{slug}}", {
+                  slug: connection.label,
+                })}
                 onPress={() =>
                   navigation.push("ServiceSetup", {
                     connectionId: connection.id,
@@ -202,11 +209,13 @@ export function PluginsScreen({
             footer={
               !isConnected
                 ? t("Reconnect to load these connections.")
-                : "These connections are no longer in your list. Refresh Plugins to see the current catalog."
+                : translateApp(
+                    "These connections are no longer in your list. Refresh Plugins to see the current catalog.",
+                  )
             }
           >
             <SettingsRow
-              label="Refresh plugins"
+              label={translateApp("Refresh plugins")}
               tone="action"
               disabled={!canFetch || refreshing}
               onPress={refresh}
@@ -225,35 +234,40 @@ export function PluginsScreen({
   const sections = [
     {
       key: "added",
-      title: `Added${addedCount === undefined ? "" : ` · ${addedCount}`}`,
+      title: (addedCount === undefined ? translateApp("Added") : translateApp("Added · {{addedCount}}", { addedCount: addedCount })),
       data: added,
       empty:
         !isConnected && !connections.data
           ? t("Reconnect to load your added connectors.")
           : connections.isError
-            ? "Your connections could not be loaded."
+            ? translateApp("Your connections could not be loaded.")
             : searching
-              ? "No added connectors match this search."
-              : "No connectors added yet. Add one from Discover below.",
+              ? translateApp("No added connectors match this search.")
+              : translateApp(
+                  "No connectors added yet. Add one from Discover below.",
+                ),
     },
     {
       key: "discover",
-      title: `Discover${discoverCount === undefined ? "" : ` · ${discoverCount}`}`,
+      title: (discoverCount === undefined ? translateApp("Discover") : translateApp("Discover · {{discoverCount}}", { discoverCount: discoverCount })),
       data: available,
       empty:
         !isConnected && (!catalog.data || !catalogKnown)
           ? t("Reconnect to load available connectors.")
           : catalog.isError || !catalogKnown
-            ? "The available catalog could not be confirmed. Retry loading plugins."
+            ? translateApp(
+                "The available catalog could not be confirmed. Retry loading plugins.",
+              )
             : searching
-              ? "No available connectors match this search."
-              : "All available connectors are already added.",
+              ? translateApp("No available connectors match this search.")
+              : translateApp("All available connectors are already added."),
     },
   ];
   return (
-    <WorkspacePage title="Plugins" showHeading={false} scroll={false}>
+    <WorkspacePage title={translateApp("Plugins")}
+      showHeading={false} scroll={false}>
       <SegmentControl
-        segments={[{ label: "Connectors" }, { label: "Skills" }]}
+        segments={[{ label: translateApp("Connectors") }, { label: translateApp("Skills") }]}
         activeIndex={tab === "connectors" ? 0 : 1}
         onPress={(index) => {
           Keyboard.dismiss();
@@ -268,6 +282,7 @@ export function PluginsScreen({
           contentContainerStyle={styles.skillContent}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
+          {...railIndicator}
         >
           <PluginSkills agentId={agentId} />
         </ScrollView>
@@ -277,7 +292,7 @@ export function PluginsScreen({
             <PluginSearch value={query} onChange={setQuery} />
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Refresh plugins"
+              accessibilityLabel={translateApp("Refresh plugins")}
               accessibilityState={{ disabled: !canFetch || refreshing }}
               disabled={!canFetch || refreshing}
               onPress={refresh}
@@ -293,7 +308,7 @@ export function PluginsScreen({
           <SectionList
             style={styles.body}
             contentContainerStyle={styles.listContent}
-            accessibilityLabel="Connectors"
+            accessibilityLabel={translateApp("Connectors")}
             sections={loading ? [] : sections}
             keyExtractor={(item) => item.id}
             stickySectionHeadersEnabled={false}
@@ -302,7 +317,7 @@ export function PluginsScreen({
                 accessibilityRole="header"
                 style={[styles.sectionTitle, { color: colors.textMuted }]}
               >
-                {section.title.toUpperCase()}
+                {section.title}
               </Text>
             )}
             renderSectionFooter={({ section }) =>
@@ -338,12 +353,15 @@ export function PluginsScreen({
                   {isConnected && loadError ? (
                     <>
                       <Notice
-                        message={`Some plugins could not be loaded. ${errorText(loadError)}`}
+                        message={translateApp(
+                          "Some plugins could not be loaded. {{errorText}}",
+                          { errorText: errorText(loadError) },
+                        )}
                         tone="error"
                       />
                       <SettingsGroup>
                         <SettingsRow
-                          label="Retry loading plugins"
+                          label={translateApp("Retry loading plugins")}
                           tone="action"
                           disabled={!canFetch || refreshing}
                           onPress={refresh}
@@ -359,10 +377,11 @@ export function PluginsScreen({
                 <SkeletonRows
                   rows={6}
                   title
-                  accessibilityLabel="Loading plugins"
+                  accessibilityLabel={translateApp("Loading plugins")}
                 />
               ) : null
             }
+            {...railIndicator}
           />
         </View>
       )}
@@ -371,9 +390,10 @@ export function PluginsScreen({
 }
 
 export function AgentSkillsScreen({ agentId }: { agentId: string }) {
+  useAppLanguage();
   return (
     <WorkspacePage
-      title="Agent skills"
+      title={translateApp("Agent skills")}
       showHeading={false}
       contentStyle={styles.grouped}
     >
@@ -389,15 +409,16 @@ function PluginSearch({
   value: string;
   onChange: (value: string) => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
       <Search size={17} color={colors.textMuted} accessible={false} />
       <TextInput
-        accessibilityLabel="Search connectors"
+        accessibilityLabel={translateApp("Search connectors")}
         value={value}
         onChangeText={onChange}
-        placeholder="Search connectors"
+        placeholder={translateApp("Search connectors")}
         placeholderTextColor={colors.textMuted}
         selectionColor={colors.primary}
         autoCapitalize="none"
@@ -409,7 +430,7 @@ function PluginSearch({
       {value.length > 0 && (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Clear connector search"
+          accessibilityLabel={translateApp("Clear connector search")}
           onPress={() => onChange("")}
           hitSlop={8}
           style={styles.clearSearch}
@@ -422,6 +443,7 @@ function PluginSearch({
 }
 
 function RowSeparator() {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={{ backgroundColor: colors.groupedFill }}>
@@ -437,7 +459,8 @@ const sentence = (value: string) =>
 
 // Discover rows tag how the service authenticates, beside its name.
 const authLabel = (meta: string) =>
-  meta === "oauth" ? "OAuth" : meta === "api key" ? "API key" : sentence(meta);
+  meta === "oauth" ? "OAuth" : meta === "api key" ? translateApp("API key")
+      : sentence(meta);
 
 /** One connector: brand icon, name, summary and its status or "Connect". */
 function ConnectorRow({
@@ -447,6 +470,7 @@ function ConnectorRow({
   item: ConnectorCardItem;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <SettingsRow
@@ -473,7 +497,7 @@ function ConnectorRow({
               ? "warning"
               : "default"
       }
-      accessibilityLabel={`${item.added ? "Manage" : "Connect"} ${item.name}, ${item.added ? item.status : `${authLabel(item.meta)}, available to add`}`}
+      accessibilityLabel={(item.added ? (item.added ? translateApp("Manage {{name}}, {{status}}", { name: item.name, status: item.status }) : translateApp("Manage {{name}}, {{authLabel}}, available to add", { name: item.name, authLabel: authLabel(item.meta) })) : (item.added ? translateApp("Connect {{name}}, {{status}}", { name: item.name, status: item.status }) : translateApp("Connect {{name}}, {{authLabel}}, available to add", { name: item.name, authLabel: authLabel(item.meta) })))}
       accessibilityHint={item.added ? item.summary : item.description}
       onPress={onPress}
     />
@@ -527,8 +551,7 @@ const styles = StyleSheet.create({
   },
   listHeader: { gap: spacing.lg, paddingBottom: spacing.lg },
   sectionTitle: {
-    ...typeScale.small,
-    letterSpacing: 0.6,
+    ...typeScale.groupLabel,
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.sm,
   },

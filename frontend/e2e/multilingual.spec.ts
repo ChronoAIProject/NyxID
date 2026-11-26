@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { composerInput, openAssistant } from "./helpers";
+import { composerInput, openAssistant, sendMessage, stopButton } from "./helpers";
 
 async function openAccountMenu(page: Page) {
   const menu = page.getByRole("button", { name: /^(Account menu|账号菜单|帳號選單)$/ });
@@ -13,6 +13,37 @@ async function closeMobileChats(page: Page) {
   const close = page.getByRole("button", { name: /^(Close chats|关闭聊天|關閉聊天)$/ });
   if (await close.isVisible()) await close.click();
 }
+
+test("an open action card and its decision receipt follow the selected language", async ({ page }) => {
+  const unexpected: string[] = [];
+  await page.route("**/api/v1/**", (route) => {
+    unexpected.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
+    return route.fulfill({ status: 500, json: { message: "Unexpected request outside fixtures" } });
+  });
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const card = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
+  await expect(card).toBeVisible();
+  await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+  await page.getByRole("combobox", { name: "Language", exact: true }).selectOption("zh-CN");
+  await page.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(page.getByRole("region", { name: /确认：Delete agent key 'ci-bot'/ })).toBeVisible();
+  await page.getByRole("button", { name: "拒绝", exact: true }).click();
+  const receipt = page.getByRole("status").filter({ hasText: "你已拒绝 · Delete agent key" });
+  await expect(receipt).toBeVisible();
+  await expect(receipt).toContainText("刚刚");
+
+  await openAccountMenu(page);
+  await page.getByRole("menuitem", { name: "设置", exact: true }).click();
+  await page.getByRole("combobox", { name: "语言", exact: true }).selectOption("en");
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "You denied · Delete agent key" })).toBeVisible();
+  expect(unexpected).toEqual([]);
+});
 
 for (const width of [1280, 390]) {
   test(`language changes survive navigation and reload at ${width}px`, async ({
@@ -118,4 +149,45 @@ test("Studio translates open forms across tabs without translating drafts", asyn
   await settings.getByRole("combobox", { name: "語言", exact: true }).selectOption("en");
   await expect(page.getByRole("button", { name: "Create User", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("a chat's pinned card language survives reload through a decision", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const englishCard = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
+  await expect(englishCard).toBeVisible();
+  await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  const context = page.getByRole("button", { name: "Working context", exact: true });
+  await context.click();
+  const selector = page.getByRole("combobox", { name: "Approval card language" });
+  await selector.selectOption("zh-TW");
+  await page.keyboard.press("Escape");
+  const card = page.getByRole("region", { name: /確認：Delete agent key 'ci-bot'/ });
+  await expect(card).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await page.reload();
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "拒絕", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "你已拒絕 · Delete agent key" })).toBeVisible();
+  await context.click();
+  await expect(selector).toHaveValue("zh-TW");
+  await selector.selectOption("app");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("status").filter({ hasText: "You denied · Delete agent key" })).toBeVisible();
+});
+
+test("approval cards follow sustained user language on a reloaded English thread", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  for (const text of ["请帮我检查这个服务的配置", "我需要确认这个操作的范围。"]) {
+    await sendMessage(page, text);
+    await expect(page.getByText(text, { exact: true }).first()).toBeVisible();
+    await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  }
+  await sendMessage(page, "Delete agent key ci-bot");
+  const card = page.getByRole("region", { name: /确认：Delete agent key 'ci-bot'/ });
+  await expect(card).toBeVisible();
+  await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  await page.reload();
+  await expect(card.getByRole("button", { name: "拒绝", exact: true })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
 });

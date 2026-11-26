@@ -45,6 +45,7 @@ use crate::services::{
     ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::turn_trace::{GuestServiceFailure, Stage};
 
 #[path = "proxy_ingress.rs"]
 pub(crate) mod ingress;
@@ -69,6 +70,9 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::RateLimited => (429, 1005),
         AppError::ServiceConcurrencyLimited => (429, 12600),
         AppError::Internal(_) => (500, 1006),
+        AppError::PoolAttemptTransport(
+            crate::errors::PoolAttemptTransportKind::ResolutionUnavailable,
+        ) => (err.status_code().as_u16(), err.error_code()),
         AppError::DatabaseError(_) => (500, 1007),
         AppError::ValidationError(_) => (400, 1008),
         AppError::NodeNotFound(_) => (404, 8000),
@@ -143,79 +147,87 @@ fn proxy_success_event(
     }
 }
 
-/// Response headers that are safe to forward back to the client.
-/// Uses an allowlist to prevent leaking internal headers from downstream services.
-/// NOTE: CORS headers (access-control-*) are intentionally excluded — the NyxID
-/// CorsLayer handles CORS for all responses. Forwarding downstream CORS headers
-/// would cause duplicate headers and browser CORS failures.
-const ASYNC_LOCATION_HEADERS: &[&str] = &["location", "operation-location", "content-location"];
-
-#[derive(Clone, Debug)]
-struct AsyncLocationContext {
-    service_base: url::Url,
-    downstream_request: url::Url,
-    caller_proxy_prefix: String,
+/// Rewritten response URLs are built from the caller's request, not the authenticated downstream URL.
+pub(super) struct AsyncLocationContext {
+    service_base: Option<url::Url>,
+    caller: Option<CallerLocation>,
     exact_user_service_id: Option<String>,
+    url_credentials: Vec<zeroize::Zeroizing<String>>,
+}
+
+struct CallerLocation {
+    request: url::Url,
+    proxy_prefix: String,
 }
 
 impl AsyncLocationContext {
-    fn new(
-        target_base_url: &str,
-        downstream_path: &str,
-        downstream_query: Option<&str>,
-        caller_proxy_prefix: Option<String>,
+    pub(super) fn new(
+        target: &proxy_service::ProxyTarget,
+        caller_uri: &axum::http::Uri,
+        requested_path: &str,
+        delegated: &[delegation_service::DelegatedCredential],
     ) -> Option<Self> {
-        let caller_proxy_prefix = caller_proxy_prefix?;
-        let mut service_base = url::Url::parse(target_base_url).ok()?;
-        if !matches!(service_base.scheme(), "http" | "https") {
-            return None;
+        let mut context = Self::for_target(target, delegated)?;
+        if let (Some(service_base), Some(proxy_prefix)) = (
+            context.service_base.as_ref(),
+            caller_proxy_prefix(caller_uri.path(), requested_path),
+        ) {
+            let path = caller_uri.path().strip_prefix(&proxy_prefix).unwrap_or("");
+            // A colon in the first path segment must stay part of the caller's path.
+            if let Ok(mut request) = service_base.join(&format!("./{path}")) {
+                let query = caller_uri.query().map(strip_internal_query_params);
+                request.set_query(query.as_deref().filter(|query| !query.is_empty()));
+                context.caller = Some(CallerLocation {
+                    request,
+                    proxy_prefix,
+                });
+            }
         }
-        if !service_base.path().ends_with('/') {
-            let path = format!("{}/", service_base.path());
-            service_base.set_path(&path);
-        }
-        service_base.set_query(None);
-        service_base.set_fragment(None);
-
-        let mut downstream_request = service_base
-            .join(downstream_path.trim_start_matches('/'))
-            .ok()?;
-        downstream_request.set_query(downstream_query);
-        Some(Self {
-            service_base,
-            downstream_request,
-            caller_proxy_prefix,
-            exact_user_service_id: None,
-        })
+        Some(context)
     }
 
-    fn from_downstream_request(
-        target_base_url: &str,
-        downstream_request: url::Url,
-        caller_proxy_prefix: Option<String>,
+    pub(super) fn for_target(
+        target: &proxy_service::ProxyTarget,
+        delegated: &[delegation_service::DelegatedCredential],
     ) -> Option<Self> {
-        let caller_proxy_prefix = caller_proxy_prefix?;
-        let mut service_base = url::Url::parse(target_base_url).ok()?;
-        if !matches!(service_base.scheme(), "http" | "https") {
-            return None;
-        }
-        if !service_base.path().ends_with('/') {
-            let path = format!("{}/", service_base.path());
-            service_base.set_path(&path);
-        }
-        service_base.set_query(None);
-        service_base.set_fragment(None);
+        let service_base = if target.base_url.is_empty() {
+            // A credential node can hold the only configured service URL.
+            None
+        } else {
+            let mut base = url::Url::parse(&target.base_url).ok()?;
+            if !matches!(base.scheme(), "http" | "https")
+                || !base.username().is_empty()
+                || base.password().is_some()
+            {
+                return None;
+            }
+            base.set_query(None);
+            base.set_fragment(None);
+            base.path_segments_mut().ok()?.pop_if_empty().push("");
+            Some(base)
+        };
+        let url_credentials = delegated
+            .iter()
+            .filter(|cred| matches!(cred.injection_method.as_str(), "query" | "path"))
+            .map(|cred| &cred.credential)
+            .chain(
+                matches!(target.auth_method.as_str(), "query" | "path")
+                    .then_some(&target.credential),
+            )
+            .filter(|credential| !credential.is_empty())
+            .cloned()
+            .collect();
         Some(Self {
             service_base,
-            downstream_request,
-            caller_proxy_prefix,
+            caller: None,
             exact_user_service_id: None,
+            url_credentials,
         })
     }
 
     fn pin_pool_member(mut self, authority: Option<&PoolExecutionAuthority>) -> Self {
-        if let Some(authority) = authority {
-            self.caller_proxy_prefix = format!(
+        if let (Some(caller), Some(authority)) = (&mut self.caller, authority) {
+            caller.proxy_prefix = format!(
                 "/api/v1/proxy/s/{}/",
                 urlencoding::encode(&authority.member_slug)
             );
@@ -224,45 +236,118 @@ impl AsyncLocationContext {
         self
     }
 
-    fn rewrite(&self, value: &str) -> Option<axum::http::HeaderValue> {
-        let resolved = self.downstream_request.join(value).ok()?;
-        if resolved.scheme() != self.service_base.scheme()
-            || resolved.host_str() != self.service_base.host_str()
-            || resolved.port_or_known_default() != self.service_base.port_or_known_default()
+    pub(super) fn after_redirects(mut self, response: &reqwest::Response) -> Self {
+        if let Some(followed) = response
+            .extensions()
+            .get::<proxy_service::FollowedLocations>()
+        {
+            for location in &followed.0 {
+                self.caller = self.caller.take().and_then(|mut caller| {
+                    let resolved = caller.request.join(location.to_str().ok()?).ok()?;
+                    self.rewrite(&caller, &resolved)?;
+                    caller.request = resolved;
+                    caller.request.set_fragment(None);
+                    Some(caller)
+                });
+            }
+        }
+        self
+    }
+
+    pub(super) fn header_value(
+        &self,
+        status: StatusCode,
+        name: &str,
+        value: &str,
+    ) -> Option<axum::http::HeaderValue> {
+        let resolved = if let Some(base) = &self.service_base {
+            let resolved = self
+                .caller
+                .as_ref()
+                .map_or(base, |caller| &caller.request)
+                .join(value)
+                .ok()?;
+            if resolved.origin() == base.origin() {
+                return self.rewrite(self.caller.as_ref()?, &resolved);
+            }
+            resolved
+        } else {
+            // Without a server-configured origin, only an absolute redirect can be forwarded.
+            if value.starts_with("//") {
+                // Parse the authority of a network-path reference without changing the header bytes.
+                url::Url::parse(&format!("https:{value}")).ok()?
+            } else {
+                url::Url::parse(value).ok()?
+            }
+        };
+        // Use the original bytes for signed download URLs. The parser is only
+        // used to classify the reference, and never to reserialize its query.
+        let authority = value
+            .strip_prefix("//")
+            .or_else(|| value.split_once("://").map(|(_, rest)| rest))?;
+        if status.is_redirection()
+            && name == "location"
+            && matches!(resolved.scheme(), "http" | "https")
+            && !authority.split(['/', '?', '#']).next()?.contains('@')
+            && resolved.username().is_empty()
+            && resolved.password().is_none()
+            && !self.carries_credential(value)
+        {
+            axum::http::HeaderValue::from_str(value).ok()
+        } else {
+            None
+        }
+    }
+
+    fn carries_credential(&self, value: &str) -> bool {
+        self.url_credentials.iter().any(|credential| {
+            nyxid_service_adapters::response_location::carries_credential(value, credential)
+        })
+    }
+
+    fn rewrite(
+        &self,
+        caller: &CallerLocation,
+        resolved: &url::Url,
+    ) -> Option<axum::http::HeaderValue> {
+        let base = self.service_base.as_ref()?;
+        if resolved.origin() != base.origin()
+            || !resolved.username().is_empty()
+            || resolved.password().is_some()
         {
             return None;
         }
-
-        let base_path = self.service_base.path();
+        let base_path = base.path();
         let relative_path = if resolved.path() == base_path.trim_end_matches('/') {
             ""
         } else {
             resolved.path().strip_prefix(base_path)?
         };
+        proxy_service::validate_requested_proxy_path(relative_path).ok()?;
         let mut caller_location = format!(
             "{}{}",
-            self.caller_proxy_prefix,
+            caller.proxy_prefix,
             relative_path.trim_start_matches('/')
         );
-        if let Some(member_id) = &self.exact_user_service_id {
-            let query = resolved
-                .query()
-                .map(strip_internal_query_params)
-                .unwrap_or_default();
+        let query = resolved
+            .query()
+            .map(strip_internal_query_params)
+            .unwrap_or_default();
+        if !query.is_empty() {
             caller_location.push('?');
-            if !query.is_empty() {
-                caller_location.push_str(&query);
-                caller_location.push('&');
-            }
+            caller_location.push_str(&query);
+        }
+        if let Some(member_id) = &self.exact_user_service_id {
+            caller_location.push(if query.is_empty() { '?' } else { '&' });
             caller_location.push_str("_nyxid_via=");
             caller_location.push_str(&urlencoding::encode(member_id));
-        } else if let Some(query) = resolved.query() {
-            caller_location.push('?');
-            caller_location.push_str(query);
         }
         if let Some(fragment) = resolved.fragment() {
             caller_location.push('#');
             caller_location.push_str(fragment);
+        }
+        if self.carries_credential(&caller_location) {
+            return None;
         }
         axum::http::HeaderValue::from_str(&caller_location).ok()
     }
@@ -270,12 +355,17 @@ impl AsyncLocationContext {
 
 fn caller_proxy_prefix(request_path: &str, downstream_path: &str) -> Option<String> {
     let normalized = downstream_path.trim_matches('/');
+    let raw = request_path.trim_end_matches('/');
     if normalized.is_empty() {
-        return Some(format!("{}/", request_path.trim_end_matches('/')));
+        return Some(format!("{raw}/"));
     }
-    let suffix = format!("/{normalized}");
-    let prefix = request_path.strip_suffix(&suffix)?;
-    Some(format!("{}/", prefix.trim_end_matches('/')))
+    // Axum decodes wildcard path parameters. Retain the caller's original escaping.
+    let (end, _) = raw
+        .rmatch_indices('/')
+        .nth(normalized.matches('/').count())?;
+    let suffix = &raw[end + 1..];
+    (suffix == normalized || urlencoding::decode(suffix).ok()? == normalized)
+        .then(|| raw[..=end].to_string())
 }
 
 fn ensure_proxy_request_id(headers: &mut axum::http::HeaderMap) -> String {
@@ -305,6 +395,7 @@ fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
 pub(crate) struct ProxyExchangeStartedAt(pub(crate) std::time::Instant);
 
 fn forwarded_response_header_value(
+    status: StatusCode,
     name_lower: &str,
     value: &[u8],
     is_sse: bool,
@@ -313,9 +404,9 @@ fn forwarded_response_header_value(
     if !forwardable_response_header(name_lower, is_sse) {
         return None;
     }
-    if ASYNC_LOCATION_HEADERS.contains(&name_lower) {
+    if nyxid_service_adapters::response_location::HEADERS.contains(&name_lower) {
         let raw = std::str::from_utf8(value).ok()?;
-        return location_context?.rewrite(raw);
+        return location_context?.header_value(status, name_lower, raw);
     }
     axum::http::HeaderValue::from_bytes(value).ok()
 }
@@ -344,6 +435,9 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
 /// Constructed only by the NyxAgent turn handler, never from client headers.
 #[derive(Clone)]
 pub(super) struct NyxAgentAdmission;
+
+#[derive(Clone)]
+pub(super) struct NyxAgentSubscriberControl;
 
 /// Only the permission engine's transport can construct this in-process ingress.
 #[derive(Clone)]
@@ -652,10 +746,10 @@ fn effective_header_map(
     Ok(result)
 }
 
-fn strip_durable_idempotency_defaults(
-    headers: &mut Vec<crate::models::default_request_header::ResolvedDefaultRequestHeader>,
-) {
-    headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
+fn retain_durable_default(
+    header: &crate::models::default_request_header::ResolvedDefaultRequestHeader,
+) -> bool {
+    !header.name.eq_ignore_ascii_case("idempotency-key")
 }
 
 fn single_system_header(
@@ -742,11 +836,12 @@ fn strip_internal_query_params(raw: &str) -> String {
         .join("&")
 }
 
-fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
-    let separator = if url.contains('?') { "&" } else { "?" };
-    let encoded_name = urlencoding::encode(param_name);
-    let encoded_value = urlencoding::encode(param_value);
-    format!("{url}{separator}{encoded_name}={encoded_value}")
+fn append_query_param(
+    url: &str,
+    param_name: &str,
+    param_value: &str,
+) -> nyxid_service_adapters::SecretText {
+    nyxid_service_adapters::SecretText::with_query_param(url, param_name, param_value)
 }
 
 #[utoipa::path(
@@ -784,6 +879,7 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    crate::mw::csrf::check_proxy_navigation(&state.config, &auth_user.auth_method, &request)?;
     ingress::execute(
         &state.refusal_throttle,
         &auth_user,
@@ -1174,6 +1270,7 @@ pub async fn proxy_request_by_slug(
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    crate::mw::csrf::check_proxy_navigation(&state.config, &auth_user.auth_method, &request)?;
     ingress::execute(
         &state.refusal_throttle,
         &auth_user,
@@ -1429,7 +1526,8 @@ fn pool_attempt_evidence(
         crate::errors::PoolAttemptTransportKind::NodeAfterDispatch => {
             crate::services::pool_failover::AttemptEvidence::NodeTransportAfterDispatch
         }
-        crate::errors::PoolAttemptTransportKind::AfterDispatch => {
+        crate::errors::PoolAttemptTransportKind::AfterDispatch
+        | crate::errors::PoolAttemptTransportKind::ResolutionUnavailable => {
             crate::services::pool_failover::AttemptEvidence::TransportAfterDispatch
         }
     })
@@ -1841,7 +1939,6 @@ async fn proxy_request_through_pool(
             .ok_or_else(|| AppError::ServicePoolDeadlineExceeded {
                 attempts: summaries.clone(),
             })?;
-        let has_backup = attempt_number < plan.candidates.len().min(plan.max_attempts);
         let dispatch_state = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ticket = tokio::time::timeout_at(
             tokio::time::Instant::from_std(attempt_deadline),
@@ -1892,6 +1989,7 @@ async fn proxy_request_through_pool(
             timed_out: Default::default(),
             status: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             node_dispatched: Default::default(),
+            single_node_dispatch: Default::default(),
             retry_after: Default::default(),
             prepared_chat: prepared_chat.clone(),
         };
@@ -1966,6 +2064,10 @@ async fn proxy_request_through_pool(
         );
         let (attempt_result, diagnostic_service) =
             crate::services::shutdown::diagnostics::candidate(attempt).await;
+        let has_backup = attempt_number < plan.candidates.len().min(plan.max_attempts)
+            && !accounting
+                .single_node_dispatch
+                .load(std::sync::atomic::Ordering::Acquire);
         let attempt_result = match attempt_result {
             Ok(result) => result,
             Err(_) => {
@@ -3060,7 +3162,7 @@ async fn build_pre_resolved_node_route(
     // instance that doesn't hold the WS connection is routed to the node and
     // surfaces `503 node_offline` to the caller even though `node list` shows
     // the node online globally. See issue #325.
-    let primary_dispatchable = node_routing_service::is_node_id_dispatchable(
+    let mut primary_dispatchable = node_routing_service::is_node_id_dispatchable(
         &state.db,
         explicit_node_id,
         state.node_ws_manager.as_ref(),
@@ -3077,6 +3179,15 @@ async fn build_pre_resolved_node_route(
     .into_iter()
     .filter(|node_id| node_id != explicit_node_id)
     .collect();
+
+    if !primary_dispatchable && fallback_node_ids.is_empty() {
+        primary_dispatchable = crate::services::node_dispatch::NodeHandover::wait_recent_release(
+            &state.db,
+            &state.node_ws_manager,
+            explicit_node_id,
+        )
+        .await;
+    }
 
     if !primary_dispatchable {
         if fallback_node_ids.is_empty() {
@@ -3238,6 +3349,13 @@ async fn preflight_proxy_deny_before_resolution(
     .await?;
 
     if denied {
+        if auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.is_org_channel_guest())
+        {
+            GuestServiceFailure::ApprovalDenied.record(Stage::Proxy, Some(403));
+        }
         crate::services::assistant_model_observer::denied_before_resolution(
             state,
             auth_user,
@@ -3315,6 +3433,12 @@ async fn execute_proxy_inner(
         )
         .await?;
         crate::services::shutdown::diagnostics::resolved_proxy(&resolved.target);
+        if let Some(destination) = request
+            .extensions()
+            .get::<crate::services::platform_manager_contract::NyxAgentDestination>(
+        ) {
+            destination.verify(&resolved.target.service.id, &resolved.target.base_url)?;
+        }
         super::invocation_diagnostics::Target::record_request(
             &request,
             resolved.resolved_user_service_id.as_deref(),
@@ -4066,6 +4190,14 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::invocation_diagnostics::Target>()
         .cloned();
+    let invocation_diagnostic_probe = request
+        .extensions()
+        .get::<super::invocation_diagnostics::DiagnosticProbe>()
+        .is_some();
+    let publication_dispatch = request
+        .extensions()
+        .get::<crate::services::agent_skill_service::PublicationDispatch>()
+        .cloned();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4142,14 +4274,14 @@ async fn execute_resolved_proxy_inner<'a>(
     if is_pool_attempt {
         // The common owner observes native bytes for accounting (and may translate
         // them); reqwest/node transports do not automatically decode compression.
-        extra_outbound_headers.push(("accept-encoding".into(), "identity".into()));
+        extra_outbound_headers.push(llm_usage_service::identity_encoding_header());
         if catalog_service_slug.as_deref() == Some("llm-openai-codex")
             && pool_accounting
                 .as_ref()
                 .is_some_and(|c| c.prepared_chat.is_some())
             && target.service.custom_user_agent.is_none()
             && !target
-                .catalog_default_headers
+                .catalog_headers()
                 .iter()
                 .chain(target.user_service_default_headers.iter())
                 .any(|header| header.name.eq_ignore_ascii_case("user-agent"))
@@ -4454,8 +4586,13 @@ async fn execute_resolved_proxy_inner<'a>(
             .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
     // Only the server-authored, exact-connection check can select this lane;
     // no caller header or body can opt ordinary traffic out of billing.
-    let credential_check = crate::services::credential_verification::checking();
-    let platform_metric = if credential_check {
+    let subscriber_control = request
+        .extensions()
+        .get::<NyxAgentSubscriberControl>()
+        .is_some()
+        && target.service.slug == crate::services::assistant_nyxagent::SERVICE_SLUG;
+    let metering_only = subscriber_control || crate::services::credential_verification::checking();
+    let platform_metric = if metering_only {
         crate::models::service_billing::BillingMetric::Requests
     } else {
         platform_metric_for_target(&target, is_ws_candidate || shared_connect)
@@ -4487,11 +4624,7 @@ async fn execute_resolved_proxy_inner<'a>(
         // Verification records request metadata without catalog prices,
         // components, operation prices or resale funding. Ordinary calls keep
         // their original billing policy, including on this same connection.
-        target
-            .service
-            .billing
-            .as_ref()
-            .filter(|_| !credential_check),
+        target.service.billing.as_ref().filter(|_| !metering_only),
         state.billing.resale_enabled(),
     );
     if nyxagent_admission
@@ -4545,7 +4678,7 @@ async fn execute_resolved_proxy_inner<'a>(
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
-    let caller_proxy_prefix = caller_proxy_prefix(request.uri().path(), path);
+    let caller_uri = request.uri().clone();
     // Strip NyxID-only routing params (e.g. `_nyxid_via`) from the
     // query string before forwarding. Downstream services should never
     // see NyxID-internal parameters.
@@ -4582,8 +4715,12 @@ async fn execute_resolved_proxy_inner<'a>(
         // Idempotency forwarding is owned exclusively by the durable endpoint
         // contract. Service defaults cannot create replay semantics that the
         // selected operation did not authorize.
-        strip_durable_idempotency_defaults(&mut target.catalog_default_headers);
-        strip_durable_idempotency_defaults(&mut target.user_service_default_headers);
+        target
+            .catalog_default_headers
+            .retain(retain_durable_default);
+        target
+            .user_service_default_headers
+            .retain(retain_durable_default);
     }
     if scheduled_api_key_id.is_none()
         && (durable_grant_id.is_some() || durable_operation_id.is_some())
@@ -4611,7 +4748,7 @@ async fn execute_resolved_proxy_inner<'a>(
     let node_forward_headers = proxy_service::collect_forward_headers_with_defaults(
         &all_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -4664,6 +4801,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .assistant_chat
         .as_deref()
         .is_some_and(|chat| chat.guest || chat.confirmation_policy.is_some());
+    let org_channel_guest = auth_user
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.is_org_channel_guest());
     if operation_scoped {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
     }
@@ -4675,6 +4816,9 @@ async fn execute_resolved_proxy_inner<'a>(
             &body_bytes,
         )
     {
+        if org_channel_guest {
+            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+        }
         return Err(AppError::ApiKeyScopeForbidden(
             "Operation scopes, guest and webhook calls forbid method overrides".into(),
         ));
@@ -4706,7 +4850,12 @@ async fn execute_resolved_proxy_inner<'a>(
             all_headers
                 .get(axum::http::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
-        )?;
+        )
+        .inspect_err(|error| {
+            if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+                GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+            }
+        })?;
     }
     let operation_guest = box_proxy_future(|| {
         crate::services::agent_operation_scope_service::check_non_mcp_context(
@@ -4718,6 +4867,7 @@ async fn execute_resolved_proxy_inner<'a>(
             method.as_str(),
             operation_path.as_ref(),
             crate::services::agent_operation_scope_service::GuestHttpContext {
+                catalog_slug: catalog_service_slug.as_deref(),
                 query: query.as_deref(),
                 websocket: is_ws_candidate,
                 // The webhook floor runs before assistant selection/consent.
@@ -4737,7 +4887,12 @@ async fn execute_resolved_proxy_inner<'a>(
             },
         )
     })
-    .await?;
+    .await
+    .inspect_err(|error| {
+        if org_channel_guest && matches!(error, AppError::ApiKeyScopeForbidden(_)) {
+            GuestServiceFailure::GuestOperationDenied.record(Stage::Proxy, Some(403));
+        }
+    })?;
 
     if operation_guest {
         crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
@@ -4771,10 +4926,23 @@ async fn execute_resolved_proxy_inner<'a>(
         query.as_deref(),
         &body_bytes,
     );
-    // Only POST needs catalog authority to become a read. Preserve method
-    // classification and the existing endpoint-query budget for other raw
-    // requests; guest/operation-scope authorization has already run above.
-    let effects = if method == reqwest::Method::POST {
+    // Apply destructive overlay routes even without endpoint rows (including PUT
+    // cell edits). Only POST needs the additional stored-endpoint lookup.
+    let compiled = catalog_service_slug
+        .as_deref()
+        .and_then(crate::services::catalog_spec_registry::spec_key_for_slug)
+        .and_then(|key| {
+            crate::services::catalog_spec_registry::compiled_effects(
+                key,
+                &method,
+                operation_path.as_ref()?,
+                query.as_deref(),
+                method_override,
+            )
+        });
+    let effects = if let Some(destructive) = compiled.filter(|effects| effects.destructive) {
+        destructive
+    } else if method == reqwest::Method::POST {
         crate::services::agent_operation_scope_service::unscoped_effects(
             &state.db,
             operation_scope_id,
@@ -4787,6 +4955,7 @@ async fn execute_resolved_proxy_inner<'a>(
     } else {
         crate::services::mcp_service::operation_effects(&method, Default::default())
     };
+    assistant_projection.destructive = effects.destructive;
     operation_descriptor::apply_operation_effects(&mut operation, effects, method_override);
     operation_descriptor::apply_inference_contract(
         &mut operation,
@@ -4838,6 +5007,10 @@ async fn execute_resolved_proxy_inner<'a>(
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
+        // A diagnostic probe is secondary evidence for an already failed
+        // invocation. It must never author or dispatch a new execution
+        // permission proposal before the legacy approval guard below runs.
+        && !invocation_diagnostic_probe
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
@@ -5015,6 +5188,7 @@ async fn execute_resolved_proxy_inner<'a>(
             &approval_owner_user_id,
             service_owner_for_approval,
             service_id,
+            resolved_user_service_id.as_deref(),
             &operation,
             auth_user.approval_requester_type(),
             &approval_requester_id,
@@ -5043,7 +5217,17 @@ async fn execute_resolved_proxy_inner<'a>(
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,
-    )?;
+    )
+    .inspect_err(|_| {
+        if org_channel_guest {
+            let reason = if matches!(approval_outcome, approval_service::ApprovalOutcome::Denied) {
+                GuestServiceFailure::ApprovalDenied
+            } else {
+                GuestServiceFailure::ApprovalRequired
+            };
+            reason.record(Stage::Proxy, Some(403));
+        }
+    })?;
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -5095,6 +5279,14 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Ornn format check skipped: approval required".to_string(),
             ));
         }
+        // A caller-scoped diagnostic is secondary evidence, not a business
+        // operation. It must neither bypass approval nor leave a prompt behind.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if invocation_diagnostic_probe => {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Diagnostic probe skipped: approval required".to_string(),
+            ));
+        }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
             request_audit.model_approval_required();
             crate::services::assistant_model_observer::before_approval_request(None)
@@ -5117,6 +5309,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 &operation,
                 pending.resolution.grant_scope.clone(),
             );
+            request_operation.org_policy = pending.resolution.policy_stamp();
             request_operation.assistant_group =
                 crate::services::org_group_service::approval_binding(
                     &state.db,
@@ -5125,6 +5318,15 @@ async fn execute_resolved_proxy_inner<'a>(
                     auth_user.api_key_id.as_deref(),
                 )
                 .await?;
+            let waiter = approval_service::ConnectedWait::for_service(
+                &state.db,
+                &pending.resolution.mode,
+                &mut request_operation,
+                &operation,
+                auth_user.assistant_chat.as_deref(),
+                timeout_secs,
+            )
+            .await?;
             let approval_request = box_proxy_future(|| {
                 approval_service::create_approval_request(
                     &state.db,
@@ -5159,7 +5361,8 @@ async fn execute_resolved_proxy_inner<'a>(
             }
             // Block until the user approves/rejects or timeout expires
             let req_id = approval_request.id.clone();
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+            waiter
+                .wait(&approval_request, &downstream_cancellation, timeout_secs)
                 .await
                 .map_err(|error| {
                     approval_service::map_wait_for_decision_error(
@@ -5334,6 +5537,32 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
     target.require_credential_materialized()?;
+
+    // Ornn's server-marked lookup supplies a membership capability. Node
+    // WebSocket handshakes do not take a caller credential.
+    let forward_bearer = if is_ws && node_route.is_some() {
+        false
+    } else if assistant_projection.org_skill_lookup {
+        true
+    } else {
+        let server_headers = if is_ws {
+            &[][..]
+        } else {
+            extra_outbound_headers.as_slice()
+        };
+        Box::pin(proxy_service::admit_caller_bearer(
+            &state.db,
+            &user_id_str,
+            resolved_user_service_id.as_deref(),
+            &target,
+            node_route.as_ref(),
+            caller_token.as_deref(),
+            server_headers,
+        ))
+        .await?
+        .is_some()
+    };
+    let caller_bearer = caller_token.filter(|_| forward_bearer);
 
     let body = if body_bytes.is_empty() {
         None
@@ -5545,6 +5774,13 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
+    let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
+    let read_usage = capture_usage || model_request.is_some();
+    let mut has_operation_headers = !extra_outbound_headers.is_empty();
+    if read_usage && !is_pool_attempt && !is_ws && !shared_connect {
+        extra_outbound_headers.push(llm_usage_service::identity_encoding_header());
+    }
+
     let dispatch_admission = {
         let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
             actor_user_id: &user_id_str,
@@ -5590,6 +5826,11 @@ async fn execute_resolved_proxy_inner<'a>(
 
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
+    if let Some(dispatch) = &publication_dispatch {
+        // Admission and approval have finished. Fence the owner, invocation and
+        // exact lease before reserving funds or handing the ZIP to a transport.
+        dispatch.begin().await?;
+    }
     if crate::services::telnyx_platform_service::contract(&target.service).is_some() {
         // Scheduled writes require a separate durable-grant lifecycle. Reject
         // unsupported execution surfaces before either billing or dispatch.
@@ -5599,7 +5840,7 @@ async fn execute_resolved_proxy_inner<'a>(
             || streaming_body.is_some()
             || node_route.is_some()
             || !delegated.is_empty()
-            || !extra_outbound_headers.is_empty()
+            || has_operation_headers
         {
             return Err(AppError::BadRequest(
                 "This Telnyx platform operation supports direct HTTP and MCP calls only".into(),
@@ -5620,6 +5861,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 ),
             )?;
         destination_audit.dispatch();
+        if let Some(dispatch) = &publication_dispatch {
+            dispatch.transport_attempt(true);
+        }
         let managed = crate::services::telnyx_platform_service::execute(
             &state.db,
             state.billing.clone(),
@@ -5766,6 +6010,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     })),
                 );
                 if reservation.replay_policy == DurableReplayPolicy::DownstreamIdempotencyKey {
+                    has_operation_headers = true;
                     extra_outbound_headers.push((
                         "Idempotency-Key".to_string(),
                         reservation.operation_id.clone(),
@@ -5799,6 +6044,9 @@ async fn execute_resolved_proxy_inner<'a>(
 
     // Own local projections needed after preparation returns. All live audit,
     // admission, lease and cancellation guards move into this continuation.
+    let location_context =
+        AsyncLocationContext::new(&target, &caller_uri, requested_path, &delegated)
+            .map(|context| context.pin_pool_member(pool_authority.as_ref()));
     let forwarding_path = path.to_owned();
     let forwarding_owner = service_owner_for_approval.to_owned();
     Ok(ProxyExecutionPhase::Forward(box_proxy_future(
@@ -5939,7 +6187,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         &identity_headers,
                         query.as_deref(),
                         &ws_forward_headers,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         collect_realtime_llm_usage,
                         metered.clone(),
                         billing_egress_permit,
@@ -5972,17 +6220,9 @@ async fn execute_resolved_proxy_inner<'a>(
                     node_forward_headers,
                     &identity_headers,
                     &delegated,
-                    caller_token.as_deref(),
+                    caller_bearer.as_deref(),
                     &extra_outbound_headers,
                 )?;
-                let node_location_context = AsyncLocationContext::new(
-                    &target.base_url,
-                    &prepared.path,
-                    prepared.query.as_deref(),
-                    caller_proxy_prefix.clone(),
-                )
-                .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
                 // Build base node request (will be cloned for failover retries)
                 let node_request = NodeProxyRequest {
                     target_id: target.target_id.clone(),
@@ -6007,7 +6247,10 @@ async fn execute_resolved_proxy_inner<'a>(
                 let mut first_dispatch_admission_ms = None;
                 let mut node_failure_evidence =
                     crate::services::assistant_service_execution::NodeFailureEvidence::default();
-                for node_id in &all_node_ids {
+                let mut nodes = all_node_ids.iter().peekable();
+                let mut retry = None;
+                let mut waited = false;
+                while let Some(node_id) = retry.take().or_else(|| nodes.next()) {
                     // Generate a new request_id for each attempt to avoid correlation conflicts
                     let mut attempt_request = node_request.clone();
                     attempt_request.request_id = uuid::Uuid::new_v4().to_string();
@@ -6186,7 +6429,15 @@ async fn execute_resolved_proxy_inner<'a>(
                             .await?;
                         return Err(error);
                     }
+                    let single_node_dispatch = durable_reservation.is_some()
+                        || target
+                            .execution_permission
+                            .as_ref()
+                            .is_some_and(|permit| permit.single_dispatch());
                     if let Some(accounting) = &pool_accounting {
+                        accounting
+                            .single_node_dispatch
+                            .store(single_node_dispatch, std::sync::atomic::Ordering::Release);
                         accounting
                             .node_dispatched
                             .store(true, std::sync::atomic::Ordering::Release);
@@ -6241,19 +6492,23 @@ async fn execute_resolved_proxy_inner<'a>(
                             return Err(error);
                         }
                     }
+                    if let Some(dispatch) = &publication_dispatch {
+                        dispatch.transport_attempt(true);
+                    }
                     let result = if let Some(upload) = streaming_body.take() {
-                        let mut parameters =
+                        let headers = std::mem::take(&mut attempt_request.headers);
+                        let mut parameters = crate::crypto::secret_json::SecretJson(
                             serde_json::to_value(&attempt_request).map_err(|_| {
                                 AppError::Internal("Upload metadata encoding failed".into())
-                            })?;
-                        parameters["headers"] = serde_json::to_value(
-                            attempt_request
-                                .headers
-                                .iter()
-                                .cloned()
-                                .collect::<std::collections::BTreeMap<_, _>>(),
-                        )
-                        .map_err(|_| AppError::Internal("Upload headers encoding failed".into()))?;
+                            })?,
+                        );
+                        let headers: std::collections::BTreeMap<_, _> = headers
+                            .iter()
+                            .map(|(name, value)| (name.as_str(), value.as_str()))
+                            .collect();
+                        parameters["headers"] = serde_json::to_value(&headers).map_err(|_| {
+                            AppError::Internal("Upload headers encoding failed".into())
+                        })?;
                         parameters["git"] = serde_json::json!(machine_git);
                         parameters["max_bytes"] = serde_json::json!(
                             upload_meter
@@ -6267,7 +6522,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             request_id: attempt_request.request_id,
                             node_id: (*node_id).into(),
                             operation: nyxid_machine::Operation::ProxyUpload,
-                            parameters,
+                            parameters: nyxid_service_adapters::secret_json::WireJson(parameters),
                             timestamp: chrono::Utc::now().timestamp(),
                             nonce: uuid::Uuid::new_v4().to_string(),
                             signature: String::new(),
@@ -6292,6 +6547,58 @@ async fn execute_resolved_proxy_inner<'a>(
                             )
                             .await
                     };
+                    if let (Some(dispatch), Err(failure)) = (&publication_dispatch, &result)
+                        && !failure.dispatched
+                        && !had_dispatched_failure
+                    {
+                        dispatch.transport_attempt(false);
+                    }
+                    if let Err(failure) = &result
+                        && !failure.dispatched
+                        && !matches!(failure.error, AppError::NodeCredentialMissing(_))
+                    {
+                        if let Some(permit) = target
+                            .execution_permission
+                            .as_ref()
+                            .filter(|permit| permit.single_dispatch())
+                        {
+                            permit.node_not_sent().await?;
+                            if let Some(reservation) = &durable_reservation {
+                                durable_operation_grant_service::mark_unsent(
+                                    &state.db,
+                                    reservation,
+                                    "nothing was sent to the node",
+                                )
+                                .await;
+                            }
+                            destination_audit.denied();
+                            state
+                                .billing
+                                .reject_before_send(
+                                    &metered,
+                                    "node_not_sent",
+                                    had_dispatched_failure,
+                                )
+                                .await?;
+                            return Err(AppError::NodeOffline(
+                                "Nothing was sent to the node".into(),
+                            ));
+                        }
+                        if !stream_upload
+                            && !waited
+                            && !had_dispatched_failure
+                            && nodes.peek().is_none()
+                            && durable_reservation.is_none()
+                            && let Some(handover) = &failure.handover
+                            && handover
+                                .wait(&state.db, &state.node_ws_manager, node_id)
+                                .await
+                        {
+                            waited = true;
+                            retry = Some(node_id);
+                            continue;
+                        }
+                    }
                     if let Some(permit) = &target.execution_permission {
                         permit.complete(result.is_ok()).await?;
                     }
@@ -6320,17 +6627,16 @@ async fn execute_resolved_proxy_inner<'a>(
 
                             if let Some(accounting) = pool_accounting.clone() {
                                 let usage =
-                                    should_capture_llm_usage(&target.service, platform_metric)
-                                        .then(|| llm_usage_service::UsageAuditContext {
-                                            db: state.db.clone(),
-                                            user_id: user_id_str.clone(),
-                                            provider_slug: None,
-                                            service_id: Some(service_id.to_owned()),
-                                            model: None,
-                                            path: path.to_owned(),
-                                            api_key_id: auth_user.api_key_id.clone(),
-                                            api_key_name: auth_user.api_key_name.clone(),
-                                        });
+                                    capture_usage.then(|| llm_usage_service::UsageAuditContext {
+                                        db: state.db.clone(),
+                                        user_id: user_id_str.clone(),
+                                        provider_slug: None,
+                                        service_id: Some(service_id.to_owned()),
+                                        model: None,
+                                        path: path.to_owned(),
+                                        api_key_id: auth_user.api_key_id.clone(),
+                                        api_key_name: auth_user.api_key_name.clone(),
+                                    });
                                 let mut response = box_proxy_future(|| {
                                     pool_attempt::node_response(
                                         state,
@@ -6341,7 +6647,7 @@ async fn execute_resolved_proxy_inner<'a>(
                                         request_body_len,
                                         path,
                                         downstream_cancellation.clone(),
-                                        node_location_context.as_ref(),
+                                        location_context.as_ref(),
                                         pool_attempt::Observability {
                                             usage,
                                             diagnostics: None,
@@ -6378,7 +6684,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             ProxyResponseType::Complete(node_response) => {
                                 let response_len = node_response.body.len() as i64;
                                 let request_len = request_body_len;
-                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
+                                if capture_usage {
+                                    llm_usage_service::warn_node_usage_encoding(service_id, node_response.status, &node_response.headers);
+                                }
+                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && capture_usage)
                                     .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
                                 settle_meter_async(
                                     state.billing.clone(),
@@ -6406,10 +6715,11 @@ async fn execute_resolved_proxy_inner<'a>(
                                     if let Ok(hn) =
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes())
                                         && let Some(hv) = forwarded_response_header_value(
+                                            status,
                                             &name_lower,
                                             value.as_bytes(),
                                             false,
-                                            node_location_context.as_ref(),
+                                            location_context.as_ref(),
                                         )
                                     {
                                         response_builder = response_builder.header(hn, hv);
@@ -6445,6 +6755,9 @@ async fn execute_resolved_proxy_inner<'a>(
                                     }
                                 };
 
+                                if capture_usage {
+                                    llm_usage_service::warn_node_usage_encoding(service_id, status, &resp_headers);
+                                }
                                 let http_status =
                                     StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                                 let stream_diagnostics = ProxyExchangeDiagnostics::new(
@@ -6475,10 +6788,11 @@ async fn execute_resolved_proxy_inner<'a>(
                                     if let Ok(hn) =
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes())
                                         && let Some(hv) = forwarded_response_header_value(
+                                            http_status,
                                             &name_lower,
                                             value.as_bytes(),
                                             node_is_sse,
-                                            node_location_context.as_ref(),
+                                            location_context.as_ref(),
                                         )
                                     {
                                         response_builder = response_builder.header(hn, hv);
@@ -6492,7 +6806,6 @@ async fn execute_resolved_proxy_inner<'a>(
                                 let stream_metered = metered.clone();
                                 let request_len = request_body_len;
                                 let usage_path = path.to_string();
-                                let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
 
                                 // Convert the mpsc receiver into a streaming body.
                                 let mut exchange_diagnostics =
@@ -6664,6 +6977,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         Err(NodeProxyFailure {
                             error: err @ AppError::NodeCredentialMissing(_),
                             dispatched,
+                            ..
                         }) => {
                             if !dispatched {
                                 destination_audit.denied();
@@ -6727,6 +7041,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         Err(NodeProxyFailure {
                             error: err @ (AppError::NodeOffline(_) | AppError::NodeProxyTimeout),
                             dispatched,
+                            ..
                         }) => {
                             if !dispatched {
                                 destination_audit.denied();
@@ -6743,6 +7058,17 @@ async fn execute_resolved_proxy_inner<'a>(
                             });
 
                             if let Some(reservation) = durable_reservation.as_ref() {
+                                if !dispatched {
+                                    durable_operation_grant_service::mark_unsent(
+                                        &state.db,
+                                        reservation,
+                                        "nothing was sent to the node",
+                                    )
+                                    .await;
+                                    return Err(AppError::NodeOffline(
+                                        "Nothing was sent to the node".into(),
+                                    ));
+                                }
                                 box_proxy_future(|| {
                                     finish_durable_operation(
                                         state,
@@ -6757,7 +7083,10 @@ async fn execute_resolved_proxy_inner<'a>(
                                 .await;
                                 return Err(AppError::DurableOperationOutcomeUncertain);
                             }
-                            if stream_upload || !should_retry_node_failure(&method, dispatched) {
+                            if single_node_dispatch
+                                || stream_upload
+                                || !should_retry_node_failure(&method, dispatched)
+                            {
                                 emit_preheader_diagnostics(
                                     exchange_started_at,
                                     target_admission_ms,
@@ -6784,6 +7113,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let NodeProxyFailure {
                                 error: e,
                                 dispatched,
+                                ..
                             } = failure;
                             if !dispatched {
                                 destination_audit.denied();
@@ -6802,6 +7132,15 @@ async fn execute_resolved_proxy_inner<'a>(
                                 }
                             }
                             if let Some(reservation) = durable_reservation.as_ref() {
+                                if !dispatched {
+                                    durable_operation_grant_service::mark_unsent(
+                                        &state.db,
+                                        reservation,
+                                        "nothing was sent to the node",
+                                    )
+                                    .await;
+                                    return Err(e);
+                                }
                                 box_proxy_future(|| {
                                     finish_durable_operation(
                                         state,
@@ -7099,6 +7438,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
                 mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
                 destination_audit.dispatch();
+                if let Some(dispatch) = &publication_dispatch {
+                    dispatch.transport_attempt(true);
+                }
                 let response_result = until_client_disconnect(
                     &downstream_cancellation,
                     box_proxy_future(|| {
@@ -7288,7 +7630,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         && streaming_body.is_none()
                         && body.as_ref().is_none_or(|bytes| bytes.is_empty())
                         && delegated.is_empty()
-                        && extra_outbound_headers.is_empty(),
+                        && !has_operation_headers,
                 )
             })
             .await
@@ -7350,20 +7692,25 @@ async fn execute_resolved_proxy_inner<'a>(
                 resource_owner_id: service_owner_for_approval,
                 user_service_id: resolved_user_service_id.as_deref(),
             };
+            if let Some(dispatch) = &publication_dispatch {
+                dispatch.transport_attempt(true);
+            }
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
-                        if is_pool_attempt
+                        if publication_dispatch.is_some()
+                            || crate::services::credential_verification::checking()
+                            || is_pool_attempt
                             || operation_scoped
                             || operation_guest
                             || permission_ingress.is_some()
                             || target.service.offering_kind
                                 == crate::models::downstream_service::OfferingKind::Tool
                         {
-                            proxy_service::no_redirect_http_client()
+                            proxy_service::Redirects::Return
                         } else {
-                            &state.http_client
+                            proxy_service::Redirects::SameOrigin
                         },
                         &target,
                         reqwest_method,
@@ -7376,7 +7723,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         },
                         identity_headers,
                         delegated,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         &state.token_exchange_cache,
                         &state.cloud_response_cache,
                         extra_outbound_headers,
@@ -7390,6 +7737,17 @@ async fn execute_resolved_proxy_inner<'a>(
                 }),
             )
             .await;
+            if let (Some(dispatch), Ok(Err(error))) = (&publication_dispatch, &downstream_result)
+                && !had_dispatched_failure
+                && (matches!(
+                    error,
+                    proxy_service::ForwardRequestError::PreDispatchRejected(_)
+                ) || matches!(error, proxy_service::ForwardRequestError::Transport(e) if e.is_connect()))
+            {
+                // Reviewed uploads return redirects. A connect failure here
+                // cannot follow an earlier successful same-origin hop.
+                dispatch.transport_attempt(false);
+            }
             let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
                 Some(meter) => Ok(Err(proxy_service::ForwardRequestError::from(meter.error()))),
                 None => downstream_result,
@@ -7413,6 +7771,13 @@ async fn execute_resolved_proxy_inner<'a>(
             }
             let downstream_response = match downstream_result {
                 Ok(Ok(response)) => {
+                    if org_channel_guest
+                        && (response.status().is_client_error()
+                            || response.status().is_server_error())
+                    {
+                        GuestServiceFailure::DownstreamHttpError
+                            .record(Stage::Proxy, Some(response.status().as_u16()));
+                    }
                     if let Some(model) = &model_request {
                         model.received_headers(response.status().as_u16());
                     }
@@ -7431,6 +7796,18 @@ async fn execute_resolved_proxy_inner<'a>(
                             had_dispatched_failure,
                         )
                         .await?;
+                    if matches!(
+                        error,
+                        AppError::PoolAttemptTransport(
+                            crate::errors::PoolAttemptTransportKind::ResolutionUnavailable
+                        )
+                    ) && !had_dispatched_failure
+                        && (is_pool_attempt || nyxagent_admission)
+                    {
+                        return Err(AppError::PoolAttemptTransport(
+                            crate::errors::PoolAttemptTransportKind::Connect,
+                        ));
+                    }
                     return Err(error);
                 }
                 Ok(Err(error)) => {
@@ -7514,16 +7891,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 .await;
             }
 
+            let location_context =
+                location_context.map(|ctx| ctx.after_redirects(&downstream_response));
             // Convert reqwest Response back to axum Response
             let status = StatusCode::from_u16(downstream_response.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
-            let direct_location_context = AsyncLocationContext::from_downstream_request(
-                &target.base_url,
-                downstream_response.url().clone(),
-                caller_proxy_prefix,
-            )
-            .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
             if let Some(reservation) = durable_reservation.as_ref() {
                 box_proxy_future(|| {
                     finish_durable_operation(
@@ -7570,9 +7942,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 },
                 &all_headers,
             );
-            let usage_context = (should_capture_llm_usage(&target.service, platform_metric)
-                || model_request.is_some())
-            .then(|| llm_usage_service::UsageAuditContext {
+            let usage_context = read_usage.then(|| llm_usage_service::UsageAuditContext {
                 db: state.db.clone(),
                 user_id: user_id_str.clone(),
                 provider_slug: None,
@@ -7594,7 +7964,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         request_body_len,
                         path,
                         downstream_cancellation,
-                        direct_location_context.as_ref(),
+                        location_context.as_ref(),
                         pool_attempt::Observability {
                             usage: usage_context,
                             diagnostics: Some(exchange_diagnostics),
@@ -7631,10 +8001,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 if let Ok(header_name) =
                     axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
                     && let Some(header_value) = forwarded_response_header_value(
+                        status,
                         &name_lower,
                         value.as_bytes(),
                         is_sse,
-                        direct_location_context.as_ref(),
+                        location_context.as_ref(),
                     )
                 {
                     response_builder = response_builder.header(header_name, header_value);
@@ -7992,7 +8363,7 @@ pub(crate) fn build_downstream_ws_url(
     path: &str,
     query: Option<&str>,
     delegated: &[delegation_service::DelegatedCredential],
-) -> AppResult<String> {
+) -> AppResult<nyxid_service_adapters::SecretText> {
     let mut all_delegated = delegated.to_vec();
     proxy_service::extend_with_path_credential(&mut all_delegated, target);
     let prepared = proxy_service::prepare_delegated_request(path, query, &all_delegated)?;
@@ -8011,23 +8382,24 @@ pub(crate) fn build_downstream_ws_url(
         )));
     };
 
-    let ws_path = if prepared.path.is_empty() {
-        String::new()
-    } else if prepared.path.starts_with('/') {
-        prepared.path
+    let slash = if prepared.path.is_empty() || prepared.path.starts_with('/') {
+        ""
     } else {
-        format!("/{}", prepared.path)
+        "/"
     };
-
-    let mut url = match prepared.query {
-        Some(q) => format!("{ws_base}{ws_path}?{q}"),
-        None => format!("{ws_base}{ws_path}"),
+    let mut url = match prepared.query.as_deref() {
+        Some(query) => nyxid_service_adapters::SecretText::concat(&[
+            &ws_base,
+            slash,
+            &prepared.path,
+            "?",
+            query,
+        ]),
+        None => nyxid_service_adapters::SecretText::concat(&[&ws_base, slash, &prepared.path]),
     };
-
     if target.auth_method == "query" {
         url = append_query_param(&url, &target.auth_key_name, &target.credential);
     }
-
     Ok(url)
 }
 
@@ -8110,7 +8482,7 @@ pub(crate) fn build_downstream_ws_request(
     // set by layers 1–2; overridable defaults only fill in when the
     // handshake doesn't already carry that header.
     for h in target
-        .catalog_default_headers
+        .catalog_headers()
         .iter()
         .chain(target.user_service_default_headers.iter())
     {
@@ -8155,7 +8527,7 @@ pub(crate) fn build_downstream_ws_request(
             "bearer" => {
                 let (name, value) = make_header(
                     cred.injection_key.as_bytes(),
-                    &format!("Bearer {}", cred.credential.as_str()),
+                    &nyxid_service_adapters::SecretText::concat(&["Bearer ", &cred.credential]),
                 )?;
                 headers.insert(name, value);
             }
@@ -8173,7 +8545,10 @@ pub(crate) fn build_downstream_ws_request(
     if target.service.forward_access_token
         && let Some(token) = caller_token
     {
-        let (_, value) = make_header(b"authorization", &format!("Bearer {token}"))?;
+        let (_, value) = make_header(
+            b"authorization",
+            &nyxid_service_adapters::SecretText::concat(&["Bearer ", token]),
+        )?;
         headers.insert(reqwest::header::AUTHORIZATION, value);
     }
 
@@ -8188,18 +8563,22 @@ pub(crate) fn build_downstream_ws_request(
         "bearer" => {
             let (_, value) = make_header(
                 b"authorization",
-                &crate::services::catalog_auth_scheme::header_value(
+                &zeroize::Zeroizing::new(crate::services::catalog_auth_scheme::header_value(
                     target.service.auth_scheme.as_deref(),
                     &target.credential,
-                )?,
+                )?),
             )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         "basic" => {
             use base64::Engine;
-            let encoded =
-                base64::engine::general_purpose::STANDARD.encode(target.credential.as_bytes());
-            let (_, value) = make_header(b"authorization", &format!("Basic {encoded}"))?;
+            let encoded = zeroize::Zeroizing::new(
+                base64::engine::general_purpose::STANDARD.encode(target.credential.as_bytes()),
+            );
+            let (_, value) = make_header(
+                b"authorization",
+                &nyxid_service_adapters::SecretText::concat(&["Basic ", &encoded]),
+            )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         // "query" and "path" are already handled in URL construction
@@ -8216,8 +8595,10 @@ pub(crate) fn build_downstream_ws_request(
 
 /// Connect to a downstream WebSocket, injecting credentials and identity
 /// headers into the upgrade request.
+#[allow(clippy::too_many_arguments)]
 async fn connect_downstream_ws(
     url: &str,
+    path: &str,
     target: &proxy_service::ProxyTarget,
     delegated: &[delegation_service::DelegatedCredential],
     identity_headers: &[(String, String)],
@@ -8237,13 +8618,20 @@ async fn connect_downstream_ws(
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
-    let (ws_stream, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false),
-    )
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS);
+    let destination = target.direct_destination(url, path).await?;
+    let (ws_stream, response) = tokio::time::timeout_at(deadline, async {
+        let stream = destination
+            .connect()
+            .await
+            .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
+        tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
+            .await
+            .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
+    })
     .await
-    .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))?
-    .map_err(|e| AppError::Internal(format!("Downstream WS connection failed: {e}")))?;
+    .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))??;
 
     let selected_protocol = response
         .headers()
@@ -8311,15 +8699,15 @@ fn tungstenite_msg_to_axum(
 
 fn axum_msg_payload_for_injection(
     msg: &axum::extract::ws::Message,
-) -> Option<(crate::models::ws_frame_injection::WsFrameKind, Vec<u8>)> {
+) -> Option<(crate::models::ws_frame_injection::WsFrameKind, &[u8])> {
     match msg {
         axum::extract::ws::Message::Text(t) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Text,
-            t.to_string().into_bytes(),
+            t.as_bytes(),
         )),
         axum::extract::ws::Message::Binary(b) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Binary,
-            b.to_vec(),
+            b.as_ref(),
         )),
         _ => None,
     }
@@ -8327,15 +8715,15 @@ fn axum_msg_payload_for_injection(
 
 fn tungstenite_msg_payload_for_injection(
     msg: &tokio_tungstenite::tungstenite::Message,
-) -> Option<(crate::models::ws_frame_injection::WsFrameKind, Vec<u8>)> {
+) -> Option<(crate::models::ws_frame_injection::WsFrameKind, &[u8])> {
     match msg {
         tokio_tungstenite::tungstenite::Message::Text(t) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Text,
-            t.to_string().into_bytes(),
+            t.as_bytes(),
         )),
         tokio_tungstenite::tungstenite::Message::Binary(b) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Binary,
-            b.to_vec(),
+            b.as_ref(),
         )),
         _ => None,
     }
@@ -8346,11 +8734,13 @@ fn injection_frame_to_tungstenite(
 ) -> tokio_tungstenite::tungstenite::Message {
     match frame.kind {
         crate::models::ws_frame_injection::WsFrameKind::Text => {
-            let text = String::from_utf8(frame.payload).unwrap_or_default();
-            tokio_tungstenite::tungstenite::Message::Text(text.into())
+            let text = bytes::Bytes::from_owner(frame.payload)
+                .try_into()
+                .unwrap_or_default();
+            tokio_tungstenite::tungstenite::Message::Text(text)
         }
         crate::models::ws_frame_injection::WsFrameKind::Binary => {
-            tokio_tungstenite::tungstenite::Message::Binary(frame.payload.into())
+            tokio_tungstenite::tungstenite::Message::Binary(bytes::Bytes::from_owner(frame.payload))
         }
     }
 }
@@ -8358,11 +8748,13 @@ fn injection_frame_to_tungstenite(
 fn injection_frame_to_axum(frame: ws_frame_injector::WsFrame) -> axum::extract::ws::Message {
     match frame.kind {
         crate::models::ws_frame_injection::WsFrameKind::Text => {
-            let text = String::from_utf8(frame.payload).unwrap_or_default();
-            axum::extract::ws::Message::Text(text.into())
+            let text = bytes::Bytes::from_owner(frame.payload)
+                .try_into()
+                .unwrap_or_default();
+            axum::extract::ws::Message::Text(text)
         }
         crate::models::ws_frame_injection::WsFrameKind::Binary => {
-            axum::extract::ws::Message::Binary(frame.payload.into())
+            axum::extract::ws::Message::Binary(bytes::Bytes::from_owner(frame.payload))
         }
     }
 }
@@ -8372,8 +8764,8 @@ fn audit_ws_frame_auth_injected(
     db: &mongodb::Database,
     user_id: &str,
     service_id: &str,
-    action: &ws_frame_injector::InjectionAction,
-    routed_node_id: Option<&str>,
+    action: &ws_frame_injector::InjectionAction<'_>,
+    skipped: bool,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
     ip_address: Option<String>,
@@ -8384,11 +8776,8 @@ fn audit_ws_frame_auth_injected(
         "trigger_kind": action.trigger_kind,
         "frame_index_in": action.frame_index_in,
     });
-    if let Some(node_id) = routed_node_id
-        && let Some(obj) = data.as_object_mut()
-    {
-        obj.insert("routed_via".to_string(), serde_json::json!("node"));
-        obj.insert("node_id".to_string(), serde_json::json!(node_id));
+    if skipped {
+        data["outcome"] = serde_json::json!("skipped");
     }
 
     audit_service::log_async(
@@ -8544,41 +8933,33 @@ async fn bridge_websockets(
                                         &ws_frame_injections,
                                         &mut injector_state,
                                         &frame,
-                                        &credential,
                                     ) {
-                                        tracing::info!(
-                                            service_id = %service_id,
-                                            trigger_kind = action.trigger_kind,
-                                            frame_index_in = action.frame_index_in,
-                                            credential_sha256_prefix = %action.credential_sha256_prefix,
-                                            "Injected WebSocket auth frame"
-                                        );
+                                        let reply = action.frame_for_caller();
                                         audit_ws_frame_auth_injected(
                                             &db,
                                             &user_id,
                                             &service_id,
                                             &action,
-                                            None,
+                                            reply.is_none(),
                                             api_key_id.clone(),
                                             api_key_name.clone(),
                                             ip_address.clone(),
                                             user_agent.clone(),
                                         );
-                                        // NOTE: `direction` is the trigger direction. The injected
-                                        // frame is sent to the opposite side so a downstream
-                                        // auth challenge can produce an upstream auth response.
-                                        if deadline.expired() {
-                                            break;
-                                        }
-                                        if client_sink
-                                            .send(injection_frame_to_axum(action.send_frame))
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                        if !action.forward_original {
-                                            continue;
+                                        if let Some(reply) = reply {
+                                            tracing::info!(
+                                                service_id = %service_id,
+                                                trigger_kind = action.trigger_kind,
+                                                frame_index_in = action.frame_index_in,
+                                                credential_sha256_prefix = %ws_frame_injector::credential_hash_prefix(&credential),
+                                                "Injected WebSocket auth frame"
+                                            );
+                                            if deadline.expired() || client_sink.send(injection_frame_to_axum(reply)).await.is_err() {
+                                                break;
+                                            }
+                                            if !action.forward_original {
+                                                continue;
+                                            }
                                         }
                                     }
                                 }
@@ -8637,13 +9018,12 @@ async fn bridge_websockets(
                                         &ws_frame_injections,
                                         &mut injector_state,
                                         &frame,
-                                        &credential,
                                     ) {
                                         tracing::info!(
                                             service_id = %service_id,
                                             trigger_kind = action.trigger_kind,
                                             frame_index_in = action.frame_index_in,
-                                            credential_sha256_prefix = %action.credential_sha256_prefix,
+                                            credential_sha256_prefix = %ws_frame_injector::credential_hash_prefix(&credential),
                                             "Injected WebSocket auth frame"
                                         );
                                         audit_ws_frame_auth_injected(
@@ -8651,7 +9031,7 @@ async fn bridge_websockets(
                                             &user_id,
                                             &service_id,
                                             &action,
-                                            None,
+                                            false,
                                             api_key_id.clone(),
                                             api_key_name.clone(),
                                             ip_address.clone(),
@@ -8664,7 +9044,7 @@ async fn bridge_websockets(
                                             break;
                                         }
                                         if downstream_sink
-                                            .send(injection_frame_to_tungstenite(action.send_frame))
+                                            .send(injection_frame_to_tungstenite(action.frame_for_downstream(&credential)))
                                             .await
                                             .is_err()
                                         {
@@ -8816,6 +9196,7 @@ async fn handle_ws_passthrough(
     }
     let downstream = connect_downstream_ws(
         &downstream_url,
+        path,
         target,
         delegated,
         identity_headers,
@@ -8962,7 +9343,7 @@ async fn handle_ws_passthrough_via_node(
     let node_path = if prepared.path.starts_with('/') {
         prepared.path.clone()
     } else {
-        format!("/{}", prepared.path)
+        nyxid_service_adapters::SecretText::concat(&["/", &prepared.path])
     };
     let mut enriched_headers =
         crate::models::default_request_header::SecretHeaders::from(forward_headers.to_vec());
@@ -8992,7 +9373,7 @@ async fn handle_ws_passthrough_via_node(
     enriched_headers = crate::models::default_request_header::merge_into_header_list(
         enriched_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -9494,9 +9875,9 @@ mod tests {
         compose_pre_resolved_node_ids, enforce_node_route_scope, ensure_proxy_request_id,
         final_credential_class, forwarded_response_header_value, is_chat_completions_proxy_path,
         is_codex_transport_path, is_ws_upgrade_request, read_proxy_request_body,
-        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
-        strip_durable_idempotency_defaults, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        retain_durable_default, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -9582,6 +9963,95 @@ mod tests {
             claims.act.expect("delegation actor should be present").sub,
             "custom-sandbox"
         );
+    }
+
+    #[tokio::test]
+    async fn session_proxy_navigation_checks_the_browser_origin_before_service_lookup() {
+        use crate::mw::auth::AuthMethod;
+        use crate::test_utils::{test_app_state_no_db, test_auth_user};
+        use axum::extract::{Path, State};
+
+        let mut state = test_app_state_no_db().await;
+        state.config.frontend_url = "https://front.example".into();
+        state.config.domain_aliases.frontend_urls = vec!["https://alias.test".into()];
+        let session = test_auth_user(&uuid::Uuid::new_v4().to_string());
+        for by_slug in [true, false] {
+            for (auth_method, site, origin, referer, blocked) in [
+                (AuthMethod::Session, "cross-site", None, None, true),
+                (
+                    AuthMethod::Session,
+                    "same-site",
+                    Some("https://other.example"),
+                    None,
+                    true,
+                ),
+                (
+                    AuthMethod::Session,
+                    "same-site",
+                    Some("https://front.example"),
+                    Some("https://other.example/doc"),
+                    true,
+                ),
+                (AuthMethod::Session, "same-site", Some("null"), None, true),
+                (
+                    AuthMethod::Session,
+                    "cross-site",
+                    None,
+                    Some("https://alias.test/docs"),
+                    false,
+                ),
+                (
+                    AuthMethod::Session,
+                    "same-origin",
+                    Some("https://front.example"),
+                    None,
+                    false,
+                ),
+                (AuthMethod::Session, "none", None, None, false),
+                (AuthMethod::AccessToken, "cross-site", None, None, false),
+                (AuthMethod::ApiKey, "cross-site", None, None, false),
+            ] {
+                let mut auth = session.clone();
+                auth.auth_method = auth_method;
+                auth.scope = "proxy".into();
+                let mut req = axum::http::Request::builder().header("sec-fetch-site", site);
+                if let Some(value) = origin {
+                    req = req.header("origin", value);
+                }
+                if let Some(value) = referer {
+                    req = req.header("referer", value);
+                }
+                let req = req.body(axum::body::Body::empty()).unwrap();
+                if !blocked {
+                    crate::mw::csrf::check_proxy_navigation(&state.config, &auth.auth_method, &req)
+                        .expect("allow this caller to enter proxy routing");
+                    continue;
+                }
+                let path = Path(("missing".into(), "resource".into()));
+                let result = if by_slug {
+                    Box::pin(super::proxy_request_by_slug(
+                        State(state.clone()),
+                        auth,
+                        Default::default(),
+                        path,
+                        req,
+                    ))
+                    .await
+                } else {
+                    Box::pin(super::proxy_request(
+                        State(state.clone()),
+                        auth,
+                        Default::default(),
+                        path,
+                        req,
+                    ))
+                    .await
+                };
+                assert!(
+                    matches!(result, Err(crate::errors::AppError::Forbidden(ref message)) if message == "Cross-site request blocked")
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -9675,7 +10145,7 @@ mod tests {
                 sensitive: false,
             },
         ];
-        strip_durable_idempotency_defaults(&mut headers);
+        headers.retain(retain_durable_default);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name, "X-Amz-Target");
     }
@@ -9713,27 +10183,68 @@ mod tests {
     }
 
     #[test]
+    fn proxy_destination_download_location_is_returned_verbatim() {
+        let target = make_target("https://service.example/");
+        let context = AsyncLocationContext::for_target(&target, &[]).unwrap();
+        let value = b"https://download.example/archive?signature=fixture%2f%FF&part=1&part=2";
+        for status in [StatusCode::MULTIPLE_CHOICES, StatusCode::FOUND] {
+            let header =
+                forwarded_response_header_value(status, "location", value, false, Some(&context))
+                    .unwrap();
+            assert_eq!(header.as_bytes(), value);
+        }
+        assert!(
+            forwarded_response_header_value(
+                StatusCode::ACCEPTED,
+                "location",
+                value,
+                false,
+                Some(&context)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn async_locations_are_rewritten_to_the_caller_visible_proxy_route() {
-        let context = AsyncLocationContext::new(
-            "https://private.example/api/",
-            "/executions",
-            None,
-            Some("/api/v1/proxy/s/sandbox/".to_string()),
-        )
-        .unwrap();
+        let target = make_target("https://private.example/api/");
+        let uri = "/api/v1/proxy/s/sandbox/executions".parse().unwrap();
+        let context = AsyncLocationContext::new(&target, &uri, "executions", &[]).unwrap();
 
         assert_eq!(
-            context.rewrite("executions/op-1?view=status").unwrap(),
+            context
+                .header_value(
+                    StatusCode::ACCEPTED,
+                    "location",
+                    "executions/op-1?view=status"
+                )
+                .unwrap(),
             "/api/v1/proxy/s/sandbox/executions/op-1?view=status"
         );
         assert_eq!(
             context
-                .rewrite("https://private.example/api/executions/op-2")
+                .header_value(
+                    StatusCode::ACCEPTED,
+                    "location",
+                    "https://private.example/api/executions/op-2"
+                )
                 .unwrap(),
             "/api/v1/proxy/s/sandbox/executions/op-2"
         );
-        assert!(context.rewrite("https://attacker.example/op-3").is_none());
-        assert!(context.rewrite("/outside-service/op-4").is_none());
+        assert!(
+            context
+                .header_value(
+                    StatusCode::ACCEPTED,
+                    "location",
+                    "https://attacker.example/op-3"
+                )
+                .is_none()
+        );
+        assert!(
+            context
+                .header_value(StatusCode::ACCEPTED, "location", "/outside-service/op-4")
+                .is_none()
+        );
     }
 
     #[test]
@@ -9747,7 +10258,16 @@ mod tests {
         ] {
             assert!(ALLOWED_RESPONSE_HEADERS.contains(&name));
         }
-        assert!(forwarded_response_header_value("location", b"/private", false, None).is_none());
+        assert!(
+            forwarded_response_header_value(
+                StatusCode::ACCEPTED,
+                "location",
+                b"/private",
+                false,
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -10451,6 +10971,7 @@ mod tests {
                 >,
             >,
         >,
+        rules: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
         db: mongodb::Database,
     }
 
@@ -10470,16 +10991,7 @@ mod tests {
                 downstream_ws,
                 "svc-ha".to_string(),
                 false,
-                vec![crate::models::ws_frame_injection::WsFrameInjection {
-                    trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
-                        path: "$.type".to_string(),
-                        value: serde_json::json!("auth_required"),
-                    },
-                    template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
-                    frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-                    consume_trigger: true,
-                    direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
-                }],
+                state.rules,
                 "TEST_CRED".to_owned().into(),
                 state.db,
                 "user-1".to_string(),
@@ -10493,6 +11005,103 @@ mod tests {
             )
             .await;
         })
+    }
+
+    async fn connect_test_bridge(
+        state: WsBridgeTestState,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let app = Router::new()
+            .route("/ws", get(ws_bridge_test_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bridge");
+        let bridge_addr = listener.local_addr().expect("bridge addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve bridge");
+        });
+
+        let (client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
+            .await
+            .expect("connect client");
+        (client_ws, server_task)
+    }
+
+    #[tokio::test]
+    async fn stored_caller_rule_skips_reply_and_audits_only_metadata() {
+        use crate::models::audit_log::{AuditLog, COLLECTION_NAME};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let db = crate::test_utils::connect_test_database("ws_recipient_audit")
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let original = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(original, r#"{"type":"forward"}"#);
+            ws.send(Message::Text("forwarded".into())).await.unwrap();
+            ws.next().await;
+        });
+        let (downstream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        // Decode the same BSON representation used by catalog and user-service rows.
+        let rules = ["${credential}", "ready"]
+            .into_iter()
+            .zip(["forward", "status"])
+            .map(|(template, kind)| {
+                bson::from_document(bson::doc! {
+                    "trigger": {"json_field_equals": {"path": "$.type", "value": kind}},
+                    "template": template, "direction": "upstream", "consume_trigger": true
+                })
+                .unwrap()
+            })
+            .collect();
+        let (mut caller, server) = connect_test_bridge(WsBridgeTestState {
+            downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream))),
+            rules,
+            db: db.clone(),
+        })
+        .await;
+        for (message, expected) in [
+            (r#"{"type":"forward"}"#, "forwarded"),
+            (r#"{"type":"status"}"#, "ready"),
+        ] {
+            caller.send(Message::Text(message.into())).await.unwrap();
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(5), caller.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.into_text().unwrap(), expected);
+        }
+        caller.close(None).await.unwrap();
+        peer.await.unwrap();
+        server.abort();
+        crate::services::shutdown::process().idle().await;
+        let skipped = db
+            .collection::<AuditLog>(COLLECTION_NAME)
+            .find_one(
+                bson::doc! {"event_type":"ws_frame_auth_injected","event_data.outcome":"skipped"},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            skipped.event_data,
+            Some(serde_json::json!({
+                "service_id":"svc-ha", "trigger_kind":"json_field_equals", "frame_index_in":0, "outcome":"skipped"
+            }))
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -10547,21 +11156,18 @@ mod tests {
         let state = WsBridgeTestState {
             downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream_ws))),
             db,
+            rules: vec![crate::models::ws_frame_injection::WsFrameInjection {
+                trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
+                    path: "$.type".to_string(),
+                    value: serde_json::json!("auth_required"),
+                },
+                template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
+                frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+                consume_trigger: true,
+                direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
+            }],
         };
-        let app = Router::new()
-            .route("/ws", get(ws_bridge_test_handler))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind bridge");
-        let bridge_addr = listener.local_addr().expect("bridge addr");
-        let server_task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve bridge");
-        });
-
-        let (mut client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
-            .await
-            .expect("connect client");
+        let (mut client_ws, server_task) = connect_test_bridge(state).await;
         let client_msg = client_ws
             .next()
             .await
@@ -10600,7 +11206,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -10787,21 +11393,21 @@ mod tests {
     fn ws_url_converts_http_to_ws() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket");
     }
 
     #[test]
     fn ws_url_converts_https_to_wss() {
         let target = make_target("https://api.example.com");
         let url = build_downstream_ws_url(&target, "ws", None, &[]).unwrap();
-        assert_eq!(url, "wss://api.example.com/ws");
+        assert_eq!(url.as_str(), "wss://api.example.com/ws");
     }
 
     #[test]
     fn ws_url_preserves_query_params() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", Some("token=abc&v=1"), &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket?token=abc&v=1");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket?token=abc&v=1");
     }
 
     #[test]
@@ -10813,9 +11419,30 @@ mod tests {
 
         let url = build_downstream_ws_url(&target, "socket", Some("stream=true"), &[]).unwrap();
         assert_eq!(
-            url,
+            url.as_str(),
             "wss://api.example.com/socket?stream=true&api_key=secret%20value"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_websocket_checks_address_before_connect() {
+        // Port zero has no listening peer. The policy must refuse this URL before a TCP dial.
+        let url = "ws://[::]:0/socket";
+        let target = make_target(url);
+        use crate::services::billing::{BillingIngress, route_inventory};
+        let permit = route_inventory::enforce_billing_egress_classification(
+            Some(route_inventory::BillingRoutePolicy::Metered(
+                BillingIngress::Proxy,
+            )),
+            BillingIngress::Proxy,
+        )
+        .unwrap();
+        let result =
+            super::connect_downstream_ws(url, "/", &target, &[], &[], &[], None, permit).await;
+        assert!(matches!(
+            result,
+            Err(crate::errors::AppError::ValidationError(_))
+        ));
     }
 
     #[tokio::test]
@@ -10866,6 +11493,7 @@ mod tests {
 
         let connection = super::connect_downstream_ws(
             &format!("ws://{addr}/v1/convai/conversation"),
+            "v1/convai/conversation",
             &target,
             &[],
             &[],
@@ -10888,21 +11516,21 @@ mod tests {
     fn ws_url_handles_trailing_slash_on_base() {
         let target = make_target("http://localhost:8080/");
         let url = build_downstream_ws_url(&target, "socket.io", None, &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket.io");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket.io");
     }
 
     #[test]
     fn ws_url_passes_through_ws_scheme() {
         let target = make_target("ws://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket");
     }
 
     #[test]
     fn ws_url_passes_through_wss_scheme() {
         let target = make_target("wss://secure.example.com");
         let url = build_downstream_ws_url(&target, "ws", None, &[]).unwrap();
-        assert_eq!(url, "wss://secure.example.com/ws");
+        assert_eq!(url.as_str(), "wss://secure.example.com/ws");
     }
 
     #[test]
@@ -11116,13 +11744,16 @@ mod tests {
     #[test]
     fn append_query_param_adds_to_clean_url() {
         let result = super::append_query_param("https://api.example.com/v1", "key", "value");
-        assert_eq!(result, "https://api.example.com/v1?key=value");
+        assert_eq!(result.as_str(), "https://api.example.com/v1?key=value");
     }
 
     #[test]
     fn append_query_param_appends_to_existing_query() {
         let result = super::append_query_param("https://api.example.com/v1?a=1", "key", "val ue");
-        assert_eq!(result, "https://api.example.com/v1?a=1&key=val%20ue");
+        assert_eq!(
+            result.as_str(),
+            "https://api.example.com/v1?a=1&key=val%20ue"
+        );
     }
 
     #[test]
@@ -11473,7 +12104,7 @@ mod tests {
     #[test]
     fn append_query_param_encodes_special_chars_in_name() {
         let result = super::append_query_param("https://example.com", "key name", "val");
-        assert_eq!(result, "https://example.com?key%20name=val");
+        assert_eq!(result.as_str(), "https://example.com?key%20name=val");
     }
 
     // ── shared forward-header policy additional cases ───────────────
@@ -11701,7 +12332,7 @@ mod tests {
         assert!(result.is_some());
         let (kind, bytes) = result.unwrap();
         assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Text);
-        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "payload");
+        assert_eq!(std::str::from_utf8(bytes).unwrap(), "payload");
     }
 
     #[test]
@@ -11742,7 +12373,7 @@ mod tests {
         assert!(result.is_some());
         let (kind, bytes) = result.unwrap();
         assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Text);
-        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "tung-payload");
+        assert_eq!(std::str::from_utf8(bytes).unwrap(), "tung-payload");
     }
 
     #[test]
@@ -11774,7 +12405,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: b"injected text".to_vec(),
+            payload: b"injected text".to_vec().into(),
         };
         let msg = super::injection_frame_to_tungstenite(frame);
         match msg {
@@ -11790,7 +12421,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Binary,
-            payload: vec![0xDE, 0xAD],
+            payload: vec![0xDE, 0xAD].into(),
         };
         let msg = super::injection_frame_to_tungstenite(frame);
         match msg {
@@ -11806,7 +12437,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: vec![0xFF, 0xFE],
+            payload: vec![0xFF, 0xFE].into(),
         };
         let msg = super::injection_frame_to_tungstenite(frame);
         match msg {
@@ -11824,7 +12455,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: b"axum text".to_vec(),
+            payload: b"axum text".to_vec().into(),
         };
         let msg = super::injection_frame_to_axum(frame);
         match msg {
@@ -11840,7 +12471,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Binary,
-            payload: vec![0xBE, 0xEF],
+            payload: vec![0xBE, 0xEF].into(),
         };
         let msg = super::injection_frame_to_axum(frame);
         match msg {
@@ -11856,7 +12487,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: vec![0xFF, 0xFE],
+            payload: vec![0xFF, 0xFE].into(),
         };
         let msg = super::injection_frame_to_axum(frame);
         match msg {
@@ -12139,6 +12770,10 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    mod location_tests {
+        use super::*;
+        include!("proxy_location_tests.rs");
+    }
     include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
@@ -12463,6 +13098,20 @@ mod proxy_resolution_integration_tests {
         service_slug: &str,
         target_url: &str,
     ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let credentials =
+            nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url).unwrap();
+        start_node_executor_with_credentials(state, node, credentials, 1).await
+    }
+
+    async fn connect_test_node_socket(
+        state: AppState,
+        node: &Node,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio::task::JoinHandle<()>,
+    ) {
         let app = Router::new()
             .route(
                 "/api/v1/nodes/ws",
@@ -12514,8 +13163,16 @@ mod proxy_resolution_integration_tests {
         // auth_ok is sent only after the connection has been registered.
         assert!(state.node_ws_manager.is_connected(&node.id));
 
-        let credentials = nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url)
-            .expect("build node executor credentials");
+        (socket, ws_server)
+    }
+
+    async fn start_node_executor_with_credentials(
+        state: AppState,
+        node: &Node,
+        credentials: nyxid_node_proxy_test::CredentialStore,
+        request_count: usize,
+    ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let (socket, ws_server) = connect_test_node_socket(state, node).await;
         let signing_secret = "11".repeat(32);
         let executor = tokio::spawn(async move {
             let (mut ws_sink, mut ws_stream) = socket.split();
@@ -12524,6 +13181,7 @@ mod proxy_resolution_integration_tests {
             let http_client = nyxid_node_proxy_test::proxy_executor::build_http_client()
                 .expect("build node executor HTTP client");
 
+            let mut served = 0;
             while let Some(message) = ws_stream.next().await {
                 let message = message.expect("read proxy request from backend WebSocket");
                 let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
@@ -12563,7 +13221,10 @@ mod proxy_resolution_integration_tests {
                         .await
                         .expect("send node executor response over WebSocket");
                 }
-                break;
+                served += 1;
+                if served == request_count {
+                    break;
+                }
             }
         });
 
@@ -12757,6 +13418,7 @@ mod proxy_resolution_integration_tests {
     fn approval_config(owner_user_id: &str, service_id: &str) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            approvers: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: owner_user_id.to_string(),
             service_id: service_id.to_string(),
@@ -13274,33 +13936,26 @@ mod proxy_resolution_integration_tests {
         node
     }
 
-    async fn wait_for_node_audit_event(
+    async fn node_audit_after_write(
         db: &mongodb::Database,
         node_id: &str,
-        event_type: &str,
-    ) -> Option<AuditLog> {
-        for _ in 0..100 {
-            let found = db
-                .collection::<AuditLog>(AUDIT_LOG)
-                .find_one(doc! {
-                    "event_type": event_type,
-                    "event_data.routed_via": "node",
-                    "event_data.node_id": node_id,
-                })
-                .await
-                .expect("query audit log");
-            if found.is_some() {
-                return found;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-
-        None
-    }
-
-    async fn wait_for_node_proxy_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
-        wait_for_node_audit_event(db, node_id, "proxy_request").await
+        mut written: tokio::sync::oneshot::Receiver<String>,
+    ) -> AuditLog {
+        let writers = crate::services::shutdown::process();
+        let id = tokio::select! {
+            biased;
+            result = &mut written => result.expect("node audit writer closed"),
+            () = writers.idle() => written.try_recv().expect("node audit writer finished without a committed row"),
+        };
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "_id": id,
+                "event_data.routed_via": "node",
+                "event_data.node_id": node_id,
+            })
+            .await
+            .expect("query committed node audit")
+            .expect("audit must identify the node that handled the request")
     }
 
     async fn find_org_routing_audit(
@@ -13369,6 +14024,369 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("query approval request")
             .expect("approval request should exist")
+    }
+
+    #[derive(Clone, Copy)]
+    enum ApprovalWaitCase {
+        Disconnect,
+        Deadline,
+        Approve,
+        ExternalBudget,
+        InvalidBudget,
+        NyxbotAt70,
+        NyxbotAt85,
+    }
+
+    async fn exercise_connected_approval(case: ApprovalWaitCase) {
+        use crate::downstream_disconnect::{DisconnectAwareListener, DisconnectAwareMakeService};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let nyxbot = matches!(
+            case,
+            ApprovalWaitCase::NyxbotAt70 | ApprovalWaitCase::NyxbotAt85
+        );
+        let (state, owner, auth) = if nyxbot {
+            let fixture = crate::services::assistant_authority_tests::orchestrator_fixture(
+                "nyxbot_connected_write",
+            )
+            .await;
+            let mut auth = fixture.auth;
+            auth.assistant_chat = Some(Arc::new(fixture.chat));
+            auth.allow_all_services = true;
+            (fixture.state, fixture.owner, auth)
+        } else {
+            let db = connect_test_database("proxy_connected_approval")
+                .await
+                .expect("MongoDB required");
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let auth = access_token_auth(&owner);
+            (test_app_state(db), owner, auth)
+        };
+        let db = &state.db;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Router::new().route(
+            "/items",
+            post({
+                let calls = calls.clone();
+                move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    "created"
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_url = format!("http://{}", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+        let service = insert_user_service(db, &owner, "wait", &provider_url, None).await;
+        let timeout = if matches!(case, ApprovalWaitCase::Deadline) {
+            2
+        } else {
+            300
+        };
+        if nyxbot {
+            db.collection::<mongodb::bson::Document>(NOTIFICATION_CHANNELS)
+                .update_one(
+                    doc! {"user_id": &owner},
+                    doc! {"$set": {"approval_timeout_secs": timeout}},
+                )
+                .await
+                .unwrap();
+        } else {
+            let mut channel = notification_channel(&owner, timeout);
+            channel.approval_required = None;
+            db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+                .insert_one(channel)
+                .await
+                .unwrap();
+        }
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(approval_config(&owner, &service.id))
+            .await
+            .unwrap();
+        let ingress = if matches!(case, ApprovalWaitCase::ExternalBudget) {
+            Utc::now() - chrono::Duration::seconds(78)
+        } else {
+            Utc::now()
+        };
+        let (clock, at) = tokio::sync::watch::channel(ingress + chrono::Duration::seconds(68));
+        let proxy = Router::new()
+            .route("/proxy/s/{slug}/{*path}", post(ws_proxy_test_route))
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Proxy,
+                ),
+            ))
+            .layer(axum::middleware::from_fn(super::ingress::callback))
+            .layer(axum::Extension(super::ingress::RequestReceivedAt(ingress)))
+            .with_state((state.clone(), auth.clone()));
+        let proxy = if nyxbot {
+            let at = at.clone();
+            proxy.layer(axum::middleware::from_fn(
+                move |request: Request<Body>, next: axum::middleware::Next| {
+                    crate::services::approval_service::APPROVAL_CLOCK
+                        .scope(at.clone(), next.run(request))
+                },
+            ))
+        } else {
+            proxy
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            axum::serve(
+                DisconnectAwareListener::new(listener),
+                DisconnectAwareMakeService::new(proxy),
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let budget_header = match case {
+            ApprovalWaitCase::ExternalBudget => {
+                "X-NyxID-Approval-Wait-Seconds: 80\r\nX-NyxID-Approval-Mode: async\r\n"
+            }
+            ApprovalWaitCase::InvalidBudget => "X-NyxID-Approval-Wait-Seconds: 9\r\n",
+            _ => "",
+        };
+        client.write_all(format!("POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\n{budget_header}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let requests = db.collection::<ApprovalRequest>(APPROVAL_REQUESTS);
+        if matches!(case, ApprovalWaitCase::InvalidBudget) {
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            assert_eq!(
+                requests
+                    .count_documents(doc! {"user_id":&owner})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            origin.abort();
+            upstream.abort();
+            return;
+        }
+        let card = loop {
+            if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        if nyxbot {
+            assert_eq!(
+                card.expires_at.timestamp_millis(),
+                (ingress + chrono::Duration::seconds(80)).timestamp_millis()
+            );
+            let decision_second = if matches!(case, ApprovalWaitCase::NyxbotAt70) {
+                70
+            } else {
+                85
+            };
+            clock.send_replace(ingress + chrono::Duration::seconds(decision_second));
+        } else if matches!(case, ApprovalWaitCase::ExternalBudget) {
+            assert_eq!(
+                card.expires_at.timestamp_millis(),
+                (ingress + chrono::Duration::seconds(80)).timestamp_millis()
+            );
+        } else {
+            assert_eq!(
+                (card.expires_at - card.created_at).num_seconds(),
+                i64::from(timeout)
+            );
+        }
+        let decide = || async {
+            let decision = crate::handlers::approvals::decide_request(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(card.id.clone()),
+                Default::default(),
+                Default::default(),
+                Json(crate::handlers::approvals::DecideRequest {
+                    approved: true,
+                    duration_sec: None,
+                }),
+            );
+            if nyxbot {
+                crate::services::approval_service::APPROVAL_CLOCK
+                    .scope(at.clone(), decision)
+                    .await
+            } else {
+                decision.await
+            }
+        };
+        match case {
+            ApprovalWaitCase::InvalidBudget => unreachable!("invalid ingress returned above"),
+            ApprovalWaitCase::ExternalBudget => {
+                let mut response = String::new();
+                tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(response.contains("approval_wait_timed_out"), "{response}");
+                assert!(decide().await.is_err());
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id":&card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+            ApprovalWaitCase::Disconnect => {
+                drop(client);
+                // Allow the origin to observe EOF, then decide within the original TTL.
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                let late = decide().await;
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "late decision dispatched a write"
+                );
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id": &card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                assert!(late.is_err());
+            }
+            ApprovalWaitCase::Deadline | ApprovalWaitCase::NyxbotAt85 => {
+                if nyxbot {
+                    assert!(decide().await.is_err(), "85-second approval succeeded");
+                }
+                let mut response = String::new();
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    client.read_to_string(&mut response),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                if !nyxbot {
+                    assert!(decide().await.is_err(), "late approval succeeded");
+                }
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id": &card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                if nyxbot {
+                    let listed = crate::handlers::approvals::list_requests(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(&owner),
+                        axum::extract::Query(crate::handlers::approvals::ApprovalRequestsQuery {
+                            status: Some("expired".into()),
+                            page: None,
+                            per_page: None,
+                            org_id: None,
+                            include_admin_orgs: None,
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .0;
+                    assert!(
+                        listed
+                            .requests
+                            .iter()
+                            .any(|item| item.id == card.id && item.status == "expired")
+                    );
+                    let cards = crate::services::assistant_nyxagent::approval_history(
+                        db,
+                        &owner,
+                        auth.api_key_id.as_deref().unwrap(),
+                        &[&card.id],
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        cards
+                            .iter()
+                            .any(|item| item.id == card.id && item.status == "expired")
+                    );
+                    assert!(
+                        response.contains("approval_expired") && response.contains("Ask the owner")
+                    );
+                }
+                assert!(
+                    response.contains("Nothing was sent by this call"),
+                    "{response}"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+            ApprovalWaitCase::Approve | ApprovalWaitCase::NyxbotAt70 => {
+                let decision = decide().await.unwrap().0;
+                assert_eq!(decision.status, "approved");
+                if nyxbot {
+                    assert_eq!(
+                        chrono::DateTime::parse_from_rfc3339(&decision.decided_at.unwrap())
+                            .unwrap()
+                            .timestamp_millis(),
+                        (ingress + chrono::Duration::seconds(70)).timestamp_millis()
+                    );
+                }
+                let mut response = String::new();
+                client.read_to_string(&mut response).await.unwrap();
+                assert!(response.contains("created"), "{response}");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+        origin.abort();
+        upstream.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_disconnected_proxy_expires_without_dispatch() {
+        exercise_connected_approval(ApprovalWaitCase::Disconnect).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_deadline_returns_expiry_and_refuses_late_approval() {
+        exercise_connected_approval(ApprovalWaitCase::Deadline).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_connected_approval_returns_one_provider_result() {
+        exercise_connected_approval(ApprovalWaitCase::Approve).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_nyxbot_approval_at_70_seconds_sends_once() {
+        exercise_connected_approval(ApprovalWaitCase::NyxbotAt70).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_nyxbot_approval_at_85_seconds_expires_in_chat_and_approvals() {
+        exercise_connected_approval(ApprovalWaitCase::NyxbotAt85).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_external_budget_caps_card_and_connected_wait() {
+        exercise_connected_approval(ApprovalWaitCase::ExternalBudget).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_invalid_budget_is_rejected_before_creation() {
+        exercise_connected_approval(ApprovalWaitCase::InvalidBudget).await;
     }
 
     #[tokio::test]
@@ -13457,6 +14475,13 @@ mod proxy_resolution_integration_tests {
                 .unwrap();
             assert!(default.overridable);
             assert_eq!(default.value.as_str(), default_version);
+            db.collection::<DownstreamService>(SERVICES)
+                .update_one(
+                    doc! {"_id": &catalog.id},
+                    doc! {"$set": {"base_url": &base_url}},
+                )
+                .await
+                .unwrap();
             for via_node in [false, true] {
                 for explicit_version in [None, Some("2025-09-03")] {
                     let node = if via_node {
@@ -13534,6 +14559,355 @@ mod proxy_resolution_integration_tests {
             }
         }
         echo_server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_waits_for_release_or_retirement_and_delivers_once() {
+        use crate::services::{node_dispatch, node_owner_service as owners};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+        // The same test binary acts as the predecessor so killing it loses both
+        // listeners and the WebSocket without running an owner release.
+        if let (Ok(database), Ok(ready)) = (
+            std::env::var("HANDOVER_TEST_DB"),
+            std::env::var("HANDOVER_TEST_READY"),
+        ) {
+            let client =
+                mongodb::Client::with_uri_str(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+                    .await
+                    .unwrap();
+            let internal = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = crate::test_utils::test_app_config();
+            config.internal_advertise_url = format!("http://{}", internal.local_addr().unwrap());
+            let owner =
+                crate::test_utils::test_app_state_with_config(client.database(&database), config);
+            let private_router = node_dispatch::internal_router(
+                owner.node_dispatch.clone(),
+                1 << 20,
+                Duration::from_secs(2),
+            );
+            let node_router = Router::new()
+                .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
+                .with_state(owner);
+            std::fs::write(ready, public.local_addr().unwrap().to_string()).unwrap();
+            tokio::try_join!(
+                axum::serve(internal, private_router).into_future(),
+                axum::serve(
+                    public,
+                    node_router.into_make_service_with_connect_info::<std::net::SocketAddr>()
+                )
+                .into_future()
+            )
+            .unwrap();
+            return;
+        }
+        for graceful in [false, true] {
+            let db = connect_test_database("proxy_owner_handover").await.unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = crate::test_utils::test_app_config();
+            config.internal_advertise_url = format!("http://{}", listener.local_addr().unwrap());
+            let previous = crate::test_utils::test_app_state_with_config(db.clone(), config);
+            let survivor = test_app_state(db.clone());
+            let principal = Uuid::new_v4().to_string();
+            crate::test_utils::set_test_approval_preference(&db, &principal, false).await;
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&principal, UserType::Person))
+                .await
+                .unwrap();
+            let node = insert_online_node(&survivor, &principal, "handover").await;
+            let service =
+                insert_user_service(&db, &principal, "handover", "https://service.invalid", None)
+                    .await;
+            db.collection::<UserService>(USER_SERVICES)
+                .update_one(
+                    doc! {"_id": &service.id},
+                    doc! {"$set":{"node_id":&node.id}},
+                )
+                .await
+                .unwrap();
+
+            let (release, retired) = if graceful {
+                let owner = owners::claim(
+                    &db,
+                    &node.id,
+                    &previous.replica_identity,
+                    "original",
+                    Duration::from_secs(90),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let fence = owners::NodeOwnerFence::from_owner(&node.id, &owner);
+                db.collection::<Node>(NODES)
+                    .update_one(
+                        fence.filter(),
+                        doc! {"$set":{"connection_owner.handover_pending":true}},
+                    )
+                    .await
+                    .unwrap();
+                let router = node_dispatch::internal_router(
+                    previous.node_dispatch.clone(),
+                    1 << 20,
+                    Duration::from_secs(2),
+                );
+                let server =
+                    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+                server.abort();
+                let _ = server.await;
+                (Some(fence), None)
+            } else {
+                drop(listener);
+                let directory = tempfile::tempdir().unwrap();
+                let ready = directory.path().join("ready");
+                let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact","handlers::proxy::proxy_resolution_integration_tests::proxy_waits_for_release_or_retirement_and_delivers_once"])
+                    .env("HANDOVER_TEST_DB",db.name())
+                    .env("NYXID_TEST_DATABASE_URL",crate::test_utils::selected_test_database_uri())
+                    .env("HANDOVER_TEST_READY",&ready)
+                    .kill_on_drop(true).spawn().unwrap();
+                let address = tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        if let Ok(address) = std::fs::read_to_string(&ready)
+                            && address.parse::<std::net::SocketAddr>().is_ok()
+                        {
+                            break address;
+                        }
+                        assert!(child.try_wait().unwrap().is_none());
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let (mut ws, _) =
+                    tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
+                        .await
+                        .unwrap();
+                ws.send(Message::Text(
+                    serde_json::json!({"type":"auth","node_id":node.id,
+                    "token":format!("test-node-auth-{}",node.id),"retirement_v1":{}})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+                let frame = ws.next().await.unwrap().unwrap();
+                let offer: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(offer["type"], "retirement_offer_v1");
+                ws.send(Message::Text(serde_json::json!({"type":"retirement_confirm_v1","connection_id":offer["connection_id"]}).to_string().into())).await.unwrap();
+                let ack: serde_json::Value =
+                    serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(ack["type"], "auth_ok");
+                // Lose the result of a separate request after the real agent socket received it.
+                let mut slug = String::new();
+                let auth = access_token_auth(&principal);
+                let in_flight = proxy_request_by_slug_inner(
+                    &survivor,
+                    &auth,
+                    &service.slug,
+                    "in-flight",
+                    proxy_json_request("/proxy/s/handover/in-flight", "{}"),
+                    &mut slug,
+                );
+                let kill_after_delivery = async {
+                    loop {
+                        let frame = ws.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = frame {
+                            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                            if frame["type"] == "proxy_request" {
+                                break;
+                            }
+                        }
+                    }
+                    child.kill().await.unwrap();
+                    assert!(!child.wait().await.unwrap().success());
+                };
+                let (lost, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+                    tokio::join!(in_flight, kill_after_delivery)
+                })
+                .await
+                .expect("a lost owner response must not start the four-second handover wait");
+                assert!(matches!(lost, Err(AppError::NodeOffline(_))));
+                drop(ws);
+                let row = db
+                    .collection::<Node>(NODES)
+                    .find_one(doc! {"_id":&node.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(owners::live_owner(&row, chrono::Utc::now()).is_some());
+                (
+                    None,
+                    Some(
+                        serde_json::json!({"connection_id":offer["connection_id"],"secret":offer["secret"]}),
+                    ),
+                )
+            };
+            let successor_router = Router::new()
+                .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
+                .with_state(survivor.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    successor_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
+                .await
+                .unwrap();
+            let waiting = Arc::new(tokio::sync::Notify::new());
+            let request = node_dispatch::WAITING_FOR_NODE_HANDOVER.scope(waiting.clone(), async {
+                let mut slug = String::new();
+                proxy_request_by_slug_inner(
+                    &survivor,
+                    &access_token_auth(&principal),
+                    &service.slug,
+                    "commands",
+                    proxy_json_request("/proxy/s/handover/commands", "{}"),
+                    &mut slug,
+                )
+                .await
+                .unwrap()
+            });
+            let agent = async {
+                waiting.notified().await;
+                if let Some(fence) = release {
+                    assert!(owners::release(&db, &fence).await.unwrap());
+                }
+                let mut auth = serde_json::json!({"type":"auth","node_id":node.id,"token":format!("test-node-auth-{}",node.id)});
+                if let Some(proof) = retired {
+                    auth["retirement_v1"] = serde_json::json!({"predecessor":proof});
+                }
+                ws.send(Message::Text(auth.to_string().into()))
+                    .await
+                    .unwrap();
+                if !graceful {
+                    let frame = ws.next().await.unwrap().unwrap();
+                    let offer: serde_json::Value =
+                        serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    assert_eq!(offer["type"], "retirement_offer_v1");
+                    ws.send(Message::Text(serde_json::json!({"type":"retirement_confirm_v1","connection_id":offer["connection_id"]}).to_string().into())).await.unwrap();
+                }
+                let read = async |ws: &mut tokio_tungstenite::WebSocketStream<_>| {
+                    loop {
+                        let msg = ws.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = msg {
+                            break serde_json::from_str::<serde_json::Value>(&text).unwrap();
+                        }
+                    }
+                };
+                assert_eq!(read(&mut ws).await["type"], "auth_ok");
+                loop {
+                    let frame = read(&mut ws).await;
+                    if frame["type"] == "proxy_request" {
+                        ws.send(Message::Text(serde_json::json!({"type":"proxy_response","request_id":frame["request_id"],"status":201,"headers":{},"body":""}).to_string().into())).await.unwrap();
+                        break;
+                    }
+                }
+                (ws, server)
+            };
+            let (response, (mut ws, server)) =
+                tokio::time::timeout(Duration::from_secs(6), async {
+                    tokio::join!(request, agent)
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            while let Ok(Some(Ok(Message::Text(text)))) =
+                tokio::time::timeout(Duration::from_millis(50), ws.next()).await
+            {
+                assert_ne!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap()["type"],
+                    "proxy_request"
+                );
+            }
+            ws.close(None).await.unwrap();
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_get_fails_over_after_primary_reads_the_request_and_disconnects() {
+        use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
+        let db = connect_test_database("safe_node_failover").await.unwrap();
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let primary = insert_online_node(&state, &owner, "primary").await;
+        let backup = insert_online_node(&state, &owner, "backup").await;
+        let mut service =
+            insert_user_service(&db, &owner, "safe-read", "https://service.invalid", None).await;
+        service.node_id = Some(primary.id.clone());
+        db.collection::<UserService>(USER_SERVICES)
+            .replace_one(doc! {"_id": &service.id}, &service)
+            .await
+            .unwrap();
+        crate::services::node_service::create_binding(&db, &owner, &backup.id, &service.id)
+            .await
+            .unwrap();
+        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(8);
+        let (backup_tx, mut backup_rx) = tokio::sync::mpsc::channel(8);
+        crate::test_utils::register_test_node_connection(&state, &primary.id, primary_tx).await;
+        crate::test_utils::register_test_node_connection(&state, &backup.id, backup_tx).await;
+        let agents = async {
+            let NodeOutboundMessage::Text(message) = primary_rx.recv().await.unwrap() else {
+                panic!("expected request");
+            };
+            let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["type"], "proxy_request");
+            assert_eq!(request["method"], "GET");
+            state.node_ws_manager.unregister_connection(&primary.id);
+            let NodeOutboundMessage::Text(message) = backup_rx.recv().await.unwrap() else {
+                panic!("expected fallback");
+            };
+            let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["method"], "GET");
+            state.node_ws_manager.deliver_proxy_response(
+                &backup.id,
+                NodeProxyResponse {
+                    request_id: request["request_id"].as_str().unwrap().into(),
+                    status: 200,
+                    headers: vec![],
+                    body: b"backup".to_vec(),
+                },
+            );
+        };
+        let auth = access_token_auth(&owner);
+        let mut request = proxy_json_request("/api/v1/proxy/s/safe-read/version", "");
+        *request.method_mut() = Method::GET;
+        let mut slug = String::new();
+        let proxy = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &service.slug,
+            "version",
+            request,
+            &mut slug,
+        );
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(proxy, agents)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(result.unwrap().into_body(), 64)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"backup"
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -13680,7 +15054,6 @@ mod proxy_resolution_integration_tests {
             eprintln!("skipping proxy integration test: no local MongoDB available");
             return;
         };
-
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
         crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
@@ -13719,6 +15092,10 @@ mod proxy_resolution_integration_tests {
         let (executor, ws_server) =
             start_node_executor(state.clone(), &node, &service.slug, &base_url).await;
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_request",
+            &member_id,
+        );
         let mut resolved_slug = String::new();
         let response = proxy_request_by_slug_inner(
             &state,
@@ -13747,9 +15124,7 @@ mod proxy_resolution_integration_tests {
         assert_eq!(observed["body"], r#"{"operation":"probe"}"#);
         executor.await.expect("node executor task");
 
-        let audit = wait_for_node_proxy_audit(&db, &node.id)
-            .await
-            .expect("node-routed proxy audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),
@@ -13829,6 +15204,8 @@ mod proxy_resolution_integration_tests {
     #[tokio::test]
     async fn org_bound_slug_route_prefers_granted_org_service_and_falls_back_for_ungranted() {
         let f = crate::services::org_agent_tests::Fixture::new("proxy_org_slug_collision").await;
+        crate::services::security_readiness_service::refresh_test_replica_heartbeat(&f.state.db)
+            .await;
         let (agent, row) = f.create().await;
         let nyxbot = crate::services::assistant_authority_tests::new_orchestrator(
             &f.state,
@@ -14062,6 +15439,10 @@ mod proxy_resolution_integration_tests {
         crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_ws_upgrade",
+            &member_id,
+        );
         assert_ws_proxy_upgrade(
             state.clone(),
             access_token_auth(&member_id),
@@ -14070,9 +15451,7 @@ mod proxy_resolution_integration_tests {
         .await;
         responder.await.expect("node ws responder task");
 
-        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
-            .await
-            .expect("node-routed ws upgrade audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),
@@ -14121,6 +15500,10 @@ mod proxy_resolution_integration_tests {
         crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_ws_upgrade",
+            &owner_id,
+        );
         assert_ws_proxy_upgrade(
             state.clone(),
             access_token_auth(&owner_id),
@@ -14129,9 +15512,7 @@ mod proxy_resolution_integration_tests {
         .await;
         responder.await.expect("node ws responder task");
 
-        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
-            .await
-            .expect("node-routed ws upgrade audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),

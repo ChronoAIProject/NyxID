@@ -1,7 +1,9 @@
+
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { WORKSPACE_HEADER_ROW } from "./workspaceHeaderMetrics";
 import { useEffect, useState, type Ref } from "react";
-import { AppState, Pressable, StyleSheet, Text, View } from "react-native";
+import { Text, AppState, Pressable, StyleSheet, View } from "react-native";
 import {
   SafeAreaView,
   useSafeAreaInsets,
@@ -48,10 +50,22 @@ export type WorkspaceRoute =
   | "Agents"
   | "AccountSettings";
 const destinations = [
-  { route: "Automations", label: "Automations", Icon: CalendarClock },
-  { route: "Machines", label: "Machines", Icon: Monitor },
-  { route: "Plugins", label: "Plugins", Icon: Plug },
-  { route: "Activity", label: "Activity", Icon: ShieldCheck },
+  { route: "Automations",
+    get label() {
+      return translateApp("Automations");
+    }, Icon: CalendarClock, },
+  { route: "Machines",
+    get label() {
+      return translateApp("Machines");
+    }, Icon: Monitor, },
+  { route: "Plugins",
+    get label() {
+      return translateApp("Plugins");
+    }, Icon: Plug, },
+  { route: "Activity",
+    get label() {
+      return translateApp("Activity");
+    }, Icon: ShieldCheck, },
 ] as const;
 
 type Props = {
@@ -116,7 +130,7 @@ export function WorkspaceDrawer({
   const notifications = useNotificationIndicator(active);
   return (
     <SafeAreaView
-      edges={["top", "left", "right"]}
+      edges={["top", "left"]}
       style={[styles.panel, { backgroundColor: colors.sidebarBase }]}
     >
       <View testID="workspace-sidebar-header-row" style={styles.brandRow}>
@@ -173,16 +187,16 @@ export function WorkspaceDrawer({
         scrollHeader={
           <View>
             <Text
-              accessibilityRole="header"
-              style={[styles.section, { color: colors.textPrimary }]}
+                accessibilityRole="header"
+                style={[styles.section, { color: colors.textPrimary }]}
             >
               {t("Quick actions")}
             </Text>
             {(
               [
-                { label: "Scan QR code", Icon: ScanQrCode, action: "scanner" },
+                { label: translateApp("Scan QR code"), Icon: ScanQrCode, action: "scanner", },
                 {
-                  label: "Terminal login code",
+                  label: translateApp("Terminal login code"),
                   Icon: Terminal,
                   action: "terminal",
                 },
@@ -207,6 +221,7 @@ export function WorkspaceDrawer({
                   color={disabled ? colors.textMuted : colors.textSecondary}
                 />
                 <Text
+                  accessibilityLabel={t(label)}
                   style={[
                     styles.rowText,
                     { color: disabled ? colors.textMuted : colors.textPrimary },
@@ -217,8 +232,8 @@ export function WorkspaceDrawer({
               </Pressable>
             ))}
             <Text
-              accessibilityRole="header"
-              style={[styles.section, { color: colors.textPrimary }]}
+                accessibilityRole="header"
+                style={[styles.section, { color: colors.textPrimary }]}
             >
               {t("Workspace")}
             </Text>
@@ -256,7 +271,7 @@ export function WorkspaceDrawer({
                     { color: disabled ? colors.textMuted : colors.textPrimary },
                   ]}
                 >
-                  Notifications
+                  {translateApp("Notifications")}
                 </Text>
                 {notifications.badge ? (
                   <Text
@@ -290,7 +305,7 @@ export function WorkspaceDrawer({
                   key={t(item.label)}
                   accessibilityRole="button"
                   disabled={disabled}
-                  accessibilityLabel={`${t(item.label)}${route === "Activity" && count ? `, ${count} pending` : ""}`}
+                  accessibilityLabel={route === "Activity" && count ? translateApp("{{label}}, {{count}} pending", { label: t(item.label), count: count,}) : t(item.label)}
                   accessibilityState={{ selected, disabled }}
                   onPress={() => onNavigate(route)}
                   style={({ pressed }) => [
@@ -347,6 +362,7 @@ export function WorkspaceDrawer({
                 color={disabled ? colors.textMuted : colors.textSecondary}
               />
               <Text
+                accessibilityLabel={t("Create new agent")}
                 style={[
                   styles.rowText,
                   { color: disabled ? colors.textMuted : colors.textPrimary },
@@ -462,6 +478,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 10,
+    flexShrink: 0,
+    minWidth: 52,
   },
   row: {
     minHeight: 44,

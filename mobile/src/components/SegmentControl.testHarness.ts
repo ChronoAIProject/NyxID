@@ -38,6 +38,7 @@ export function setupSegmentControl(
       View: "View",
       Text: "Text",
       Pressable: "Pressable",
+      ScrollView: "ScrollView",
       StyleSheet: { create: (styles: unknown) => styles },
       useWindowDimensions: () => ({
         width: 390,
@@ -80,6 +81,22 @@ export function setupSegmentControl(
     },
     layout: (width: number) => {
       harness.value().props.onLayout({ nativeEvent: { layout: { width } } });
+      return harness.flush();
+    },
+    /** Natural single-line widths reported by the off-screen measuring row. */
+    measure: (widths: number[]) => {
+      const find = (node: any, id: string): any =>
+        node?.props?.testID === id
+          ? node
+          : [node?.props?.children]
+              .flat(Infinity)
+              .map((child: any) => (child?.props ? find(child, id) : undefined))
+              .find(Boolean);
+      widths.forEach((width, i) =>
+        find(harness.value(), `segment-measure-${i}`).props.onLayout({
+          nativeEvent: { layout: { width } },
+        }),
+      );
       return harness.flush();
     },
     scale: (next: number) => {

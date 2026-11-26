@@ -31,6 +31,8 @@ test("AgentDetail Keep editing resyncs only agentId so the same incoming link ch
     {
       exports,
       AgentsScreen: "AgentsScreen",
+      // Route wrappers subscribe to the app language for re-rendering.
+      useAppLanguage: () => ({ t: (phrase: string) => phrase }),
       useOpenWorkspaceChat: () => () => {},
       require: () => ({
         jsx: (type: unknown, props: unknown) => ({ type, props }),

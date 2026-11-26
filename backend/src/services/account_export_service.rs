@@ -329,6 +329,7 @@ fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
 /// Additional scoped views of the same source are declared separately.
 fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
     match collection {
+        "client_error_reports" => Some(("account_activity", "client_error_reports")),
         "agent_key_login_requests" => Some(("account", "agent_key_login_requests")),
         "agent_service_bindings" => Some(("account", "agent_service_bindings")),
         "billing_wallet" => Some(("billing", "wallet")),
@@ -438,6 +439,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "connect_links" => Some(("account", "connect_links")),
         "consents" => Some(("account", "consents")),
         "credit_grants" => Some(("billing", "credit_grants")),
+        "credit_schedule_recipients" => Some(("billing", "credit_schedule_recipients")),
         "device_codes" => Some(("security", "device_codes")),
         "device_onboard_credentials" => Some(("account", "device_onboard_credentials")),
         "execution_permission_deliveries" => Some(("account", "execution_permission_deliveries")),
@@ -610,12 +612,27 @@ const PROFILE_FIELDS: &[&str] = &[
     "profile_config.analytics.enabled",
     "profile_config.services_view",
     "profile_config.service_views",
+    "profile_config.quick_access",
     "profile_config.onboarding.ai_services_completed_at",
 ];
 const AUTHORED_GROUP_MESSAGE_FIELDS: &[&str] = &["group_id", "role", "text", "created_at"];
 
 fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecError> {
     Ok(match collection {
+        "client_error_reports" => &[
+            "received_at",
+            "expires_at",
+            "environment",
+            "severity",
+            "report.platform",
+            "report.kind",
+            "report.exception_class",
+            "report.native_signal",
+            "report.app_version",
+            "report.app_build",
+            "report.os_version",
+            "report.runtime",
+        ],
         "agent_key_login_requests" => &["approved_user_id", "status", "created_at", "expires_at"],
         "agent_service_bindings" => &["user_id", "created_at", "updated_at"],
         "api_key_credentials" => &["user_id", "kind", "is_active", "created_at", "expires_at"],
@@ -902,6 +919,15 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "consumed_at",
             "expired_at",
             "revoked_at",
+        ],
+        "credit_schedule_recipients" => &[
+            "schedule_id",
+            "recipient_user_id",
+            "anchor_at",
+            "next_due_at",
+            "is_eligible",
+            "created_at",
+            "updated_at",
         ],
         "device_codes" => &["approved_by_user_id", "status", "created_at", "expires_at"],
         "device_onboard_credentials" => &["owner_user_id", "created_at", "expires_at"],
@@ -1338,6 +1364,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "profile_config.analytics.enabled",
             "profile_config.services_view",
             "profile_config.service_views",
+            "profile_config.quick_access",
             "profile_config.onboarding.ai_services_completed_at",
         ],
         "audit_log" => &["event_type", "created_at"],
@@ -2581,6 +2608,41 @@ mod tests {
         let value = safe_item(&row, &["actor.person_id", "actor.name"]);
         assert_eq!(value["actor"]["person_id"], "opaque");
         assert_eq!(value["actor"]["name"], "Deleted account");
+    }
+
+    #[test]
+    fn profile_export_includes_the_saved_quick_access_list() {
+        let row = doc! {
+            "email": "person@example.test",
+            "profile_config": {
+                "quick_access": {"items": [
+                    {"kind": "destination", "id": "machines"},
+                    {"kind": "agent", "id": "6f9619ff-8b86-4011-b42d-00c04fc964ff"},
+                    {"kind": "crew", "id": "nyxg-0123456789abcdef0123456789abcdef"},
+                ]},
+                "analytics": {"enabled": true, "revision": 3_i32},
+            },
+        };
+        let value = safe_item(&row, PROFILE_FIELDS);
+        assert_eq!(
+            value["profile_config"]["quick_access"]["items"],
+            serde_json::json!([
+                {"kind": "destination", "id": "machines"},
+                {"kind": "agent", "id": "6f9619ff-8b86-4011-b42d-00c04fc964ff"},
+                {"kind": "crew", "id": "nyxg-0123456789abcdef0123456789abcdef"},
+            ])
+        );
+        // Sibling settings outside the allowlist stay out.
+        assert!(
+            value["profile_config"]["analytics"]
+                .get("revision")
+                .is_none()
+        );
+        assert_eq!(
+            fields_for("users").unwrap(),
+            PROFILE_FIELDS,
+            "the users registry export and the profile section list the same fields"
+        );
     }
 
     #[test]

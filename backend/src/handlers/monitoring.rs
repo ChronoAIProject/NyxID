@@ -88,7 +88,7 @@ async fn admit_check(
     }
     state
         .cluster_slot_manager
-        .acquire("monitoring-check", &access.service_id, 1)
+        .acquire_exclusive("monitoring-check", &access.service_id)
         .await?
         .ok_or(AppError::RateLimitedWithRetry { retry_after: 1 })
 }

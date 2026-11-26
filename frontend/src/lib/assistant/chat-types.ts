@@ -67,6 +67,7 @@ export interface ChatMessage {
   /** A user message written in a chat app: its platform. */
   readonly via?: string | null;
   readonly activityTotal?: number;
+  readonly continuedAfterRestart?: boolean;
   readonly turnStatus?: import("./turn-status").TurnStatus | null;
   /** Settled permission decisions and automatic receipts of this reply's turn. */
   readonly decisions?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement[];
@@ -77,6 +78,7 @@ export interface ChatMessage {
 }
 
 export interface ChatImage {
+  readonly pdf?: import("@/schemas/assistant-nyxagent").NyxAgentAttachment["pdf"];
   readonly origin?: string;
   readonly filename?: string;
   readonly source?: string;

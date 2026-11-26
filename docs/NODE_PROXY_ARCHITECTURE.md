@@ -201,7 +201,21 @@ an old process or socket cannot change its replacement.
 
 ### NodeServiceBinding (collection: `node_service_bindings`)
 
-Maps which services a node handles for its owner. When a proxy request arrives for a bound service, NyxID routes it to the node instead of using stored credentials.
+A connection stores its primary node in `UserService.node_id`. Active bindings
+for the same owner and catalog supply fallback and credential fan-out targets.
+
+Creating a catalog connection on a node or explicitly setting its node through
+either PUT or the assistant route action ensures an active binding for the node
+and catalog. When another owner already holds that binding, the connection saves
+its own primary and priority and leaves the existing owner's binding untouched.
+A move, clear or disconnect deactivates the connection owner's previous
+binding when the last active connection for that owner and catalog leaves the
+node. The connection change and these binding writes commit together. Pending
+authorization cleanup applies the same rule when its conditional revoke wins.
+
+New bindings start at priority zero. Existing bindings retain their priority.
+Editing the connection priority changes the connection alone. Owners manage
+additional fallback nodes and their ordering through the binding endpoints.
 
 ```rust
 // File: backend/src/models/node_service_binding.rs
@@ -858,7 +872,7 @@ or audit data.
 - **Delivered** to the node agent in the `register_ok` WebSocket message (raw, shown once)
 - **Stored** on the node agent as AES-256-GCM encrypted ciphertext in the config file (or in OS keychain)
 - **Rotated** alongside auth token rotation (`rotate-token` endpoint returns both new auth token and new signing secret)
-- **Configurable**: `NODE_HMAC_SIGNING_ENABLED` (default: `true`) controls whether signing is active
+- **Configurable**: `NODE_HMAC_SIGNING_ENABLED` (default: `true`) controls server signing for ordinary proxy requests. Upgraded agents require signed HTTP proxy requests and return a non-retryable 403 for unsigned frames. Enable signing on all server replicas before upgrading HTTP proxy agents
 
 ### Signature Computation
 
@@ -1312,7 +1326,7 @@ Admin routes under the admin router:
 
 ### Node Limits
 - Configurable max nodes per user (default: 10) prevents abuse
-- Configurable max concurrent node WebSocket connections per replica (default: 100)
+- Each replica admits up to 32 pending handshakes. Authenticated sockets use `NODE_MAX_WS_CONNECTIONS` (default 100).
 - Proxy requests through nodes have a timeout (default: 30s)
 - Streaming responses have a max duration (default: 300s)
 

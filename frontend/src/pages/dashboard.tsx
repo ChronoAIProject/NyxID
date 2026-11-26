@@ -35,11 +35,10 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MOBILE_APP_LINK } from "@/lib/mobile-app-link";
 
 const AI_SETUP_DISMISSED_KEY = "nyxid:ai-setup-dismissed";
 const ONBOARDING_DISMISSED_KEY = "nyxid:onboarding-dismissed";
-
-const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 
 export function DashboardPage() {
   useUiTranslation();
@@ -198,7 +197,7 @@ export function DashboardPage() {
             label={translateUi("Nodes")}
             value={
               totalNodes > 0
-                ? `${String(onlineNodes)}/${String(totalNodes)} online`
+                ? translateUi("{{online}}/{{total}} online", { online: String(onlineNodes), total: String(totalNodes) })
                 : translateUi("No nodes")
             }
             loading={nodesLoading}
@@ -210,7 +209,7 @@ export function DashboardPage() {
             label={translateUi("Approvals")}
             value={translateUi("Configure")}
             loading={false}
-            href="/approvals/settings"
+            href="/settings?tab=notifications"
           />
         </div>
 
@@ -835,7 +834,7 @@ function ApprovalsCard({
       <p className="text-14 text-muted-foreground">{translateUi("Approve AI agent access via Telegram or the NyxID mobile app.")}</p>
       <div className="flex flex-col gap-2">
         <Button asChild>
-          <Link to="/approvals/settings">
+          <Link to="/settings" search={{ tab: "notifications" }}>
             <ButtonIcon>
               <svg
                 className="h-3 w-3"

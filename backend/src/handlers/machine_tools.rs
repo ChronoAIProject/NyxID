@@ -1067,7 +1067,7 @@ async fn transfer(
     let request = signed_request(state, node, operation, parameters, authority).await?;
     let response = state
         .node_dispatch
-        .proxy_upload(request, body)
+        .proxy_upload(request.with_parameters_owner(), body)
         .await
         .map_err(|error| error.error)?;
     let ProxyResponseType::Streaming(mut stream) = response else {

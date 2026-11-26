@@ -52,6 +52,9 @@ pub struct OauthClient {
     pub default_service_catalog_slugs: Vec<String>,
     #[serde(default)]
     pub broker_capability_enabled: bool,
+    /// An administrator designated this registration for account management.
+    #[serde(default)]
+    pub first_party_management: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_webhook_url: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -64,6 +67,8 @@ pub struct OauthClient {
     pub connection_webhook_key_id: Option<String>,
     #[serde(default)]
     pub connection_webhook_enabled: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     pub created_by: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -157,11 +162,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: Some("https://client.example.com/cae".to_string()),
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
             connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
             connection_webhook_key_id: Some("key_fixture".to_string()),
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
@@ -215,6 +222,7 @@ mod tests {
 
         let restored: OauthClient = bson::from_document(doc).expect("deserialize legacy doc");
         assert!(!restored.broker_capability_enabled);
+        assert!(!restored.first_party_management);
         assert!(restored.revocation_webhook_url.is_none());
         assert!(restored.revocation_webhook_secret_encrypted.is_none());
         assert!(restored.default_service_catalog_slugs.is_empty());
@@ -235,11 +243,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec!["openai".to_string(), "lark".to_string()],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),
@@ -272,11 +282,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
@@ -303,11 +315,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec![],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
             connection_webhook_key_id: Some("key_fixture".to_string()),
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: None,
             created_at: Utc::now(),

@@ -4,7 +4,7 @@ use crate::models::service_billing::BillingMetric;
 use futures::{SinkExt, StreamExt};
 use mongodb::bson::doc;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 type Downstream =
@@ -18,7 +18,13 @@ struct Harness {
     enabled: bool,
     duration: Option<std::time::Duration>,
     abort: tokio_util::sync::CancellationToken,
-    finished: Arc<Notify>,
+    completion: Arc<Mutex<Option<BridgeCompletion>>>,
+}
+// A single upgraded connection owns both senders. A panic drops the sender
+// and is visible immediately to the test awaiting that phase.
+struct BridgeCompletion {
+    closed: oneshot::Sender<()>,
+    finished: oneshot::Sender<()>,
 }
 async fn serve_bridge(
     State(h): State<Harness>,
@@ -34,6 +40,12 @@ async fn serve_bridge(
         session.as_mut().unwrap().deadline =
             crate::services::billing::realtime_usage::BridgeDeadline::new(duration);
     }
+    let completion = h
+        .completion
+        .lock()
+        .await
+        .take()
+        .expect("one upgrade per fixture");
     ws.on_upgrade(move |client| async move {
         let work = async {
             let stats = if let Some(downstream) = h.downstream.lock().await.take() {
@@ -78,6 +90,7 @@ async fn serve_bridge(
                 )
                 .await
             };
+            let _ = completion.closed.send(());
             // Same intent and money functions as production; await settlement
             // here so command accounting needs no polling queries.
             let usage = websocket_platform_usage(&stats);
@@ -93,11 +106,13 @@ async fn serve_bridge(
             }
         };
         tokio::select! {_=work=>{},()=h.abort.cancelled()=>{}}
-        h.finished.notify_one();
+        let _ = completion.finished.send(());
     })
 }
 struct Running {
     client: Downstream,
+    closed: oneshot::Receiver<()>,
+    finished: oneshot::Receiver<()>,
     direct: Option<Downstream>,
     node: Option<mpsc::Sender<crate::services::node_ws_manager::WsProxyFrame>>,
     harness: Harness,
@@ -133,6 +148,8 @@ impl Running {
             let (server, client) = tokio::join!(accept, connect);
             (Some(client.unwrap().0), Some(server))
         };
+        let (closed_tx, closed) = oneshot::channel();
+        let (finished_tx, finished) = oneshot::channel();
         let harness = Harness {
             state,
             metered,
@@ -141,7 +158,10 @@ impl Running {
             enabled,
             duration,
             abort: Default::default(),
-            finished: Default::default(),
+            completion: Arc::new(Mutex::new(Some(BridgeCompletion {
+                closed: closed_tx,
+                finished: finished_tx,
+            }))),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -156,6 +176,8 @@ impl Running {
             .unwrap()
             .0;
         Self {
+            closed,
+            finished,
             client,
             direct,
             node: node.then_some(tx),
@@ -223,21 +245,20 @@ impl Running {
                 .await
                 .unwrap();
         }
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.harness.finished.notified(),
-        )
-        .await
-        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), &mut self.closed)
+            .await
+            .expect("WebSocket bridge did not finish after closing the upstream")
+            .expect("bridge task dropped before closing");
+        (&mut self.finished)
+            .await
+            .expect("bridge task dropped before settlement completed");
     }
-    async fn crash(&self) {
+    async fn crash(&mut self) {
         self.harness.abort.cancel();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.harness.finished.notified(),
-        )
-        .await
-        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut self.finished)
+            .await
+            .unwrap()
+            .expect("bridge task dropped during crash");
     }
 }
 
@@ -375,22 +396,21 @@ async fn realtime_ws_bridges_limit_closes_quiet_sessions_and_cancels_blocked_obs
                         .unwrap();
                 }
             }
-            let started = std::time::Instant::now();
-            let received =
-                tokio::time::timeout(std::time::Duration::from_secs(2), running.client.next())
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let received = running.client.next().await;
+                assert!(
+                    matches!(received, Some(Ok(Message::Close(None))) | None),
+                    "{received:?}"
+                );
+                (&mut running.closed)
                     .await
-                    .unwrap();
-            assert!(
-                matches!(received, Some(Ok(Message::Close(None))) | None),
-                "{received:?}"
-            );
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                running.harness.finished.notified(),
-            )
+                    .expect("bridge task dropped before closing");
+            })
             .await
-            .unwrap();
-            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            .expect("WebSocket bridge exceeded its close deadline");
+            (&mut running.finished)
+                .await
+                .expect("bridge task dropped before settlement completed");
             fixtures::settled(&f, if blocked { 3 } else { 0 }).await;
             drop(running);
             f.db.drop().await.unwrap();

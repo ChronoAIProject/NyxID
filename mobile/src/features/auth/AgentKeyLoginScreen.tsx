@@ -1,4 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { LoginRequestTerminalView } from "./LoginRequestTerminalView";
 import { useUncertainLoginPreview } from "./useUncertainLoginPreview";
 import { useLoginRequestResume } from "./useLoginRequestResume";
@@ -151,10 +154,10 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     disabled: writing || stepUp.busy,
     defaultRole: "back",
     options: { headerShown: inWorkspaceSheet },
-    label: "Back to login",
+    label: translateApp("Back to login"),
     onBack: () => setScanning(false),
   });
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   const lastAction = useRef(0);
   const actionBusy = useRef(false);
   const operation = useRef<{
@@ -307,7 +310,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       return;
     }
     if (!verifiedRetry && Date.now() - lastAction.current < 750) {
-      setError(t("Please wait a moment before trying again."));
+      setError(() => (translateApp("Please wait a moment before trying again.")));
       return;
     }
     if (!automatic) uncertainPreview.reset();
@@ -346,9 +349,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         finish(terminal);
       else if (!automatic)
         setError(
-          t(agentKeyActionErrorCopy(failure, step), {
+          () => (translateApp(agentKeyActionErrorCopy(failure, step), {
             host: loginServerHost(),
-          }),
+          })),
         );
       cooldown.sync();
     } finally {
@@ -494,7 +497,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         Date.parse(parsed.credential_expires_at) >
           Date.parse(summary.expires_at)
       )
-        throw new Error("Credential expiry cannot exceed key expiry.");
+        throw localizedError("Credential expiry cannot exceed key expiry.");
       if (operation.current) {
         operation.current.decision = "approve";
         operation.current.dispatched = true;
@@ -555,7 +558,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         onManualEntry={() => setScanning(false)}
         onCode={(value, kind) => {
           setScanning(false);
-          if (kind === "device")
+          if (kind === "staging-device")
+            navigation.navigate("DeviceLogin", { user_code: value, staging_scan: true });
+          else if (kind === "device")
             navigation.navigate("DeviceLogin", { user_code: value });
           else {
             setCode(formatAuthDeviceUserCode(value));
@@ -632,14 +637,15 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
             <View style={styles.screenHeader}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Back"
+                accessibilityLabel={translateApp("Back")}
                 onPress={back}
                 style={styles.headerBackButton}
               >
                 <ChevronLeft size={24} color={colors.textPrimary} />
               </Pressable>
               <Text style={styles.title}>
-                {mint ? "One-time login code" : "Agent Key login"}
+                {mint ? translateApp("One-time login code")
+                  : translateApp("Agent Key login")}
               </Text>
             </View>
           )}
@@ -666,7 +672,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     )}
                   </Text>
                   <AuthTextInput
-                    accessibilityLabel="User code"
+                    accessibilityLabel={translateApp("User code")}
                     value={code}
                     editable={!pending}
                     autoCapitalize="characters"
@@ -681,7 +687,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   />
                   <AuthSubmitButton
                     loading={pending}
-                    label="Continue"
+                    label={translateApp("Continue")}
                     disabled={
                       pending ||
                       cooldown.coolingDown ||
@@ -690,7 +696,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     onPress={() => void act(loadPreview)}
                   />
                   <PrimaryButton
-                    label="Scan QR code"
+                    label={translateApp("Scan QR code")}
                     kind="ghost"
                     disabled={pending}
                     onPress={() => setScanning(true)}
@@ -700,48 +706,59 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               {preview && (
                 <View style={styles.previewSection}>
                   <DetailRow
-                    label="User code"
+                    label={translateApp("User code")}
                     value={formatAuthDeviceUserCode(code)}
                     mono
                     styles={styles}
                   />
                   <Text style={styles.cautionText}>
-                    Confirm this matches the code shown on the requesting device
-                    or terminal. Reject if it does not match.
+                    {translateApp(
+                      "Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match.",
+                    )}
                   </Text>
                   {origin && (
                     <DetailRow
-                      label="Started from"
+                      label={translateApp("Started from")}
                       value={origin}
                       tone="warning"
                       styles={styles}
                     />
                   )}
                   {[
-                    ["Requester", requesterValue(preview)],
-                    ["IP attribution", preview.client_ip_attribution],
-                    ["Reported IP", preview.client_ip ?? "Unavailable"],
-                    ["Location", formatLocation(preview)],
-                    ["Network", formatNetwork(preview)],
-                    ["Reported device", formatDevice(preview)],
+                    [translateApp("Requester"), requesterValue(preview)],
                     [
-                      "Requested profile",
-                      preview.requested_profile ?? "Not provided",
+                      translateApp("IP attribution"), preview.client_ip_attribution],
+                    [
+                      translateApp("Reported IP"), preview.client_ip ?? translateApp("Unavailable"),
+                    ],
+                    [translateApp("Location"), formatLocation(preview)],
+                    [translateApp("Network"), formatNetwork(preview)],
+                    [translateApp("Reported device"), formatDevice(preview)],
+                    [
+                      translateApp("Requested profile"),
+                      preview.requested_profile ?? translateApp("Not provided"),
                     ],
                     [
-                      "Reported client",
+                      translateApp("Reported client"),
                       preview.client_app ?? preview.client_kind,
                     ],
-                    ["Platform", preview.client_platform ?? "Not identified"],
                     [
-                      "Requested",
-                      `${formatDeviceLoginRelativeTime(preview.initiated_at, now)} - ${new Date(preview.initiated_at).toLocaleString()}`,
+                      translateApp("Platform"), preview.client_platform ?? translateApp("Not identified"),
                     ],
                     [
-                      "Expires",
+                      translateApp("Requested"),
+                      `${formatDeviceLoginRelativeTime(preview.initiated_at, now)} - ${new Date(preview.initiated_at).toLocaleString(appLocale())}`,
+                    ],
+                    [
+                      translateApp("Expires"),
                       waitingForDecision
                         ? t("Waiting for NyxID…")
-                        : `${new Date(preview.expires_at).toLocaleString()} (${remaining ?? 0}s)`,
+                        : translateApp("{{date}} ({{minutes}}s)", {
+                            date: new Date(preview.expires_at).toLocaleString(
+                              appLocale(),
+                            ),
+                            minutes: remaining ?? 0,
+                          }),
                     ],
                   ].map(([label, value]) => (
                     <DetailRow
@@ -752,35 +769,43 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     />
                   ))}
                   <Text style={styles.cautionText}>
-                    Only approve a request you started. Reported device details
-                    and a matching network do not prove who is requesting
-                    access.
+                    {translateApp(
+                      "Only approve a request you started. Reported device details and a matching network do not prove who is requesting access.",
+                    )}
                   </Text>
                 </View>
               )}
               {expired && (
                 <Text accessibilityRole="alert" style={styles.fieldErrorText}>
-                  This request has expired. Start Agent Key login again.
+                  {translateApp(
+                    "This request has expired. Start Agent Key login again.",
+                  )}
                 </Text>
               )}
               {/* A terminal code chooses its access from an iOS grouped list. */}
               {mint && step === "review" && isAuthenticated ? (
                 <SettingsGroup
-                  title="Sign the terminal in with"
-                  footer="Anyone with the code can use it once, within five minutes. An Agent Key keeps the terminal to that key's services and approvals."
+                  title={translateApp("Sign the terminal in with")}
+                  footer={translateApp(
+                    "Anyone with the code can use it once, within five minutes. An Agent Key keeps the terminal to that key's services and approvals.",
+                  )}
                 >
                   <SettingsRow
                     icon={KeyRound}
-                    label="Choose an Agent Key"
-                    badge="Recommended"
-                    detail="Only this key's services and approvals"
+                    label={translateApp("Choose an Agent Key")}
+                    badge={translateApp("Recommended")}
+                    detail={translateApp(
+                      "Only this key's services and approvals",
+                    )}
                     disabled={pending || expired}
                     onPress={() => void act(loadOptions)}
                   />
                   <SettingsRow
                     icon={UserRound}
-                    label="Full account session"
-                    detail="Signs the terminal in as you, with full access"
+                    label={translateApp("Full account session")}
+                    detail={translateApp(
+                      "Signs the terminal in as you, with full access",
+                    )}
                     disabled={pending}
                     onPress={() => setStep("account")}
                   />
@@ -793,18 +818,18 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   preview?.supports_grant_choice === true) ? (
                   <AuthSubmitButton
                     loading={pending}
-                    label="Choose an Agent Key"
+                    label={translateApp("Choose an Agent Key")}
                     disabled={pending || expired}
                     onPress={() => void act(loadOptions)}
                   />
                 ) : !isAuthenticated ? (
                   <AuthSubmitButton
-                    label="Sign in on this phone"
+                    label={translateApp("Sign in on this phone")}
                     onPress={() => navigation.navigate("Auth")}
                   />
                 ) : (
                   <AuthSubmitButton
-                    label="Review account login"
+                    label={translateApp("Review account login")}
                     onPress={() =>
                       navigation.navigate("DeviceLogin", { user_code: code })
                     }
@@ -814,16 +839,16 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               {step === "account" && (
                 <View style={styles.inputSection}>
                   <Text style={styles.inputLabel}>
-                    Confirm full account access
+                    {translateApp("Confirm full account access")}
                   </Text>
                   <Text style={styles.cautionText}>
-                    This code grants access to your account, services,
-                    credentials, and organization permissions. The session can
-                    refresh until it expires or you revoke it.
+                    {translateApp(
+                      "This code grants access to your account, services, credentials, and organization permissions. The session can refresh until it expires or you revoke it.",
+                    )}
                   </Text>
                   <AuthSubmitButton
                     loading={pending}
-                    label="Generate account login code"
+                    label={translateApp("Generate account login code")}
                     disabled={pending}
                     onPress={() =>
                       void act(
@@ -834,7 +859,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     }
                   />
                   <PrimaryButton
-                    label="Back"
+                    label={translateApp("Back")}
                     kind="ghost"
                     disabled={pending}
                     onPress={() => setStep("review")}
@@ -845,15 +870,17 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                 <View style={styles.inputSection}>
                   <WorkspaceSelectionField
                     surfaceColors={colors}
-                    label="Agent Key"
-                    title="Choose an Agent Key"
-                    description="Choose a key to review its full effective permissions before approving."
-                    placeholder="Select an existing key"
-                    confirmLabel="Review permissions"
+                    label={translateApp("Agent Key")}
+                    title={translateApp("Choose an Agent Key")}
+                    description={translateApp(
+                      "Choose a key to review its full effective permissions before approving.",
+                    )}
+                    placeholder={translateApp("Select an existing key")}
+                    confirmLabel={translateApp("Review permissions")}
                     options={options.keys.map((key) => ({
                       value: key.id,
                       label: key.name,
-                      description: `${key.owner_name} · ${key.scopes} · ${key.key_prefix}${key.expires_at ? ` · Expires ${new Date(key.expires_at).toLocaleDateString()}` : " · No expiry"}`,
+                      description: (key.expires_at ? translateApp("{{name}} · {{scopes}} · {{keyPrefix}} · Expires {{time}}", { name: key.owner_name, scopes: key.scopes, keyPrefix: key.key_prefix, time: new Date(key.expires_at).toLocaleDateString(appLocale()) }) : translateApp("{{name}} · {{scopes}} · {{keyPrefix}} · No expiry", { name: key.owner_name, scopes: key.scopes, keyPrefix: key.key_prefix })),
                       searchText: `${key.id} ${key.owner_id} ${key.platform ?? ""}`,
                     }))}
                     value={[]}
@@ -872,7 +899,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     }}
                   />
                   <AuthSubmitButton
-                    label="Create a new key"
+                    label={translateApp("Create a new key")}
                     disabled={pending || expired}
                     onPress={() => setStep("new")}
                   />
@@ -897,18 +924,20 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               {step === "confirm" && summary && (
                 <View style={styles.inputSection}>
                   <Text style={styles.inputLabel}>
-                    Confirm effective permissions
+                    {translateApp("Confirm effective permissions")}
                   </Text>
                   {permissions(summary)}
                   <Text style={styles.cautionText}>
                     {issuanceNotice(selection?.kind === "existing")}
                   </Text>
                   <Text style={styles.inputLabel}>
-                    Credential expiry (blank: 90 days, bounded by key expiry)
+                    {translateApp(
+                      "Credential expiry (blank: 90 days, bounded by key expiry)",
+                    )}
                   </Text>
                   <AuthTextInput
-                    accessibilityLabel="Credential expiry"
-                    placeholder="YYYY-MM-DDTHH:mm:ssZ"
+                    accessibilityLabel={translateApp("Credential expiry")}
+                    placeholder={"YYYY-MM-DDTHH:mm:ssZ"}
                     placeholderTextColor={colors.textMuted}
                     value={credentialExpiry}
                     editable={!pending}
@@ -920,12 +949,16 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   />
                   <AuthSubmitButton
                     loading={pending}
-                    label={mint ? "Generate restricted login code" : "Approve"}
+                    label={
+                      mint
+                        ? translateApp("Generate restricted login code")
+                        : translateApp("Approve")
+                    }
                     disabled={pending || expired}
                     onPress={() => void act(() => decide(true), false, true)}
                   />
                   <PrimaryButton
-                    label="Back to keys"
+                    label={translateApp("Back to keys")}
                     kind="ghost"
                     disabled={pending}
                     onPress={() => setStep("options")}
@@ -934,7 +967,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               )}
               {preview && isAuthenticated && (
                 <PrimaryButton
-                  label="Reject"
+                  label={translateApp("Reject")}
                   kind="danger"
                   disabled={pending || expired}
                   onPress={() => void act(() => decide(false), false, true)}

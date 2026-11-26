@@ -87,7 +87,7 @@ bindings fail closed with `thread_target_unavailable`; there is no parent-chat
 fallback. Delayed sends retain their original encrypted reference, expiry,
 authorization and dispatch barrier, never a newer event reference.
 
-Organization replies use the retained event's committed conversation and verified
+Organization turn replies use the retained event's committed conversation and verified
 execution actor, independently of the transport admin. Readers also accept this
 committed identity on events admitted before the fix; they never select a newer
 conversation or rewrite the event. Exact child, source, route and live authority
@@ -96,6 +96,19 @@ and live eligibility, before creating delivery metadata. Target checks precede
 attachment downloads. Rejected preflight leaves it usable; once claimed, an
 uncertain platform effect never releases it. Concurrent uses share the existing
 unique token-use barrier; replay cannot alter receipts or Health.
+
+For a fixed refusal produced before an org turn starts, the server records
+the exact UTF-8 text digest and original followed target at terminalization.
+The callback must carry that plain text with no markup or attachments. The
+same verified member or still-exposed guest must be eligible in the live
+thread. Wallet, credit and service grants govern execution only. Both gateway
+consumers share a source-specific delivery receipt, including when one uses a
+channel key and the other a reply token. After tenant-token preparation, the
+last live authority check, token use and uncertain receipt commit together just
+before the message POST. A failed preparation can retry with the same token.
+An ambiguous POST retains the claim. A retained marked source whose event
+expired or was removed cannot acquire another target. Closed text or target
+mismatches appear in bot Health.
 Closed target/authority rejections and send failures update bot outbound
 diagnostics/Health once and emit `nyxbot_thread_reply_failed` with a bounded
 reason and numeric error code. Pre-dispatch authorization refusals and inconclusive database/provider lookups
@@ -155,8 +168,10 @@ verified actor in `ChannelOrigin.org_execution`. A group/topic has one org-owned
 public transcript and separate hidden execution lanes per member or guest.
 Only a verified admin records owner presence; ordinary members cannot open the
 guest audience. Follow expiry, stop, exact source targeting and delivery fences
-remain mandatory. Guest exposure, exact daily budget and per-sender limits apply
-to followed turns too. Gateway sender IDs never establish NyxID membership.
+remain mandatory. The binding's guest exposure, guest service and billing
+limits, and per-sender limits apply to followed turns too; see
+[guest settings](chat/09-nyxbot-orchestrator.md#guest-settings-and-binding-recovery).
+Gateway sender IDs never establish NyxID membership.
 
 Discord addressing and diagnostics (#2185): an exact bot-user mention and a
 mention of that bot's own authenticated managed integration role both normalize

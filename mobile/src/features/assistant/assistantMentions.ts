@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 /** Composer handles are local conveniences, never a new server routing field. */
 export type AttachmentKind = "image" | "file" | "pasted-text";
 
@@ -99,7 +100,7 @@ function describe(mention: AttachmentMention): string {
     mention.kind === "image"
       ? "image"
       : mention.kind === "pasted-text"
-        ? "pasted text"
+        ? translateApp("pasted text")
         : "file";
   // Labels cannot introduce agent routing when this draft belongs to a group.
   return `${noun} "${mention.label.replace(/@/g, "")}"`;

@@ -273,6 +273,54 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
 
 pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
     match command {
+        AdminCatalogCommands::CallerTokenDestination {
+            service,
+            destination_url,
+            target_id,
+            revoke,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let row = find_service(&mut api, &service)
+                .await?
+                .ok_or_else(|| anyhow!("Catalog service not found: {service}"))?;
+            let id = row["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Catalog service has no ID"))?;
+            let body = serde_json::json!({
+                "approve_caller_token_destination": {
+                    "destination_url": destination_url,
+                    "target_id": target_id,
+                    "approved": !revoke,
+                },
+            });
+            let _: Value = api.put(&format!("/services/{id}"), &body).await?;
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::json!({"service_id":id,"target_id":target_id,"approved":!revoke})
+                ),
+                OutputFormat::Table => println!(
+                    "Catalog caller-token approval {}",
+                    if revoke { "revoked" } else { "granted" }
+                ),
+            }
+            Ok(())
+        }
+        AdminCatalogCommands::PrivateDestination {
+            service_id,
+            revoke,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            api.put::<Value, _>(
+                &format!("/services/{service_id}"),
+                &json!({"approve_private_destination": !revoke}),
+            )
+            .await?;
+            println!("Updated private destination approval for {service_id}");
+            Ok(())
+        }
         AdminCatalogCommands::Icon {
             provider,
             file,
@@ -2492,6 +2540,63 @@ mod tests {
         let row = &zoho(&[]).unwrap().services[0];
         assert_eq!(playbook::api_fields(row)["auth_scheme"], "Zoho-oauthtoken");
         assert!(playbook::api_fields(row).get("operations").is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn caller_token_approval_cli_selects_exact_destination() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let server = MockServer::start().await;
+        let row = service_row();
+        listing(&server, json!([]), json!([row.clone()])).await;
+        for revoke in [false, true] {
+            let approval = json!({
+                "approved": !revoke,
+                "target_id": "docs",
+                "destination_url": "https://docs.example.test",
+            });
+            let id = row["id"].as_str().unwrap();
+            Mock::given(method("PUT"))
+                .and(path(format!("/api/v1/services/{id}")))
+                .and(body_json(
+                    json!({"approve_caller_token_destination": approval}),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(row.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            run_catalog(AdminCatalogCommands::CallerTokenDestination {
+                service: row["slug"].as_str().unwrap().into(),
+                destination_url: "https://docs.example.test".into(),
+                target_id: Some("docs".into()),
+                revoke,
+                auth: mock_auth(server.uri()),
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_cli_sets_and_revokes_catalog_approval() {
+        let server = MockServer::start().await;
+        let id = uuid::Uuid::new_v4();
+        for revoke in [false, true] {
+            Mock::given(method("PUT"))
+                .and(path(format!("/api/v1/services/{id}")))
+                .and(body_json(json!({"approve_private_destination": !revoke})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            run_catalog(AdminCatalogCommands::PrivateDestination {
+                service_id: id,
+                revoke,
+                auth: mock_auth(server.uri()),
+            })
+            .await
+            .unwrap();
+        }
     }
 
     #[tokio::test]

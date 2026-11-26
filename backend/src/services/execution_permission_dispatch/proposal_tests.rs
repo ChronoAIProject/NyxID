@@ -298,6 +298,51 @@ async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exa
 }
 
 #[tokio::test]
+async fn approved_node_proposal_refused_at_writer_is_terminal_not_sent() {
+    use crate::services::node_service;
+    let (f, row) = assistant("proposal_node_refusal").await;
+    let db = &f.state.db;
+    let (_, token, _) =
+        node_service::create_registration_token(db, &f.owner, "proposal-node", 5, 120)
+            .await
+            .unwrap();
+    let (node, _, _) = node_service::register_node(db, &f.state.encryption_keys, &token, None)
+        .await
+        .unwrap();
+    db.collection::<Document>("user_services")
+        .update_one(
+            doc! {"_id":&f.connection},
+            doc! {"$set":{"node_id":&node.id}},
+        )
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    test_utils::register_test_node_connection(&f.state, &node.id, tx).await;
+    let _ = f.call("/proxy/s/execution-fixture/status").await;
+    let request = proposal(&f).await;
+    proposals::decide(
+        &f.state,
+        &f.owner,
+        &request.id,
+        &decision(&request, "persistent"),
+    )
+    .await
+    .unwrap();
+    finish(&f, &row, "Waiting").await;
+    let resumed = event_turn(&f, &row).await;
+    drop(rx);
+    let text = resume(&f, &resumed).await;
+    assert!(text.contains("Nothing was sent"), "{text}");
+    let result = proposal(&f).await;
+    let terminal = proposals::proposal(&result).unwrap();
+    assert_eq!(terminal.state, "not_sent");
+    assert_eq!(terminal.failure_code.as_deref(), Some("operation_not_sent"));
+    assert!(resume(&f, &resumed).await.contains("not sent"));
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_even_persistent() {
     let (f, row) = assistant("execution_proposal_duplicates").await;
     let _ = f.call("/proxy/s/execution-fixture/status").await;
@@ -1441,6 +1486,8 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
         ApprovalOutcome::NeedsApproval(PendingApproval {
             options: Default::default(),
             resolution: ApprovalResolution {
+                org_config: None,
+                connection_id: None,
                 required: true,
                 mode: ApprovalMode::PerRequest,
                 effect: ApprovalEffect::RequireApproval,
@@ -1648,9 +1695,22 @@ async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
         doc! {"_id":&request.id},
         doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
     ).await.unwrap();
+    let capture = super::migration_tests::Capture::default();
     for _ in 0..2 {
-        let (status, _) = write_call(&f).await;
+        let (status, _) = tracing::instrument::WithSubscriber::with_subscriber(
+            write_call(&f),
+            capture.subscriber(),
+        )
+        .await;
         assert_ne!(status, StatusCode::OK);
+    }
+    {
+        let events = capture.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        for event in events.iter() {
+            assert_eq!(event["decision"], "hard_denial");
+            assert_eq!(event["cause"], "proposal_not_live");
+        }
     }
     assert_eq!(count(&f, "approval_requests").await, 1);
     assert!(f.server.received_requests().await.unwrap().is_empty());
@@ -1692,3 +1752,6 @@ async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
+
+#[path = "proposal_record_tests.rs"]
+mod mixed_records;

@@ -1,3 +1,5 @@
+mod approvers;
+
 use std::io::Write;
 
 use anyhow::Result;
@@ -117,6 +119,7 @@ fn parse_approval_rule(spec: &str) -> Result<Value> {
 
 pub async fn run(command: ApprovalCommands) -> Result<()> {
     match command {
+        ApprovalCommands::Approvers { command } => approvers::run(command).await,
         ApprovalCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;
@@ -228,9 +231,18 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             Ok(())
         }
 
+        ApprovalCommands::Status { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let path = format!("/approvals/requests/{}/status", urlencoding::encode(&id));
+            let result: Value = api.get(&path).await?;
+            super::billing_support::print(&result, auth.output, || {
+                super::billing_support::fields(&result)
+            })
+        }
+
         ApprovalCommands::Approve { id, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let body = serde_json::json!({ "decision": "approved" });
+            let body = serde_json::json!({ "approved": true });
             let result: Value = api
                 .post(&format!("/approvals/requests/{id}/decide"), &body)
                 .await?;
@@ -248,7 +260,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
         ApprovalCommands::Deny { id, reason, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let mut body = serde_json::json!({ "decision": "denied" });
+            let mut body = serde_json::json!({ "approved": false });
             if let Some(reason) = reason {
                 body["reason"] = Value::String(reason);
             }
@@ -604,7 +616,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/approvals/requests/r1/decide"))
-            .and(body_json(serde_json::json!({ "decision": "approved" })))
+            .and(body_json(serde_json::json!({ "approved": true })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .expect(1)
             .mount(&server)
@@ -624,7 +636,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/approvals/requests/r1/decide"))
             .and(body_json(
-                serde_json::json!({ "decision": "denied", "reason": "nope" }),
+                serde_json::json!({ "approved": false, "reason": "nope" }),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .expect(1)
@@ -832,7 +844,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/approvals/requests/r1/decide"))
-            .and(body_json(serde_json::json!({ "decision": "denied" })))
+            .and(body_json(serde_json::json!({ "approved": false })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .expect(1)
             .mount(&server)

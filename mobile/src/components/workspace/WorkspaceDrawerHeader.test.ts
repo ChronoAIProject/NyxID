@@ -11,6 +11,9 @@ test("nested drawer headers keep Back/title/Close in a centered 18pt row", () =>
         jsx: (type: any, props: any) => ({ type, props }),
         jsxs: (type: any, props: any) => ({ type, props }),
       },
+      "react-native-safe-area-context": {
+        useSafeAreaInsets: () => ({ left: 0, right: 0 }),
+      },
       "react-native": {
         View: "View",
         Text: "Text",
@@ -45,7 +48,9 @@ test("nested drawer headers keep Back/title/Close in a centered 18pt row", () =>
       return element.type(element.props);
     })(),
   );
-  const [back, title, close] = h.value().props.children;
+  // The sheet's band wraps the 60pt row.
+  assert.equal(h.value().props.testID, "workspace-sheet-header-band");
+  const [back, title, close] = h.value().props.children.props.children;
   assert.equal(back.props.children.props.children, "Back");
   assert.equal(close.props.children.props.children, "Close");
   assert.equal(back.props.style.width, close.props.style.width);
@@ -78,6 +83,9 @@ test("drawer header options return an element without borrowing navigator hooks"
   let calls = 0;
   const h = hookHarness<any>({
     "react/jsx-runtime": { jsx: (type: any, props: any) => ({ type, props }) },
+    "react-native-safe-area-context": {
+      useSafeAreaInsets: () => ({ left: 0, right: 0 }),
+    },
     "react-native": { StyleSheet: { create: (value: any) => value } },
     "../../theme/ThemeContext": {
       useTheme: () => {
@@ -111,6 +119,9 @@ test("sheet Back depends on the local route index, never the surrounding app his
         jsx: (type: any, props: any) => ({ type, props }),
         jsxs: (type: any, props: any) => ({ type, props }),
       },
+      "react-native-safe-area-context": {
+        useSafeAreaInsets: () => ({ left: 0, right: 0 }),
+      },
       "react-native": {
         View: "View",
         Text: "Text",
@@ -141,7 +152,7 @@ test("sheet Back depends on the local route index, never the surrounding app his
       });
       return e.type(e.props);
     });
-    const [left, , right] = h.value().props.children;
+    const [left, , right] = h.value().props.children.props.children;
     assert.equal(
       left.props.children.props.children,
       index > 0 ? "Back" : null,
@@ -150,4 +161,58 @@ test("sheet Back depends on the local route index, never the surrounding app his
     assert.equal(right.props.children.props.children, "Close");
     h.unmount();
   }
+});
+
+test("sheet header actions retain live sensor and landscape insets without padding the body", () => {
+  let insets = { left: 0, right: 0 };
+  const h = hookHarness<any>({
+    "react/jsx-runtime": {
+      jsx: (type: any, props: any) => ({ type, props }),
+      jsxs: (type: any, props: any) => ({ type, props }),
+    },
+    "react-native": {
+      View: "View",
+      Text: "Text",
+      StyleSheet: { create: (v: any) => v },
+    },
+    "react-native-safe-area-context": { useSafeAreaInsets: () => insets },
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "./workspaceHeaderMetrics": {
+      WORKSPACE_HEADER_ROW: {},
+      FLOATING_HEADER_MARGIN: 12,
+      FLOATING_HEADER_GAP: 8,
+      useWorkspaceHeaderSides: () => ({ width: 44 }),
+    },
+  });
+  const { WorkspaceDrawerHeader } = h.load(
+    fileURLToPath(new URL("./WorkspaceDrawerHeader.tsx", import.meta.url)),
+  ) as any;
+  h.mount(() => {
+    const element = WorkspaceDrawerHeader({
+      navigation: { getState: () => ({ routes: [{ key: "settings" }] }) },
+      route: { name: "AccountSettings", key: "settings" },
+      options: { title: "Settings", headerRight: () => "Close" },
+    });
+    return element.type(element.props);
+  });
+  for (const value of [
+    { left: 0, right: 104 },
+    { left: 59, right: 0 },
+    { left: 0, right: 0 },
+  ]) {
+    insets = value;
+    h.render();
+    const row = h.value().props.children;
+    const style = Object.assign({}, ...row.props.style);
+    // The bars' shared 12pt margin and 8pt gap between floating controls.
+    assert.equal(style.paddingRight, 12 + value.right);
+    assert.equal(style.paddingLeft, 12 + value.left);
+    assert.equal(style.gap, 8);
+    assert.equal(row.props.children[2].props.children.props.style.gap, 8);
+    assert.equal(
+      row.props.children[2].props.children.props.children,
+      "Close",
+    );
+  }
+  h.unmount();
 });

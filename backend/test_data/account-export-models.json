@@ -1845,6 +1845,35 @@
       }
     }
   ],
+  "credit_schedule_recipients": [
+    {
+      "_id": "fixture-recipient",
+      "schedule_id": "fixture-schedule",
+      "recipient_user_id": "fixture-value",
+      "anchor_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "next_due_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "is_eligible": true,
+      "eligibility_version": 0,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
   "device_codes": [
     {
       "_id": "fixture-value",
@@ -4881,6 +4910,73 @@
       "created_at": {
         "$date": {
           "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "client_error_reports": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "event_id": "fixture-value",
+      "consent_revision": "consent-sentinel",
+      "report": {
+        "schema_version": 1,
+        "event_id": "fixture-value",
+        "captured_at": "2023-11-14T22:13:20Z",
+        "platform": "ios",
+        "kind": "native_crash",
+        "exception_class": "Error",
+        "native_signal": "SIGSEGV",
+        "app_version": "1.2.3",
+        "app_build": "123",
+        "artifact_id": "artifact-sentinel",
+        "os_version": "18",
+        "runtime": {
+          "name": "hermes",
+          "major": 1
+        },
+        "js_frames": [
+          {
+            "asset": "frame-sentinel",
+            "line": 1,
+            "column": 2
+          }
+        ],
+        "native_images": [
+          {
+            "uuid": "image-sentinel",
+            "name": "image",
+            "size": 10
+          }
+        ],
+        "native_frames": [
+          {
+            "image": 0,
+            "offset": 1
+          }
+        ]
+      },
+      "environment": "prod",
+      "severity": "fatal",
+      "fingerprint": "fingerprint-sentinel",
+      "received_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "export": {
+        "status": "pending",
+        "destination_id": "delivery-sentinel",
+        "deadline": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
         }
       }
     }

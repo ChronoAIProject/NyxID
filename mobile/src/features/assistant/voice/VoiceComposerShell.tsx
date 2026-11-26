@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../../i18n/LanguageProvider";
+import { translateApp } from "../../../i18n/appTranslation";
 import { type ComponentProps, type ReactNode } from "react";
 import {
   Pressable,
@@ -20,6 +22,7 @@ import { VoiceComposerAura } from "./VoiceComposerAura";
 
 /** Leave transcript space while bounding voice to the current phone/tablet window. */
 export function useVoiceComposerHeight() {
+  useAppLanguage();
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   return Math.max(88, height - insets.top - insets.bottom - 60 - 96);
@@ -31,6 +34,7 @@ export function VoiceComposerShell({
   children,
   ...aura
 }: ComponentProps<typeof VoiceComposerAura> & { minimized: boolean }) {
+  useAppLanguage();
   return (
     <VoiceComposerAura {...aura}>
       <ChatComposerFrame
@@ -56,6 +60,7 @@ export function VoiceComposerHeader({
   error?: boolean;
   children?: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
   const separateTitle = fontScale > 1.8 && !!children;
@@ -97,7 +102,9 @@ export function VoiceComposerHeader({
           {status}
         </Text>
         <Text
-          accessibilityLabel={`Call time ${duration}`}
+          accessibilityLabel={translateApp("Call time {{duration}}", {
+            duration: duration,
+          })}
           style={[styles.elapsed, { color: colors.textSecondary }]}
         >
           {duration}
@@ -128,6 +135,7 @@ export function VoiceComposerCompactRow({
   onExpand?: () => void;
   onClose: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const { fontScale = 1 } = useWindowDimensions();
   if (controls) {
@@ -141,8 +149,8 @@ export function VoiceComposerCompactRow({
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Expand voice composer"
-          accessibilityHint={`${status}. Call time ${duration}. Tap to expand for listening mode options${liveText ? `. ${liveText}` : ""}`}
+          accessibilityLabel={translateApp("Expand voice composer")}
+          accessibilityHint={(liveText ? translateApp("{{status}}. Call time {{duration}}. Tap to expand for listening mode options. {{liveText}}", { status: status, duration: duration, liveText: liveText}) : translateApp("{{status}}. Call time {{duration}}. Tap to expand for listening mode options", { status: status, duration: duration }))}
           onPress={onExpand}
           style={styles.compactHoldExpand}
         />
@@ -154,7 +162,9 @@ export function VoiceComposerCompactRow({
             {liveText || status}
           </Text>
           <Text
-            accessibilityLabel={`Call time ${duration}`}
+            accessibilityLabel={translateApp("Call time {{duration}}", {
+              duration: duration,
+            })}
             style={[styles.elapsed, { color: colors.textSecondary }]}
           >
             {duration}
@@ -174,7 +184,8 @@ export function VoiceComposerCompactRow({
             <DictationWaveform subscribe={subscribeLevel} />
           </View>
           {controls}
-          <VoiceIconButton label="End voice and close" onPress={onClose}>
+          <VoiceIconButton label={translateApp("End voice and close")}
+            onPress={onClose}>
             <PhoneOff size={20} color={colors.danger} />
           </VoiceIconButton>
         </View>
@@ -191,8 +202,8 @@ export function VoiceComposerCompactRow({
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Expand voice composer"
-        accessibilityHint={`${status}. Call time ${duration}. Tap to expand for listening mode options${liveText ? `. ${liveText}` : ""}`}
+        accessibilityLabel={translateApp("Expand voice composer")}
+        accessibilityHint={(liveText ? translateApp("{{status}}. Call time {{duration}}. Tap to expand for listening mode options. {{liveText}}", { status: status, duration: duration, liveText: liveText}) : translateApp("{{status}}. Call time {{duration}}. Tap to expand for listening mode options", { status: status, duration: duration }))}
         onPress={onExpand}
         style={styles.compactExpand}
       >
@@ -215,14 +226,17 @@ export function VoiceComposerCompactRow({
           </View>
         </View>
         <Text
-          accessibilityLabel={`Call time ${duration}`}
+          accessibilityLabel={translateApp("Call time {{duration}}", {
+            duration: duration,
+          })}
           style={[styles.elapsed, { color: colors.textSecondary }]}
         >
           {duration}
         </Text>
       </Pressable>
       {controls}
-      <VoiceIconButton label="End voice and close" onPress={onClose}>
+      <VoiceIconButton label={translateApp("End voice and close")}
+        onPress={onClose}>
         <PhoneOff size={20} color={colors.danger} />
       </VoiceIconButton>
     </View>
@@ -230,6 +244,7 @@ export function VoiceComposerCompactRow({
 }
 
 export function VoiceComposerControls({ children }: { children: ReactNode }) {
+  useAppLanguage();
   return <View style={styles.controls}>{children}</View>;
 }
 
@@ -248,6 +263,7 @@ export function VoiceIconButton({
   onPress: () => void;
   children: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -285,6 +301,7 @@ export function VoiceMainButton({
   onPress: () => void;
   children: ReactNode;
 }) {
+  useAppLanguage();
   return (
     <Pressable
       accessibilityRole="button"

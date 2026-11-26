@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
@@ -5,9 +6,10 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { ApiError } from "./ApiError";
 import * as responseError from "./responseError";
-import { createSessionRefresh } from "../auth/sessionRefresh";
+import { createSessionRefresh, isRefreshRefusal } from "../auth/sessionRefresh";
 import { executeAuthenticatedRequest } from "./authenticatedTransport";
 import { guardedJsonTransport } from "./guardedTransport";
+import { translateApp } from "../../i18n/appTranslation";
 type ApiUrlModule = typeof import("./baseUrl");
 type HttpModule = typeof import("./http");
 type MobileApiModule = typeof import("./mobileApi");
@@ -25,8 +27,10 @@ export function loadTestModule<T>(filename: string, context: Record<string, unkn
 export function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fetch, loadModule = loadTestModule) {
   let session = { accessToken: "access-before-refresh", refreshToken: "refresh-test", sessionGeneration: 1 };
   const dependencies: Record<string, unknown> = {
+    "../../i18n/appTranslation": { translateApp },
+    "../../i18n/localizedError": { localizedError },
     "./connectionState": { assistantConnection: { observe: (send: () => Promise<unknown>) => send() } },
-    "../auth/sessionRefresh": { createSessionRefresh },
+    "../auth/sessionRefresh": { createSessionRefresh, isRefreshRefusal },
     "expo/fetch": { fetch },
     "./authenticatedTransport": { executeAuthenticatedRequest },
     "./approvalAdapter": {},

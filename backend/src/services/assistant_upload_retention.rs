@@ -167,7 +167,7 @@ async fn ensure_settings(db: &Database) -> AppResult<()> {
 fn projection() -> Document {
     doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "collaboration_group_id":1, "origin":1,
     "content_type":1, "message_id":1, "created_at":1, "bound_at":1, "expires_at":1,
-    "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
+    "parent_attachment_id":1, "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
 }
 fn date(row: &Document, key: &str) -> Option<DateTime<Utc>> {
     row.get_datetime(key).ok().map(|v| v.to_chrono())
@@ -273,6 +273,16 @@ async fn expired(
     policy: Policy,
     now: DateTime<Utc>,
 ) -> AppResult<bool> {
+    if row.get_str("origin").ok() == Some(super::assistant_upload_service::pdf_vision::ORIGIN) {
+        let Some(parent_id) = row.get_str("parent_attachment_id").ok() else {
+            return Ok(true);
+        };
+        let parent = db.collection::<Document>(ATTACHMENTS).find_one(doc! {"_id":parent_id,"user_id":row.get_str("user_id").unwrap_or_default(),"origin":"user_upload","content_type":"application/pdf"}).projection(projection()).await?;
+        return match parent {
+            Some(parent) => Box::pin(expired(db, &parent, policy, now)).await,
+            None => Ok(true),
+        };
+    }
     if age_expired(row, policy, now) {
         return Ok(true);
     }
@@ -441,7 +451,7 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
         .projection(doc! {"_id":1})
         .session(&mut *session)
         .await?;
-    let roots: Vec<Document> = children.stream(&mut *session).try_collect().await?;
+    let roots: Vec<Document> = crate::db::read_documents(&mut children, session).await?;
     let ids: Vec<&str> = roots
         .iter()
         .filter_map(|row| row.get_str("_id").ok())
@@ -673,6 +683,8 @@ async fn sweep_batch(db: &Database, token: &LeaseToken) -> AppResult<usize> {
             deleted += 1;
         }
     }
+    // These are direct dependents: raw payload chunks OR inline PDF pages.
+    // PDF pages never have chunks; deleting the root remains one bounded level.
     let chunk_cursor = previous
         .and_then(|v| v.get_str("chunk_cursor").ok())
         .unwrap_or_default();

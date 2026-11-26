@@ -188,6 +188,22 @@ it("shows one legacy notice without a budget or service editor", async () => {
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
 });
+it.each([true, false])("explains when the saved list excludes guest services (model only: %s)", async (modelOnly) => {
+  settings = orgChannelSettingsSchema.parse({
+    ...settings,
+    guest_enabled: true,
+    guest_policy_mode: "legacy",
+    binding_limits_guest_services: true,
+    effective_guest_services: modelOnly ? [] : settings.effective_guest_services,
+  });
+  mount();
+  expect(await screen.findByText(/This bot's saved limits exclude services listed for guests/)).toBeVisible();
+  expect(screen.getByText(modelOnly ? "Model-only chat" : /Calendar: Use/)).toBeVisible();
+  expect(screen.getByRole("link", { name: /Agent details → Grants/ })).toHaveAttribute(
+    "href", "/assistant?agent=agent&details=grants",
+  );
+  expect(writes).toEqual([]);
+});
 it("never reveals service IDs or budget controls while loading fails", async () => {
   failRead = true;
   mount();

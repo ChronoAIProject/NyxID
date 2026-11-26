@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Animated, AppState, Pressable, View } from "react-native";
 import {
@@ -27,6 +29,7 @@ export function AssistantBanner({
   icon?: ReactNode;
   onDismiss?: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -78,7 +81,7 @@ export function AssistantBanner({
       {onDismiss ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Dismiss"
+          accessibilityLabel={translateApp("Dismiss")}
           style={{
             width: 44,
             minHeight: 44,
@@ -95,6 +98,7 @@ export function AssistantBanner({
   );
 }
 export function AssistantErrorNotice({ message }: { message?: string }) {
+  useAppLanguage();
   const [dismissed, setDismissed] = useState<string>();
   if (!message || message === dismissed) return null;
   return (
@@ -112,6 +116,7 @@ export function JumpToLatest({
   visible: boolean;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
   const [offset] = useState(() => new Animated.Value(0));
@@ -150,7 +155,7 @@ export function JumpToLatest({
     >
       <AnimatedPressable
         accessibilityRole="button"
-        accessibilityLabel="Jump to latest message"
+        accessibilityLabel={translateApp("Jump to latest message")}
         hitSlop={6}
         onPress={jump}
         style={{
@@ -184,6 +189,7 @@ export function AssistantConnectionBanner({
   onRetry: () => void;
   inset?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
@@ -231,10 +237,14 @@ export function AssistantConnectionBanner({
         }
       >
         {!isConnected
-          ? "You're offline. NyxBot can't send, run or refresh until you reconnect. You're seeing what was already loaded."
+          ? translateApp(
+              "You're offline. NyxBot can't send, run or refresh until you reconnect. You're seeing what was already loaded.",
+            )
           : unreachable
-            ? "Can't reach NyxID. NyxBot can't send, run or refresh until the connection is back. You're seeing what was already loaded."
-            : "Back online."}
+            ? translateApp(
+                "Can't reach NyxID. NyxBot can't send, run or refresh until the connection is back. You're seeing what was already loaded.",
+              )
+            : translateApp("Back online.")}
       </AssistantBanner>
     </View>
   );

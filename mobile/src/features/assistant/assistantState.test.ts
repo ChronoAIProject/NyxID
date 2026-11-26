@@ -206,6 +206,7 @@ test("server-owned specialist, automation, and trigger confirmations never dupli
     needsClientContinuation({ ...acknowledgement, status: "denied" }),
     false,
   );
+  assert.match(continuationText(acknowledgement), /continue the original task/);
   assert.match(
     continuationText(acknowledgement),
     /acknowledgement_id d9428888-122b-11e1-b85c-61cd3cbb3210/,

@@ -34,7 +34,7 @@ receives them. Existing untrusted metadata/private-network restrictions remain.
 | M3 actual consumers | Sandbox API and workload verifier use Bearer, including separately reconstructed production factories sharing one cache; TLS/CA and selected-mode readiness |
 | M4 bootstrap boundary | Original Pod-bound Kubernetes token stays in TokenReview with audience `nyxid-remote-machine-v1`; Google token is only Kubernetes request authorization; UID/owner/generation/epoch/fence checks remain |
 | M5 disclosure and regression | Redacted diagnostics; existing metadata restrictions and relevant native lifecycle/bootstrap regression tests; identify real Rust paths versus HTTP/TLS doubles |
-| M6 environment pending | Verify actual Google `chrono-nyxid` principal, target Kubernetes permissions, API reachability and CA in target environment; existing `nyxid-machine-manager` Kubernetes ServiceAccount RBAC is not evidence of Google-principal authorization |
+| M6 environment pending | Verify the principal of the backend's Google service account, target Kubernetes permissions, API reachability and CA in target environment; existing `nyxid-machine-manager` Kubernetes ServiceAccount RBAC is not evidence of Google-principal authorization |
 
 Update these goal/MVP/acceptance contracts before implementation source. Local
 fixtures do not establish real metadata identity or GKE permissions. This task
@@ -83,7 +83,7 @@ Restore `cli/Dockerfile.machine` byte-for-byte to this branch's HEAD. Move its h
 
 ## Single current full Machine contract (2026-10-15; written before implementation)
 
-The undeployed development variants have no compatibility or migration path. The sole profile is `remote-machine`, product policy `remote-machine-mvp`, individual data policy `remote-machine-data`, and account deletion policy `machine-data`. Fixed resources remain 2 vCPU, 2 GiB RAM and a 20 GiB persistent `/workspace`. Temporary capacity is undeclared (`ephemeral_gib: null`), never zero or a historical numeric allocation. Commands/Files default on; Browser/Computer are optional, with Computer requiring Browser.
+The undeployed development variants have no compatibility or migration path. The sole profile is `remote-machine`, product policy `remote-machine-mvp`, individual data policy `remote-machine-data`, and account deletion policy `machine-data-provider-revocation-v2`. Fixed resources remain 2 vCPU, 2 GiB RAM and a 20 GiB persistent `/workspace`. Temporary capacity is undeclared (`ephemeral_gib: null`), never zero or a historical numeric allocation. Commands/Files default on; Browser/Computer are optional, with Computer requiring Browser.
 
 The single Sandbox shape omits both ephemeral-storage request/limit keys and home/tmp disk emptyDir sizeLimit keys. Protected identity Memory/token volumes, permissions, CPU/RAM/PVC, network constraints, optional RuntimeClass and exact immutable owner/Machine/workspace identity remain. CREATE requires the currently approved image; UPDATE retains the exact admitted image. A current Machine saved with image A must still quote, replay, resume and rekey using A after deployment changes to B. Missing prior-object evidence cannot authorize old-digest recreation or implicit upgrades. Temporary quota demand remains unknown, separately from create versus retained-PVC resume demand.
 
@@ -140,7 +140,7 @@ The actual ordinary and external foreground/background executor regressions cove
 
 ## Owner deletion and recovery
 
-`DELETE /api/v1/users/me` requires the existing first-party human extractor and `X-NyxID-Account-Deletion-Policy: machine-data`. The current Settings, mobile confirmation and `nyxid profile delete` send this acceptance after the explicit disclosure; CLI `--yes` retains the disclosure and supplies the same policy. The Assistant action accepts `deletionPolicyVersion: "machine-data"` with its existing email confirmation and includes both in the canonical action fingerprint. Missing/stale policy and external credentials are rejected before deletion effects or action reservation.
+`DELETE /api/v1/users/me` requires the existing first-party human extractor and `X-NyxID-Account-Deletion-Policy: machine-data-provider-revocation-v2`. The current Settings, mobile confirmation and `nyxid profile delete` send this acceptance after the explicit disclosure; CLI `--yes` retains the disclosure and supplies the same policy. The Assistant action accepts `deletionPolicyVersion: "machine-data-provider-revocation-v2"` with its existing email confirmation and includes both in the canonical action fingerprint. Missing/stale policy and external credentials are rejected before deletion effects or action reservation.
 
 Current account-deletion disclosures (Settings and Assistant shared confirmation, mobile native confirmation, and CLI including `--yes`) describe queued Machine/workspace deletion with a 24-hour target. Completion uses applicable control-plane stop/absence, Sandbox object-cascade checks, terminal creation responsibilities and accounting; disk-release proof is not a gate. Underlying storage follows its reclaim policy and physical storage release is unverified. The Billing Machines policy uses the same boundary. Policy versions, consent and authorization are unchanged.
 

@@ -24,15 +24,17 @@ export async function guardedJsonTransport<T>(options: {
     return { response, payload };
   };
   let { response, payload } = await receive();
+  let refreshRefused = false;
   if (response.status === 401 && options.requiresAuth && options.retry) {
     options.guard();
     const refreshed = await options.refresh();
     options.guard();
+    refreshRefused = !refreshed;
     if (refreshed) ({ response, payload } = await receive());
   }
   options.guard();
   if (!response.ok) {
-    if (response.status === 401 && options.requiresAuth && (options.invalidateOnAuthFailure ?? true)) {
+    if (refreshRefused && response.status === 401 && options.requiresAuth && (options.invalidateOnAuthFailure ?? true)) {
       options.guard();
       await options.invalidate();
       options.guard();

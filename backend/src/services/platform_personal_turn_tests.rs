@@ -65,7 +65,7 @@ fn legacy_turn_without_execution_marker_remains_readable() {
     assert!(turn.platform_origin.is_none());
 }
 
-pub(super) async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
+pub(crate) async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
     let (db, update, owner) =
         super::super::platform_personal_binding_service::tests::fixture(name).await;
     engine::ensure_indexes(&db).await.unwrap();
@@ -367,7 +367,7 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
     .unwrap();
     session.commit_transaction().await.unwrap();
     let row = claim.conversation;
-    let old = claim.credential.api_key_id;
+    let old = claim.credential.api_key_id.clone();
     use super::super::assistant_agent_credential_service as credentials;
     // Generic metadata/ordinary replacement cannot borrow a platform turn.
     assert!(
@@ -375,9 +375,10 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
             .await
             .is_err()
     );
-    let successor = credentials::replace_for_turn(db, &state.encryption_keys, &row, &old)
-        .await
-        .unwrap();
+    let successor =
+        credentials::replace_for_turn(db, &state.encryption_keys, &row, &claim.credential)
+            .await
+            .unwrap();
     assert_ne!(old, successor.api_key_id);
     let rebound = engine::get(db, &row.user_id, &row.id).await.unwrap();
     assert_eq!(rebound.credential_api_key_id, successor.api_key_id);
@@ -439,7 +440,7 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
         .await
         .unwrap();
     assert!(
-        credentials::replace_for_turn(db, &state.encryption_keys, &row, &successor.api_key_id)
+        credentials::replace_for_turn(db, &state.encryption_keys, &row, &successor)
             .await
             .is_err()
     );
@@ -623,6 +624,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             &db,
             contract::NyxAgentExecutionContext::Owner {
                 user_id: "missing".into(),
+                attempt: None,
                 turn: turn.clone(),
                 platform_origin: None,
             },
@@ -937,6 +939,7 @@ async fn fresh_event_read_cannot_commit_after_concurrent_revocation() {
         None,
         None,
         None,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -1175,6 +1178,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         }
         let now = chrono::Utc::now();
         let watch = AsyncServiceOperation {
+            meta_contexts: Vec::new(),
             artifact_catalog_service_id: None,
             artifact_mode: None,
             artifact_result: None,

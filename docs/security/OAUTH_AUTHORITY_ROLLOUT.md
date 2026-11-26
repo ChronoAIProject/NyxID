@@ -5,6 +5,12 @@ deployment required to activate them across participating writers and verifiers.
 See [implemented security controls](../SECURITY_REMEDIATION_W1_W4.md) for related
 changes and remaining limits.
 
+## Public callback rollout
+
+Deploy all authorization replicas with the global `auth:oauth-exact-redirects-v1` flag off (the default). The system seeds known callbacks on an empty shared MCP registration and records the reviewed callback digest on interactive approvals. Existing clients keep their prior redirect and silent-consent behavior during observation.
+
+Inspect `oauth_redirect_policy_observation` by registered client ID, reason, host class and path match. Each replica logs the first request immediately, then aggregates additional requests per minute. Counts are grouped by scheme as well. Scheme names longer than 64 bytes and new scheme groups above the 4,096-window threshold are reported as `other`. Obtain complete callback registrations from the client owner or client configuration. Register missing callbacks, including each supported loopback host. Legacy empty registrations stay available during observation. Once registrations and fleet coverage are confirmed, a first-party administrator can enable the global flag. A public callback must then match its registration with only its loopback port allowed to vary. A changed or previously unrecorded callback requires a fresh review.
+
 ## Compatibility boundary
 
 The new online gate requires the original protected consent revision for
@@ -133,6 +139,12 @@ to old readers as a compatibility fallback. Reauthorization and deliberate token
 invalidation may be required again. Record the reduced guarantee explicitly
 before reopening an older release.
 
+## Refresh client rollout
+
+All replicas start with the global `auth:oauth-refresh-client-auth-v1` flag off. Inspect `oauth_refresh_client_auth_observation` counts by issuing client ID, client type and reason. Missing, conflicting or invalid credentials retain the previous refresh behavior during observation. The same per-replica one-minute aggregation applies. Update OpenClaw OAuth installations to send their configured client ID and secret and confirm the observations have cleared for supported clients.
+
+After deploying all refresh replicas and updating clients, a first-party administrator can enable the flag independently. Public clients then send their issuing client ID. Confidential clients also present their secret through HTTP Basic or the token form. Each request uses one secret transport. Turning the flag off resumes observation. In both stages, simultaneous refreshes share one committed successor, and reuse after the 120-second grace revokes that refresh family.
+
 ## Diagnosing early OAuth sign-outs
 
 Use read-only queries to distinguish consent authority churn from an ordinary
@@ -249,6 +261,11 @@ signed, bound selection in the existing consent transaction. Invalid or expired
 saved approvals remain errors. Later re-consent can add Machine permission using
 that same approval/revision contract; it never widens an older token. Declining
 Machine access on a new session does not revoke another session's existing grant.
+
+In Authorized Apps, the grant and expiry dates describe base OAuth consent.
+Machine permissions opens the [owner Machine grant read](../API.md#get-apiv1usersmeconsentsclient_idmachine-grant)
+for the selected app. Its effective status comes from the saved client, consent,
+and grant. Initial approval and renewal start in the client’s signed OAuth flow.
 
 ### Browser delivery and native handoff
 

@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { turnEventSchema, type AssistantTurnEvent } from "./assistantTypes";
 
 /** Incremental SSE framing, including split CRLF and multi-line data fields. */
@@ -22,7 +23,7 @@ export class AssistantSseDecoder {
       this.buffer = this.buffer.slice(index + length);
       this.frameSize += line.length;
       if (this.frameSize > 1024 * 1024)
-        throw new Error("Assistant event exceeded its limit.");
+        throw localizedError("Assistant event exceeded its limit.");
       if (!line) {
         const payload = this.data.join("\n");
         this.data = [];
@@ -30,10 +31,10 @@ export class AssistantSseDecoder {
         if (!payload) continue;
         const parsed: unknown = JSON.parse(payload);
         if (!parsed || typeof parsed !== "object")
-          throw new Error("Invalid assistant event.");
+          throw localizedError("Invalid assistant event.");
         const name = (parsed as { event?: unknown }).event;
         if (typeof name !== "string")
-          throw new Error("Invalid assistant event.");
+          throw localizedError("Invalid assistant event.");
         if (!KNOWN_EVENTS.has(name)) continue;
         events.push(turnEventSchema.parse(parsed));
       } else if (line.startsWith("data:")) {
@@ -41,7 +42,7 @@ export class AssistantSseDecoder {
       }
     }
     if (this.buffer.length + this.frameSize > 1024 * 1024)
-      throw new Error("Assistant event exceeded its limit.");
+      throw localizedError("Assistant event exceeded its limit.");
     return events;
   }
 }
@@ -86,10 +87,10 @@ export function applyAssistantEvent(
     state.conversationId &&
     event.conversation_id !== state.conversationId
   ) {
-    throw new Error("Assistant conversation mismatch.");
+    throw localizedError("Assistant conversation mismatch.");
   }
   if ("turn_id" in event && state.turnId && event.turn_id !== state.turnId) {
-    throw new Error("Assistant turn mismatch.");
+    throw localizedError("Assistant turn mismatch.");
   }
   const next = { ...state, cursor: event.cursor };
   switch (event.event) {
@@ -106,16 +107,16 @@ export function applyAssistantEvent(
       return { ...next, continuations: event.continuation };
     case "message.started":
       if (state.messageId && state.messageId !== event.message_id)
-        throw new Error("Assistant message mismatch.");
+        throw localizedError("Assistant message mismatch.");
       return { ...next, messageId: event.message_id };
     case "block.started": {
       if (
         event.message_id !== state.messageId ||
         event.block.block_id !== event.block_id
       )
-        throw new Error("Assistant block identity mismatch.");
+        throw localizedError("Assistant block identity mismatch.");
       if (state.blocks.some((item) => item.id === event.block_id))
-        throw new Error("Duplicate assistant block.");
+        throw localizedError("Duplicate assistant block.");
       return {
         ...next,
         blocks: [
@@ -130,9 +131,9 @@ export function applyAssistantEvent(
         event.event === "block.completed" &&
         event.block.block_id !== event.block_id
       )
-        throw new Error("Assistant block identity mismatch.");
+        throw localizedError("Assistant block identity mismatch.");
       if (!state.blocks.some((item) => item.id === event.block_id))
-        throw new Error("Assistant block was not started.");
+        throw localizedError("Assistant block was not started.");
       return {
         ...next,
         blocks: state.blocks.map((item) =>
@@ -152,7 +153,7 @@ export function applyAssistantEvent(
       return { ...next, terminal: event.status, result: event };
     case "message.completed":
       if (event.message_id !== state.messageId)
-        throw new Error("Assistant message mismatch.");
+        throw localizedError("Assistant message mismatch.");
       return next;
     default:
       return next;

@@ -67,7 +67,7 @@ fn requests_inspection(attachment: &crate::models::assistant_conversation::TurnA
         && attachment.content_type.starts_with("image/")
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ToolImages {
     pub rounds: u32,
     seen: HashSet<String>,
@@ -77,6 +77,7 @@ pub(crate) struct ToolImages {
     omitted: Vec<String>,
     attempted: bool,
     model_unsupported: bool,
+    #[serde(skip)]
     pub fallback: Option<TurnResult>,
 }
 
@@ -286,7 +287,7 @@ pub(crate) async fn renew(
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let lease = chrono::Utc::now() + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS);
     let updated = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false},
+        .update_one(engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false}).map_err(|_|TurnError::internal("cancelled","stop"))?,
             doc! {"$set":{"nyxagent_session_id":binding,"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}})
         .await.map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
     if updated.matched_count != 1 {
@@ -297,6 +298,101 @@ pub(crate) async fn renew(
         json!({"turn_id":turn.turn_id,"continuation":round,"reason":"tool_images","image_round":round}),
     );
     Ok(())
+}
+
+pub(super) fn image_rejected(error: &TurnError) -> bool {
+    error.code == "image_input_unsupported"
+        || error.upstream_code.as_deref() == Some("image_input_unsupported")
+}
+
+pub(super) async fn settle_pdf_request(
+    state: &AppState,
+    row: &AssistantConversation,
+    pdf: &mut uploads::pdf_vision::Delivery,
+    unavailable: Option<&str>,
+    completed: bool,
+) -> Result<(), TurnError> {
+    if pdf.settle_request(unavailable, completed) {
+        record_pdf_outcomes(state, row, &pdf.reports).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn record_pdf_outcomes(
+    state: &AppState,
+    row: &AssistantConversation,
+    reports: &[(String, crate::models::assistant_upload::PdfCoverage)],
+) -> Result<(), TurnError> {
+    if reports.is_empty() {
+        return Ok(());
+    }
+    let Some(turn) = row.active_turn.as_ref() else {
+        return Err(TurnError::internal("cancelled", "turn_missing"));
+    };
+    let db = state.db.clone();
+    let conversation_id = row.id.clone();
+    let user_id = row.user_id.clone();
+    let turn_id = turn.turn_id.clone();
+    let fence = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested": false})
+        .map_err(|_| TurnError::internal("cancelled", "stop"))?;
+    let reports = reports.to_vec();
+    let mut session = db
+        .client()
+        .start_session()
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    let result = session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let operation: AppResult<()> = async {
+                // Serialize with Stop, settlement and same-turn worker reclaim.
+                let now = bson::DateTime::now();
+                let started_after = bson::DateTime::from_chrono(
+                    Utc::now() - chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS),
+                );
+                let mut filter = fence.clone();
+                filter.insert("$or", bson::to_bson(&[
+                    doc! {"active_turn.lease_expires_at": {"$gt": now}},
+                    doc! {"active_turn.lease_expires_at": bson::Bson::Null,
+                          "active_turn.started_at": {"$gt": started_after}},
+                ]).map_err(|_| AppError::Internal("PDF coverage fence encoding failed".into()))?);
+                let touched = db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(filter, doc! {"$currentDate":{"updated_at":true}})
+                    .session(&mut *session)
+                    .await?;
+                if touched.matched_count != 1 {
+                    return Err(AppError::AssistantTurnRequired);
+                }
+                for (id, pdf) in &reports {
+                    let value = mongodb::bson::to_bson(pdf)
+                        .map_err(|_| AppError::Internal("PDF coverage encoding failed".into()))?;
+                    let update = doc! {"$set":{"attachments.$.pdf":value}};
+                    db.collection::<mongodb::bson::Document>(
+                        crate::models::assistant_message::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {"user_id":&user_id,"conversation_id":&conversation_id,"turn_id":&turn_id,"role":{"$ne":"assistant"},"attachments.id":id},
+                        update,
+                    )
+                    .session(&mut *session)
+                    .await?;
+                }
+                Ok(())
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error);
+    match result {
+        Ok(()) => Ok(()),
+        Err(AppError::AssistantTurnRequired) => Err(TurnError::internal("cancelled", "stop")),
+        Err(_) => Err(TurnError::internal("assistant_unavailable", "prepare")),
+    }
 }
 
 #[cfg(test)]

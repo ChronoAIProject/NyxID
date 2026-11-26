@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { composerInputMinHeight } from "./composerGeometry";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import type { AgentIdentity } from "../../components/agentAvatarModel";
@@ -8,11 +10,11 @@ import {
 } from "../../components/workspace/ScrollEdgeFades";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Text,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   useWindowDimensions,
   View,
@@ -22,12 +24,15 @@ import {
 import { Clipboard, FileText, Image } from "lucide-react-native";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { chatComposerFocus } from "./chatComposerFocus";
+import { composerCompact } from "./composerCompact";
 import {
   activeMention,
   insertMention,
   mentionCandidates,
   type NativeTextSelection,
 } from "./assistantMentions";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 export type AssistantMentionOption = {
   id: string;
@@ -43,6 +48,19 @@ type ScopedSelection = {
   selection: NativeTextSelection;
 };
 
+/** Handed to `renderActions`: whether the idle composer is one row, and where
+ * its leading/trailing controls end so the input's text clears them. */
+export type ComposerActionsLayout = {
+  compact: boolean;
+  onLeadingWidth: (width: number) => void;
+  onTrailingWidth: (width: number) => void;
+};
+
+/** One row only while nothing could be hidden: unfocused and empty. */
+
+// Space between a one-row composer's controls and its text.
+const COMPACT_TEXT_GAP = 4;
+
 export function AssistantMentionInput({
   value,
   onChangeText,
@@ -52,7 +70,9 @@ export function AssistantMentionInput({
   accessibilityLabel,
   generation = 0,
   style,
+  expandedContent,
   renderActions,
+  compactWhenIdle = true,
 }: {
   value: string;
   onChangeText: (value: string) => void;
@@ -62,9 +82,17 @@ export function AssistantMentionInput({
   accessibilityLabel: string;
   generation?: number | string;
   style?: StyleProp<TextStyle>;
+  expandedContent?: ReactNode;
   /** Put composer controls below the text so multiline drafts use its full width. */
-  renderActions?: (mentionAction: ReactNode) => ReactNode;
+  renderActions?: (
+    mentionAction: ReactNode,
+    layout: ComposerActionsLayout,
+  ) => ReactNode;
+  /** An unfocused composer with only whitespace collapses to one row on every window. */
+  compactWhenIdle?: boolean;
 }) {
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
   const { colors } = useTheme();
   const maxHeight = useComposerHeight();
   const { fontScale } = useWindowDimensions();
@@ -110,6 +138,29 @@ export function AssistantMentionInput({
     null,
   );
   const [focused, setFocused] = useState(false);
+  const compact =
+    !!renderActions && composerCompact(compactWhenIdle, focused, value);
+  // An empty draft, or a collapsed whitespace-only one, shows the one-line
+  // prompt; the whitespace stays in the draft.
+  const showPlaceholder = !value || compact;
+  // Measured from the toolbar in either layout; 44pt targets until then.
+  const [leadingWidth, setLeadingWidth] = useState(44);
+  const [trailingWidth, setTrailingWidth] = useState(88);
+  const actionsLayout: ComposerActionsLayout = {
+    compact,
+    onLeadingWidth: (width) => {
+      if (mounted.current && width > 0) setLeadingWidth(Math.ceil(width));
+    },
+    onTrailingWidth: (width) => {
+      if (mounted.current && width > 0) setTrailingWidth(Math.ceil(width));
+    },
+  };
+  const textInsets = compact
+    ? {
+        paddingLeft: leadingWidth + COMPACT_TEXT_GAP,
+        paddingRight: trailingWidth + COMPACT_TEXT_GAP,
+      }
+    : undefined;
   const selection =
     cursor.revision === revision ? cursor.selection : scope.current.selection;
   const trigger = editable && focused ? activeMention(value, selection) : null;
@@ -164,7 +215,7 @@ export function AssistantMentionInput({
   const mentionAction = mentions.length ? (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Mention an attachment or agent"
+      accessibilityLabel={translateApp("Mention an attachment or agent")}
       accessibilityState={{ disabled: !editable, expanded: !!trigger }}
       disabled={!editable}
       onPress={openMentions}
@@ -194,6 +245,7 @@ export function AssistantMentionInput({
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
             style={styles.options}
+            {...railIndicator}
           >
             {candidates.length ? (
               candidates.map((option) => {
@@ -207,7 +259,10 @@ export function AssistantMentionInput({
                   <Pressable
                     key={option.id}
                     accessibilityRole="button"
-                    accessibilityLabel={`Mention ${option.label}, @${option.handle}`}
+                    accessibilityLabel={translateApp(
+                      "Mention {{name}}, @{{handle}}",
+                      { name: option.label, handle: option.handle },
+                    )}
                     disabled={!editable}
                     onPress={() => {
                       if (!current()) return;
@@ -257,13 +312,21 @@ export function AssistantMentionInput({
               })
             ) : (
               <Text style={[styles.noMatches, { color: colors.textSecondary }]}>
-                No matching mentions
+                {translateApp("No matching mentions")}
               </Text>
             )}
           </ScrollView>
         </View>
       ) : null}
-      <View style={[styles.inputFrame, renderActions && styles.fullWidthInput]}>
+      {!compact ? expandedContent : null}
+      <View
+        testID="chat-composer-input-frame"
+        style={[
+          styles.inputFrame,
+          renderActions && styles.fullWidthInput,
+          textInsets,
+        ]}
+      >
         <TextInput
           key={revision}
           ref={input}
@@ -272,7 +335,7 @@ export function AssistantMentionInput({
           editable={editable}
           placeholder={Platform.OS === "ios" ? "" : placeholder}
           accessibilityHint={
-            Platform.OS === "ios" && !value ? placeholder : undefined
+            Platform.OS === "ios" && showPlaceholder ? placeholder : undefined
           }
           placeholderTextColor={colors.textMuted}
           selectionColor={colors.primary}
@@ -286,9 +349,11 @@ export function AssistantMentionInput({
               : undefined
           }
           onFocus={() => {
+            if (input.current) chatComposerFocus.focused(input.current);
             if (current()) setFocused(true);
           }}
           onBlur={() => {
+            if (input.current) chatComposerFocus.blurred(input.current);
             if (mounted.current && scope.current.revision === revision)
               setFocused(false);
           }}
@@ -347,16 +412,22 @@ export function AssistantMentionInput({
               minHeight: composerInputMinHeight(fontScale),
             },
             style,
-            // iOS sizes a multiline input to its text; a measured height pins it at one line.
-            Platform.OS === "ios"
+            // Idle whitespace stays to one line on both native platforms.
+            compact
+              ? { height: composerInputMinHeight(fontScale), maxHeight: composerInputMinHeight(fontScale) }
+              : Platform.OS === "ios"
               ? {
-                  height: value ? undefined : composerInputMinHeight(fontScale),
+                  height: showPlaceholder
+                    ? composerInputMinHeight(fontScale)
+                    : undefined,
                   maxHeight,
                 }
               : { height: inputHeight, maxHeight },
           ]}
         />
-        {Platform.OS === "ios" && !value ? (
+        {Platform.OS === "ios" && showPlaceholder ? (
+          // Remounted per font scale: a live text-size change must re-measure
+          // this overlay, or it keeps its old line box and clips the glyphs.
           <Text
             pointerEvents="none"
             accessibilityElementsHidden
@@ -365,7 +436,13 @@ export function AssistantMentionInput({
             style={[
               styles.emptyPlaceholder,
               { color: colors.textMuted },
-              renderActions && { left: 12, right: 12 },
+              renderActions &&
+                (textInsets
+                  ? {
+                      left: textInsets.paddingLeft,
+                      right: textInsets.paddingRight,
+                    }
+                  : { left: 12, right: 12 }),
             ]}
           >
             {placeholder}
@@ -373,7 +450,9 @@ export function AssistantMentionInput({
         ) : null}
         <ScrollEdgeFades edges={overflow.edges} color={colors.composerBg} />
       </View>
-      {renderActions ? renderActions(mentionAction) : mentionAction}
+      {renderActions
+        ? renderActions(mentionAction, actionsLayout)
+        : mentionAction}
     </View>
   );
 }

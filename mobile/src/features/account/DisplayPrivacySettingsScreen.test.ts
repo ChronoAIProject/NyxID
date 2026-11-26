@@ -1,3 +1,4 @@
+import {translate} from "../../i18n/translate";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiError } from "../../lib/api/ApiError";
@@ -119,6 +120,8 @@ test("Privacy analytics keeps shared group insets and wrapping controls at narro
   ]) {
     env.resize(width!, fontScale!);
     const title = env.text("USAGE ANALYTICS");
+    assert.equal(style(title).textTransform, undefined);
+    assert.equal(style(title).letterSpacing, 0.6);
     const footer = env.text(
       "Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules.",
     );
@@ -244,3 +247,87 @@ test("Privacy export watchdog failures use the existing localized error toast", 
     } finally { env.harness.unmount(); }
   }
 });
+
+test("Privacy shows diagnostics status and explicitly limits Android coverage", () => {
+  const env = setupSettingsScreen(
+    "./PrivacySettingsScreen.tsx",
+    "PrivacySettingsScreen",
+    { diagnosticsOffered: true },
+  );
+  assert.ok(env.row("Crash diagnostics"));
+  assert.ok(env.row("Review updated analytics"));
+  assert.ok(env.text("Crash diagnostics need updated permission"));
+  assert.ok(env.text("iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured."));
+  env.harness.unmount();
+});
+
+test("Privacy hides review action after diagnostics are enabled", () => {
+  const env = setupSettingsScreen(
+    "./PrivacySettingsScreen.tsx",
+    "PrivacySettingsScreen",
+    {
+      diagnosticsOffered: true,
+      diagnosticsAvailable: true,
+      deviceEnabled: true,
+      devicePolicy: 2,
+    },
+  );
+  assert.ok(env.row("Crash diagnostics"));
+  assert.equal(
+    env.all().find(
+      (node) =>
+        node.type === "Text" &&
+        [node.props.children].flat(Infinity).join("") ===
+          "Review updated analytics",
+    ),
+    undefined,
+  );
+  assert.ok(env.text("Crash diagnostics enabled"));
+  env.harness.unmount();
+});
+
+test("Privacy hides all policy-2 groups and rows when diagnostics is not offered", () => {
+  const env=setupSettingsScreen("./PrivacySettingsScreen.tsx","PrivacySettingsScreen", {diagnosticsOffered:false});
+  const text=env.all().map(node=>node.props.children).flat(Infinity);
+  assert.ok(!text.includes("CRASH DIAGNOSTICS"));
+  assert.ok(!text.includes("Crash diagnostics"));
+  assert.ok(!text.includes("Review updated analytics"));
+  assert.ok(env.row("Allow for my account"));
+  assert.ok(env.row("Allow on this device"));
+  env.harness.unmount();
+});
+
+for (const [accountPolicy,devicePolicy,offered,expected] of [["2",1,true,2],["1",2,true,2],["2",2,false,1],["1",1,true,1]] as const) test(`account switch keeps acknowledged policy account=${accountPolicy} device=${devicePolicy} offered=${offered}`,()=>{
+  const env=setupSettingsScreen("./PrivacySettingsScreen.tsx","PrivacySettingsScreen",{diagnosticsOffered:offered,accountPolicy,devicePolicy});
+  env.mutationOptions[0]!.mutationFn(true);
+  assert.equal(env.analyticsSaves[0]![5],expected);
+  env.harness.unmount();
+});
+
+for (const [language, reviewMessage] of [
+  ["en", "Could not save updated analytics permission."],
+  ["zh-CN", "无法保存更新后的分析授权。"],
+  ["zh-TW", "無法儲存更新後的分析授權。"],
+] as const) {
+  test(`Privacy policy-1 failure feedback follows app language (${language})`, () => {
+    const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", {
+      diagnosticsOffered: false, accountPolicy: "1", devicePolicy: 1, language,
+    });
+    env.mutationOptions[0]!.onError!();
+    env.harness.flush();
+    const toast = env.all().find((node) => node.type === "ToastOverlay");
+    assert.equal(toast?.props.toast?.message,
+      translate(language, "Could not save account analytics permission. This device remains off; retry to withdraw across devices."));
+    env.harness.unmount();
+  });
+  test(`Privacy policy-2 review failure feedback is localized (${language})`, () => {
+    const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", {
+      diagnosticsOffered: true, language,
+    });
+    env.mutationOptions[2]!.onError!();
+    env.harness.flush();
+    const toast = env.all().find((node) => node.type === "ToastOverlay");
+    assert.equal(toast?.props.toast?.message, reviewMessage);
+    env.harness.unmount();
+  });
+}

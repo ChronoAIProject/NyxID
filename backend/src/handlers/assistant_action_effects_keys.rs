@@ -696,6 +696,14 @@ async fn commit_key_delete(
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
     }
+    if current.state_version == request.expected_state_version {
+        super::assistant_nyxagent::survivor::cancel_before_revocation(
+            state,
+            &owner_id,
+            mongodb::bson::doc! {"user_id":&owner_id,"credential_api_key_id":&request.key_id},
+        )
+        .await;
+    }
     match key_service::delete_api_key_with_expected_state_version(
         &state.db,
         &owner_id,

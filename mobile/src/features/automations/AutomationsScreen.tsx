@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, TextInput, View } from "react-native";
 import {
@@ -75,6 +77,7 @@ const STATUSES = ["all", "active", "disabled"] as const;
 const AGENTS_KEY = ["workspace", "agents", "list"] as const;
 
 function useAgents(enabled: boolean) {
+  useAppLanguage();
   return useQuery({
     queryKey: AGENTS_KEY,
     queryFn: ({ signal }) => agentsApi.list(signal),
@@ -85,10 +88,12 @@ function useAgents(enabled: boolean) {
 
 /** Automation times always read in the phone's own local time. */
 function useAutomationZone(_enabled: boolean) {
+  useAppLanguage();
   return deviceTimezone();
 }
 
 function useAutomationRuns(id: string, enabled: boolean) {
+  useAppLanguage();
   return useInfiniteQuery({
     queryKey: [...AUTOMATIONS, id, "runs"],
     initialPageParam: undefined as AutomationRunsCursor | undefined,
@@ -111,13 +116,14 @@ function AutomationRetry({
   label: string;
   onRetry: () => void;
 }) {
+  useAppLanguage();
   return (
     <>
       <Notice tone="error" message={automationError(error)} />
       <SettingsGroup inset={false}>
         <SettingsRow
           tone="action"
-          label="Retry"
+          label={translateApp("Retry")}
           accessibilityLabel={label}
           onPress={onRetry}
         />
@@ -128,7 +134,7 @@ function AutomationRetry({
 
 // One blank, at the end: the reader finishes the sentence with when and what.
 export const AUTOMATION_SETUP_PROMPT =
-  "Hi NyxBot, I'd like help setting up an automation that runs every ";
+  "Hi NyxBot, help me set up a recurring automation.";
 
 /**
  * Open a new NyxBot chat as the main chat (not a page pushed over this one)
@@ -138,6 +144,7 @@ function useStartNyxBotChat(navigation: {
   getParent: () => { getState: () => any } | undefined;
   dispatch: (action: any) => void;
 }) {
+  useAppLanguage();
   const sheet = useWorkspaceSheet();
   return (prompt: string) => {
     const params = newAssistantChatParams();
@@ -158,15 +165,28 @@ function useStartNyxBotChat(navigation: {
 }
 
 const STATUS_OPTIONS = [
-  { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "disabled", label: "Paused" },
+  { value: "all",
+    get label() {
+      return translateApp("All");
+    },
+  },
+  { value: "active",
+    get label() {
+      return translateApp("Active");
+    },
+  },
+  { value: "disabled",
+    get label() {
+      return translateApp("Paused");
+    },
+  },
 ] as const;
 
 export function AutomationsScreen({
   navigation,
   route,
 }: WorkspaceScreenProps<"Automations">) {
+  useAppLanguage();
   const { colors } = useTheme();
   const runtime = useAutomationRuntime();
   const startChat = useStartNyxBotChat(navigation);
@@ -203,24 +223,25 @@ export function AutomationsScreen({
   );
   const agent = agents.data?.agents.find((item) => item.id === agentId);
   const agentLabel = !agentId
-    ? "All agents"
+    ? translateApp("All agents")
     : agent
       ? agent.display_name || agent.name
-      : "Selected agent";
+      : translateApp("Selected agent");
   const statusLabel =
-    STATUS_OPTIONS.find((option) => option.value === status)?.label ?? "All";
+    STATUS_OPTIONS.find((option) => option.value === status)?.label ??
+    translateApp("All");
   return (
     <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
       <AskNyxBotCard
         colors={colors}
-        onPress={() => startChat(AUTOMATION_SETUP_PROMPT)}
+        onPress={() => startChat(translateApp(AUTOMATION_SETUP_PROMPT))}
       />
       <View style={styles.filters}>
         <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
           <Search size={17} color={colors.textMuted} accessible={false} />
           <TextInput
-            accessibilityLabel="Search automations"
-            placeholder="Search by name or agent"
+            accessibilityLabel={translateApp("Search automations")}
+            placeholder={translateApp("Search by name or agent")}
             placeholderTextColor={colors.textMuted}
             selectionColor={colors.primary}
             value={search}
@@ -233,7 +254,7 @@ export function AutomationsScreen({
           {search ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Clear search"
+              accessibilityLabel={translateApp("Clear search")}
               onPress={() => setSearch("")}
               style={styles.clear}
             >
@@ -245,8 +266,10 @@ export function AutomationsScreen({
           <View ref={statusMenu.anchor} collapsable={false}>
             <FilterChip
               colors={colors}
-              label={status === "all" ? "Status" : statusLabel}
-              accessibilityLabel={`Status, ${statusLabel}`}
+              label={status === "all" ? translateApp("Status") : statusLabel}
+              accessibilityLabel={translateApp("Status, {{status}}", {
+                status: statusLabel,
+              })}
               active={status !== "all"}
               menu
               onPress={statusMenu.open}
@@ -255,7 +278,9 @@ export function AutomationsScreen({
           <FilterChip
             colors={colors}
             label={agentLabel}
-            accessibilityLabel={`Agent, ${agentLabel}`}
+            accessibilityLabel={translateApp("Agent, {{label}}", {
+              label: agentLabel,
+            })}
             active={!!agentId}
             onPress={() =>
               navigation.push("AutomationAgentFilter", {
@@ -267,13 +292,19 @@ export function AutomationsScreen({
         {statusMenu.popup}
       </View>
       {!runtime.online && (
-        <Notice message="You’re offline. Reconnect to refresh automations." />
+        <Notice message={translateApp(
+            "You’re offline. Reconnect to refresh automations.",
+          )}
+        />
       )}
-      {list.isPending && <SkeletonCards accessibilityLabel="Loading automations" />}
+      {list.isPending && (
+        <SkeletonCards accessibilityLabel={translateApp("Loading automations")}
+        />
+      )}
       {list.error && (
         <AutomationRetry
           error={list.error}
-          label="Retry automations"
+          label={translateApp("Retry automations")}
           onRetry={() => void list.refetch()}
         />
       )}
@@ -302,13 +333,15 @@ export function AutomationsScreen({
             <View style={[styles.card, { backgroundColor: colors.groupedFill }]}>
               <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>
                 {list.data.triggers.length
-                  ? "No matching automations"
-                  : "No automations yet"}
+                  ? translateApp("No matching automations")
+                  : translateApp("No automations yet")}
               </Text>
               <Text style={[styles.cardMeta, { color: colors.textMuted }]}>
                 {list.data.triggers.length
-                  ? "Try another search, agent or status."
-                  : "Ask NyxBot to run something for you on a schedule or when an event arrives."}
+                  ? translateApp("Try another search, agent or status.")
+                  : translateApp(
+                      "Ask NyxBot to run something for you on a schedule or when an event arrives.",
+                    )}
               </Text>
             </View>
           )}
@@ -326,11 +359,14 @@ function AskNyxBotCard({
   colors: ThemeColors;
   onPress: () => void;
 }) {
+  useAppLanguage();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Ask NyxBot"
-      accessibilityHint="Opens a new NyxBot chat with a message to finish describing your automation"
+      accessibilityLabel={translateApp("Ask NyxBot")}
+      accessibilityHint={translateApp(
+        "Opens a new NyxBot chat with a message to finish describing your automation",
+      )}
       onPress={onPress}
       style={({ pressed }) => [
         styles.ask,
@@ -346,11 +382,12 @@ function AskNyxBotCard({
       </View>
       <View style={styles.askText}>
         <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>
-          Ask NyxBot
+          {translateApp("Ask NyxBot")}
         </Text>
         <Text style={[styles.cardMeta, { color: colors.textSecondary }]}>
-          Start a chat to set up an automation. Just finish the sentence with
-          when it runs and what it does.
+          {translateApp(
+            "Start a chat to set up an automation. Just finish the sentence with when it runs and what it does.",
+          )}
         </Text>
       </View>
       <ChevronRight size={18} color={colors.textMuted} />
@@ -373,12 +410,15 @@ function FilterChip({
   menu?: boolean;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const Glyph = menu ? ChevronDown : ChevronRight;
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
-      accessibilityHint={menu ? "Opens a menu" : "Opens the agent list"}
+      accessibilityHint={menu ? translateApp("Opens a menu")
+          : translateApp("Opens the agent list")
+      }
       onPress={onPress}
       style={({ pressed }) => [
         styles.chip,
@@ -422,14 +462,17 @@ function AutomationCard({
   target: string;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const status = automationStatusLabel(row.status);
   const active = row.status === "active";
   const schedule = automationScheduleSummary(row, zone);
   const next =
     row.source === "schedule"
       ? active
-        ? `Next ${formatAutomationTime(row.next_run_at, zone)}`
-        : "No new scheduled runs while paused"
+        ? translateApp("Next {{date}}", {
+            date: formatAutomationTime(row.next_run_at, zone),
+          })
+        : translateApp("No new scheduled runs while paused")
       : undefined;
   const pause = automationPauseReason(row.pause_reason);
   const detail = automationListDetail(row, target, zone);
@@ -437,7 +480,7 @@ function AutomationCard({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${row.label}, ${status}. ${detail}`}
-      accessibilityHint="Opens this automation"
+      accessibilityHint={translateApp("Opens this automation")}
       onPress={onPress}
       style={({ pressed }) => [
         styles.card,
@@ -526,6 +569,7 @@ export function AutomationAgentFilterScreen({
   navigation,
   route,
 }: NativeStackScreenProps<WorkspaceContentParamList, "AutomationAgentFilter">) {
+  useAppLanguage();
   const runtime = useAutomationRuntime();
   const agents = useAgents(runtime.active);
   const selected = route.params?.agentId ?? "";
@@ -543,13 +587,13 @@ export function AutomationAgentFilterScreen({
       {agents.error && (
         <AutomationRetry
           error={agents.error}
-          label="Retry agents"
+          label={translateApp("Retry agents")}
           onRetry={() => void agents.refetch()}
         />
       )}
       <SettingsGroup>
         <SettingsCheckRow
-          label="All agents"
+          label={translateApp("All agents")}
           selected={!selected}
           onPress={() => choose("")}
         />
@@ -564,7 +608,7 @@ export function AutomationAgentFilterScreen({
         ))}
         {selected && !live.some((agent) => agent.id === selected) ? (
           <SettingsCheckRow
-            label="Selected agent"
+            label={translateApp("Selected agent")}
             selected
             onPress={() => choose(selected)}
           />
@@ -579,6 +623,7 @@ export function AutomationDetailScreen({
   navigation,
   route,
 }: NativeStackScreenProps<WorkspaceContentParamList, "AutomationDetail">) {
+  useAppLanguage();
   const runtime = useAutomationRuntime();
   const detail = useQuery({
     queryKey: [...AUTOMATIONS, "detail", route.params.id],
@@ -605,7 +650,9 @@ export function AutomationDetailScreen({
     ? [
         automationPauseReason(row.pause_reason),
         row.status === "disabled"
-          ? "Future scheduled runs are paused. Existing run threads remain available."
+          ? translateApp(
+              "Future scheduled runs are paused. Existing run threads remain available.",
+            )
           : undefined,
       ]
         .filter(Boolean)
@@ -617,61 +664,66 @@ export function AutomationDetailScreen({
       {detail.error && (
         <AutomationRetry
           error={detail.error}
-          label="Retry automation"
+          label={translateApp("Retry automation")}
           onRetry={() => void detail.refetch()}
         />
       )}
       {row && (
         <>
           <SettingsGroup inset={false} footer={pause || undefined}>
-            <SettingsRow label="Name" value={row.label} />
+            <SettingsRow label={translateApp("Name")} value={row.label} />
             <SettingsRow
-              label="Status"
+              label={translateApp("Status")}
               value={automationStatusLabel(row.status)}
             />
-            <SettingsRow label="Runs for" value={target} />
-            <SettingsRow label="Starts" value={automationSourceLabel(row)} />
+            <SettingsRow label={translateApp("Runs for")} value={target} />
+            <SettingsRow label={translateApp("Starts")}
+              value={automationSourceLabel(row)} />
           </SettingsGroup>
           <SettingsGroup
-            title="Schedule"
+            title={translateApp("Schedule")}
             inset={false}
             footer={
               row.schedule?.kind === "cron" && row.schedule.timezone !== zone
-                ? `Shown in your local time. This automation follows ${row.schedule.timezone} time, including daylight saving changes.`
+                ? translateApp(
+                    "Shown in your local time. This automation follows {{timezone}} time, including daylight saving changes.",
+                    { timezone: row.schedule.timezone },
+                  )
                 : undefined
             }
           >
             <SettingsRow
-              label="Repeats"
+              label={translateApp("Repeats")}
               value={automationScheduleSummary(row, zone)}
             />
             {row.schedule?.kind === "cron" && (
               <SettingsRow
-                label="Calendar expression"
+                label={translateApp("Calendar expression")}
                 value={row.schedule.expression}
               />
             )}
             {nextRuns.map((at, index) => (
               <SettingsRow
                 key={at}
-                label={index === 0 ? "Next run" : "Then"}
+                label={index === 0 ? translateApp("Next run") : translateApp("Then")
+                }
                 value={formatAutomationTime(at, zone)}
               />
             ))}
             <SettingsRow
-              label="Overlap"
+              label={translateApp("Overlap")}
               value={
                 row.overlap === "queue"
-                  ? "Queue one run"
-                  : "Skip overlapping runs"
+                  ? translateApp("Queue one run")
+                  : translateApp("Skip overlapping runs")
               }
             />
           </SettingsGroup>
           <AutomationDelivery row={row} />
-          <SettingsGroup title="Runs" inset={false}>
+          <SettingsGroup title={translateApp("Runs")} inset={false}>
             {row.last_run ? (
               <SettingsRow
-                label="Latest run"
+                label={translateApp("Latest run")}
                 detail={[
                   formatAutomationTime(row.last_run.scheduled_at, zone),
                   automationReason(row.last_run.reason),
@@ -685,17 +737,19 @@ export function AutomationDetailScreen({
               />
             ) : null}
             <SettingsRow
-              label="Run history"
+              label={translateApp("Run history")}
               onPress={() => navigation.push("AutomationRuns", { id: row.id })}
             />
           </SettingsGroup>
           {row.delivery.type === "assistant" && (
             <SettingsGroup
               inset={false}
-              footer="Normal agent usage and billing apply. This automation uses existing agent permissions."
+              footer={translateApp(
+                "Normal agent usage and billing apply. This automation uses existing agent permissions.",
+              )}
             >
               <SettingsRow
-                label="Agent permissions"
+                label={translateApp("Agent permissions")}
                 onPress={() => {
                   if (row.delivery.type === "assistant")
                     navigation.push("AgentDetail", {
@@ -721,17 +775,23 @@ function AutomationGuidance({
   label: string;
   navigation: Parameters<typeof useStartNyxBotChat>[0];
 }) {
+  useAppLanguage();
   const startChat = useStartNyxBotChat(navigation);
   return (
     <SettingsGroup
       inset={false}
-      footer="To run or change this automation, ask NyxBot."
+      footer={translateApp("To run or change this automation, ask NyxBot.")}
     >
       <SettingsRow
         tone="action"
-        label="Ask NyxBot"
+        label={translateApp("Ask NyxBot")}
         onPress={() =>
-          startChat(`Hi NyxBot, I'd like to change my automation "${label}": `)
+          startChat(
+            translateApp(
+              'Hi NyxBot, I\'d like to change my automation "{{label}}".',
+              { label: label },
+            ),
+          )
         }
       />
     </SettingsGroup>
@@ -739,47 +799,50 @@ function AutomationGuidance({
 }
 
 function AutomationDelivery({ row }: { row: Automation }) {
+  useAppLanguage();
   const d = row.delivery;
   if (d.type === "assistant")
     return (
       <>
-        <SettingsGroup title="Instruction" inset={false}>
+        <SettingsGroup title={translateApp("Instruction")} inset={false}>
           <SettingsRow label={d.instruction} selectable />
         </SettingsGroup>
-        <SettingsGroup title="Delivery" inset={false}>
+        <SettingsGroup title={translateApp("Delivery")} inset={false}>
           <SettingsRow
-            label="Thread"
-            value={d.thread_policy ?? "Default for this agent and source"}
-          />
-          <SettingsRow
-            label="Result"
-            value={
-              d.deliver_to.type === "chat"
-                ? "Channel chat"
-                : d.deliver_to.type === "notification"
-                  ? "Notification"
-                  : "Thread"
+            label={translateApp("Thread")}
+            value={d.thread_policy ??
+              translateApp("Default for this agent and source")
             }
           />
           <SettingsRow
-            label="Confirmation"
+            label={translateApp("Result")}
+            value={
+              d.deliver_to.type === "chat"
+                ? translateApp("Channel chat")
+                : d.deliver_to.type === "notification"
+                  ? translateApp("Notification")
+                  : translateApp("Thread")
+            }
+          />
+          <SettingsRow
+            label={translateApp("Confirmation")}
             value={
               d.confirmation_policy === "destructive"
-                ? "Destructive actions"
-                : "Every changing action"
+                ? translateApp("Destructive actions")
+                : translateApp("Every changing action")
             }
           />
         </SettingsGroup>
       </>
     );
   return (
-    <SettingsGroup title="Delivery" inset={false}>
+    <SettingsGroup title={translateApp("Delivery")} inset={false}>
       {d.type === "webhook" ? (
         <SettingsRow label={d.url} selectable />
       ) : d.type === "agent" ? (
         <SettingsRow label={d.conversation_id} mono selectable />
       ) : (
-        <SettingsRow label="Send a reminder notification." />
+        <SettingsRow label={translateApp("Send a reminder notification.")} />
       )}
     </SettingsGroup>
   );
@@ -789,6 +852,7 @@ export function AutomationRunsScreen({
   navigation,
   route,
 }: NativeStackScreenProps<WorkspaceContentParamList, "AutomationRuns">) {
+  useAppLanguage();
   const runtime = useAutomationRuntime();
   const zone = useAutomationZone(runtime.active);
   const history = useAutomationRuns(route.params.id, runtime.active);
@@ -800,14 +864,16 @@ export function AutomationRunsScreen({
       {history.error && (
         <AutomationRetry
           error={history.error}
-          label="Retry run history"
+          label={translateApp("Retry run history")}
           onRetry={() => void history.refetch()}
         />
       )}
       {history.data && (
         <SettingsGroup
           inset={false}
-          footer="Up to 1,000 recent runs are retained for 90 days."
+          footer={translateApp(
+            "Up to 1,000 recent runs are retained for 90 days.",
+          )}
         >
           {runs.map((run) => {
             const value = automationStatusLabel(run.outcome);
@@ -820,8 +886,8 @@ export function AutomationRunsScreen({
                 detail={detail}
                 value={value}
                 valueTone={run.outcome === "failed" ? "danger" : "default"}
-                accessibilityLabel={`Run scheduled ${label}, ${value}${detail ? `. ${detail}` : ""}`}
-                accessibilityHint="Opens this run"
+                accessibilityLabel={(detail ? translateApp("Run scheduled {{label}}, {{amount}}. {{details}}", { label: label, amount: value, details: detail }) : translateApp("Run scheduled {{label}}, {{amount}}", { label: label, amount: value }))}
+                accessibilityHint={translateApp("Opens this run")}
                 onPress={() =>
                   navigation.push("AutomationRunDetail", {
                     id: route.params.id,
@@ -833,17 +899,20 @@ export function AutomationRunsScreen({
           })}
           {!runs.length && (
             <SettingsRow
-              label="No runs yet"
-              detail="Scheduled, requested and event runs will appear here."
+              label={translateApp("No runs yet")}
+              detail={translateApp(
+                "Scheduled, requested and event runs will appear here.",
+              )}
             />
           )}
           {history.hasNextPage && (
             <SettingsRow
               tone="action"
               label={
-                history.isFetchingNextPage ? "Loading…" : "Load Older Runs"
+                history.isFetchingNextPage ? translateApp("Loading…")
+                  : translateApp("Load Older Runs")
               }
-              accessibilityLabel="Load older runs"
+              accessibilityLabel={translateApp("Load older runs")}
               accessibilityState={{ busy: history.isFetchingNextPage }}
               disabled={!runtime.online || history.isFetchingNextPage}
               onPress={() => void history.fetchNextPage()}
@@ -859,6 +928,7 @@ export function AutomationRunsScreen({
 export function AutomationRunDetailScreen({
   route,
 }: NativeStackScreenProps<WorkspaceContentParamList, "AutomationRunDetail">) {
+  useAppLanguage();
   const openChat = useOpenWorkspaceChat();
   const runtime = useAutomationRuntime();
   const zone = useAutomationZone(runtime.active);
@@ -875,11 +945,14 @@ export function AutomationRunDetailScreen({
         ) : history.error ? (
           <AutomationRetry
             error={history.error}
-            label="Retry run"
+            label={translateApp("Retry run")}
             onRetry={() => void history.refetch()}
           />
         ) : (
-          <Notice message="This run is no longer in the recent run history." />
+          <Notice message={translateApp(
+              "This run is no longer in the recent run history.",
+            )}
+          />
         )}
       </SettingsPage>
     );
@@ -891,38 +964,51 @@ export function AutomationRunDetailScreen({
         inset={false}
         footer={
           run.outcome === "waiting" && run.reason === "confirmation_required"
-            ? "Open the thread to review the required action card."
+            ? translateApp(
+                "Open the thread to review the required action card.",
+              )
             : undefined
         }
       >
         <SettingsRow
-          label="Outcome"
+          label={translateApp("Outcome")}
           value={automationStatusLabel(run.outcome)}
           valueTone={run.outcome === "failed" ? "danger" : "default"}
         />
         <SettingsRow
-          label="Scheduled"
+          label={translateApp("Scheduled")}
           value={formatAutomationTime(run.scheduled_at, zone)}
         />
         {run.started_at ? (
           <SettingsRow
-            label="Started"
+            label={translateApp("Started")}
             value={formatAutomationTime(run.started_at, zone)}
           />
         ) : null}
         {run.finished_at ? (
           <SettingsRow
-            label="Finished"
+            label={translateApp("Finished")}
             value={formatAutomationTime(run.finished_at, zone)}
           />
         ) : null}
-        {duration ? <SettingsRow label="Duration" value={duration} /> : null}
-        {reason ? <SettingsRow label="Reason" value={reason} /> : null}
+        {duration ? (
+          <SettingsRow label={translateApp("Duration")} value={duration} />
+        ) : null}
+        {reason ? (
+          <SettingsRow label={translateApp("Reason")} value={reason} />
+        ) : null}
       </SettingsGroup>
       {run.missed && (
-        <SettingsGroup title="Missed" inset={false}>
+        <SettingsGroup title={translateApp("Missed")} inset={false}>
           <SettingsRow
-            label={`Missed ${run.missed.count} occurrences between ${formatAutomationTime(run.missed.from, zone)} and ${formatAutomationTime(run.missed.through, zone)}.`}
+            label={translateApp(
+              "Missed {{count}} occurrences between {{startDate}} and {{endDate}}.",
+              {
+                count: run.missed.count,
+                startDate: formatAutomationTime(run.missed.from, zone),
+                endDate: formatAutomationTime(run.missed.through, zone),
+              },
+            )}
           />
         </SettingsGroup>
       )}
@@ -930,7 +1016,7 @@ export function AutomationRunDetailScreen({
         <SettingsGroup inset={false}>
           <SettingsRow
             tone="action"
-            label="Open Thread"
+            label={translateApp("Open Thread")}
             onPress={() => openChat({ conversationId: run.thread_id! })}
           />
         </SettingsGroup>

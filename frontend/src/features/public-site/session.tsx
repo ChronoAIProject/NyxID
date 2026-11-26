@@ -4,15 +4,20 @@ import { ConsentBanner } from "@/components/consent-banner";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { initTelemetry, capture, identify } from "@/lib/telemetry";
+import { installCrashReporting, crashRootOptions } from "@/lib/crash-reporting/install";
+import { subscribeCrashPermission } from "@/lib/crash-reporting/permission-refresh";
 import { parsePublicPath, publishedRoute } from "./publication";
 import type { publicRouter } from "./router";
 export async function startPublicSession(
   router: ReturnType<typeof publicRouter>,
 ) {
+  installCrashReporting();
+  const queryClient = new QueryClient();
+  subscribeCrashPermission(queryClient);
   const consent = document.createElement("div");
   document.body.append(consent);
-  createRoot(consent).render(
-    <QueryClientProvider client={new QueryClient()}>
+  createRoot(consent, crashRootOptions).render(
+    <QueryClientProvider client={queryClient}>
       <ConsentBanner />
     </QueryClientProvider>,
   );
@@ -32,7 +37,7 @@ export async function startPublicSession(
       useAuthStore.getState().isAuthenticated &&
       ["/", "/zh"].includes(window.location.pathname)
     )
-      window.location.replace("/dashboard");
+      window.location.replace("/assistant");
   };
   void useAuthStore
     .getState()
@@ -47,6 +52,7 @@ export async function startPublicSession(
         telemetry_dsn?: string;
         telemetry_host?: string;
         telemetry_share_analytics?: boolean;
+        crash_diagnostics_offered?: boolean;
       }
     | undefined;
   const initialize = () => {
@@ -66,6 +72,7 @@ export async function startPublicSession(
       const response = await fetch("/api/v1/public/config");
       if (response.ok) {
         config = await response.json();
+        queryClient.setQueryData(["public-config"], config);
         initialize();
       }
     } catch (error) {

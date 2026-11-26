@@ -286,14 +286,13 @@ async fn org_access_2283_readiness_and_flag_suspend_provider_reply_status_and_la
 
 async fn relay(state: &AppState, row: &NyxbotChannel, id: &str) -> Response {
     let correlation = format!("relay-{id}");
-    let body = serde_json::to_vec(
-        &json!({"message_id":id,"correlation_id":correlation,"platform":"lark",
+    let body = json!({"message_id":id,"correlation_id":correlation,"platform":"lark",
         "agent":{"api_key_id":row.route_api_key_id,"name":"route"},
         "conversation":{"id":row.route_id,"platform_id":"org-private","type":"private"},
         "sender":{"platform_id":"7"},"content":{"type":"text","text":"Relay member request"},
-        "raw_platform_data":{"event":{"sender":{"sender_type":"user"}}}}),
-    )
-    .unwrap();
+        "raw_platform_data":{"event":{"sender":{"sender_type":"user"}}}});
+    store_direct_source(state, row, &body).await;
+    let body = serde_json::to_vec(&body).unwrap();
     let token = crate::crypto::jwt::generate_relay_callback_token(
         &state.jwt_keys,
         &state.config,

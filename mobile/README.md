@@ -222,7 +222,13 @@ pnpm bump:android    # PROD_ANDROID_VERSION_CODE → N+1
 pnpm bump:both       # both
 ```
 
-The repository matches NyxID's current TestFlight build on `fun.chrono-ai.nyxid`: **1.0.4 (36)**. For a new upload, keep `APP_VERSION=1.0.4` and set a higher `PROD_IOS_BUILD_NUMBER` in your local `.env.prod`; `pnpm bump:ios` advances an existing build number of 36 to 37. Later uploads must continue to increase the build number.
+For an incremental TestFlight build, get the last accepted version and build
+number from App Store Connect. Record the pushed Git commit alongside each
+accepted build so the next tab can recover its exact source. Compare the
+candidate with the previous release commit, including mobile and shared code.
+If the previous build included worktree edits, include those edits in a shared
+commit and verify the affected screens against the archived build before using
+that commit as the starting point.
 
 ## Troubleshooting / cleaning
 
@@ -335,10 +341,10 @@ All under `/api/v1` on the configured `*_API_BASE_URL`. The workspace API famili
 ## Deep links & push
 
 - Custom URL scheme: `{APP_SCHEME}://challenge/{challenge_id}` → opens the challenge detail screen
-- Device login scheme: `nyxid://login/device?user_code=...` -> prefills the confirmation screen without previewing or approving
+- Device login scheme: `nyxid://login/device?user_code=...` -> loads the public request review; approval requires a separate authenticated action
 - The QR scanner accepts HTTPS or `nyxid://` login URLs but extracts only `user_code`; API calls always use `*_API_BASE_URL`
 - Supported push payload fields: `deeplink`, `url`, `challenge_id`, `challengeId`
-- Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The host of `*_API_BASE_URL` is also auto-added to iOS `associatedDomains` so backend-issued links open in the app.
+- Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The configured host list and shared `shared/native-app-links.json` paths include device login. Android HTTPS filters remain profile-local opt-in through `*_ANDROID_HTTPS_APP_LINKS=true` after every selected host serves Asset Links. See [App links](docs/APP_LINKS.md) for the built-in login-link flow and server setup.
 - React Navigation accepts the configured app scheme and every embedded API/frontend origin plus the link host; the universal-link settings are the same for both domain sets (see [Domain migration](docs/DOMAIN_MIGRATION.md)).
 
 ## Session
@@ -443,3 +449,30 @@ server default and uses the existing voice session/stream/control contract.
 Real GPT transcription and spoken responses require an authenticated real NyxID
 backend with provider access, flags and credits. Synthetic fixture transcripts
 and contract tests establish lifecycle behavior only.
+
+## Crash diagnostics and release artifacts
+
+Policy-2 consent gates automatic iOS native/JS diagnostics and Android JS errors
+and JS fatal errors. Android JVM/NDK native crashes are not captured. All data
+uses the authenticated NyxID relay. The local Expo module pins PLCrashReporter
+1.12.0 and is called only from JS, without app/scene delegate hooks. See
+[CRASH_REPORTING.md](../docs/CRASH_REPORTING.md) for the protected native buffer,
+raw-file purge points, fatal-handler ordering and tests.
+
+Release scripts generate an artifact UUID, preserve the Hermes composed map and
+bundle, and preserve iOS dSYMs with UUIDs immediately after archive. Private
+artifacts live in `release/crash-artifacts/<platform>/<version>-<build>-<artifact>`.
+Install the build uploader with `npm ci --prefix tools/crash-artifacts` from the
+repo root. Upload runs only with CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN, _ORG and
+_PROJECT_MOBILE together. Keep those build secrets outside Expo public config.
+The report's app version/build always comes from the installed native binary.
+
+Before distributing each TestFlight or Play build, an administrator must register
+its installed platform, marketing version and build number/versionCode in
+NyxID Admin → Crash reports → Unverified releases, or call
+`POST /api/v1/admin/crash-reports/releases` with
+`{"platform":"ios","app_version":"1.0.4","app_build":"45"}` (use `android`
+for Play; optional `artifact_id` is supported). Store binaries have no
+server-reachable manifest, so mobile registration cannot be automatic. Unknown
+builds are retained and shown separately; only registered releases count in the
+version summary. Registration later verifies existing rows without backfill.

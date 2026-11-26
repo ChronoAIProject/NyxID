@@ -4,8 +4,10 @@ import { useOverlayLayer } from "@/lib/overlay-layer";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
 import {
   useMemo,
+  useContext,
   useRef,
   useState,
+  useSyncExternalStore,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -13,6 +15,11 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { ChannelBotSetup } from "@/components/channels/channel-bot-setup";
 import { ConnectLinkContent } from "@/components/connect-link/connect-link-content";
+import { ChannelConnectLinkContent } from "@/components/channels/channel-connect-link-content";
+import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
+import { NyxBotHandoffContext } from "@/lib/assistant/nyxbot-handoff-context";
+import type { PlatformSetupCompletion } from "@/lib/assistant/platform-setup";
+import { getAssistantIdentityRevision, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import {
   Dialog,
   DialogBody,
@@ -28,12 +35,14 @@ import type { ChannelPlatform } from "@/types/channels";
 function ChannelBotSetupModal({
   target,
   onClose,
+  onComplete,
 }: {
   readonly target: Extract<
     ReturnType<typeof assistantModalLinkTarget>,
     { kind: "channel-bot" }
   >;
   readonly onClose: () => void;
+  readonly onComplete?: (result: PlatformSetupCompletion) => Promise<void>;
 }) {
   const values = useMemo(
     () => channelBotSetupUrlValues(target.search),
@@ -54,6 +63,8 @@ function ChannelBotSetupModal({
       defaultLabel={defaultLabel}
       defaultOrgId={values.target_org_id ?? null}
       stayInPlace
+      initialTelegramRequestId={target.requestId}
+      onFinish={onComplete && !target.requestId ? (id) => onComplete({ kind: "channel_bot", id }) : undefined}
     />
   );
 }
@@ -64,7 +75,7 @@ function ConnectLinkModal({
 }: {
   readonly target: Extract<
     ReturnType<typeof assistantModalLinkTarget>,
-    { kind: "connect" }
+    { kind: "connect" | "channel-connect" }
   >;
   readonly onClose: () => void;
 }) {
@@ -76,17 +87,19 @@ function ConnectLinkModal({
         <DialogOverlay style={{ zIndex: layer - 1 }} />
         <OverlayLayer layer={layer}>
         <DialogPrimitive.Content
+          onInteractOutside={(event) => { if (target.kind === "channel-connect") event.preventDefault(); }}
+          onEscapeKeyDown={(event) => { if (target.kind === "channel-connect") event.preventDefault(); }}
           aria-describedby={undefined}
           style={{ zIndex: layer }}
           className="fixed top-1/2 left-1/2 w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 outline-none"
         >
-          <DialogTitle className="sr-only">{t("Connect a service")}</DialogTitle>
+          <DialogTitle className="sr-only">{target.kind === "channel-connect" ? t("Set up your channel bot") : t("Connect a service")}</DialogTitle>
           <DialogBody className="max-h-[calc(100dvh-2rem)] rounded-xl bg-card shadow-xl shadow-primary/5">
-            <ConnectLinkContent
+            {target.kind === "channel-connect" ? <ChannelConnectLinkContent token={target.token} embedded onClose={onClose} /> : <ConnectLinkContent
               token={target.token}
               embedded
               redirectOnTerminal={false}
-            />
+            />}
           </DialogBody>
           <DialogClose className="absolute top-3 right-3 flex size-8 items-center justify-center rounded-full bg-card/80 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
             <X className="size-4" aria-hidden="true" />
@@ -102,9 +115,11 @@ function ConnectLinkModal({
 export function AssistantLinkModal({
   href,
   onClose,
+  onComplete,
 }: {
   readonly href: string | null;
   readonly onClose: () => void;
+  readonly onComplete?: (result: PlatformSetupCompletion) => Promise<void>;
 }) {
   const target = useMemo(
     () =>
@@ -114,11 +129,14 @@ export function AssistantLinkModal({
     [href],
   );
   if (!target) return null;
-  if (target.kind === "connect") {
+  if (target.kind === "connect" || target.kind === "channel-connect") {
     return <ConnectLinkModal target={target} onClose={onClose} />;
   }
-  if (target.kind === "account-panel") return null;
-  return <ChannelBotSetupModal target={target} onClose={onClose} />;
+  if (target.kind === "agent-key") {
+    return <ApiKeyCreateDialog externalOpen onExternalOpenChange={(open) => !open && onClose()} hideTrigger onComplete={onComplete ? (id) => onComplete({ kind: "agent_key", id }) : undefined} />;
+  }
+  if (target.kind === "account-panel" || target.kind === "conversation" || target.kind === "workspace") return null;
+  return <ChannelBotSetupModal target={target} onClose={onClose} onComplete={onComplete} />;
 }
 
 /**
@@ -131,11 +149,14 @@ export function AssistantLinkModalHost({
   readonly children: ReactNode;
 }) {
   const account = useAccountPanel();
-  const [href, setHref] = useState<string | null>(null);
+  const handoff = useContext(NyxBotHandoffContext);
+  const identity = useSyncExternalStore(subscribeAssistantIdentity, getAssistantIdentityRevision, getAssistantIdentityRevision);
+  const [selection, setSelection] = useState<{ href: string; identity: number; complete?: (result: PlatformSetupCompletion) => Promise<void> } | null>(null);
+  const href = selection?.identity === identity ? selection.href : null;
   const triggerRef = useRef<HTMLAnchorElement | null>(null);
 
   function closeModal() {
-    setHref(null);
+    setSelection(null);
     const trigger = triggerRef.current;
     requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus();
@@ -161,19 +182,30 @@ export function AssistantLinkModalHost({
       window.location.origin,
     );
     if (!targetLink) return;
+    if (targetLink.kind === "workspace") {
+      if (handoff?.navigate) { event.preventDefault(); handoff.navigate(targetLink.href); }
+      return;
+    }
+    if (targetLink.kind === "conversation") {
+      if (handoff) {
+        event.preventDefault();
+        handoff.open(targetLink.conversationId);
+      }
+      return;
+    }
     event.preventDefault();
     if (targetLink.kind === "account-panel") {
       void account.open(targetLink.panel, targetLink.params, link);
       return;
     }
     triggerRef.current = link;
-    setHref(targetLink.href);
+    setSelection({ href: targetLink.href, identity, complete: handoff?.complete });
   }
 
   return (
     <div className="contents" onClickCapture={handleClickCapture}>
       {children}
-      <AssistantLinkModal href={href} onClose={closeModal} />
+      <AssistantLinkModal key={identity} href={href} onClose={closeModal} onComplete={selection?.identity === identity ? selection.complete : undefined} />
     </div>
   );
 }

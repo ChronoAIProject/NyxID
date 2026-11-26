@@ -37,7 +37,9 @@ computer, CLI, agent, or device. After identity verification it offers full
 account access, an existing eligible Agent Key, or a new Agent Key with an
 explicit scope. The selected result is bound to the one pending request and
 is the only result the requester can poll. QR and deep links identify that
-request and never carry credentials or scope decisions.
+request and never carry credentials or scope decisions. Trusted frontend/API
+app links and custom-scheme links may load the non-mutating public mobile preview
+automatically; approval remains a separate explicit authenticated human decision.
 
 `/login` remains the ordinary full-account browser login. Its NyxID-app
 shortcut intentionally uses the legacy request and browser-poll routes so

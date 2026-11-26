@@ -6058,7 +6058,7 @@ pub(crate) fn validate_seeded_header_capacity<'a>(
 }
 
 async fn reconcile_firecrawl_seed_metadata(
-    service_col: &mongodb::Collection<DownstreamService>,
+    db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<()> {
     let Some(seed) = DEFAULT_SERVICE_SEEDS
@@ -6105,17 +6105,22 @@ async fn reconcile_firecrawl_seed_metadata(
         set_doc.insert("known_limitations", limitations);
     }
 
-    let result = service_col
+    let moved = super::caller_token_approval::move_seed_destinations(
+        db,
+        doc! {"slug": "api-firecrawl", "created_by": "system", "base_url": {"$ne": seed.base_url}},
+        set_doc.clone(),
+    )
+    .await?;
+    let result = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .update_many(
-            doc! { "slug": "api-firecrawl", "created_by": "system" },
+            doc! { "slug": "api-firecrawl", "created_by": "system", "base_url": seed.base_url },
             doc! { "$set": set_doc },
         )
         .await?;
-    if result.modified_count > 0 {
-        tracing::info!(
-            modified = result.modified_count,
-            "Reconciled Firecrawl catalog seed metadata"
-        );
+    let modified = moved + result.modified_count;
+    if modified > 0 {
+        tracing::info!(modified, "Reconciled Firecrawl catalog seed metadata");
     }
 
     Ok(())
@@ -6485,22 +6490,14 @@ pub async fn seed_default_services(
     // (was api.openai.com/v1, now chatgpt.com/backend-api/codex)
     let old_codex_url = "https://api.openai.com/v1";
     let new_codex_url = "https://chatgpt.com/backend-api/codex";
-    if let Ok(Some(_)) = service_col
-        .find_one(doc! {
-            "slug": "llm-openai-codex",
-            "base_url": old_codex_url,
-        })
-        .await
+    if super::caller_token_approval::move_seed_destinations(
+        db,
+        doc! {"slug": "llm-openai-codex", "base_url": old_codex_url},
+        doc! {"base_url": new_codex_url, "updated_at": bson::DateTime::from_chrono(now)},
+    )
+    .await?
+        > 0
     {
-        service_col
-            .update_one(
-                doc! { "slug": "llm-openai-codex", "base_url": old_codex_url },
-                doc! { "$set": {
-                    "base_url": new_codex_url,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
         tracing::info!(
             slug = "llm-openai-codex",
             "Updated existing downstream service base_url to chatgpt.com"
@@ -6637,10 +6634,13 @@ pub async fn seed_default_services(
         #[cfg(test)]
         super::startup_seed_tests::missing(db, "service", seed.service_slug).await;
 
-        // Create an empty encrypted credential (field is required)
-        let empty_credential = encryption_keys.encrypt(b"").await?;
-
         let service_id = Uuid::new_v4().to_string();
+        let empty_credential = super::catalog_credential_record_service::empty_credential(
+            encryption_keys,
+            &service_id,
+            "system",
+        )
+        .await?;
         let is_llm_service = seed.service_slug.starts_with("llm-");
         let description = seed.description.map(String::from).unwrap_or_else(|| {
             if is_llm_service {
@@ -6730,6 +6730,8 @@ pub async fn seed_default_services(
             requires_user_credential: seed.requires_user_credential,
             is_active: true,
             created_by: "system".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -6835,7 +6837,7 @@ pub async fn seed_default_services(
         );
     }
 
-    reconcile_firecrawl_seed_metadata(&service_col, now).await?;
+    reconcile_firecrawl_seed_metadata(db, now).await?;
     reconcile_google_workspace_seed(db, now).await?;
     reconcile_google_mail_send_seed(db, now).await?;
     reconcile_google_optional_mail_scopes_seed(db, now).await?;
@@ -8209,8 +8211,6 @@ pub async fn update_provider_if_unchanged(
         }
     }
 
-    use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
-
     if clearing_credentials {
         unset_doc.insert("client_id_encrypted", "");
         unset_doc.insert("client_secret_encrypted", "");
@@ -8232,15 +8232,11 @@ pub async fn update_provider_if_unchanged(
         filter.extend(guard);
     }
 
-    let updated = db
-        .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(filter, update_doc)
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
+    let updated = super::channel_signing_migration::update_provider(db, filter, update_doc)
+        .await?
+        .map(bson::from_document::<ProviderConfig>)
+        .transpose()
+        .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?;
     let Some(updated) = updated else {
         return Err(provider_update_miss_error(
             db,

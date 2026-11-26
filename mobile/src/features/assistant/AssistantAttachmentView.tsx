@@ -1,4 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import {
   saveAttachmentImage,
   IMAGE_SAVE_FAILED,
@@ -14,6 +17,7 @@ import {
   Platform,
   StyleSheet,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { Directory, File, Paths } from "expo-file-system";
@@ -79,6 +83,8 @@ export function AssistantAttachmentView({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const compact = width / Math.max(1, fontScale) < 340;
   const { isAuthenticated } = useAuthSession();
   const focused = useIsFocused();
   const epoch = getAuthEpoch();
@@ -110,17 +116,17 @@ export function AssistantAttachmentView({
   const savingRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<string>();
+  const [saveStatus, setSaveStatus] = useLocalizedState<string>();
   const [enlarged, setEnlarged] = useState(false);
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
   );
   const [preview, setPreview] = useState<string>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [expired, setExpired] = useState(false);
   const image = isPreviewableAttachment(attachment);
   const unavailable = attachment.expired || expired;
-  const label = attachment.label || "Attachment";
+  const label = attachment.label || translateApp("Attachment");
 
   const removeCache = useCallback(() => {
     const cache = cached.current;
@@ -180,7 +186,7 @@ export function AssistantAttachmentView({
       setEnlarged(false);
       setBusy(false);
       setSaving(false);
-      if (wasSaving) setSaveStatus(t(IMAGE_NOT_SAVED));
+      if (wasSaving) setSaveStatus(() => (translateApp(IMAGE_NOT_SAVED)));
     });
     return () => subscription.remove();
   }, [cancel, t]);
@@ -215,7 +221,7 @@ export function AssistantAttachmentView({
     setBusy(true);
     savingRef.current = save;
     setSaving(save);
-    if (save) setSaveStatus(t("Saving image…"));
+    if (save) setSaveStatus(() => (translateApp("Saving image…")));
     setError(undefined);
     let openedCache: CachedAttachment | undefined;
     const removeOpenedCache = () => {
@@ -244,7 +250,7 @@ export function AssistantAttachmentView({
             anchor: null,
             alive: sameOperation,
           });
-          if (sameOperation()) setSaveStatus(t(result.phrase, result.values));
+          if (sameOperation()) setSaveStatus(() => (translateApp(result.phrase, result.values)));
         } finally {
           if (sharingFile.current === nativeSave)
             sharingFile.current = undefined;
@@ -285,7 +291,7 @@ export function AssistantAttachmentView({
             anchor: findNodeHandle(saveButton.current),
             alive: sameOperation,
           });
-          if (sameOperation()) setSaveStatus(t(result.phrase, result.values));
+          if (sameOperation()) setSaveStatus(() => (translateApp(result.phrase, result.values)));
         } finally {
           removeOpenedCache();
         }
@@ -296,13 +302,13 @@ export function AssistantAttachmentView({
           removeOpenedCache();
           return;
         }
-        if (!available) throw new Error(ATTACHMENT_UNAVAILABLE_MESSAGE);
+        if (!available) throw localizedError(ATTACHMENT_UNAVAILABLE_MESSAGE);
         sharingFile.current = { file, scope, epoch };
         try {
           // Native cancellation resolves normally and is not shown as an error.
           await Sharing.shareAsync(file.uri, {
             mimeType: attachment.content_type,
-            dialogTitle: "Open attachment",
+            dialogTitle: translateApp("Open attachment"),
           });
         } finally {
           // An older sharing operation cannot clear a newer operation's file.
@@ -313,9 +319,9 @@ export function AssistantAttachmentView({
       removeOpenedCache();
       if (save ? sameOperation() : alive()) {
         const message = attachmentAccessError(cause);
-        if (save) setSaveStatus(t(IMAGE_SAVE_FAILED));
-        else setError(message);
-        setExpired(message === ATTACHMENT_EXPIRED_MESSAGE);
+        if (save) setSaveStatus(() => (translateApp(IMAGE_SAVE_FAILED)));
+        else setError(() => (message));
+        setExpired(message === translateApp(ATTACHMENT_EXPIRED_MESSAGE));
       }
     } finally {
       if (operation.current === request) {
@@ -351,26 +357,30 @@ export function AssistantAttachmentView({
       {image && preview && !unavailable ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Image from ${label}`}
+          accessibilityLabel={translateApp("Image from {{label}}", {
+            label: label,
+          })}
           onPress={() => setEnlarged(true)}
           style={{ minHeight: 44 }}
         >
           <Image
-            accessibilityLabel={`Image from ${label}`}
+            accessibilityLabel={translateApp("Image from {{label}}", {
+              label: label,
+            })}
             source={{ uri: preview }}
             resizeMode="contain"
             style={{ width: "100%", height: 220, borderRadius: radius.md }}
             onError={() => {
               cancel();
               setPreview(undefined);
-              setError(ATTACHMENT_UNAVAILABLE_MESSAGE);
+              setError(() => (translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE)));
             }}
           />
         </Pressable>
       ) : null}
       {image && busy && !saving ? (
         <Label muted accessibilityLiveRegion="polite">
-          Loading image from {label}
+          {translateApp("Loading image from {{label}}", { label })}
         </Label>
       ) : null}
       <FileRow
@@ -387,6 +397,7 @@ export function AssistantAttachmentView({
           image
             ? [
                 styles.file,
+                compact && styles.compactFile,
                 {
                   backgroundColor: colors.card,
                   borderColor: colors.border,
@@ -395,6 +406,7 @@ export function AssistantAttachmentView({
               ]
             : ({ pressed }) => [
                 styles.file,
+                compact && styles.compactFile,
                 {
                   backgroundColor: colors.card,
                   borderColor: colors.border,
@@ -412,18 +424,13 @@ export function AssistantAttachmentView({
         ) : (
           <FileText size={18} color={colors.textSecondary} accessible={false} />
         )}
-        <View style={styles.metadata}>
-          <Label numberOfLines={1}>{label}</Label>
+        <View style={[styles.metadata, compact && styles.compactMetadata]}>
+          <Label numberOfLines={compact ? undefined : 1}>{label}</Label>
           {!unavailable && (
             <Label muted numberOfLines={1} style={styles.detail}>
-              {attachment.size < 1024
-                ? `${attachment.size} B`
-                : attachment.size < 1024 * 1024
-                  ? `${Math.ceil(attachment.size / 1024)} KB`
-                  : `${(attachment.size / (1024 * 1024)).toFixed(1)} MB`}
-              {!image && attachment.pages != null && attachment.pages > 0
-                ? ` · ${attachment.pages} ${attachment.content_type === "application/pdf" ? (attachment.pages === 1 ? "page" : "pages") : attachment.pages === 1 ? "section" : "sections"}`
-                : ""}
+              {(attachment.size < 1024
+                ? (!image && attachment.pages != null && attachment.pages > 0 ? (attachment.content_type === "application/pdf" ? (attachment.pages === 1 ? translateApp("{{size}} B · {{pages}} page", { size: attachment.size, pages: attachment.pages }) : translateApp("{{size}} B · {{pages}} pages", { size: attachment.size, pages: attachment.pages })) : (attachment.pages === 1 ? translateApp("{{size}} B · {{pages}} section", { size: attachment.size, pages: attachment.pages }) : translateApp("{{size}} B · {{pages}} sections", { size: attachment.size, pages: attachment.pages }))) : translateApp("{{size}} B", { size: attachment.size })) : (attachment.size < 1024 * 1024
+                  ? (!image && attachment.pages != null && attachment.pages > 0 ? (attachment.content_type === "application/pdf" ? (attachment.pages === 1 ? translateApp("{{kilobytes}} KB · {{pages}} page", { kilobytes: Math.ceil(attachment.size / 1024), pages: attachment.pages }) : translateApp("{{kilobytes}} KB · {{pages}} pages", { kilobytes: Math.ceil(attachment.size / 1024), pages: attachment.pages })) : (attachment.pages === 1 ? translateApp("{{kilobytes}} KB · {{pages}} section", { kilobytes: Math.ceil(attachment.size / 1024), pages: attachment.pages }) : translateApp("{{kilobytes}} KB · {{pages}} sections", { kilobytes: Math.ceil(attachment.size / 1024), pages: attachment.pages }))) : translateApp("{{kilobytes}} KB", { kilobytes: Math.ceil(attachment.size / 1024) })) : (!image && attachment.pages != null && attachment.pages > 0 ? (attachment.content_type === "application/pdf" ? (attachment.pages === 1 ? translateApp("{{megabytes}} MB · {{pages}} page", { megabytes: (attachment.size / (1024 * 1024)).toFixed(1), pages: attachment.pages }) : translateApp("{{megabytes}} MB · {{pages}} pages", { megabytes: (attachment.size / (1024 * 1024)).toFixed(1), pages: attachment.pages })) : (attachment.pages === 1 ? translateApp("{{megabytes}} MB · {{pages}} section", { megabytes: (attachment.size / (1024 * 1024)).toFixed(1), pages: attachment.pages }) : translateApp("{{megabytes}} MB · {{pages}} sections", { megabytes: (attachment.size / (1024 * 1024)).toFixed(1), pages: attachment.pages }))) : translateApp("{{megabytes}} MB", { megabytes: (attachment.size / (1024 * 1024)).toFixed(1) }))))}
             </Label>
           )}
         </View>
@@ -443,11 +450,12 @@ export function AssistantAttachmentView({
               image
                 ? ({ pressed }) => [
                     styles.action,
+                    compact && styles.compactAction,
                     {
                       opacity: unavailable ? 0.5 : pressed ? 0.8 : 1,
                     },
                   ]
-                : styles.action
+                : [styles.action, compact && styles.compactAction]
             }
           >
             <Label>
@@ -493,7 +501,7 @@ export function AssistantAttachmentView({
             captionColor ? { color: captionColor } : undefined,
           ]}
         >
-          {unavailable ? ATTACHMENT_EXPIRED_MESSAGE : error}
+          {unavailable ? translateApp(ATTACHMENT_EXPIRED_MESSAGE) : error}
         </Label>
       )}
       {!unavailable && attachment.image_input === "unavailable" && (
@@ -506,25 +514,29 @@ export function AssistantAttachmentView({
         >
           {attachment.image_input_reason === "model_text_only" ||
           attachment.image_input_reason === "image_input_unsupported"
-            ? "This model can’t view images. Choose an image-capable model or describe the image in text."
+            ? translateApp(
+                "This model can’t view images. Choose an image-capable model or describe the image in text.",
+              )
             : attachment.image_input_reason === "guest_media_unavailable"
-              ? "This guest image was saved in this chat but was unavailable to the model in that turn."
+              ? translateApp(
+                  "This guest image was saved in this chat but was unavailable to the model in that turn.",
+                )
               : attachment.origin === "user_upload"
-                ? IMAGE_INPUT_UNAVAILABLE_MESSAGE
-                : "The agent couldn't view this image."}
+                ? translateApp(IMAGE_INPUT_UNAVAILABLE_MESSAGE)
+                : translateApp("The agent couldn't view this image.")}
         </Label>
       )}
       <AssistantImagePreview
         uri={enlarged ? preview : undefined}
         label={label}
-        closeLabel="Close attachment preview"
+        closeLabel={translateApp("Close attachment preview")}
         onClose={closePreview}
         onError={() => {
           if (cached.current?.file?.uri !== preview) return;
           cancel();
           setPreview(undefined);
           closePreview();
-          setError(ATTACHMENT_UNAVAILABLE_MESSAGE);
+          setError(() => (translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE)));
         }}
       />
     </View>
@@ -532,7 +544,7 @@ export function AssistantAttachmentView({
 }
 
 const styles = StyleSheet.create({
-  container: { gap: 4, width: "100%" },
+  container: { gap: 4, width: "100%", maxWidth: "100%", minWidth: 0 },
   file: {
     minWidth: TOUCH_TARGET,
     flexDirection: "row",
@@ -544,6 +556,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     minHeight: TOUCH_TARGET,
   },
+  compactFile: { flexDirection: "column", alignItems: "stretch" },
+  compactMetadata: { flexGrow: 0 },
+  compactAction: { alignSelf: "flex-end", flexShrink: 0, maxWidth: "100%" },
   metadata: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   action: {
     minHeight: 44,

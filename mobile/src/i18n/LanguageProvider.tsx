@@ -17,6 +17,8 @@ import {
 } from "./language";
 import { translate, type TranslationValues } from "./translate";
 
+import { setAppTranslationLanguage } from "./appTranslation";
+
 type AppLanguage = {
   language: Language;
   choose: (language: Language) => void;
@@ -46,12 +48,12 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       .catch(() => null)
       .then((saved) => {
         if (!active) return;
-        setLanguage(
-          initialLanguage(
-            saved,
-            deviceLanguages({ includeLocaleFallback: true }),
-          ),
+        const initial = initialLanguage(
+          saved,
+          deviceLanguages({ includeLocaleFallback: true }),
         );
+        setAppTranslationLanguage(initial);
+        setLanguage(initial);
         setLoaded(true);
       });
     return () => {
@@ -60,6 +62,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     };
   }, []);
   const choose = useCallback((next: Language) => {
+    setAppTranslationLanguage(next);
     setLanguage(next);
     const write = ++revision.current;
     setPersistenceError(false);

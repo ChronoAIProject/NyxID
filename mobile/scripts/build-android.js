@@ -33,13 +33,16 @@ const {
   runFile,
 } = require("./android-build-command");
 
-const { loadEnv, resolveProfile, MOBILE_ROOT } = require("./lib/load-env");
+const { loadEnv, resolveProfile, appIdentity, MOBILE_ROOT } = require("./lib/load-env");
 
 const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
 const env = loadEnv();
 const r = resolveProfile(APP_ENV, env, {
   validateAndroidGoogleServices: true,
 });
+
+const crashArtifacts = require('./crash-artifacts');
+const crash = crashArtifacts.prepare(MOBILE_ROOT, 'android', appIdentity(env).version, r.androidVersionCode);
 
 const KEYSTORE_PATH =
   env.ANDROID_KEYSTORE_PATH || "./credentials/release.keystore";
@@ -129,6 +132,9 @@ if (!fs.existsSync(aabPath)) {
   console.error("[build-android] No .aab produced at", aabPath);
   process.exit(1);
 }
+crashArtifacts.collect(crash,
+  path.join(MOBILE_ROOT,'android/app/build/generated/assets/createBundleReleaseJsAndAssets/index.android.bundle'),
+  path.join(MOBILE_ROOT,'android/app/build/generated/sourcemaps/react/release/index.android.bundle.map'));
 console.log(`\n[build-android] ✓ produced: ${aabPath}`);
 console.log(
   `\nNext: pnpm submit:android   (uploads this .aab to Play Internal testing)`,

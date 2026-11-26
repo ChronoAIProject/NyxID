@@ -33,3 +33,13 @@ for (const [label, row, expected] of [
   test(`upload status maps ${label}`, () =>
     assert.deepEqual(assistantUploadStatus(row as any), expected));
 }
+
+test("an invalid receipt is never complete and explicit removal exposes busy feedback", () => {
+  const item = { id: "old", label: "old", content_type: "text/plain", size: 1 };
+  assert.deepEqual(assistantUploadStatus({ item, needsReupload: true, progress: 0 }), {
+    text: "Waiting to upload…", loader: "indeterminate", progress: 0,
+  });
+  assert.deepEqual(assistantUploadStatus({ item, removing: true, progress: 100 }), {
+    text: "Removing attachment…", loader: "indeterminate", progress: 0,
+  });
+});

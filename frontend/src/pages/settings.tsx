@@ -1,3 +1,4 @@
+import { useUpdateDisplayName } from "@/hooks/use-update-display-name";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -6,12 +7,12 @@ import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
-import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
+import { useUser, useLogout, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
 import { api, apiFetch, apiClient, ApiError } from "@/lib/api-client";
 import { validateAccountExport } from "@/lib/account-export";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
@@ -34,7 +35,7 @@ import {
   FormField,
   FormLabel,
 } from "@/components/ui/form";
-import { copyToClipboard, formatDate } from "@/lib/utils";
+import { cn, copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
 import { SETTINGS_TABS, SETTINGS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
@@ -103,6 +104,10 @@ import {
   buildCodexCommand,
   buildCodexConfig,
 } from "./settings.helpers";
+
+const NotificationSettings = lazy(() =>
+  import("./notification-settings").then((module) => ({ default: module.NotificationSettings })),
+);
 
 interface DeleteAccountResponse {
   readonly status: string;
@@ -178,7 +183,9 @@ function SettingsContent({
           onValueChange={handleTabChange}
           className="flex min-h-0 flex-1 flex-col gap-6"
         >
-          <CompactChrome>
+          <CompactChrome
+            className={cn(presentation === "panel" && "assistant-scrollbar overflow-hidden [scrollbar-gutter:stable]")}
+          >
             <SegmentedControlList aria-label={translateUi("Account settings")}>
               {SETTINGS_TABS.map((tab) => (
                 <SegmentedControlTrigger key={tab} value={tab}>
@@ -214,7 +221,7 @@ function SettingsContent({
                 <FormViewport className="flex min-h-0 flex-1 flex-col">
                   <CompactScroll
                     active={currentTab === tab}
-                    className="assistant-scrollbar flex-1 space-y-6 pb-6"
+                    className={cn("assistant-scrollbar flex-1 space-y-6 pb-6", presentation === "panel" && "[scrollbar-gutter:stable]")}
                   >
                     {tab === "profile" ? (
                       <>
@@ -228,6 +235,10 @@ function SettingsContent({
                       </>
                     ) : tab === "sessions" ? (
                       <SessionsTab />
+                    ) : tab === "notifications" ? (
+                      <Suspense fallback={<Skeleton className="h-48 w-full" />}>
+                        <NotificationSettings />
+                      </Suspense>
                     ) : tab === "mcp" ? (
                       <McpTab />
                     ) : tab === "display" ? (
@@ -259,14 +270,19 @@ function ProfileForm({ user }: { readonly user: User }) {
   const form = useAppForm({
     defaultValues: { display_name: user.display_name ?? "" },
   });
-  const setUser = useAuthStore((s) => s.setUser);
-  const queryClient = useQueryClient();
+  const updateName = useUpdateDisplayName(user.id);
+  const logout = useLogout();
+  const navigate = useNavigate();
+
+  async function handleLogout() {
+    await logout.mutateAsync();
+    void navigate({ to: "/login" });
+  }
+
   async function save(values: { display_name: string }) {
     form.clearErrors("root");
     try {
-      const updated = await api.put<User>("/users/me", values);
-      setUser(updated);
-      queryClient.setQueryData(["user", "me"], updated);
+      const updated = await updateName.mutateAsync(values);
       const draft = form.getValues("display_name");
       form.reset({ display_name: updated.display_name ?? "" });
       if (draft !== values.display_name) form.setValue("display_name", draft);
@@ -352,6 +368,15 @@ function ProfileForm({ user }: { readonly user: User }) {
               >{translateUi("Resend verification email")}</button>
             </GroupedRow>
           )}
+          <GroupedRow asChild interactive>
+            <button
+              type="button"
+              disabled={logout.isPending}
+              onClick={() => void handleLogout()}
+            >
+              {translateUi("Log out")}
+            </button>
+          </GroupedRow>
         </GroupedList>
         <GroupedFormActions
           label={translateUi("Profile")}
@@ -362,7 +387,7 @@ function ProfileForm({ user }: { readonly user: User }) {
           discard={() => form.reset()}
           changes={() =>
             describeChanges(form.formState.defaultValues, form.getValues(), [
-              { key: "display_name", label: "Name" },
+              { key: "display_name", get label() { return translateUi("Name"); } },
             ])
           }
         />
@@ -712,9 +737,9 @@ function SecurityTab() {
                 passwordForm.formState.isDirty
                   ? [
                       {
-                        label: "Password",
-                        before: "Current password",
-                        after: "Changed",
+                        get label() { return translateUi("Password"); },
+                        get before() { return translateUi("Current password"); },
+                        get after() { return translateUi("Changed"); },
                       },
                     ]
                   : []
@@ -1071,6 +1096,8 @@ function SessionsTab() {
 
 function PrivacyTab() {
   useUiTranslation();
+  const [reviewDiagnostics, setReviewDiagnostics] = useState(false);
+  const devicePolicy = useConsentStore((s) => s.policy);
   const consentEnabled = useConsentStore((s) => s.enabled);
   const persistenceError = useConsentStore((s) => s.persistenceError);
   const setConsent = useConsentStore((s) => s.setConsent);
@@ -1083,15 +1110,19 @@ function PrivacyTab() {
     enabled: Boolean(accountId),
     staleTime: 0,
   });
-  async function handleToggle(next: boolean) {
+  const diagnosticsEnabled =
+    permission.data?.diagnostics_available &&
+    consentEnabled &&
+    devicePolicy === 2;
+  async function handleToggle(next: boolean, policy: 1|2 = 1) {
     if (!accountId) return;
     setSaving(true);
     try {
-      await saveAnalyticsConsent(accountId, next);
+      await saveAnalyticsConsent(accountId, next, policy);
       await permission.refetch();
     } catch {
       toast.error(
-        translateErrorMessage("Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
+        translateErrorMessage(next && policy === 2 && consentEnabled ? "Could not save updated analytics permission." : "Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
       );
     } finally {
       setSaving(false);
@@ -1186,7 +1217,7 @@ function PrivacyTab() {
       title={translateUi("Usage analytics")}
       footer={
         <>
-          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.")}</p>
+          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")}</p>
           {persistenceError && (
             <div role="alert" className="space-y-2">
               <p>{translateUi("This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.")}</p>
@@ -1239,7 +1270,7 @@ function PrivacyTab() {
                 permission.isError ||
                 permission.isFetching
               }
-              onCheckedChange={(next) => void handleToggle(next)}
+              onCheckedChange={(next) => void handleToggle(next, permission.data?.diagnostics_offered && (permission.data?.policy_version === "2" || devicePolicy === 2) ? 2 : 1)}
               aria-label={translateUi("Allow account usage analytics")}
             />
           </>
@@ -1257,14 +1288,71 @@ function PrivacyTab() {
                 permission.isFetching)
             }
             onCheckedChange={(next) => {
-              setConsent(next);
+              setConsent(next, useConsentStore.getState().policy ?? 1);
               if (!next) disableTelemetry();
             }}
             aria-label={translateUi("Allow usage analytics on this browser")}
           />
         }
       />
+        {permission.data?.diagnostics_offered === true && (
+          <GroupedRow
+            title={translateUi("Crash diagnostics")}
+            description={translateUi(
+              diagnosticsEnabled
+                ? "Crash diagnostics enabled"
+                : "Crash diagnostics need updated permission",
+            )}
+            accessory={
+              diagnosticsEnabled ? undefined : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    saving || permission.data?.current_policy_version !== "2"
+                  }
+                  onClick={() => setReviewDiagnostics(true)}
+                >
+                  {translateUi("Review updated analytics")}
+                </Button>
+              )
+            }
+          />
+        )}
       </GroupedList>
+      {permission.data?.diagnostics_offered === true && (
+        <Dialog open={reviewDiagnostics} onOpenChange={setReviewDiagnostics}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {translateUi("Review updated analytics")}
+              </DialogTitle>
+              <DialogDescription>
+                {translateUi(
+                  "Analytics updated: optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Allow updated analytics for this account and browser, or keep your current choice.",
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setReviewDiagnostics(false)}
+              >
+                {translateUi("Not now")}
+              </Button>
+              <Button
+                disabled={saving}
+                onClick={() => {
+                  void handleToggle(true, 2);
+                  setReviewDiagnostics(false);
+                }}
+              >
+                {translateUi("Allow updated analytics")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

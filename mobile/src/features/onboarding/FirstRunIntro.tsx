@@ -1,3 +1,7 @@
+import { onboardingText } from "../../../../shared/onboardingCopy";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { OnboardingReplay } from "./OnboardingReplay";
 import { useEffect, useRef, useState } from "react";
 import { Feather } from "@expo/vector-icons";
@@ -79,6 +83,7 @@ export function FirstRunIntro({
   onClose: () => void;
   onStart: (step: NextStep) => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
   const queryClient = useQueryClient();
@@ -87,7 +92,7 @@ export function FirstRunIntro({
   const mounted = useRef(true);
   const saving = useRef(false);
   const presentation = useRef(0);
-  const [saveError, setSaveError] = useState<string>();
+  const [saveError, setSaveError] = useLocalizedState<string>();
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -158,7 +163,9 @@ export function FirstRunIntro({
         opened === presentation.current
       )
         setSaveError(
-          "Your intro could not be saved. Check your connection and try again.",
+          () => (translateApp(
+            "Your intro could not be saved. Check your connection and try again.",
+          )),
         );
       return false;
     } finally {
@@ -243,7 +250,7 @@ export function FirstRunIntro({
       >
         <View style={styles.dismissRow}>
           <ActionButton
-            label="Not now"
+            label={translateApp("Not now")}
             variant="secondary"
             compact
             onPress={dismissLocally}
@@ -255,7 +262,10 @@ export function FirstRunIntro({
               <Pressable
                 key={item}
                 accessibilityRole="tab"
-                accessibilityLabel={`Step ${position + 1} of ${STEPS.length}`}
+                accessibilityLabel={translateApp(
+                  "Step {{step}} of {{total}}",
+                  { step: position + 1, total: STEPS.length},
+                )}
                 accessibilityState={{
                   selected: position === progress,
                   disabled: save.isPending,
@@ -297,11 +307,13 @@ export function FirstRunIntro({
           ) : step === "interests" ? (
             <>
               <Heading
-                title="Let's set NyxBot up for you"
-                body="Tell us who it's for and what it should help with. We'll tailor your first suggestions and NyxBot will remember. You can skip this."
+                title={translateApp("Let's set NyxBot up for you")}
+                body={translateApp(
+                  "Tell us who it's for and what it should help with. We'll tailor your first suggestions and NyxBot will remember. You can skip this.",
+                )}
               />
               <Label muted style={styles.overline}>
-                WHO IS IT FOR?
+                {translateApp("WHO IS IT FOR?")}
               </Label>
               <Chips
                 choices={state.work_styles}
@@ -310,7 +322,7 @@ export function FirstRunIntro({
                 disabled={save.isPending}
               />
               <Label muted style={styles.overline}>
-                WHAT SHOULD IT HELP WITH?
+                {translateApp("WHAT SHOULD IT HELP WITH?")}
               </Label>
               <Chips
                 choices={topicsFor(state.topics, workStyle ?? "solo")}
@@ -323,50 +335,79 @@ export function FirstRunIntro({
           ) : step === "chief" ? (
             <>
               <Heading
-                title="Meet NyxBot, your chief of staff"
-                body="Ask in plain words. NyxBot works across the apps you connect, keeps track of what matters and remembers how you like things done."
+                title={translateApp("Meet NyxBot, your chief of staff")}
+                body={translateApp(
+                  "Ask in plain words. NyxBot works across the apps you connect, keeps track of what matters and remembers how you like things done.",
+                )}
               />
               <OnboardingReplay
                 kind="chief-of-staff"
                 topics={topics}
-                label="Replay: the owner asks NyxBot for a daily summary, and NyxBot replies with the next steps."
+                label={translateApp(
+                  "Replay: the owner asks NyxBot for a daily summary, and NyxBot replies with the next steps.",
+                )}
               />
-              <Point text="Chat here, on the web, or in Telegram, Slack and other chat apps." />
-              <Point text="It uses only the services you connect, through NyxID." />
+              <Point text={translateApp(
+                  "Chat here, on the web, or in Telegram, Slack and other chat apps.",
+                )}
+              />
+              <Point text={translateApp(
+                  "It uses only the services you connect, through NyxID.",
+                )}
+              />
             </>
           ) : step === "specialists" ? (
             <>
               <Heading
-                title="Specialists: experts with one job"
-                body="Think of specialists as people who are great at one thing. Give each a fixed role and scope, so it does that job better than anyone. Work with them directly, or let NyxBot hand them the work."
+                title={translateApp("Specialists: experts with one job")}
+                body={translateApp(
+                  "Think of specialists as people who are great at one thing. Give each a fixed role and scope, so it does that job better than anyone. Work with them directly, or let NyxBot hand them the work.",
+                )}
               />
               <OnboardingReplay
                 kind="specialists"
                 topics={topics}
-                label="Replay: the owner asks NyxBot for urgent issues; NyxBot hands the job to the researcher specialist, which reports back, and NyxBot answers."
+                label={translateApp(
+                  "Replay: the owner asks NyxBot for urgent issues; NyxBot hands the job to the researcher specialist, which reports back, and NyxBot answers.",
+                )}
               />
-              <Point text="A role and scope you set: only the services and access you grant." />
-              <Point text="Chat with one directly, ask NyxBot to delegate, or put several in a crew." />
+              <Point text={translateApp(
+                  "A role and scope you set: only the services and access you grant.",
+                )}
+              />
+              <Point text={translateApp(
+                  "Chat with one directly, ask NyxBot to delegate, or put several in a crew.",
+                )}
+              />
             </>
           ) : step === "control" ? (
             <>
               <Heading
-                title="You stay in control"
-                body="NyxBot asks before it does anything sensitive. You choose how often it asks in NyxBot settings: Auto, Ask every time or Full access."
+                title={translateApp("You stay in control")}
+                body={translateApp(
+                  "NyxBot asks before it does anything sensitive. You choose how often it asks in NyxBot settings: Auto, Ask every time or Full access.",
+                )}
               />
               <OnboardingReplay
                 kind="control"
                 topics={topics}
-                label="Replay: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
+                label={translateApp(
+                  "Replay: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion.",
+                )}
               />
-              <Point text="Auto (the default) asks before sensitive or destructive actions." />
-              <Point text="Reading never asks." />
+              <Point text={translateApp(
+                  "Auto (the default) asks before sensitive or destructive actions.",
+                )}
+              />
+              <Point text={translateApp("Reading never asks.")} />
             </>
           ) : (
             <>
               <Heading
-                title="Pick your first step"
-                body="One tap and NyxBot takes it from there. These stay on your home page until you're done with them."
+                title={translateApp("Pick your first step")}
+                body={translateApp(
+                  "One tap and NyxBot takes it from there. These stay on your home page until you're done with them.",
+                )}
               />
               <NextStepList
                 steps={steps ?? state.recommendations}
@@ -377,14 +418,15 @@ export function FirstRunIntro({
           )}
           {saveError || !online ? (
             <Label accessibilityRole="alert" style={{ color: colors.danger }}>
-              {saveError ?? "You’re offline. Reconnect to save your intro."}
+              {saveError ??
+                translateApp("You’re offline. Reconnect to save your intro.")}
             </Label>
           ) : null}
           {step === "welcome" ? null : (
             <View style={[styles.footer, { borderColor: colors.borderSoft }]}>
               {index < LAST ? (
                 <ActionButton
-                  label="Skip intro"
+                  label={translateApp("Skip intro")}
                   variant="secondary"
                   compact
                   disabled={!online || save.isPending}
@@ -394,7 +436,7 @@ export function FirstRunIntro({
               <View style={styles.spacer} />
               {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
                 <ActionButton
-                  label="Back"
+                  label={translateApp("Back")}
                   variant="secondary"
                   compact
                   disabled={save.isPending}
@@ -404,12 +446,12 @@ export function FirstRunIntro({
               <ActionButton
                 label={
                   index === LAST
-                    ? "Explore on my own"
+                    ? translateApp("Explore on my own")
                     : step === "interests"
                       ? topics.length || workStyle
-                        ? "Continue"
-                        : "Continue without picking"
-                      : "Next"
+                        ? translateApp("Continue")
+                        : translateApp("Continue without picking")
+                      : translateApp("Next")
                 }
                 variant={index === LAST ? "secondary" : "primary"}
                 compact
@@ -437,6 +479,7 @@ function Welcome({
   onSkip: () => void;
   disabled: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.welcome}>
@@ -446,18 +489,26 @@ function Welcome({
       />
       <View style={styles.heading}>
         <Label accessibilityRole="header" style={[styles.title, styles.center]}>
-          {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
+          {firstName ? translateApp("Welcome, {{firstName}}", { firstName: firstName })
+            : translateApp("Welcome to NyxBot")}
         </Label>
         <Label muted style={[styles.bodyText, styles.center]}>
-          I'm NyxBot, your personal chief of staff. Give me a minute and I'll
-          show you how we'll work together.
+          {translateApp(
+            "I'm NyxBot, your personal chief of staff. Give me a minute and I'll show you how we'll work together.",
+          )}
         </Label>
       </View>
       <View style={styles.points}>
         {[
-          ["star", "A chief of staff that works across your apps"],
-          ["users", "Specialists with one job each, under your rules"],
-          ["shield", "Nothing sensitive happens without your say-so"],
+          ["star",
+            translateApp("A chief of staff that works across your apps"),
+          ],
+          ["users",
+            translateApp("Specialists with one job each, under your rules"),
+          ],
+          ["shield",
+            translateApp("Nothing sensitive happens without your say-so"),
+          ],
         ].map(([icon, text]) => (
           <View
             key={text}
@@ -476,12 +527,12 @@ function Welcome({
         ))}
       </View>
       <ActionButton
-        label="Let's get started"
+        label={translateApp("Let's get started")}
         disabled={disabled}
         onPress={onStart}
       />
       <ActionButton
-        label="Skip for now"
+        label={translateApp("Skip for now")}
         variant="secondary"
         compact
         disabled={disabled}
@@ -492,6 +543,7 @@ function Welcome({
 }
 
 function Heading({ title, body }: { title: string; body: string }) {
+  useAppLanguage();
   return (
     <View style={styles.heading}>
       <Label accessibilityRole="header" style={styles.title}>
@@ -505,6 +557,7 @@ function Heading({ title, body }: { title: string; body: string }) {
 }
 
 function Point({ text }: { text: string }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.row}>
@@ -529,6 +582,7 @@ function Chips({
   multi?: boolean;
   disabled?: boolean;
 }) {
+  const { language } = useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -569,7 +623,7 @@ function Chips({
               />
             </View>
             <Label style={[styles.small, { flexShrink: 1 }]}>
-              {choice.label}
+              {onboardingText(language, choice.label)}
               {active ? "  ✓" : ""}
             </Label>
           </Pressable>

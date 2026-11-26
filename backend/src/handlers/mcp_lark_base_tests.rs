@@ -85,6 +85,27 @@ impl Drop for PausedTokenExchange {
     }
 }
 
+use crate::test_utils::test_pdf as pdf;
+async fn named_call(
+    u: &BaseFixture,
+    auth: &McpAuthContext,
+    meta: bool,
+    operation: &str,
+    args: Value,
+) -> Value {
+    let slug = if u.catalog.slug.ends_with("-bot") {
+        format!("{}-3", u.catalog.slug)
+    } else {
+        "receipts".into()
+    };
+    let name = format!("{slug}__{operation}");
+    let params = if meta {
+        json!({"name":"nyx__call_tool","arguments":{"tool_name":name,"arguments_json":args.to_string()}})
+    } else {
+        json!({"name":name,"arguments":args})
+    };
+    rpc(&u.f, auth, "tools/call", Some(params)).await
+}
 async fn flag(f: &Fixture, key: &str, enabled: bool) {
     let now = bson::DateTime::now();
     f.state
@@ -122,6 +143,10 @@ async fn bind_named_upload(f: &Fixture, name: &str, bytes: &[u8]) -> String {
     )
     .await
     .unwrap();
+    bind_upload_id(f, &item.id).await;
+    item.id
+}
+async fn bind_upload_id(f: &Fixture, id: &str) {
     let message = f
         .state
         .db
@@ -137,13 +162,12 @@ async fn bind_named_upload(f: &Fixture, name: &str, bytes: &[u8]) -> String {
         &f.owner,
         &f.row.id,
         message.get_str("_id").unwrap(),
-        std::slice::from_ref(&item.id),
+        &[id.to_owned()],
         &mut session,
     )
     .await
     .unwrap();
     session.commit_transaction().await.unwrap();
-    item.id
 }
 
 async fn bump_credential_epoch(f: &Fixture, credential: &str, previous: i64) {
@@ -1146,6 +1170,7 @@ async fn lark_base_write_config_exact_descriptors_nonchat_and_async_exclude_atta
             &u.f.state.db,
             &u.f.state.encryption_keys,
             None,
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args(&u.attachment_id)
@@ -1160,6 +1185,7 @@ async fn lark_base_write_config_exact_descriptors_nonchat_and_async_exclude_atta
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             &asynchronous,
             &args(&u.attachment_id)
@@ -1360,6 +1386,7 @@ async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_
         "omitted_photo",
         "override",
         "wrong_table",
+        "wrong_base",
     ] {
         let mut input = args(&u.attachment_id);
         match variant {
@@ -1373,6 +1400,7 @@ async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_
                 input.as_object_mut().unwrap().remove("attachments");
             }
             "override" => input["allow_duplicate_photo"] = json!(true),
+            "wrong_base" => input["app_token"] = json!("other"),
             _ => input["table_id"] = json!("other"),
         }
         assert_error(&call(&u, &auth, false, input).await);
@@ -1401,6 +1429,16 @@ async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_
     assert_eq!(
         payload(&call(&u, &auth, true, args(&u.attachment_id)).await)["record_id"],
         "rec_receipt"
+    );
+    let sent = requests(&u).await;
+    let upload = sent
+        .iter()
+        .find(|r| r.url.path().ends_with("/upload_all"))
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&upload.body)
+            .unwrap()
+            .contains("name=\"parent_node\"\r\n\r\nbase\r\n")
     );
     cleanup(u).await;
 }
@@ -1937,3 +1975,6 @@ async fn lark_base_non_image_tool_file_remains_refused() {
     );
     u.f.state.db.drop().await.unwrap();
 }
+
+#[path = "mcp_lark_base_media_tests.rs"]
+mod media_tests;

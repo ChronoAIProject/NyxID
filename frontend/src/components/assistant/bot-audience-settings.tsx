@@ -330,9 +330,9 @@ function GuestSettings({
       <GroupedRow className="block space-y-1">
         {legacy ? (
           <p>
-            {translateUi(
-              "Existing guest limits are kept. Review them in Grants.",
-            )}
+            {settings.binding_limits_guest_services
+              ? translateUi("This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.")
+              : translateUi("Existing guest limits are kept. Review them in Grants.")}
           </p>
         ) : (
           <>

@@ -15,8 +15,8 @@ import {
   Code,
   Users,
   ShieldCheck,
+  Bug,
   Layers,
-  Bell,
   WalletCards,
   Coins,
   ReceiptText,
@@ -72,7 +72,6 @@ export const MAIN_NAV = [
 ] as const;
 
 export const APPROVALS_NAV = [
-  { to: "/approvals/settings", icon: Bell, label: "Notifications" },
   { to: "/approvals/history", icon: ClipboardList, label: "Approval History" },
   { to: "/approvals/grants", icon: Lock, label: "Active Grants" },
 ] as const;
@@ -100,6 +99,7 @@ export const ADMIN_NAV = [
   },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/usage", icon: ChartNoAxesCombined, label: "Usage" },
+  { to: "/admin/crash-reports", icon: Bug, label: "Crash reports" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
   { to: "/admin/credits", icon: Coins, label: "Credits" },
   { to: "/admin/billing", icon: ReceiptText, label: "Billing" },

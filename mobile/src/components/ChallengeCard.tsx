@@ -1,7 +1,10 @@
+import { Translation } from "../i18n/Translation";
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { ServiceIcon } from "./ServiceIcon";
 import { getFrontendUrl } from "../lib/env";
 import { useMemo } from "react";
-import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { Text,  Linking, Pressable, StyleSheet, View } from "react-native";
 import { ChevronRight } from "lucide-react-native";
 import { TOUCH_TARGET, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -26,12 +29,12 @@ type ChallengeCardProps = {
 function formatTimeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1) return translateApp("just now");
+  if (mins < 60) return translateApp("{{minutes}}m ago", { minutes: mins});
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return translateApp("{{hours}}h ago", {hours: hours });
   const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return translateApp("{{days}}d ago", {days: days });
 }
 
 /** Risk tone shared by the request rows and the request detail. */
@@ -64,6 +67,7 @@ export function ApprovalDecisionPair({
   onApprove?: () => void;
   onDeny?: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   return (
@@ -84,7 +88,7 @@ export function ApprovalDecisionPair({
             { color: disabled ? colors.textMuted : colors.success },
           ]}
         >
-          Approve
+          {translateApp("Approve")}
         </Text>
       </Pressable>
       <View style={styles.pairSeparator} />
@@ -104,7 +108,7 @@ export function ApprovalDecisionPair({
             { color: disabled ? colors.textMuted : colors.danger },
           ]}
         >
-          Deny
+          {translateApp("Deny")}
         </Text>
       </Pressable>
     </View>
@@ -114,7 +118,7 @@ export function ApprovalDecisionPair({
 /** A pending request: an inset-group row that opens its detail, with Approve | Deny below. */
 export function ChallengeCard({
   challenge,
-  grantDurationLabel = "30 days",
+  grantDurationLabel = translateApp("30 days"),
   isMutating = false,
   decisionsDisabled = false,
   first = true,
@@ -123,13 +127,15 @@ export function ChallengeCard({
   onApprove,
   onDeny,
 }: ChallengeCardProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   // DESIGN.md §Interaction Rules: status labels always Title Case.
-  const riskLabel =
+  const riskLabel = translateApp(
     challenge.risk_level.charAt(0).toUpperCase() +
-    challenge.risk_level.slice(1);
+    challenge.risk_level.slice(1),
+  );
   const summary =
     challenge.summary.trim() ||
     `${challenge.action} ${challenge.resource}`.trim();
@@ -137,16 +143,19 @@ export function ChallengeCard({
   const showRequester =
     requester && requester !== "Unspecified" && requester !== "Unknown";
   const modeLabel =
-    challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
+    challenge.approval_mode === "grant" ? translateApp("Grant mode")
+      : translateApp("Per-request");
   const timeAgo = formatTimeAgo(challenge.created_at);
   const expiresAt = Date.parse(challenge.expires_at);
   const remainingMs = expiresAt - Date.now();
   const expired = !Number.isFinite(expiresAt) || remainingMs <= 0;
   const expiryLabel = !Number.isFinite(expiresAt)
-    ? "Expiry unavailable — refresh before deciding"
+    ? translateApp("Expiry unavailable — refresh before deciding")
     : remainingMs <= 0
-      ? "Expired"
-      : `Expires in ${Math.max(1, Math.ceil(remainingMs / 60_000))} min`;
+      ? translateApp("Expired")
+      : translateApp("Expires in {{minutes}} min", {
+          minutes: Math.max(1, Math.ceil(remainingMs / 60_000)),
+        });
   const blocked =
     decisionsDisabled ||
     isMutating ||
@@ -157,8 +166,8 @@ export function ChallengeCard({
   const context = [
     challenge.from_org_policy === true
       ? challenge.org_name
-        ? `Org · ${challenge.org_name}`
-        : "Org"
+        ? translateApp("Org · {{organization}}", { organization: challenge.org_name })
+        : translateApp("Org")
       : undefined,
     modeLabel,
   ].filter(Boolean);
@@ -176,7 +185,7 @@ export function ChallengeCard({
         accessibilityRole={onPress ? "button" : undefined}
         accessibilityLabel={summary}
         accessibilityHint={
-          onPress ? "View approval request details" : undefined
+          onPress ? translateApp("View approval request details") : undefined
         }
       >
         <View style={styles.tile}>
@@ -188,27 +197,31 @@ export function ChallengeCard({
           </Text>
           <Text style={styles.resource}>{summary}</Text>
           {showRequester ? (
-            <Text style={styles.meta}>Requested by {requester}</Text>
+            <Text style={styles.meta}>
+              {translateApp("Requested by {{name}}", { name: requester })}</Text>
           ) : null}
           <Text style={styles.meta}>
             {timeAgo} · {expiryLabel}
           </Text>
           <Text style={styles.meta}>
             {showRisk ? (
-              <Text
-                style={{ color: riskTextColor(colors, challenge.risk_level) }}
-              >
-                {`${riskLabel} risk · `}
-              </Text>
-            ) : null}
-            {context.join(" · ")}
+              <Translation message="{{risk}} risk · {{context}}" values={{
+                risk: <Text style={{ color: riskTextColor(colors, challenge.risk_level) }}>{riskLabel}</Text>,
+                context: context.join(" · "),
+              }} />
+            ) : context.join(" · ")}
           </Text>
           <Text style={styles.meta}>
             {challenge.execution_proposal
-              ? "Review the exact scope and duration in the web app."
+              ? translateApp(
+                  "Review the exact scope and duration in the web app.",
+                )
               : challenge.approval_mode === "grant"
-                ? `Approving allows matching requests for ${grantDurationLabel}.`
-                : "Approval applies only to this request."}
+                ? translateApp(
+                    "Approving allows matching requests for {{label}}.",
+                    { label: grantDurationLabel },
+                  )
+                : translateApp("Approval applies only to this request.")}
           </Text>
         </View>
         {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
@@ -217,7 +230,7 @@ export function ChallengeCard({
         <View style={styles.pairDivider}>
           <SettingsRow
             tone="action"
-            label="Review in the web app"
+            label={translateApp("Review in the web app")}
             accessibilityRole="link"
             onPress={() =>
               void Linking.openURL(`${getFrontendUrl()}/assistant/approvals`)

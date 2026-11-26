@@ -406,7 +406,8 @@ async fn trust_stranded_slot_recovers_before_changed_same_key_or_new_key_both_fo
                     .await
                     .unwrap_err();
                 assert!(
-                    matches!(error, AppError::Conflict(ref message) if message.contains("new Idempotency-Key"))
+                    matches!(error, AppError::Conflict(ref message) if message.contains("new Idempotency-Key")),
+                    "contextual={contextual}: {error} ({error:?})"
                 );
                 assert_absent(&f, &row).await;
                 assert_eq!(f.post_count().await, 2);

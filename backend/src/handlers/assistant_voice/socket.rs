@@ -276,8 +276,7 @@ async fn serve(
                 }
                 crate::services::assistant_voice::require_enabled(&state.db,&call.user_id).await.map_err(|e|crate::errors::voice_start::Stage::Flag.error(e))?;
                 call=crate::services::voice::session::get(&state.db,&call.user_id,&call.conversation_id,&call.id).await?;
-                let captions:Vec<AssistantMessage>=state.db.collection(MESSAGES).find(doc!{"user_id":&call.user_id,
-                    "conversation_id":&call.conversation_id,"voice.session_id":&call.id}).sort(doc!{"seq":-1}).limit(16).await?.try_collect().await?;
+                let captions=crate::services::voice::transcript::snapshot_captions(&state.db,&call).await?;
                 let tasks:Vec<VoiceRequest>=state.db.collection(REQUESTS).find(doc!{"user_id":&call.user_id,
                     "conversation_id":&call.conversation_id,"session_id":&call.id}).sort(doc!{"message_seq":-1}).limit(64).await?.try_collect().await?;
                 let source_ids:Vec<_>=tasks.iter().map(|r|r.message_id.clone()).collect();
@@ -288,7 +287,7 @@ async fn serve(
                 let notice_states:Vec<_>=notices.iter().map(|n|json!({"request_id":n.request_id,
                     "state":if n.state=="queued" && n.not_after.timestamp_millis()<chrono::Utc::now().timestamp_millis(){"expired"}else{n.state.as_str()}})).collect();
                 let value=json!({"type":"snapshot","session":super::SessionResponse::from(call.clone()),"announcements":notice_states,
-                    "captions":captions.into_iter().rev().map(|m|json!({"id":m.id,"speaker":m.role,"text":m.text,
+                    "captions":captions.into_iter().map(|m|json!({"id":m.id,"speaker":m.role,"text":m.text,
                         "start_ms":m.voice.as_ref().map(|v|v.start_ms),"end_ms":m.voice.as_ref().map(|v|v.end_ms),
                         "fragments":fragments_response(m.voice.as_ref()),
                         "sealed":m.voice.as_ref().is_some_and(|v|v.sealed),"complete":m.voice.as_ref().is_some_and(|v|v.complete)})).collect::<Vec<_>>(),

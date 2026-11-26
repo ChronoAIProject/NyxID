@@ -8,6 +8,7 @@ import {
   assistantGroupMessagesSchema,
   assistantGroupPostedSchema,
   nyxAgentAcknowledgementSchema,
+  nyxAgentAttachmentSchema,
   nyxAgentChannelAgentSchema,
   nyxAgentChannelConnectSchema,
   nyxAgentChannelListSchema,
@@ -35,6 +36,26 @@ const legacyConversation = {
   active_turn: null,
   context_reset_at: null,
 };
+
+it("retains unread PDF coverage when legacy classification times out", () => {
+  const pdf = {
+    classification: "unknown",
+    text_pages: [],
+    image_pages: [],
+    unread_pages: [1, 2],
+    reason: "render_timeout",
+  };
+  const attachment = nyxAgentAttachmentSchema.parse({
+    id: "legacy-pdf",
+    content_type: "application/pdf",
+    origin: "user_upload",
+    pages: 2,
+    size: 1024,
+    label: "scan.pdf",
+    pdf,
+  });
+  expect(attachment.pdf).toEqual(pdf);
+});
 
 describe("NyxBot conversation schema", () => {
   it("reads rows from servers before agents existed as unattributed NyxBot threads", () => {

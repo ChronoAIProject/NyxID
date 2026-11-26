@@ -367,3 +367,86 @@ it.each([
   expect(screen.getByText(label)).toBeVisible();
   expect(mockPost).not.toHaveBeenCalled();
 });
+
+it.each([
+  ["prepared", "answer_prepared", "none", "Answer prepared", "Healthy"],
+  ["confirmed", "platform_delivery_confirmed", "none", "Delivery confirmed", "Healthy"],
+  ["unconfirmed", "gateway_does_not_confirm", "none", "Delivery not confirmed by the gateway", "Healthy"],
+  ["unconfirmed", "delivery_sending", "none", "Sending answer", "Healthy"],
+  ["unconfirmed", "gateway_receipt_pending", "none", "Awaiting delivery confirmation", "Healthy"],
+  ["unconfirmed", "delivery_stalled", "verify", "Delivery stalled", "Needs attention"],
+  ["unconfirmed", "platform_delivery_unconfirmed", "verify", "Delivery unconfirmed", "Needs attention"],
+  ["unconfirmed", "platform_delivery_unconfirmed", "none", "Delivery unconfirmed", "Needs attention"],
+  ["rejected", "gateway_reply_rejected", "reconnect", "Delivery rejected", "Needs attention"],
+  ["unconfirmed", "gateway_does_not_confirm", "reconnect", "Delivery not confirmed by the gateway", "Needs attention"],
+])("shows %s/%s with action %s", async (state, reason, action, label, badge) => {
+  mockGet.mockResolvedValue(health({
+    platform: "lark",
+    answer_delivery: { state, reason },
+    recommended_action: action,
+  }));
+  renderCard();
+  expect(await screen.findByText("Latest answer delivery")).toBeVisible();
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.getByText(badge)).toBeVisible();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["zh-CN", "网关未确认送达", "网关不提供这条回复的送达回执。"],
+  ["zh-TW", "閘道未確認送達", "閘道不提供這則回覆的送達回條。"],
+])("localizes the neutral stream explanation in %s", async (language, label, explanation) => {
+  mockGet.mockResolvedValue(health({
+    platform: "lark",
+    answer_delivery: { state: "unconfirmed", reason: "gateway_does_not_confirm" },
+    recommended_action: "none",
+    recommended_action_text: "The gateway does not provide a delivery receipt for this answer.",
+  }));
+  renderCard();
+  await screen.findByText("Healthy");
+  await act(async () => { await appI18n.changeLanguage(language); });
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.getByText(explanation)).toBeVisible();
+  expect(screen.queryByText("需要注意")).not.toBeInTheDocument();
+});
+
+it.each(["telegram", "telegram-new"])("shows the last gateway refusal without changing verification truth for %s", async (platform) => {
+  mockGet.mockResolvedValue(health({ platform, can_write: false, status: "active", webhook_registered: true,
+    nyxbot_status: "failed", nyxbot_last_error: "gateway_rejected_request", recommendation_cause: "gateway_rejected_request",
+    nyxbot_setup_diagnostic: {operation:"create",outcome:"rejected",http_status:400,field:"/name",problem_code:"invalid_request"},
+    recommended_action:"contact_admin",recommended_action_text:"gateway_rejected_request: Last connection attempt: rejected." }));
+  renderCard();
+  expect(await screen.findByText(/Last connection attempt: The gateway rejected the connection request/)).toBeVisible();
+  expect(screen.getByText("Needs attention")).toBeVisible();
+  expect(screen.queryByRole("button",{name:"Verify"})).not.toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["en", "Last connection attempt: The gateway has not registered"],
+  ["zh-CN", "上次连接尝试：网关尚未将"],
+  ["zh-TW", "上次連線嘗試：閘道尚未將"],
+])("localizes missing-provider recovery in %s", async (language, text) => {
+  mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_provider_not_registered",recommendation_cause:"gateway_provider_not_registered",
+    recommended_action:"contact_admin",recommended_action_text:"gateway_provider_not_registered: Last connection attempt: missing."}));
+  renderCard();
+  await screen.findByText(/Last connection attempt/);
+  await act(async () => {await appI18n.changeLanguage(language);});
+  expect(screen.getByText((value)=>value.startsWith(text))).toBeVisible();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it("retains a bot fault recommendation despite failed gateway history", async () => {
+  mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_rejected_request",
+    recommended_action:"reconnect",recommended_action_text:"Reconnect the Telegram account, then select Verify."}));
+  renderCard();
+  expect(await screen.findByText("Reconnect the Telegram account, then select Verify.")).toBeVisible();
+  expect(screen.queryByText(/Last connection attempt/)).not.toBeInTheDocument();
+});
+
+it("renders an older response without guessing a setup cause from prose", async () => {
+  mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_rejected_request",
+    recommended_action:"contact_admin",recommended_action_text:"gateway_rejected_request: older server guidance"}));
+  renderCard();
+  expect(await screen.findByText("gateway_rejected_request: older server guidance")).toBeVisible();
+});

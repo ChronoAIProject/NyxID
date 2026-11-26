@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ContentScreenProps } from "../../app/navigationTypes";
@@ -29,8 +31,10 @@ export function activityDetailLine(
   return [
     agent,
     formatMachineDate(createdAt),
-    durationMs != null ? `${durationMs} ms` : undefined,
-    exitCode != null ? `Exit code: ${exitCode}` : undefined,
+    durationMs != null ? translateApp("{{milliseconds}} ms", { milliseconds: durationMs})
+      : undefined,
+    exitCode != null ? translateApp("Exit code: {{code}}", { code: exitCode})
+      : undefined,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -40,6 +44,7 @@ export function MachineActivityScreen({
   route,
   navigation,
 }: ContentScreenProps<"MachineActivity">) {
+  useAppLanguage();
   const runtime = useMachineRuntime();
   const filter = route.params.agent ?? ALL_AGENTS;
   // A page cursor belongs to the filter it was read with.
@@ -69,20 +74,21 @@ export function MachineActivityScreen({
     label: agent.display_name ?? agent.name,
   }));
   const agentLabel = (id?: string | null) =>
-    agents.find((agent) => agent.id === id)?.label ?? "Unattributed";
+    agents.find((agent) => agent.id === id)?.label ??
+    translateApp("Unattributed");
   const filterLabel =
     filter === ALL_AGENTS
-      ? "All agents"
+      ? translateApp("All agents")
       : filter === UNATTRIBUTED
-        ? "Unattributed"
+        ? translateApp("Unattributed")
         : (agents.find((agent) => agent.id === filter)?.label ??
-          "Selected agent");
+          translateApp("Selected agent"));
   const pull = usePullRefresh(() => {
     if (runtime.active) return query.refetch();
   });
   return (
     <WorkspacePage
-      title="Machine activity"
+      title={translateApp("Machine activity")}
       showHeading={false}
       refreshing={pull.refreshing}
       onRefresh={pull.onRefresh}
@@ -90,12 +96,16 @@ export function MachineActivityScreen({
     >
       <SettingsGroup
         inset={false}
-        footer="Metadata only; command contents, credentials and desktop frames are not included."
+        footer={translateApp(
+          "Metadata only; command contents, credentials and desktop frames are not included.",
+        )}
       >
         <SettingsRow
-          label="Agent"
+          label={translateApp("Agent")}
           value={filterLabel}
-          accessibilityLabel={`Agent filter, ${filterLabel}`}
+          accessibilityLabel={translateApp("Agent filter, {{label}}", {
+            label: filterLabel,
+          })}
           onPress={() =>
             navigation.push("MachineActivityFilter", {
               machineId: route.params.machineId,
@@ -111,7 +121,7 @@ export function MachineActivityScreen({
           rows={4}
           icon={false}
           title
-          accessibilityLabel="Loading machine activity"
+          accessibilityLabel={translateApp("Loading machine activity")}
         />
       )}
       {query.error && (
@@ -119,7 +129,9 @@ export function MachineActivityScreen({
       )}
       {query.data && !query.error && (
         <SettingsGroup
-          title={before ? "Older activity" : "Recent activity"}
+          title={before ? translateApp("Older activity")
+              : translateApp("Recent activity")
+          }
           inset={false}
         >
           {query.data.entries.map((entry) => {
@@ -151,7 +163,8 @@ export function MachineActivityScreen({
             );
           })}
           {!query.data.entries.length && (
-            <SettingsRow label="No activity matches this filter." />
+            <SettingsRow label={translateApp("No activity matches this filter.")}
+            />
           )}
         </SettingsGroup>
       )}
@@ -160,7 +173,7 @@ export function MachineActivityScreen({
           {query.data?.next_cursor && (
             <SettingsRow
               tone="action"
-              label="Older Activity"
+              label={translateApp("Older Activity")}
               disabled={!runtime.active || query.isFetching}
               onPress={() =>
                 setPage({ filter, before: query.data!.next_cursor! })
@@ -170,7 +183,7 @@ export function MachineActivityScreen({
           {before && (
             <SettingsRow
               tone="action"
-              label="Latest Activity"
+              label={translateApp("Latest Activity")}
               onPress={() => setPage(undefined)}
             />
           )}
@@ -185,6 +198,7 @@ export function MachineActivityFilterScreen({
   route,
   navigation,
 }: ContentScreenProps<"MachineActivityFilter">) {
+  useAppLanguage();
   const { machineId, ownerId, agent, agents } = route.params;
   const choose = (value: string) =>
     navigation.popTo(
@@ -194,24 +208,24 @@ export function MachineActivityFilterScreen({
     );
   return (
     <WorkspacePage
-      title="Agent"
+      title={translateApp("Agent")}
       showHeading={false}
       contentStyle={machinePageContent}
     >
       <SettingsGroup inset={false}>
         <SettingsCheckRow
-          label="All agents"
+          label={translateApp("All agents")}
           selected={agent === ALL_AGENTS}
           onPress={() => choose(ALL_AGENTS)}
         />
         <SettingsCheckRow
-          label="Unattributed"
+          label={translateApp("Unattributed")}
           selected={agent === UNATTRIBUTED}
           onPress={() => choose(UNATTRIBUTED)}
         />
       </SettingsGroup>
       {agents.length ? (
-        <SettingsGroup title="Agents" inset={false}>
+        <SettingsGroup title={translateApp("Agents")} inset={false}>
           {agents.map((row) => (
             <SettingsCheckRow
               key={row.id}
@@ -230,6 +244,7 @@ export function MachineActivityFilterScreen({
 export function MachineActivityDetailScreen({
   route,
 }: ContentScreenProps<"MachineActivityDetail">) {
+  useAppLanguage();
   const entry = route.params;
   return (
     <WorkspacePage
@@ -239,24 +254,29 @@ export function MachineActivityDetailScreen({
     >
       <SettingsGroup
         inset={false}
-        footer="Metadata only; command contents, credentials and desktop frames are not included."
+        footer={translateApp(
+          "Metadata only; command contents, credentials and desktop frames are not included.",
+        )}
       >
-        <SettingsRow label="Action" value={entry.action} />
+        <SettingsRow label={translateApp("Action")} value={entry.action} />
         <SettingsRow
-          label="Outcome"
+          label={translateApp("Outcome")}
           value={entry.outcome}
           valueTone={activityOutcomeTone(entry.outcome)}
         />
-        <SettingsRow label="Agent" value={entry.agent} />
-        <SettingsRow label="Time" value={formatMachineDate(entry.createdAt)} />
+        <SettingsRow label={translateApp("Agent")} value={entry.agent} />
+        <SettingsRow label={translateApp("Time")}
+          value={formatMachineDate(entry.createdAt)} />
         {entry.durationMs != null ? (
-          <SettingsRow label="Duration" value={`${entry.durationMs} ms`} />
+          <SettingsRow label={translateApp("Duration")}
+            value={translateApp("{{milliseconds}} ms", { milliseconds: entry.durationMs })} />
         ) : null}
         {entry.exitCode != null ? (
-          <SettingsRow label="Exit code" value={String(entry.exitCode)} />
+          <SettingsRow label={translateApp("Exit code")}
+            value={String(entry.exitCode)} />
         ) : null}
       </SettingsGroup>
-      <SettingsGroup title="Entry ID" inset={false}>
+      <SettingsGroup title={translateApp("Entry ID")} inset={false}>
         <SettingsRow label={entry.id} mono selectable />
       </SettingsGroup>
     </WorkspacePage>

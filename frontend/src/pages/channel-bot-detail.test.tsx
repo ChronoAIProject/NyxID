@@ -1,13 +1,16 @@
 import type { ReactNode } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import { AddRouteDialog, ChannelBotDetailPage } from "./channel-bot-detail";
 
-const { refetch, apiKeys, queryState, create } = vi.hoisted(() => ({
+const { refetch, apiKeys, queryState, create, verify, botFixture } = vi.hoisted(() => ({
   refetch: vi.fn(),
   apiKeys: vi.fn(),
   queryState: { error: null as Error | null },
   create: vi.fn(),
+  verify: vi.fn(),
+  botFixture: { platform: "lark", owner: "org-1", status: "active" },
 }));
 vi.mock("@/hooks/use-api-keys", () => ({
   useApiKeys: (scope: unknown) => {
@@ -16,6 +19,8 @@ vi.mock("@/hooks/use-api-keys", () => ({
   },
 }));
 vi.mock("@/hooks/use-channel-conversations", () => ({
+  useChannelConversations: () => ({ data: [] }),
+  useDeleteChannelConversation: () => ({ mutateAsync: vi.fn() }),
   useCreateChannelConversation: () => ({ mutate: create, isPending: false }),
 }));
 vi.mock("@/components/layout/dashboard-layout", () => ({
@@ -25,6 +30,8 @@ vi.mock("@/components/layout/dashboard-layout", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   queryState.error = null;
+  Object.assign(botFixture, { platform: "lark", owner: "org-1", status: "active" });
+  verify.mockReset().mockReturnValue({ mutateAsync: vi.fn() });
 });
 
 it("loads the bot owner's keys and disables submission with no eligible keys", () => {
@@ -66,7 +73,7 @@ vi.mock("@/hooks/use-runtime-config", () => ({
 }));
 vi.mock("@/hooks/use-channel-platforms", () => ({
   useChannelPlatformViews: () => ({
-    getPlatform: (id: string) => ({ label: id === "discord" ? "Discord" : "Slack", webhookDocs: null, activities: [] }),
+    getPlatform: (id: string) => ({ label: id === "discord" ? "Discord" : "Slack", webhookDocs: null, activities: [], fields: [] }),
   }),
 }));
 
@@ -118,12 +125,13 @@ vi.mock("@/stores/auth-store", () => ({
 }));
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBot: () => ({ data: {
-    id: "org-bot", user_id: "org-1", platform: "lark", label: "Team helper",
-    status: "active", platform_bot_username: "team_helper", conversations_count: 7,
+    id: "org-bot", user_id: botFixture.owner, platform: botFixture.platform, label: "Team helper",
+    created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+    status: botFixture.status, platform_bot_username: "team_helper", conversations_count: 7,
     setup_instructions: ["Existing admin setup details"],
   }, isLoading: false }),
   useDeleteChannelBot: () => ({ mutateAsync: vi.fn() }),
-  useVerifyChannelBot: () => ({ mutateAsync: vi.fn() }),
+  useVerifyChannelBot: () => verify(),
   useUpdateChannelBot: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-channel-activities", () => ({
@@ -139,4 +147,42 @@ it("uses membership for read-only settings with main's detail response and no ca
   expect(screen.getByText("Bot health")).toBeVisible();
   expect(apiKeys).toHaveBeenCalledWith({ orgId: "org-1", enabled: false });
   expect(screen.queryByRole("button", { name: /Delete Bot|Add Route|Verify/i })).not.toBeInTheDocument();
+});
+
+vi.mock("@/components/shared/ownership-transfer-card", () => ({ OwnershipTransferCard: () => null }));
+
+it.each([
+  ["pending_webhook", "credentials", "Credentials verified. Bot status: Pending Webhook."],
+  ["active", "credentials", "Credentials verified. Bot status: Active."],
+  ["active", undefined, "Check complete. See bot details for the current status."],
+] as const)("reports the Discord verification result for %s with scope %s", async (status, scope, message) => {
+  Object.assign(botFixture, { platform: "discord", owner: "member", status: "pending_webhook" });
+  const result = { id: "org-bot", verification_scope: scope, status, webhook_registered: !scope };
+  const mutateAsync = vi.fn().mockResolvedValue(result);
+  verify.mockReturnValue({ mutateAsync, isSuccess: true, variables: result.id, data: result });
+  const success = vi.spyOn(toast, "success");
+  render(<ChannelBotDetailPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Verify Bot" }));
+  await waitFor(() => expect(success).toHaveBeenCalledWith(message));
+  expect(screen.getByText(message)).toBeVisible();
+});
+
+
+it.each(["telegram", "telegram-new"])("shows connection health to the personal owner for %s", (platform) => {
+  Object.assign(botFixture, { platform, owner: "member" });
+  render(<ChannelBotDetailPage />);
+  expect(screen.getByText("Bot health")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Verify Bot" })).toBeVisible();
+});
+
+vi.mock("@/components/channels/meta-customer-setup", () => ({ MetaCustomerSetup: () => null }));
+
+it.each(["messenger", "instagram"])("guides manual %s credential repair according to the delivery hold", (platform) => {
+  Object.assign(botFixture, { platform, owner: "member", status: "suspended" });
+  const page = render(<ChannelBotDetailPage />);
+  expect(screen.getByText(/nyxid channel-bot delivery org-bot --resume/)).toBeVisible();
+  botFixture.status = "pending_webhook";
+  page.rerender(<ChannelBotDetailPage />);
+  expect(screen.queryByText(/nyxid channel-bot delivery org-bot --resume/)).toBeNull();
+  expect(screen.getByText(/Run Verify Bot to check the saved credentials/)).toBeVisible();
 });

@@ -99,7 +99,12 @@ async fn terminal(f: &Fixture, id: &str) -> Value {
 
 #[tokio::test]
 async fn response_read_2588_live_consumer_preserves_text_marker_and_completion() {
-    let f = Box::pin(Fixture::new("response_read_live")).await;
+    let f = Box::pin(Fixture::with_output(
+        "response_read_live",
+        false,
+        pretool_output(GATEWAY_LINK_REPLY),
+    ))
+    .await;
     advertised(&f).await;
     let (mut request, event) = f
         .input("live answer", ThreadAddress::Mention, false, true)
@@ -113,8 +118,7 @@ async fn response_read_2588_live_consumer_preserves_text_marker_and_completion()
     let accepted = submit_frozen_fixture(status, &headers, &prefix, &request["metadata"]);
     assert_eq!(accepted["thread_reply"], true);
     let rest = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
-    assert!(rest.contains("Here is your answer"));
-    assert_eq!(frames(&rest).last().unwrap()["type"], "response.completed");
+    assert_gateway_link_frames(&frames(&rest));
     let id = accepted["id"].as_str().unwrap();
     let completed = terminal(&f, id).await;
     assert_eq!(completed["output"], json!([]));
@@ -137,13 +141,18 @@ async fn response_read_2588_live_consumer_preserves_text_marker_and_completion()
             .unwrap(),
         "streamed"
     );
-    assert!(!raw.to_string().contains("Here is your answer"));
+    assert!(!raw.to_string().contains("booking.example"));
 }
 
 #[tokio::test]
 async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let f = Box::pin(Fixture::new("response_read_replica")).await;
+    let f = Box::pin(Fixture::with_output(
+        "response_read_replica",
+        false,
+        pretool_output(GATEWAY_LINK_REPLY),
+    ))
+    .await;
     advertised(&f).await;
     let parent_completed = Arc::new(AtomicBool::new(false));
     Mock::given(method("POST")).and(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
@@ -217,7 +226,7 @@ async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
     drop(blocked);
     let completed = terminal(&f, id).await;
     assert_eq!(completed["output"], json!([]));
-    assert!(!completed.to_string().contains("Here is your answer"));
+    assert!(!completed.to_string().contains("booking.example"));
     assert_eq!(completed["conversation"], accepted["conversation"]);
     let saved: NyxbotEvent = f
         .state
@@ -258,10 +267,9 @@ async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
             .collect::<Vec<_>>()
     };
     let first_send = sends(f.gateway.received_requests().await.unwrap()).remove(0);
-    assert_eq!(
-        first_send.body_json::<Value>().unwrap()["thread_reply"],
-        true
-    );
+    let message = first_send.body_json::<Value>().unwrap();
+    assert_eq!(message["thread_reply"], true);
+    assert_eq!(message["text"], GATEWAY_LINK_REPLY);
     // The mock gateway closes only a parent accepted by submit_frozen whose
     // provider read is terminal. Its automatic replay has no chat effect.
     parent_completed.store(
@@ -312,7 +320,7 @@ async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
         if start < 3 {
             assert_eq!(actual.last().unwrap()["response"], completed);
         }
-        assert!(!body.contains("Here is your answer"));
+        assert!(!body.contains("booking.example"));
     }
     let bad = native_responses::events(
         State(f.state.clone()),
@@ -950,7 +958,7 @@ async fn response_read_2588_failed_followed_turn_stays_empty_and_sends_failure_i
         .unwrap();
     assert_eq!(
         sent,
-        json!({"text":"I could not finish that. Please try again.","thread_reply":true})
+        json!({"text":"The previous operation may have taken effect. Check its result before trying again.","thread_reply":true})
     );
     let events = native_responses::events(
         State(f.state.clone()),
@@ -969,5 +977,64 @@ async fn response_read_2588_failed_followed_turn_stays_empty_and_sends_failure_i
     assert_eq!(
         frames(&body_text(repeat).await).last().unwrap()["response"],
         completed
+    );
+}
+
+#[path = "nyxbot_org_thread_notice_tests.rs"]
+mod org_thread_notice_tests;
+
+#[tokio::test]
+async fn followed_turn_snapshot_keeps_accepted_thread_choice() {
+    let f = Box::pin(Fixture::new("thread_snapshot_2460")).await;
+    advertised(&f).await;
+    let (mut request, event) = f.input("answer", ThreadAddress::Mention, false, true).await;
+    metadata(&mut request, &event);
+    let blocked = f.calls.lock().await;
+    let response = Box::pin(respond(&f.state, &f.key, &request, &event)).await;
+    let mut body = response.into_body();
+    let created = frames(&first(&mut body).await).remove(0);
+    let id = created["response"]["id"].as_str().unwrap();
+    assert_eq!(created["response"]["thread_reply"], true);
+    assert_eq!(snapshot(&f, id).await["thread_reply"], true);
+    drop(blocked);
+    body.collect().await.unwrap();
+    let completed = terminal(&f, id).await;
+    assert_eq!(completed["thread_reply"], true);
+    assert_eq!(completed["output"], json!([]));
+}
+
+#[tokio::test]
+async fn followed_answer_delivery_health_tracks_the_answer_receipt() {
+    let f = Box::pin(Fixture::new("answer_health_2460")).await;
+    let (request, event) = f.input("answer", ThreadAddress::Mention, false, true).await;
+    let response = Box::pin(respond(&f.state, &f.key, &request, &event)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("Here is your answer"));
+    let bot = crate::services::channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+        .await
+        .unwrap();
+    let health = Box::pin(crate::handlers::channel_bots::health_loaded(
+        &f.state, &bot, true, true,
+    ))
+    .await
+    .unwrap();
+    let health = serde_json::to_value(health).unwrap();
+    assert_eq!(health["answer_delivery"]["state"], "unconfirmed");
+    assert_eq!(
+        health["answer_delivery"]["reason"],
+        "gateway_does_not_confirm"
+    );
+    assert_eq!(health["recommended_action"], "none");
+    assert!(
+        health["recommended_action_text"]
+            .as_str()
+            .unwrap()
+            .contains("receipt")
+    );
+    assert!(!health["answer_delivery"].to_string().contains(&event));
+    assert!(
+        !health["answer_delivery"]
+            .to_string()
+            .contains("Here is your answer")
     );
 }

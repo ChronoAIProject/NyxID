@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
@@ -19,10 +22,11 @@ export function AssistantApprovalCard({
   disabled: boolean;
   onDecide: (approved: boolean) => Promise<void>;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [decided, setDecided] = useState<boolean>();
   const lock = useRef(false);
   const alive = useRef(true);
@@ -47,9 +51,9 @@ export function AssistantApprovalCard({
     } catch (cause) {
       if (alive.current)
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : "Could not send your decision. Try again.",
+            : translateApp("Could not send your decision. Try again.")),
         );
     } finally {
       lock.current = false;
@@ -61,14 +65,16 @@ export function AssistantApprovalCard({
       <View accessibilityLiveRegion="polite">
         <Label style={{ fontWeight: "600", fontSize: 13 }}>
           {decided === true
-            ? "Approved and sent"
+            ? translateApp("Approved and sent")
             : decided === false
-              ? "Request denied"
-              : "Approval required"}
+              ? translateApp("Request denied")
+              : translateApp("Approval required")}
         </Label>
         {decided === undefined ? (
           <Label muted>
-            Review the destination and access scope before this action runs.
+            {translateApp(
+              "Review the destination and access scope before this action runs.",
+            )}
           </Label>
         ) : null}
       </View>
@@ -87,15 +93,15 @@ export function AssistantApprovalCard({
         }}
       >
         <Label muted style={{ fontSize: 10 }}>
-          Scope
+          {translateApp("Scope")}
         </Label>
         {[
           approval.service_slug,
           approval.agent_key_prefix,
           approval.approval_mode === "per_request"
-            ? "per-request approval"
+            ? translateApp("per-request approval")
             : approval.approval_mode === "grant"
-              ? "grant · grant"
+              ? translateApp("grant · grant")
               : undefined,
         ]
           .filter(Boolean)
@@ -119,20 +125,24 @@ export function AssistantApprovalCard({
       </View>
       {approval.approval_mode === "grant" && decided === undefined ? (
         <Label muted>
-          Approving also allows repeat {approval.service_slug} writes for the
-          next grant without asking again.
+          {translateApp(
+            "Approving also allows repeat {{service}} writes for the next grant without asking again.",
+            { service: approval.service_slug},
+          )}
         </Label>
       ) : null}
       {decided === undefined ? (
         <>
           <Label muted>
             {expired
-              ? "expired"
-              : `expires in ${Math.max(1, Math.ceil(remaining / 60_000))} min`}
+              ? translateApp("expired")
+              : translateApp("expires in {{minutes}} min", {
+                  minutes: Math.max(1, Math.ceil(remaining / 60_000)),
+                })}
           </Label>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
             <ActionButton
-              label="Approve and send"
+              label={translateApp("Approve and send")}
               compact
               variant="secondary"
               disabled={disabled || expired || busy}
@@ -140,17 +150,19 @@ export function AssistantApprovalCard({
               onPress={() => void decide(true)}
             />
             <ActionButton
-              label="Deny"
+              label={translateApp("Deny")}
               compact
               variant="danger"
               disabled={disabled || expired || busy}
               onPress={() => void decide(false)}
             />
           </View>
-          <Label muted>Nothing is sent until you decide.</Label>
+          <Label muted>
+            {translateApp("Nothing is sent until you decide.")}
+          </Label>
         </>
       ) : decided === false ? (
-        <Label muted>Nothing was sent.</Label>
+        <Label muted>{translateApp("Nothing was sent.")}</Label>
       ) : null}
       {error ? (
         <Label accessibilityRole="alert" style={{ color: colors.danger }}>
@@ -161,21 +173,31 @@ export function AssistantApprovalCard({
   );
 }
 
-/** Same future/past distance copy as web formatTimeDistance. */
+/** Same future/past distance copy as web formatTimeDistance. Hermes has no
+ * Intl.RelativeTimeFormat, so every language uses complete catalog phrases. */
 export function waitingTimeDistance(value: string, now = Date.now()) {
   const date = Date.parse(value);
   if (!Number.isFinite(date)) return "N/A";
   const diff = date - now,
     seconds = Math.floor(Math.abs(diff) / 1000);
-  const prefix = diff > 0 ? "in " : "",
-    suffix = diff > 0 ? "" : " ago";
-  if (seconds < 60) return diff > 0 ? "in a moment" : "just now";
-  if (seconds < 3600) return `${prefix}${Math.floor(seconds / 60)}m${suffix}`;
+  const minutes = Math.floor(seconds / 60),
+    hours = Math.floor(seconds / 3600),
+    days = Math.floor(seconds / 86400);
+  if (seconds < 60)
+    return diff > 0 ? translateApp("in a moment") : translateApp("just now");
+  if (seconds < 3600)
+    return diff > 0
+      ? translateApp("in {{minutes}}m", { minutes })
+      : translateApp("{{minutes}}m ago", { minutes });
   if (seconds < 86400)
-    return `${prefix}${Math.floor(seconds / 3600)}h${suffix}`;
+    return diff > 0
+      ? translateApp("in {{hours}}h", { hours })
+      : translateApp("{{hours}}h ago", { hours });
   if (seconds < 604800)
-    return `${prefix}${Math.floor(seconds / 86400)}d${suffix}`;
-  return new Date(date).toLocaleDateString();
+    return diff > 0
+      ? translateApp("in {{days}}d", { days })
+      : translateApp("{{days}}d ago", { days });
+  return new Date(date).toLocaleDateString(appLocale());
 }
 export function AssistantWaitingNote({
   items,
@@ -186,6 +208,7 @@ export function AssistantWaitingNote({
   agentName: string;
   pendingEvents?: number;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -197,13 +220,16 @@ export function AssistantWaitingNote({
     <>
       {pendingEvents > 0 ? (
         <Label muted accessibilityLiveRegion="polite" style={{ fontSize: 11 }}>
-          {pendingEvents} {pendingEvents === 1 ? "update" : "updates"} waiting
-          for {agentName}'s next turn
+          {translateApp(
+            pendingEvents === 1 ? "{{count}} update waiting for {{agent}}'s next turn"
+              : "{{count}} updates waiting for {{agent}}'s next turn",
+            { count: pendingEvents, agent: agentName},
+          )}
         </Label>
       ) : null}
       {items.length ? (
         <View
-          accessibilityLabel="Waiting"
+          accessibilityLabel={translateApp("Waiting")}
           accessibilityLiveRegion="polite"
           style={{
             borderWidth: 1,
@@ -236,7 +262,9 @@ export function AssistantWaitingNote({
                 <Label style={{ fontSize: 12, flex: 1 }}>{item.title}</Label>
                 {item.expires_at ? (
                   <Label muted style={{ fontSize: 11 }}>
-                    expires {waitingTimeDistance(item.expires_at, now)}
+                    {translateApp("expires {{time}}", {
+                      time: waitingTimeDistance(item.expires_at, now),
+                    })}
                   </Label>
                 ) : null}
               </View>
@@ -248,8 +276,10 @@ export function AssistantWaitingNote({
             </View>
           ))}
           <Label muted style={{ fontSize: 11 }}>
-            {agentName} continues here by itself when this happens; no need to
-            reply.
+            {translateApp(
+              "{{agent}} continues here by itself when this happens; no need to reply.",
+              { agent: agentName},
+            )}
           </Label>
         </View>
       ) : null}

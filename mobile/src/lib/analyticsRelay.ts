@@ -1,6 +1,6 @@
 import type { ConsentSnapshot } from './analyticsConsentState';
 import type { MobileEvent } from './telemetry-schema';
-export type AnalyticsPermission = { account_id: string; enabled: boolean; revision: string };
+export type AnalyticsPermission = { policy_version?: string|null; current_policy_version?: string; diagnostics_status?: "available"|"consent_required"|"not_offered"|"unknown"; diagnostics_offered?: boolean; diagnostics_available?: boolean; account_id: string; enabled: boolean; revision: string };
 export type RelayRequest = <T>(path: string, options?: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; expectedAccountId?: string; authorityGuard?: () => void }) => Promise<T>;
 /** No event queue or positive permission cache. Every event obtains a new revision. */
 export function createAnalyticsRelay(snapshot: () => ConsentSnapshot, request: RelayRequest) {
@@ -35,18 +35,21 @@ export function createAnalyticsRelay(snapshot: () => ConsentSnapshot, request: R
 /** An account mutation always carries intent before the server writes. A late
  * response can never enable this device after local withdrawal or account switch. */
 export async function saveAnalyticsPermission(accountId: string, enabled: boolean, request: RelayRequest,
-  snapshot: () => ConsentSnapshot, setLocal: (enabled: boolean) => void): Promise<void> {
+  snapshot: () => ConsentSnapshot, setLocal: (enabled: boolean, policy?:1|2) => void, acknowledged:1|2 = 1): Promise<void> {
   if (snapshot().accountId !== accountId) throw new Error('analytics_account_changed');
-  setLocal(false);
+  // Re-acknowledgement must preserve an existing opt-in on transport failure.
+  if (!enabled || !snapshot().enabled || acknowledged !== 2) setLocal(false);
   const revision = snapshot().revision;
   const guard = () => {
     if (snapshot().accountId !== accountId || snapshot().revision !== revision)
       throw new Error('analytics_authority_changed');
   };
+  const policy = acknowledged === 2 && (await request<AnalyticsPermission>('/users/me/preferences/analytics', {expectedAccountId:accountId,authorityGuard:guard})).current_policy_version === "2" ? 2 : 1;
+  guard();
   const permission = await request<AnalyticsPermission>('/users/me/preferences/analytics', {
-    method: 'PUT', expectedAccountId: accountId, authorityGuard: guard, body: { account_id: accountId, enabled },
+    method: 'PUT', expectedAccountId: accountId, authorityGuard: guard, body: { account_id: accountId, enabled, ...(policy === 2 ? {policy_version:"2"} : {}) },
   });
   guard();
   if (permission.account_id !== accountId || permission.enabled !== enabled) throw new Error('analytics_account_changed');
-  setLocal(enabled);
+  setLocal(enabled,policy);
 }

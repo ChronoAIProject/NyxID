@@ -290,6 +290,7 @@ async fn lark_attachment_dispatch_direct_and_meta_send_canonical_parts_and_retur
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &args(&u.attachment_id),
@@ -338,6 +339,250 @@ async fn lark_attachment_dispatch_direct_and_meta_send_canonical_parts_and_retur
         }
         assert!(body.contains("name=\"file\"; filename=\"receipt.txt\"\r\nContent-Type: text/plain\r\n\r\nreceipt bytes\r\n"));
     }
+    u.f.state.db.drop().await.unwrap();
+}
+
+// Persist the pre-upgrade scope shape directly so authentication exercises the saved revision.
+async fn saved_upload_scope(u: &UploadFixture) -> McpAuthContext {
+    let scope = doc! {
+        "revision": 7_i64, "catalog_service_id": &u.catalog.id,
+        "operations": [{
+            "endpoint_id": &u.endpoint.id,
+            "rule": {"method": "POST", "path_template": &u.endpoint.path},
+            "inputs": {"body": {"type": "object",
+                "required": ["attachment_id", "parent_type", "parent_node"],
+                "properties": {
+                    "attachment_id": {"type": "exact", "value": &u.attachment_id},
+                    "parent_type": {"type": "exact", "value": "bitable_file"},
+                    "parent_node": {"type": "exact", "value": "base"}
+                }
+            }}
+        }]
+    };
+    u.f.state
+        .db
+        .collection::<bson::Document>("api_keys")
+        .update_one(
+            doc! {"_id": &u.f.chat.api_key_id},
+            doc! {"$set": {"assistant_operation_scopes": {&u.instance: scope}}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&u.f).await;
+    let saved = &auth.assistant_operation_scopes[&u.instance];
+    assert_eq!(saved.revision, 7);
+    saved.operations[0]
+        .inputs
+        .as_ref()
+        .unwrap()
+        .validate("POST", &Default::default())
+        .unwrap();
+    auth
+}
+
+#[tokio::test]
+async fn lark_attachment_ordinary_scopes_keep_legacy_wire_and_consent_inputs() {
+    use sha2::{Digest, Sha256};
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let u = setup("attachment_legacy_identity").await;
+    let mut auth = authenticate(&u.f).await;
+    assert!(auth.assistant_operation_scopes.is_empty());
+    let service = loaded(&u, &auth).await;
+    let endpoint = service
+        .endpoints
+        .iter()
+        .find(|ep| ep.name == UPLOAD_OPERATION)
+        .unwrap();
+    let mut input = args(&u.attachment_id);
+    // Golden values from the original canonical multipart encoder for this attachment.
+    let mime = "multipart/form-data; boundary=nyxid-d81a2681488740d5d152714e8d2aa54f";
+    let hash = "8988cb770c7a2553553d4a62ee99fe78b5ef3e933d1874cc0751f98b54af7365";
+    for pass in 0..3 {
+        if pass == 1 {
+            auth = saved_upload_scope(&u).await;
+            let rule = &mut auth
+                .assistant_operation_scopes
+                .get_mut(&u.instance)
+                .unwrap()
+                .operations[0];
+            rule.inputs = None;
+        }
+        if pass == 2 {
+            input["extra"] = json!(r#"{ "drive_route_token" : "base" }"#);
+            // An alternative rule for the same operation can allow the legacy request.
+            let limited = saved_upload_scope(&u).await;
+            auth.assistant_operation_scopes
+                .get_mut(&u.instance)
+                .unwrap()
+                .operations
+                .insert(
+                    0,
+                    limited.assistant_operation_scopes[&u.instance].operations[0].clone(),
+                );
+        }
+        let prepared = mcp_service::prepare_chat_proxy_tool_call(
+            &u.f.state.db,
+            &u.f.state.encryption_keys,
+            auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
+            &service,
+            endpoint,
+            &input,
+        )
+        .await
+        .unwrap();
+        let (semantic, content_type) = prepared.scope_input();
+        assert_eq!(content_type, Some(mime));
+        assert_eq!(hex::encode(Sha256::digest(semantic)), hash);
+        let card = prepared
+            .attachment_confirmation_arguments(endpoint, &input)
+            .unwrap();
+        assert_eq!(
+            card,
+            json!({"endpoint_contract":mcp_service::endpoint_contract_digest(endpoint),
+            "method":"POST","path":"drive/v1/medias/upload_all","query":null,"body_sha256":hash,
+            "content_type":mime,"acknowledgement_id":null})
+        );
+        drop(prepared);
+        // Use the same live key scope at the later authorization checkpoints.
+        u.f.state.db.collection::<bson::Document>("api_keys").update_one(
+            doc!{"_id": &u.f.chat.api_key_id},
+            doc!{"$set":{"assistant_operation_scopes":bson::to_bson(&auth.assistant_operation_scopes).unwrap()}}
+        ).await.unwrap();
+        let response = call(&u, &auth, false, input.clone()).await;
+        assert_eq!(response["result"]["isError"], false, "{response}");
+    }
+    let sent = u.server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 3);
+    for request in sent {
+        assert_eq!(request.headers["content-type"], mime);
+        assert_eq!(hex::encode(Sha256::digest(&request.body)), hash);
+    }
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lark_attachment_scoped_consent_rejects_changed_bytes_at_same_id() {
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let u = setup("attachment_scoped_card").await;
+    crate::services::assistant_settings_service::update(
+        &u.f.state.db,
+        &u.f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = saved_upload_scope(&u).await;
+    let mut input = args(&u.attachment_id);
+    let card = payload(&call(&u, &auth, false, input.clone()).await);
+    let ack = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&u.f.state.db, &u.f.owner, &u.f.row.id, ack, true)
+        .await
+        .unwrap();
+    input["acknowledgement_id"] = json!(ack);
+    replace_upload_bytes(&u, b"changed bytes").await;
+    let refused = payload(&call(&u, &auth, false, input.clone()).await);
+    assert_eq!(refused["error"], "acknowledgement_invalid");
+    assert_no_requests(&u).await;
+    replace_upload_bytes(&u, b"receipt bytes").await;
+    let sent = call(&u, &auth, false, input).await;
+    assert_eq!(sent["result"]["isError"], false, "{sent}");
+    assert_eq!(u.server.received_requests().await.unwrap().len(), 1);
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lark_attachment_saved_scope_sends_only_the_approved_base_and_file() {
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let u = setup("attachment_scope_approved").await;
+    u.f.state.db.collection::<bson::Document>(downstream_service::COLLECTION_NAME).update_one(
+        doc! {"_id": &u.catalog.id},
+        doc! {"$set": {"default_request_headers": [{"name":"content-type","value":"application/json","overridable":false}]}},
+    ).await.unwrap();
+    let auth = saved_upload_scope(&u).await;
+    let input = args(&u.attachment_id);
+    for meta in [false, true] {
+        let response = call(&u, &auth, meta, input.clone()).await;
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert!(text(&response).contains("file_receipt"));
+    }
+    let sent = u.server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 2);
+    for request in sent {
+        let body = std::str::from_utf8(&request.body).unwrap();
+        let boundary = request.headers["content-type"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+        assert!(body.starts_with(&format!("--{boundary}\r\n")));
+        for field in ["parent_type", "parent_node"] {
+            let part = format!("name=\"{field}\"\r\n\r\n");
+            assert_eq!(body.matches(&part).count(), 1);
+            assert!(body.contains(&format!("{part}{}\r\n", input[field].as_str().unwrap())));
+        }
+        assert!(body.contains("name=\"extra\"\r\n\r\n{\"drive_route_token\":\"base\"}\r\n"));
+        assert!(body.contains("\r\n\r\nreceipt bytes\r\n"));
+    }
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lark_attachment_saved_scope_denies_before_reading_chunks_or_sending() {
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let u = setup("attachment_scope_denied").await;
+    let mut auth = saved_upload_scope(&u).await;
+    // A byte read would fail on the missing chunk before it could return a scope decision.
+    let deleted =
+        u.f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
+            .delete_many(doc! {"parent_attachment_id": &u.attachment_id})
+            .await
+            .unwrap();
+    assert!(deleted.deleted_count > 0);
+    for (field, value) in [("parent_node", "other"), ("file_name", "undeclared.txt")] {
+        let mut input = args(&u.attachment_id);
+        input[field] = json!(value);
+        for meta in [false, true] {
+            let response = call(&u, &auth, meta, input.clone()).await;
+            assert_error(&response);
+            assert!(
+                text(&response).contains("body violates its closed schema"),
+                "{response}"
+            );
+        }
+    }
+    let service = loaded(&u, &auth).await;
+    let endpoint = service
+        .endpoints
+        .iter()
+        .find(|ep| ep.name == UPLOAD_OPERATION)
+        .unwrap();
+    let scopes = &mut auth.assistant_operation_scopes;
+    scopes.get_mut(&u.instance).unwrap().operations.clear();
+    let refused = mcp_service::prepare_chat_proxy_tool_call(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        auth.chat.as_ref(),
+        scopes,
+        &service,
+        endpoint,
+        &args(&u.attachment_id),
+    )
+    .await
+    .err()
+    .expect("a fully excluded upload must return the operation refusal");
+    assert!(
+        refused
+            .to_string()
+            .contains("Specialist operation scope denied this call. Allowed operations: none"),
+        "{refused}"
+    );
+    assert_no_requests(&u).await;
     u.f.state.db.drop().await.unwrap();
 }
 
@@ -929,6 +1174,7 @@ async fn lark_attachment_body_scopes_and_unsupported_preparation_fail_closed_bef
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             &async_endpoint,
             &args(&u.attachment_id)
@@ -942,19 +1188,18 @@ async fn lark_attachment_body_scopes_and_unsupported_preparation_fail_closed_bef
     })).unwrap();
     auth.assistant_operation_scopes
         .insert(u.instance.clone(), scope);
-    let prepared = mcp_service::prepare_chat_proxy_tool_call(
+    let error = mcp_service::prepare_chat_proxy_tool_call(
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &args(&u.attachment_id),
     )
     .await
-    .unwrap();
-    let error = prepared
-        .authorize_agent_operations(&auth.assistant_operation_scopes, &service, endpoint)
-        .unwrap_err();
+    .err()
+    .expect("closed empty body schema should refuse upload arguments");
     assert!(
         error.to_string().contains("Operation scope input limit"),
         "{error}"
@@ -1023,6 +1268,7 @@ async fn lark_attachment_budget_precedes_decryption_and_is_held_by_prepared_call
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 auth.chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &args(&u.attachment_id)
@@ -1037,6 +1283,7 @@ async fn lark_attachment_budget_precedes_decryption_and_is_held_by_prepared_call
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args(&u.attachment_id)
@@ -1054,6 +1301,7 @@ async fn lark_attachment_budget_precedes_decryption_and_is_held_by_prepared_call
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &args(&u.attachment_id),
@@ -1170,6 +1418,7 @@ async fn lark_attachment_platform_cards_bind_materialized_bytes_and_boundary_con
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         &endpoint,
         &original,
@@ -1206,6 +1455,7 @@ async fn lark_attachment_platform_cards_bind_materialized_bytes_and_boundary_con
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         &endpoint,
         &original,

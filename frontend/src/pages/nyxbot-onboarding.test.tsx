@@ -208,6 +208,7 @@ beforeEach(async () => {
     if (path === "/keys/google-1") return keys[0];
     if (path === "/catalog/api-google") return catalogResponse;
     if (path === "/public/config") return publicConfig;
+    if (path === "/channel-platforms") return { platforms: [] };
     if (path === "/user-services") return { services: userServices };
     if (path.startsWith("/providers/google-provider/connect/oauth"))
       return {
@@ -406,7 +407,7 @@ describe("Nyxbot onboarding", () => {
       expect(telegram).not.toHaveBeenCalled();
       if (step === "channel") {
         expect(
-          get.mock.calls.every(([path]) => path === "/user-services"),
+          get.mock.calls.every(([path]) => ["/user-services", "/channel-platforms"].includes(String(path))),
         ).toBe(true);
         expect(authorizer).not.toHaveBeenCalled();
       }
@@ -440,7 +441,7 @@ describe("Nyxbot onboarding", () => {
       focusManager.setFocused(true);
       await client.invalidateQueries();
     });
-    expect(get.mock.calls.every(([path]) => path === "/user-services")).toBe(
+    expect(get.mock.calls.every(([path]) => ["/user-services", "/channel-platforms"].includes(String(path)))).toBe(
       true,
     );
     expect(post).not.toHaveBeenCalled();

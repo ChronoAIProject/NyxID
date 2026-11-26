@@ -105,6 +105,13 @@ const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const CRASH_REPORTS_FLAG_KEY: &str = "diagnostics:crash-reports";
+const CRASH_REPORTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CRASH_REPORTS_FLAG_KEY,
+    description: "Enable policy-2 crash diagnostics for the acting person.",
+    default_enabled: false,
+};
+
 /// Acting-person rollout for connected-service health and readiness monitoring.
 pub const SERVICE_MONITORING_FLAG_KEY: &str = "services:monitoring";
 const SERVICE_MONITORING_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -250,12 +257,24 @@ const ORG_SPECIALIST_CHANNELS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ORG_AGENT_ACCESS_FLAG_KEY: &str = "assistant:org-agent-access-lists-v1";
+const ORG_AGENT_ACCESS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ORG_AGENT_ACCESS_FLAG_KEY,
+    description: "Allow organization Admins to edit specialist access lists after fleet readiness.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
     default_enabled: false,
 };
 
+const NAMED_APPROVERS: FeatureFlagDef = FeatureFlagDef {
+    key: super::org_service_approvers::FLAG,
+    description: "Allow named approver configuration on organization services after fleet activation.",
+    default_enabled: false,
+};
 pub const GUEST_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:guest-operation-scopes";
 const GUEST_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: GUEST_OPERATION_SCOPES_FLAG_KEY,
@@ -271,9 +290,22 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY: &str = "assistant:generated-artifacts";
+pub const TURN_HANDOFF_FLAG_KEY: &str = "assistant:turn-handoff";
+const TURN_HANDOFF_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: TURN_HANDOFF_FLAG_KEY,
+    description: "Allow eligible assistant turns to reattach across replicas when the fleet and model support it.",
+    default_enabled: false,
+};
 const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
     description: "Admit generated Sandbox files for Web user turns once capability support is recorded and every live API and async worker supports it.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_PDF_VISION_FLAG_KEY: &str = "assistant:pdf-vision";
+const ASSISTANT_PDF_VISION_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_PDF_VISION_FLAG_KEY,
+    description: "Render PDF pages without text for vision models after upgrading all attachment readers and encryption workers.",
     default_enabled: false,
 };
 
@@ -356,6 +388,12 @@ const ASSISTANT_NOTIFICATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const STAGING_QR_LOGIN: FeatureFlagDef = FeatureFlagDef {
+    key: "auth:staging-qr-login",
+    description: "Allow a production account to approve staging device sign-ins for its verified email.",
+    default_enabled: false,
+};
+
 pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
 const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: MOBILE_MFA_FLAG_KEY,
@@ -371,11 +409,30 @@ pub async fn mobile_mfa_required(db: &mongodb::Database, person: &str) -> AppRes
         .any(|key| key == MOBILE_MFA_FLAG_KEY))
 }
 
+const OAUTH_REFRESH_CLIENT_AUTH_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
+    description: "Authenticate confidential OAuth refreshes and require the issuing client ID (global only).",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
     description: "Require an invitation code for new account registration (global only).",
     default_enabled: true,
+};
+
+const OAUTH_EXACT_REDIRECTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: OAUTH_EXACT_REDIRECTS_FLAG_KEY,
+    description: "Require registered public OAuth callbacks and an exact reviewed callback for silent consent (global only).",
+    default_enabled: false,
+};
+
+pub const APP_TOKEN_MANAGEMENT_FLAG_KEY: &str = "auth:app-token-management-v1";
+const APP_TOKEN_MANAGEMENT_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: APP_TOKEN_MANAGEMENT_FLAG_KEY,
+    description: "Require administrator designation for OAuth clients using account management routes (global only).",
+    default_enabled: false,
 };
 
 /// Mobile builds that embed both production domain sets read this global flag
@@ -391,10 +448,26 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
 
 /// Flags resolved without a user or organization; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
+    OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
     INVITATION_CODE_FLAG_KEY,
+    OAUTH_EXACT_REDIRECTS_FLAG_KEY,
+    APP_TOKEN_MANAGEMENT_FLAG_KEY,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
 ];
+
+pub const OAUTH_EXACT_REDIRECTS_FLAG_KEY: &str = "auth:oauth-exact-redirects-v1";
+pub const OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY: &str = "auth:oauth-refresh-client-auth-v1";
+
+pub(crate) fn requires_oauth_policy_admin(key: &str) -> bool {
+    is_global_only(key)
+        && matches!(
+            key,
+            APP_TOKEN_MANAGEMENT_FLAG_KEY
+                | OAUTH_EXACT_REDIRECTS_FLAG_KEY
+                | OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY
+        )
+}
 
 pub(crate) fn is_global_only(flag_key: &str) -> bool {
     GLOBAL_ONLY_FLAG_KEYS.contains(&flag_key)
@@ -466,9 +539,23 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    OAUTH_REFRESH_CLIENT_AUTH_FLAG,
+    FeatureFlagDef {
+        key: "channels:messenger",
+        description: "Allow the acting person to connect Messenger inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
+    FeatureFlagDef {
+        key: "channels:instagram",
+        description: "Allow the acting person to connect Instagram professional inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
     INVITATION_CODE_FLAG,
+    OAUTH_EXACT_REDIRECTS_FLAG,
+    APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
+    STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
@@ -480,9 +567,12 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
+    NAMED_APPROVERS,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -495,6 +585,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_LEARNING_FLAG,
     ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_AGENT_ACCESS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -508,6 +599,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
+    CRASH_REPORTS_FLAG,
     FeatureFlagDef {
         key: super::platform_model_service::FLAG,
         description: "Platform model catalog; activation requires complete model execution and billing readiness.",
@@ -529,9 +621,23 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    OAUTH_REFRESH_CLIENT_AUTH_FLAG,
+    FeatureFlagDef {
+        key: "channels:messenger",
+        description: "Allow the acting person to connect Messenger inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
+    FeatureFlagDef {
+        key: "channels:instagram",
+        description: "Allow the acting person to connect Instagram professional inboxes; existing management remains available when disabled.",
+        default_enabled: false,
+    },
     INVITATION_CODE_FLAG,
+    OAUTH_EXACT_REDIRECTS_FLAG,
+    APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
+    STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
@@ -543,9 +649,12 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
+    NAMED_APPROVERS,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -558,6 +667,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_LEARNING_FLAG,
     ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_AGENT_ACCESS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -571,6 +681,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
+    CRASH_REPORTS_FLAG,
     FeatureFlagDef {
         key: super::platform_model_service::FLAG,
         description: "Platform model catalog; activation requires complete model execution and billing readiness.",
@@ -661,6 +772,30 @@ pub async fn get_definition(db: &mongodb::Database, key: &str) -> AppResult<Flag
         .await?
         .map(Into::into)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{key}'")))
+}
+
+/// Serialize Meta enrollment changes with OAuth installation commits.  The
+/// channel flags are built-ins and therefore have no definition row to lock;
+/// this one shared platform fence is the mutation row used by both the admin
+/// flag writer and the installer.  It is intentionally platform-wide rather
+/// than per-person, so a disable cannot race one actor's final commit.
+pub(crate) async fn fence_meta_enrollment_in_session(
+    db: &mongodb::Database,
+    platform: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if !matches!(platform, "messenger" | "instagram") {
+        return Ok(());
+    }
+    db.collection::<bson::Document>("feature_flag_enrollment_fences")
+        .update_one(
+            doc! {"_id": format!("channels:{platform}")},
+            doc! {"$inc": {"revision": 1_i64}},
+        )
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    Ok(())
 }
 
 pub fn validate_flag_key(key: &str) -> AppResult<()> {
@@ -1014,6 +1149,33 @@ pub(crate) fn resolve_personal_definitions<'a>(
     enabled_keys
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthoringUnavailableReason {
+    FlagOff,
+    ReadinessMissing,
+}
+
+/// The caller has already established the org Admin's management permission.
+pub(crate) async fn org_admin_authoring_unavailable_reason(
+    db: &mongodb::Database,
+    actor: &str,
+    org: &str,
+    key: &str,
+) -> AppResult<Option<AuthoringUnavailableReason>> {
+    let enabled = resolve_enabled_features(db, org, actor, OrgRole::Admin).await?;
+    if !enabled.iter().any(|candidate| candidate == key) {
+        return Ok(Some(AuthoringUnavailableReason::FlagOff));
+    }
+    match super::security_readiness_service::require_serving(db, key).await {
+        Ok(()) => Ok(None),
+        Err(AppError::SecurityReadinessUnavailable) => {
+            Ok(Some(AuthoringUnavailableReason::ReadinessMissing))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Resolve enabled-flag keys for a member of an org (org context). Applies the
 /// platform-global baseline, the org's own overrides, and platform user overrides.
 pub async fn resolve_enabled_features(
@@ -1034,6 +1196,55 @@ pub async fn resolve_enabled_features(
         member_user_id,
         role,
     ))
+}
+
+/// A cleared deny must pass readiness if it restores an enabled parent.
+pub(super) async fn clear_enables_inherited_override(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    key: &str,
+    kind: FlagTargetKind,
+    target: Option<&str>,
+) -> AppResult<bool> {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERS, OrgMembership};
+    let rows = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
+    let global = rows
+        .find_one(
+            doc! {"flag_key":key,"definition_id":null,"org_user_id":null,
+            "target_kind":"global","enabled":true},
+        )
+        .session(&mut *session)
+        .await?
+        .is_some();
+    if kind != FlagTargetKind::User {
+        return Ok(kind == FlagTargetKind::Org && global);
+    }
+    let actor = target.ok_or_else(|| AppError::BadRequest("Missing user target".into()))?;
+    let mut cursor = db
+        .collection::<OrgMembership>(MEMBERS)
+        .find(doc! {"member_user_id":actor,"revoked_at":null})
+        .session(&mut *session)
+        .await?;
+    let memberships: Vec<OrgMembership> = cursor.stream(&mut *session).try_collect().await?;
+    if memberships.is_empty() {
+        return Ok(global);
+    }
+    let orgs: Vec<_> = memberships.iter().map(|m| &m.org_user_id).collect();
+    let mut cursor = rows
+        .find(doc! {"flag_key":key,"definition_id":null,"org_user_id":{"$in":orgs}})
+        .session(&mut *session)
+        .await?;
+    let mut by_org: HashMap<String, Vec<FeatureFlagOverride>> = HashMap::new();
+    while let Some(row) = cursor.next(&mut *session).await.transpose()? {
+        if let Some(org) = &row.org_user_id {
+            by_org.entry(org.clone()).or_default().push(row);
+        }
+    }
+    Ok(memberships.iter().any(|m| {
+        let overrides = by_org.get(&m.org_user_id).map_or(&[][..], Vec::as_slice);
+        !resolve_definitions_from_overrides([(key, global, None)], &[], overrides, actor, m.role)
+            .is_empty()
+    }))
 }
 
 /// Resolve enabled-flag keys for a user in the personal (non-org) context.
@@ -1081,6 +1292,53 @@ pub async fn resolve_personal_features(
     ))
 }
 
+/// Resolve just the built-in diagnostics flag, sharing its override snapshot
+/// with the global kill switch. No definition inventory or per-org fan-out.
+pub(crate) async fn resolve_crash_reporting(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<(bool, bool)> {
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+    let mut scopes = vec![bson::Bson::Null];
+    scopes.extend(
+        memberships
+            .iter()
+            .map(|m| bson::Bson::String(m.org_user_id.clone())),
+    );
+    let rows: Vec<FeatureFlagOverride> = db
+        .collection(COLLECTION_NAME)
+        .find(doc! {
+            "flag_key": CRASH_REPORTS_FLAG_KEY,
+            "definition_id": null,
+            "org_user_id": {"$in": scopes}
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let (org, platform): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.org_user_id.is_some());
+    let killed = platform
+        .iter()
+        .any(|r| r.target_kind == FlagTargetKind::Global && r.target_key.is_none() && !r.enabled);
+    let roles: Vec<_> = memberships
+        .into_iter()
+        .map(|m| (m.org_user_id, m.role))
+        .collect();
+    let enabled = resolve_personal_definitions(
+        [(CRASH_REPORTS_FLAG_KEY, false, None)],
+        &platform,
+        &org,
+        &roles,
+        user_id,
+    )
+    .iter()
+    .any(|k| k == CRASH_REPORTS_FLAG_KEY);
+    Ok((enabled, killed))
+}
+
+pub async fn oauth_refresh_client_auth_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &OAUTH_REFRESH_CLIENT_AUTH_FLAG).await
+}
+
 /// Signup has no user or organization yet, so only the global override applies.
 pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &INVITATION_CODE_FLAG).await
@@ -1094,6 +1352,14 @@ pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<boo
 /// Resolve live for each retry pass; turning off shared Lago writes needs no redeploy.
 pub async fn cma_sandbox_rate_sync_enabled(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &CMA_SANDBOX_RATE_SYNC_FLAG).await
+}
+
+pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &APP_TOKEN_MANAGEMENT_FLAG).await
+}
+
+pub async fn oauth_exact_redirects_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &OAUTH_EXACT_REDIRECTS_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
@@ -1496,6 +1762,9 @@ async fn upsert_override_row(
             AppError::Internal("feature flag override upsert did not return the row".to_string())
         })?;
 
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -1579,6 +1848,9 @@ pub async fn set_platform_override(
                 "platform feature flag override upsert did not return the row".to_string(),
             )
         })?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -1604,6 +1876,9 @@ pub async fn clear_platform_override(
             "target_key": target_key,
         })
         .await?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -1658,6 +1933,9 @@ pub async fn clear_platform_org_override(
             "target_key": bson::Bson::Null,
         })
         .await?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -3311,9 +3589,15 @@ mod tests {
         assert_eq!(
             shipped,
             vec![
+                "auth:oauth-refresh-client-auth-v1",
+                "channels:messenger",
+                "channels:instagram",
                 "auth:invitation-code",
+                "auth:oauth-exact-redirects-v1",
+                "auth:app-token-management-v1",
                 "mobile:new-domains",
                 "auth:mobile-mfa",
+                "auth:staging-qr-login",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
@@ -3325,9 +3609,12 @@ mod tests {
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:turn-handoff",
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
+                "approval:org-service-named-approvers-v1",
                 "assistant:channel-media",
+                "assistant:pdf-vision",
                 "assistant:channel-guest-media",
                 "assistant:attachment-writes",
                 "assistant:live-turn-gate",
@@ -3340,6 +3627,7 @@ mod tests {
                 "assistant:agent-learning",
                 "assistant:notifications",
                 "assistant:org-agents",
+                "assistant:org-agent-access-lists-v1",
                 "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",
                 "assistant:voice",
@@ -3353,6 +3641,7 @@ mod tests {
                 "experimental:cma-sandbox-rate-sync",
                 "experimental:remote-machines",
                 "services:monitoring",
+                "diagnostics:crash-reports",
                 "inference:platform-models",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
@@ -3365,6 +3654,12 @@ mod tests {
                 "nyxbot:gateway-aurinko",
                 "nyxbot:gateway-custom-event",
             ]
+        );
+        assert!(
+            !find_flag(CRASH_REPORTS_FLAG_KEY)
+                .expect("crash reporting flag is registered")
+                .default_enabled,
+            "crash reporting must default to off"
         );
         assert!(
             !find_flag(NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY)
@@ -4043,6 +4338,7 @@ mod tests {
     #[test]
     fn channel_media_attachment_writes_and_generated_artifacts_are_registered_default_off() {
         for key in [
+            TURN_HANDOFF_FLAG_KEY,
             ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
             ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
             ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,

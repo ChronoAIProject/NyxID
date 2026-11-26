@@ -645,6 +645,21 @@ NyxID control header is never forwarded to the provider. Opted-in calls return
 the same occurrence. Server-owned watches and voice continuations retain their existing
 durable source lifecycle. They do not borrow a foreground request's waiter.
 
+For a connected approval, callers can send `X-NyxID-Approval-Wait-Seconds`
+with one decimal integer from 10 through 300. The wait and the card expire
+together, measured from request receipt, at the shorter of that budget and
+the configured approval timeout. Existing route-specific deadlines still apply.
+Omitting the header uses the existing connected wait. An invalid or repeated
+value returns HTTP 400 before approval creation. On an eligible v2 proposal,
+`X-NyxID-Approval-Mode: async` takes precedence over a valid wait budget.
+NyxID consumes both control headers before dispatch.
+
+`nyxid proxy request` requests async approval and supplies an 80-second
+connected wait budget. Use `--approval-wait <secs>` to change the budget or
+`--no-approval-wait` to use the server's connected wait. A pending v2 response
+prints the request ID and exits with code 2. Run `nyxid approval status <id>`
+with the original credential to read the decision and execution result.
+
 For opted-in requests the approval-required response carries the opaque request ID. Poll
 `GET /api/v1/approvals/requests/{id}/status` with the **same parent key, login child
 (if any), and actor**. The additive `execution` field reports state, a safe failure
@@ -800,9 +815,12 @@ provider bodies or text enter the event. Decision causes distinguish:
   `additional_floor_required`.
 - `hard_denial`: explicit policy/ceiling, revoked or invalid permission, unsupported
   version, used claim, dead task, resource denial or ineligible decider. A marked
-  resume that no longer covers refuses; it cannot fall back to Full.
+  resume that no longer covers refuses. A rejected or expired review reports
+  `proposal_not_live`. A duplicate submission that finds an approved occurrence
+  reports `occurrence_already_reviewed` and keeps the original review handle.
 - `operational_error`: unavailable authority/readiness/enrollment resolution,
-  candidate overflow, required resource verification, uncertain outcome or
+  candidate overflow, required resource verification, an uncertain outcome
+  (including a retry that finds an `unknown` receipt), or
   `admission_abandoned` when a started admission future is dropped.
 - `legacy`: a stale-positive hint resolved off, unsupported source/transport, or
   no eligible floor. This is not a denial of the ordinary legacy path.
@@ -865,7 +883,7 @@ and is capped by the original task and reply-source deadline.
 
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only
-references, not another copy of the answer. Version-5 deliveries keep a plan
+references, not another copy of the answer. Deliveries in versions 5 and 6 keep a plan
 fingerprint, part count, confirmed-prefix position and receipt identifiers only.
 Their 180-second preparation lease uses MongoDB time and is recoverable until
 an exact claim/part fence commits `dispatching` immediately before provider I/O.
@@ -874,7 +892,10 @@ prefix atomically; recovery sends only the remaining suffix. A reclaimed lease
 fences the original preparer. `dispatching` is irreversible: a crash after that
 boundary, including acceptance without a saved receipt, becomes `unknown` and
 is never automatically resent. Source policy, task epoch, enrollment and
-readiness are fenced again before release. A completed task may release its stored receipt;
+readiness are fenced again before release. A pre-effect authority refusal
+finishes as `refused` with a skipped audit. A validation database error leaves
+an owned `preparing` part eligible for recovery. Only an occurrence in
+`dispatching` can settle as an unknown send. A completed task may release its stored receipt;
 a cancelled task or changed epoch may not. The original terminal stream/native
 replay claim is never reopened. Ordinary initial answers keep their existing
 transport behavior.
@@ -884,7 +905,11 @@ inbound message/topic, including sources with a sealed target; there is no
 fallback to the gateway or a newer local message. Native receipts use a distinct
 occurrence key on the original gateway event. Eligible native receipts retain
 the 29-minute bound and exact native event; no latest-event, proactive-send or alternate-destination fallback is
-allowed. Receipts are text-only; attachments remain accessible in the web thread.
+allowed. A confirmed native side part commits its receipt and promotes the
+occurrence to version 6 atomically. Workers that lease versions 4 and 5 skip the
+promoted occurrence. A remaining side part requires the event's side-message
+capability. A confirmed legacy prefix keeps its version, plan and event-reply
+route. Receipts are text-only; attachments remain accessible in the web thread.
 Expired/refused/unknown delivery is recovered through authenticated web history.
 Terminal outbox metadata is retained for at most 24 hours; TTL is cleanup only.
 

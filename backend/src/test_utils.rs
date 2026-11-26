@@ -31,6 +31,19 @@ use crate::services::ssh_service::SshSessionManager;
 
 mod mongo_readiness;
 
+// MongoDB uses real sockets. Suppress Tokio's automatic clock jumps while I/O
+// is pending so fixtures can advance their timers at known protocol boundaries.
+pub(crate) async fn with_manual_clock<T>(future: impl std::future::Future<Output = T>) -> T {
+    let (release, hold) = tokio::sync::oneshot::channel::<()>();
+    let guard = tokio::task::spawn_blocking(move || hold.blocking_recv());
+    tokio::time::pause();
+    let result = future.await;
+    tokio::time::resume();
+    release.send(()).unwrap();
+    guard.await.unwrap().unwrap();
+    result
+}
+
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_MAX_NAME_LEN: usize = 63;
 const TEST_DB_CREATED_AT_HEX_LEN: usize = 16;
@@ -287,6 +300,12 @@ pub(crate) async fn connect_test_database_with_command_handler(
     Some(db)
 }
 
+pub(crate) fn selected_test_database_uri() -> &'static str {
+    TEST_DB_PINNED_URI
+        .get()
+        .expect("fixture pins its selected URI")
+}
+
 /// Concern assertions need replica discovery: the driver's Single topology
 /// legitimately sends primaryPreferred even for an explicitly Primary handle.
 /// Retain the ordinary fixture guard until this discovered client is dropped.
@@ -297,9 +316,7 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
     let fixture = connect_test_database(prefix)
         .await
         .expect("Mongo8 fixture required");
-    let uri = TEST_DB_PINNED_URI
-        .get()
-        .expect("fixture pins its selected URI");
+    let uri = selected_test_database_uri();
     let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
     options.direct_connection = Some(false);
     options.server_selection_timeout = Some(Duration::from_secs(30));
@@ -347,20 +364,27 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
 }
 
 /// Wait, within the shared readiness budget, until majority-acknowledged
-/// writes and linearizable reads on this database answer within 100 ms.
+/// writes and linearizable reads on this database answer within 150 ms for
+/// three consecutive probes, including a gap between probes.
 ///
 /// Tests that exercise production admission gates (the 250 ms analytics
 /// dispatch transaction, the 200 ms linearizable consent read) assert those
-/// deadlines as written. A CI runner can start such a test while MongoDB is
-/// still stalled on its own journal flushes and the per-test database drop
-/// backlog, which no nextest slot reservation prevents. This establishes the
-/// healthy-server precondition first; the measured call still runs once
-/// against the unchanged production bounds.
+/// deadlines as written. An idle default-config single-node replica set has a
+/// roughly 100 ms journal cadence: 60 quiet majority-write/linearizable-read
+/// probes measured 102–113 ms (p50 106 ms, p90 111 ms), with none at or below
+/// 100 ms. The 150 ms precondition accommodates that cadence while retaining
+/// margin below both production bounds and rejecting stalls lasting seconds.
+/// A CI runner can start such a test while MongoDB is still stalled on its
+/// own journal flushes and the per-test database drop backlog, which no
+/// nextest slot reservation prevents. This establishes the healthy-server
+/// precondition first; the measured call still runs once against the
+/// unchanged production bounds.
 pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
     const BUDGET: Duration = Duration::from_secs(90);
-    const RESPONSIVE: Duration = Duration::from_millis(100);
+    const RESPONSIVE: Duration = Duration::from_millis(150);
     let started = std::time::Instant::now();
     let probes = db.collection::<Document>("__readiness");
+    let mut responsive_probes = 0;
     loop {
         let id = Uuid::new_v4().to_string();
         let probe = std::time::Instant::now();
@@ -374,7 +398,12 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
             .await;
         let elapsed = probe.elapsed();
         if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
-            return;
+            responsive_probes += 1;
+            if responsive_probes == 3 {
+                return;
+            }
+        } else {
+            responsive_probes = 0;
         }
         assert!(
             started.elapsed() < BUDGET,
@@ -383,7 +412,7 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
             write.is_ok(),
             read.is_ok()
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1869,6 +1898,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 /// config's side-effect-free fields (encryption key, limits, feature flags).
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
+        crash_reporting: crate::config::CrashReportingConfig::default(),
         port: 3001,
         shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
         auth_device_eight_char_codes: false,
@@ -1949,6 +1979,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         android_app_package: None,
         android_app_sha256_cert_fingerprints: Vec::new(),
         mobile_app_return_schemes: Vec::new(),
+        mobile_social_redirect_uris: Vec::new(),
         apns_sandbox: true,
         key_provider: "local".to_string(),
         aws_kms_key_arn: None,
@@ -2194,7 +2225,6 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
         internal_auth,
         crate::services::node_ws_manager::node_proxy_ws_message_size_limit(
             config.proxy_max_body_size,
@@ -2204,7 +2234,6 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let developer_webhook_dispatcher = Arc::new(
         crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
             encryption_keys.clone(),
         ),
     );
@@ -2218,8 +2247,12 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        jobs: Arc::new(crate::services::job_health::Jobs::new(&config)),
+        app_management_observations: Arc::default(),
+        staging_qr: crate::services::staging_qr::Peer::Disabled,
         refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),
+        crash_reports: Arc::new(Default::default()),
         local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
@@ -2931,6 +2964,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         requires_user_credential: false,
         is_active: true,
         created_by: "system".to_string(),
+        caller_token_approved_destinations: Default::default(),
+        approved_private_base_url: None,
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,
@@ -3331,6 +3366,23 @@ pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, 
         present,
         "notification {id} presence after source transition"
     );
+}
+
+/// A valid unencrypted one-page PDF shared by media ingestion and Base wire tests.
+pub fn test_pdf() -> Vec<u8> {
+    use lopdf::{Document, Object, dictionary};
+    let mut pdf = Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
+    pdf.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1}),
+    );
+    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
 }
 
 #[cfg(test)]

@@ -1,12 +1,16 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use super::audit_service::required::{self, TextField};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
+use crate::models::downstream_service::COLLECTION_NAME as CATALOG;
+use crate::models::oauth_client::COLLECTION_NAME as CLIENTS;
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 
 pub(crate) const REVOCATION_FENCES: &str = "consent_revocation_fences";
@@ -362,6 +366,7 @@ async fn write_consent_in_session(
         scopes: normalized_scopes,
         revision,
         write_version: Some(Uuid::new_v4().to_string()),
+        reviewed_redirect_hash: None,
         issuance_fence: pure_broadening
             .then(|| existing.and_then(|consent| consent.issuance_fence.clone()))
             .flatten(),
@@ -688,6 +693,7 @@ pub fn fingerprint(consent: &Consent) -> AppResult<String> {
     let mut document =
         bson::to_document(&snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
     document.remove("write_version");
+    document.remove("reviewed_redirect_hash");
     let bytes = bson::to_vec(&document).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
@@ -748,6 +754,30 @@ pub async fn replace_incremental_consent_with_machine(
         })
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Record a signed browser decision only while its consent snapshot is current.
+pub async fn record_reviewed_redirect(
+    db: &mongodb::Database,
+    consent: &Consent,
+    redirect_uri: &str,
+) -> AppResult<()> {
+    let digest = crate::crypto::token::hash_token(redirect_uri);
+    if consent.reviewed_redirect_hash.as_deref() == Some(digest.as_str()) {
+        return Ok(());
+    }
+    let result = db
+        .collection::<Consent>(CONSENTS)
+        .update_one(
+            version_filter(consent),
+            doc! {"$set": {"reviewed_redirect_hash": digest}},
+        )
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    if result.matched_count != 1 {
+        return Err(grant_changed());
+    }
+    Ok(())
 }
 
 /// Check if a user has granted consent for the requested scopes to a client.
@@ -896,6 +926,7 @@ pub struct ConsentRevocationResult {
 }
 
 /// List all consents for a user.
+#[cfg(test)]
 pub async fn list_user_consents(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Consent>> {
     let consents: Vec<Consent> = db
         .collection::<Consent>(CONSENTS)
@@ -905,6 +936,136 @@ pub async fn list_user_consents(db: &mongodb::Database, user_id: &str) -> AppRes
         .await?;
 
     Ok(consents)
+}
+
+pub struct ConsentServiceDisplay {
+    pub slug: Option<String>,
+    pub label: String,
+    pub catalog_service_name: Option<String>,
+    pub disabled: bool,
+}
+
+pub struct ConsentListDisplay {
+    pub consents: Vec<Consent>,
+    pub client_names: BTreeMap<String, String>,
+    pub services: BTreeMap<String, ConsentServiceDisplay>,
+}
+
+/// Resolve the authorized consent inventory and all display names together.
+pub async fn list_user_consent_displays(
+    db: &mongodb::Database,
+    user: &str,
+    allow_org_access: bool,
+) -> AppResult<ConsentListDisplay> {
+    #[derive(Deserialize)]
+    struct ClientName {
+        #[serde(rename = "_id")]
+        id: String,
+        client_name: String,
+    }
+    #[derive(Deserialize)]
+    struct CatalogName {
+        #[serde(rename = "_id")]
+        id: String,
+        name: String,
+    }
+
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .await?;
+    let mut cursor = db
+        .collection::<Consent>(CONSENTS)
+        .find(doc! {"user_id": user})
+        .session(&mut session)
+        .await?;
+    let consents: Vec<Consent> = cursor.stream(&mut session).try_collect().await?;
+    let mut client_names = BTreeMap::new();
+    let client_ids: Vec<_> = consents
+        .iter()
+        .map(|c| c.client_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !client_ids.is_empty() {
+        let mut cursor = db
+            .collection::<ClientName>(CLIENTS)
+            .find(doc! {"_id": {"$in": client_ids}})
+            .projection(doc! {"_id": 1, "client_name": 1})
+            .session(&mut session)
+            .await?;
+        client_names = cursor
+            .stream(&mut session)
+            .map_ok(|row| (row.id, row.client_name))
+            .try_collect()
+            .await?;
+    }
+
+    let service_ids: Vec<_> = consents
+        .iter()
+        .flat_map(|consent| consent.allowed_service_ids.iter().flatten())
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let services = super::service_display::load_in_session(
+        db,
+        user,
+        &service_ids,
+        allow_org_access,
+        &mut session,
+    )
+    .await?;
+    let catalog_ids: Vec<_> = services
+        .values()
+        .filter_map(|row| row.catalog_service_id.as_deref())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut catalog_names = BTreeMap::new();
+    if !catalog_ids.is_empty() {
+        let mut cursor = db
+            .collection::<CatalogName>(CATALOG)
+            .find(doc! {"_id": {"$in": catalog_ids}})
+            .projection(doc! {"_id": 1, "name": 1})
+            .session(&mut session)
+            .await?;
+        catalog_names = cursor
+            .stream(&mut session)
+            .map_ok(|row| (row.id, row.name))
+            .try_collect()
+            .await?;
+    }
+    session.abort_transaction().await?;
+    let services = services
+        .into_iter()
+        .map(|(id, row)| {
+            let catalog_service_name = row
+                .catalog_service_id
+                .as_ref()
+                .and_then(|id| catalog_names.get(id))
+                .cloned();
+            let label = row
+                .label
+                .or_else(|| row.slug.clone())
+                .unwrap_or_else(|| "—".to_owned());
+            (
+                id,
+                ConsentServiceDisplay {
+                    slug: row.slug,
+                    label,
+                    catalog_service_name,
+                    disabled: row.disabled,
+                },
+            )
+        })
+        .collect();
+    Ok(ConsentListDisplay {
+        consents,
+        client_names,
+        services,
+    })
 }
 
 /// List all consents for a client.
@@ -1605,11 +1766,13 @@ mod tests {
                 is_active: true,
                 delegation_scopes: String::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: Some(user_id.clone()),
                 default_service_catalog_slugs: Vec::new(),
@@ -1712,13 +1875,14 @@ mod tests {
             .unwrap();
         assert!(!other_client.revoked);
 
-        let refresh_result = crate::services::token_service::refresh_tokens(
+        let refresh_result = crate::services::token_service::refresh_tokens_for_client(
             &db,
             &config,
             &jwt_keys,
             &refresh_jwt,
             None,
             None,
+            crate::services::token_service::RefreshClient::Identified(&client_id, None),
         )
         .await
         .map_err(AppError::into_refresh_source);

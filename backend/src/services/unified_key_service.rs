@@ -1027,10 +1027,9 @@ async fn create_key_inner(
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
 
-        if crate::services::retired_service_service::is_retired(&svc) {
-            return Err(AppError::NotFound(format!(
-                "Catalog service '{slug}' not found"
-            )));
+        super::catalog_service::require_connection_access(db, user_id, &svc).await?;
+        if user_id != actor_user_id {
+            super::catalog_service::require_connection_access(db, actor_user_id, &svc).await?;
         }
 
         if matches!(
@@ -1414,21 +1413,6 @@ async fn create_key_inner(
             }
         };
 
-        // Auto-sync NodeServiceBinding for the catalog service. The binding
-        // is owned by the org (when target_org_id is set), but the node is
-        // owned by the actor making the request -- pass both so the node
-        // permission check uses the actor while the binding row is created
-        // under the org.
-        node_service::sync_node_binding_for_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            Some(&svc.id),
-            node_id,
-            None,
-        )
-        .await?;
-
         let (
             ssh_host,
             ssh_port,
@@ -1499,7 +1483,12 @@ async fn create_key_inner(
 
         let now = Utc::now();
         let base_url = ssh_service::target_base_url(&built_ssh_config.host, built_ssh_config.port);
-        let empty_credential = encryption_keys.encrypt(b"").await?;
+        let empty_credential = super::catalog_credential_record_service::empty_credential(
+            encryption_keys,
+            &ds_id,
+            user_id,
+        )
+        .await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
             secret_context_versions: Default::default(),
@@ -1526,7 +1515,7 @@ async fn create_key_inner(
             auth_type: Some("ssh".to_string()),
             auth_scheme: None,
             auth_key_name: String::new(),
-            credential_encrypted: empty_credential.clone(),
+            credential_encrypted: empty_credential,
             platform_key: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -1537,6 +1526,8 @@ async fn create_key_inner(
             requires_user_credential: false,
             is_active: true,
             created_by: user_id.to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -1660,19 +1651,6 @@ async fn create_key_inner(
                 Err(error) => return Err(error),
             }
         };
-
-        // Auto-sync NodeServiceBinding for the custom SSH service. See
-        // comment in the catalog branch above for why both user_id and
-        // actor_user_id are passed.
-        node_service::sync_node_binding_for_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            Some(&ds_id),
-            node_id,
-            None,
-        )
-        .await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -1826,17 +1804,6 @@ async fn create_key_inner(
                 Err(error) => return Err(error),
             }
         };
-
-        // Auto-sync NodeServiceBinding (no-op for custom HTTP without catalog_service_id).
-        node_service::sync_node_binding_for_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            None,
-            node_id,
-            None,
-        )
-        .await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -3705,10 +3672,13 @@ pub(crate) async fn disconnect_credentials_with_audit(
         .await?;
     }
 
-    for service in &plan.services {
-        user_service_service::deactivate_user_service(db, owner_id, &actor.user_id, &service.id)
-            .await?;
-    }
+    user_service_service::deactivate_user_services(
+        db,
+        owner_id,
+        &actor.user_id,
+        &excluded_service_ids,
+    )
+    .await?;
 
     let grant_effect_id = (plan.scope == oauth_revocation::RevocationScope::Grant)
         .then(|| uuid::Uuid::new_v4().to_string());
@@ -3800,7 +3770,7 @@ pub(crate) async fn disconnect_credentials_with_audit(
         })
         && let Some(provider_id) = initiating_key.provider_config_id.as_deref()
         && let Some(token) =
-            find_legacy_provider_token_if_last_key(db, owner_id, provider_id).await?
+            find_legacy_provider_token_if_last_key(db, owner_id, provider_id, None).await?
         && let Some((claimed, effect)) =
             claim_disconnect_source(&claim_context, USER_PROVIDER_TOKENS, &token.id, None).await?
     {
@@ -3839,18 +3809,6 @@ pub(crate) async fn disconnect_credentials_with_audit(
             .await?;
         }
     }
-    for service in &plan.services {
-        node_service::sync_node_binding_for_user_service(
-            db,
-            owner_id,
-            &actor.user_id,
-            service.catalog_service_id.as_deref(),
-            None,
-            service.node_id.as_deref(),
-        )
-        .await?;
-    }
-
     let deleted_services: Vec<DeletedKeyEvent> = plan
         .services
         .iter()
@@ -4317,41 +4275,33 @@ async fn find_legacy_provider_token_if_last_key(
     db: &mongodb::Database,
     owner_id: &str,
     provider_id: &str,
+    mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<Option<UserProviderToken>> {
-    let remaining = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-        .count_documents(doc! {
-            "user_id": owner_id,
-            "provider_config_id": provider_id,
-            "connection_id": null,
-            "status": { "$nin": ["revoked", "failed"] },
-            "credential_type": { "$ne": "node_managed" },
-        })
-        .await?;
+    let keys = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS);
+    let count = keys.count_documents(doc! {
+        "user_id": owner_id,
+        "provider_config_id": provider_id,
+        "connection_id": null,
+        "status": { "$nin": ["revoked", "failed"] },
+        "credential_type": { "$ne": "node_managed" },
+    });
+    let remaining = match session.as_deref_mut() {
+        Some(tx) => count.session(tx).await?,
+        None => count.await?,
+    };
     if remaining > 0 {
         return Ok(None);
     }
-    let token = db
-        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-        .find_one(doc! {
-            "user_id": owner_id,
-            "provider_config_id": provider_id,
-            "status": { "$ne": "revoked" },
-        })
-        .await?;
-    Ok(token)
-}
-
-async fn claim_legacy_provider_token_if_last_key(
-    db: &mongodb::Database,
-    owner_id: &str,
-    provider_id: &str,
-) -> AppResult<Option<UserProviderToken>> {
-    match find_legacy_provider_token_if_last_key(db, owner_id, provider_id).await? {
-        Some(token) => {
-            user_token_service::claim_provider_token_by_id(db, owner_id, &token.id).await
-        }
-        None => Ok(None),
-    }
+    let tokens = db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS);
+    let find = tokens.find_one(doc! {
+        "user_id": owner_id,
+        "provider_config_id": provider_id,
+        "status": { "$ne": "revoked" },
+    });
+    Ok(match session {
+        Some(tx) => find.session(tx).await?,
+        None => find.await?,
+    })
 }
 
 /// Authenticate outside the retry transaction; exact BSON CAS makes the
@@ -4981,36 +4931,50 @@ pub async fn revoke_key_if_pending(
     let Some(api_key) = user_api_key_service::find_api_key(db, user_id, ak_id).await? else {
         return Ok(false);
     };
-    let api_key_provider_config_id = api_key.provider_config_id;
-
-    // Atomic gate: flips pending_auth -> revoked in one write. If
-    // the provider callback already flipped to `active`, the filter
-    // misses and we report `false` without touching anything else.
-    let flipped = user_api_key_service::revoke_api_key_if_pending(db, user_id, ak_id).await?;
+    if api_key.status != "pending_auth" {
+        return Ok(false);
+    }
+    let mut edit =
+        user_service_service::prepare_service_deactivation(db, user_id, actor_user_id, service_id)
+            .await?;
+    edit.require_api_key(ak_id);
+    let context = (db, user_id, ak_id, edit);
+    let flipped = super::service_history::transaction::run_send(
+        db,
+        &context,
+        |tx, &(db, user_id, ak_id, ref edit)| {
+            Box::pin(async move {
+                let claim = async {
+                    let Some(key) =
+                        user_api_key_service::claim_api_key_if_pending(db, user_id, ak_id, tx)
+                            .await?
+                    else {
+                        return Ok(false);
+                    };
+                    if let Some(provider) = key.provider_config_id.as_deref()
+                        && let Some(token) =
+                            find_legacy_provider_token_if_last_key(db, user_id, provider, Some(tx))
+                                .await?
+                    {
+                        user_token_service::claim_provider_token_in_session(
+                            db, user_id, &token.id, None, tx,
+                        )
+                        .await?;
+                    }
+                    edit.deactivate_in_transaction(db, tx).await?;
+                    Ok(true)
+                }
+                .await;
+                super::api_key_mutation_service::transaction_result(claim)
+            })
+        },
+    )
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)?;
     if !flipped {
         return Ok(false);
     }
-    if let Some(provider_id) = api_key_provider_config_id.as_deref() {
-        // Pending cleanup remains local-only. Claiming the legacy token here
-        // preserves the previous last-copy cleanup without scheduling remote
-        // work, while retaining the exact-row claim semantics.
-        let _ = claim_legacy_provider_token_if_last_key(db, user_id, provider_id).await?;
-    }
-
-    // API key was in pending_auth and is now revoked (by the atomic
-    // status-filter update above). Tear down the owning UserService
-    // and any node binding to keep the records consistent.
-    user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
-    node_service::sync_node_binding_for_user_service(
-        db,
-        user_id,
-        actor_user_id,
-        svc.catalog_service_id.as_deref(),
-        None,
-        svc.node_id.as_deref(),
-    )
-    .await?;
-
+    user_service_service::cleanup_deactivated_service(db, user_id, service_id).await?;
     Ok(true)
 }
 
@@ -5233,6 +5197,7 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    mod catalog_placeholders;
     mod optional_provider_tests {
         include!("unified_key_service_optional_provider_tests.rs");
     }
@@ -5673,6 +5638,8 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "system".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -6024,7 +5991,7 @@ mod tests {
                 &user_id,
                 &user_id,
                 None,
-                Some("https://api.example.com"),
+                Some("https://127.0.0.1"),
                 "secret-token",
                 "Race Service",
                 None,
@@ -6045,7 +6012,7 @@ mod tests {
                 &user_id,
                 &user_id,
                 None,
-                Some("https://api.example.com"),
+                Some("https://127.0.0.1"),
                 "secret-token",
                 "Race Service",
                 None,
@@ -6196,6 +6163,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_connection_paths_require_current_access() {
+        use crate::services::{assistant_connection_service, connect_link_service, mcp_service};
+        use crate::test_utils::{connect_transaction_test_database, test_user_service};
+
+        let db = connect_transaction_test_database("catalog_connection_access").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &actor,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let nodes = crate::services::node_ws_manager::NodeWsManager::new(30, 100);
+        let mut catalog = sample_catalog_service();
+        catalog.visibility = "private".into();
+        catalog.service_category = "internal".into();
+        catalog.requires_user_credential = false;
+        catalog.auth_method = "none".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &actor).await.unwrap();
+        let connections = db.collection::<UserService>(USER_SERVICES);
+        assert_eq!(
+            connections
+                .count_documents(doc! {"user_id": &actor})
+                .await
+                .unwrap(),
+            0
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(crate::test_utils::test_user_endpoint(
+                "endpoint",
+                &actor,
+                "Existing",
+                &catalog.base_url,
+                None,
+                Some(&catalog.id),
+            ))
+            .await
+            .unwrap();
+        connections
+            .insert_one(test_user_service(
+                "existing",
+                &actor,
+                "existing",
+                "endpoint",
+                Some(&catalog.id),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let unified = create_catalog_key(&db, &keys, &actor, &catalog.slug, "Catalog").await;
+        let hosted = connect_link_service::create(
+            &db,
+            connect_link_service::CreateInput {
+                user_id: actor.clone(),
+                service_slug: catalog.slug.clone(),
+                use_platform_key: None,
+                scopes: vec![],
+                label: None,
+                endpoint_url: None,
+                requested_by: None,
+                callback_url: None,
+                ttl_secs: None,
+                oauth_client_id: None,
+                assistant_intent_locked: false,
+            },
+        )
+        .await;
+        let mcp = mcp_service::connect_service(
+            &db,
+            &keys,
+            &nodes,
+            &actor,
+            &catalog.id,
+            None,
+            None,
+            "https://example.test",
+            None,
+            &[],
+        )
+        .await;
+        let assistant =
+            assistant_connection_service::resolve_catalog(&db, &actor, Some(&catalog.id), None)
+                .await;
+        let existing =
+            crate::services::proxy_service::read_connection_authority(&db, &actor, "existing")
+                .await;
+        let errors = [
+            unified.err(),
+            hosted.err(),
+            mcp.err(),
+            assistant.err(),
+            existing.err(),
+        ];
+        let outcomes = errors
+            .each_ref()
+            .map(|err| err.as_ref().map(AppError::error_code));
+        assert!(
+            errors
+                .iter()
+                .all(|err| matches!(err, Some(AppError::NotFound(_)))),
+            "unified, hosted, MCP, assistant, existing connection error codes: {outcomes:?}"
+        );
+        assert_eq!(
+            connections
+                .count_documents(doc! {"user_id": &actor})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn create_key_uses_explicit_slug_override_for_catalog_services() {
         let Some(db) = connect_test_database("unified_key_service").await else {
             eprintln!("skipping unified_key_service integration test: no local MongoDB available");
@@ -6317,7 +6407,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret-token",
             "Custom Service",
             Some("custom-service"),
@@ -6521,7 +6611,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret-token",
             "Header Service",
             Some("header-service"),
@@ -9682,7 +9772,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth Service",
             Some("no-auth-svc"),
@@ -9750,7 +9840,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Cred",
             None,
@@ -10147,7 +10237,7 @@ mod tests {
             &user_id,
             &user_id,
             Some(&catalog.slug),
-            Some("https://custom.example.com/v2"),
+            Some("https://127.0.0.2/v2"),
             "secret",
             "Override EP",
             None,
@@ -10165,7 +10255,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.endpoint.url, "https://custom.example.com/v2");
+        assert_eq!(result.endpoint.url, "https://127.0.0.2/v2");
     }
 
     #[tokio::test]
@@ -10470,7 +10560,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "With Spec",
             Some("with-spec"),
@@ -10522,7 +10612,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Identity Svc",
             Some("identity-svc"),
@@ -10566,7 +10656,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-a.example.com"),
+            Some("https://127.0.0.1"),
             "secret-a",
             "Service A",
             Some("svc-a"),
@@ -10590,7 +10680,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-b.example.com"),
+            Some("https://127.0.0.2"),
             "secret-b",
             "Service B",
             Some("svc-b"),
@@ -10626,7 +10716,7 @@ mod tests {
         // Verify fields on one of them
         let svc_a = keys.iter().find(|k| k.slug == "svc-a").unwrap();
         assert_eq!(svc_a.label, "Service A");
-        assert_eq!(svc_a.endpoint_url, "https://api-a.example.com");
+        assert_eq!(svc_a.endpoint_url, "https://127.0.0.1");
         assert_eq!(svc_a.auth_method, "bearer");
         assert_eq!(svc_a.status, "active");
         assert!(svc_a.is_active);
@@ -10669,7 +10759,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "my-secret",
             "Get Test",
             Some("get-test"),
@@ -10694,7 +10784,7 @@ mod tests {
         assert_eq!(view.id, created.service.id);
         assert_eq!(view.slug, "get-test");
         assert_eq!(view.label, "Get Test");
-        assert_eq!(view.endpoint_url, "https://api.example.com");
+        assert_eq!(view.endpoint_url, "https://127.0.0.1");
         assert_eq!(view.auth_method, "bearer");
         assert_eq!(view.credential_type, "api_key");
         assert_eq!(view.status, "active");
@@ -10718,7 +10808,7 @@ mod tests {
             &user_a,
             &user_a,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "User A Svc",
             Some("user-a-svc"),
@@ -10821,7 +10911,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-a.example.com"),
+            Some("https://127.0.0.1"),
             "secret-a",
             "Keep",
             Some("keep-svc"),
@@ -10845,7 +10935,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api-b.example.com"),
+            Some("https://127.0.0.2"),
             "secret-b",
             "Delete",
             Some("delete-svc"),
@@ -11120,7 +11210,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "old-secret",
             "Rotate Test",
             Some("rotate-test"),
@@ -11175,7 +11265,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "Upgrade Test",
             Some("upgrade-test"),
@@ -11334,7 +11424,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "Reject Test",
             Some("reject-test"),
@@ -11385,7 +11475,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "No Changes",
             Some("no-changes"),
@@ -11440,7 +11530,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Active Key",
             Some("active-key"),
@@ -11491,7 +11581,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth",
             Some("no-auth"),
@@ -11535,7 +11625,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth Reconcile",
             Some("noauth-reconcile"),
@@ -11579,7 +11669,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "my-secret",
             "Has Cred Reconcile",
             Some("hascred-reconcile"),
@@ -11806,7 +11896,7 @@ mod tests {
             &user_id,
             &user_id,
             Some("api-supabase"),
-            Some("https://demo.supabase.co"),
+            Some("https://127.0.0.1"),
             "sb_secret_test",
             "Personal Supabase",
             None,
@@ -11824,7 +11914,7 @@ mod tests {
         .await
         .expect("Supabase catalog connection should be created");
 
-        assert_eq!(result.endpoint.url, "https://demo.supabase.co/rest/v1");
+        assert_eq!(result.endpoint.url, "https://127.0.0.1/rest/v1");
         assert_eq!(result.service.auth_method, "header");
         assert_eq!(result.service.auth_key_name, "apikey");
         assert!(result.api_key.is_some());
@@ -12015,7 +12105,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Empty Cred",
             Some("empty-cred"),
@@ -12067,7 +12157,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret-key-value",
             "Query Auth Svc",
             Some("query-auth-svc"),
@@ -12106,7 +12196,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "secret",
             "Query Empty Key",
             Some("query-empty-key"),
@@ -12145,7 +12235,7 @@ mod tests {
             &user_id,
             &user_id,
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             "",
             "No Auth Revoke",
             Some("noauth-revoke"),

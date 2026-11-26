@@ -224,11 +224,14 @@ feature flags requires deployment readiness:
 | Capability | Existing boundary retained |
 | --- | --- |
 | `channel:discord-gateway` | Relay socket ownership and gateway transport handoff; every transport writer must wait for relay shutdown before remote setup. The socket worker additionally requires live readiness at acquisition and renewal. |
+| `approval:org-service-named-approvers-v1` | Organization service approver authoring. Effective enables, clear-that-enables and every approver-list PUT require activation and support from every live generation. |
 | `assistant:org-agents` | Creation/configuration and use-oriented organization-agent discovery gate (`delegation_summaries`); direct use retains live membership/resource ACLs. |
+| `assistant:org-agent-access-lists-v1` | Organization specialist access-list authoring. Effective flag enables, clearing an override that enables authoring, and each policy PUT require durable activation and live fleet support. |
 | `assistant:operation-scopes` | Scope editing gate; stored scopes are enforced during authentication and execution with the flag off. |
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
+| `billing:recipient-schedules-v1` | Recipient-cycle schedule readers and billing workers. New authoring, resuming a paused recipient schedule and the overview capability require this readiness plus allocation authoring. Pause every recipient schedule and drain upgraded workers before any binary rollback. |
 | `permissions:execution-v1` | Explicit execution-contract reader. Per-person activation requires reader/dispatch/authoring; broad activation additionally requires enrollment readiness below. See [contract](EXECUTION_PERMISSIONS.md). |
 | `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
 | `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Every live writer must advertise support before activation. |
@@ -302,6 +305,12 @@ roster or drain declaration is required. Changing an env value to
 false, losing a heartbeat, or waiting for a lease does not downgrade enforcement. A deliberate rollback requires full
 maintenance drain and an explicit deployment/data recovery plan; the product
 does not automatically clear this marker or provide a live downgrade command.
+
+## Named approvers for organization services
+
+`approval:org-service-named-approvers-v1` defaults off. Deploy the enforcement readers to every serving API and worker generation. In `GET /api/v1/admin/security-readiness`, check that this capability has `activated: true` and `serving_ready: true`, then enable the flag for the intended cohort. The approvers GET reports the effective availability for the requesting Admin. Loss of live support closes PUT even for an already-enabled cohort.
+
+To stop edits, disable the flag. Saved lists, request revisions and reusable grant cutoffs remain enforced. After the first named list is saved, the oldest supported rollback target is a release containing the #2996 readers. Rolling back to that release removes the authoring endpoints.
 
 ## Required approval and delivery
 
@@ -475,3 +484,21 @@ look is not evidence of rollback. Initial heartbeat publication precedes workers
 and HTTP serving. The observation-floor limitations above still apply to invisible
 pre-protocol builds. No lease checkpoint, manual activation or provider total can
 certify missing history. Delivery, admission and money are unaffected.
+
+## Organization specialist access lists
+
+Deploy the enforcing readers and workers before the authoring release. Keep
+`assistant:org-agent-access-lists-v1` off until every process that can admit,
+execute or deliver specialist work enforces saved restrictions. On the
+authoring release, check the capability’s `serving_ready` in
+`GET /api/v1/admin/security-readiness`, then enable the flag for the desired
+cohort. The PUT resolves the flag for the Admin in the specialist’s owning
+organization. A missing activation or an unsupported live generation makes
+GET report `authoring_available: false` and PUT return HTTP 403.
+
+To roll back, disable authoring at the effective scopes and deploy the
+reader release (#2977) or another release that enforces both lists and their
+revisions. Disabling the flag preserves each saved policy and outstanding
+revocations. Keep pre-reader replicas out of ingress, execution and delivery
+while restricted data or work exists. Heartbeats can assess only observed
+generations. See [organization specialist agents](ORG_AGENTS.md).

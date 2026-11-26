@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useSyncExte
 import { analyticsConsentState, type ConsentSnapshot } from './analyticsConsentState';
 import { createConsentPersistence } from './consentPersistence';
 const STORAGE_KEY = 'nyxid.telemetry_consent';
-export type MobileConsentContextValue = ConsentSnapshot & { setConsent(enabled: boolean): void; clearConsent(): void; retryPersistence(): void };
+export type MobileConsentContextValue = ConsentSnapshot & { setConsent(enabled: boolean, policy?:1|2): void; clearConsent(): void; retryPersistence(): void };
 const MobileConsentContext = createContext<MobileConsentContextValue | null>(null);
 export function MobileConsentProvider({ children }: PropsWithChildren) {
   const state = useSyncExternalStore(analyticsConsentState.subscribe, analyticsConsentState.getSnapshot);
@@ -15,7 +15,7 @@ export function MobileConsentProvider({ children }: PropsWithChildren) {
     });
     return () => { cancelled = true; };
   }, []);
-  const setConsent = useCallback((enabled: boolean) => { analyticsConsentState.setConsent(enabled); void persist(); }, []);
+  const setConsent = useCallback((enabled: boolean, policy:1|2 = 1) => { analyticsConsentState.setConsent(enabled, policy); void persist(); }, []);
   const clearConsent = useCallback(() => { analyticsConsentState.clearConsent(); void persist(); }, []);
   const value = useMemo(() => ({ ...state, setConsent, clearConsent, retryPersistence: () => { void persist(); } }), [state, setConsent, clearConsent]);
   return <MobileConsentContext.Provider value={value}>{children}</MobileConsentContext.Provider>;

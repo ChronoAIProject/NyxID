@@ -1523,6 +1523,7 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
     // to the usual checks (what guests may do with a service is decided
     // before, from the owner's guest access).
     let target = crate::services::mcp_approval::McpApprovalTarget {
+        connection_id: None,
         service_id: uuid::Uuid::new_v4().to_string(),
         service_name: "Example".into(),
         service_slug: "example".into(),
@@ -1534,19 +1535,34 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
         operation_descriptor::SshOperationKind::Exec,
         Some("ls"),
     );
-    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
-        .await
-        .unwrap_err();
+    let refused =
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)), None)
+            .await
+            .unwrap_err();
     assert_eq!(result(refused, true).await["error"], "owner_only");
-    authorize_mcp_operation(&f.state, &auth, target.clone(), &delete, Some(json!(1)))
-        .await
-        .unwrap_or_else(|_| panic!("DELETE"));
+    authorize_mcp_operation(
+        &f.state,
+        &auth,
+        target.clone(),
+        &delete,
+        Some(json!(1)),
+        None,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("DELETE"));
     for method in ["GET", "POST", "PUT", "PATCH"] {
         let operation =
             operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
-        authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
-            .await
-            .unwrap_or_else(|_| panic!("{method}"));
+        authorize_mcp_operation(
+            &f.state,
+            &auth,
+            target.clone(),
+            &operation,
+            Some(json!(1)),
+            None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{method}"));
     }
 }
 
@@ -1709,6 +1725,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.clone(),
@@ -1767,6 +1784,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
             crate::models::approval_grant::COLLECTION_NAME,
         )
         .insert_one(crate::models::approval_grant::ApprovalGrant {
+            org_policy: None,
             execution_review: None,
             execution_last_used_at: None,
             execution_use: None,
@@ -3073,6 +3091,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: catalog.id.clone(),
@@ -3097,6 +3116,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
                     crate::models::approval_grant::COLLECTION_NAME,
                 )
                 .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    org_policy: None,
                     execution_review: None,
                     execution_last_used_at: None,
                     execution_use: None,
@@ -5220,6 +5240,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
             .db
             .collection::<ServiceApprovalConfig>(CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.clone(),
@@ -5494,6 +5515,7 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
                 .db
                 .collection(configs::COLLECTION_NAME)
                 .insert_one(configs::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: service_id.clone(),
@@ -5631,28 +5653,24 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         };
-        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::select! {
-                response = &mut action => {
-                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                        .await
-                        .unwrap();
-                    let body: Value = serde_json::from_slice(&bytes).unwrap();
-                    // These fixtures send no secret-bearing arguments. Report
-                    // only the tool's safe error text, never auth/fixture state.
-                    panic!(
-                        "{dispatch} ({credential_header}) returned before service approval: {}",
-                        body["result"]["content"][0]["text"]
-                            .as_str()
-                            .or_else(|| body["message"].as_str())
-                            .unwrap_or("missing error result")
-                    );
-                }
-                pending = pending_approval => pending,
+        let pending = tokio::select! {
+            response = &mut action => {
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                // These fixtures send no secret-bearing arguments. Report
+                // only the tool's safe error text, never auth/fixture state.
+                panic!(
+                    "{dispatch} ({credential_header}) returned before service approval: {}",
+                    body["result"]["content"][0]["text"]
+                        .as_str()
+                        .or_else(|| body["message"].as_str())
+                        .unwrap_or("missing error result")
+                );
             }
-        })
-        .await
-        .expect("tool must reach service approval before cancellation");
+            pending = pending_approval => pending,
+        };
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         receipts::cancel(&f.state, &f.owner, &key).await.unwrap();
         f.state
@@ -5664,9 +5682,7 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
             )
             .await
             .unwrap();
-        let response = tokio::time::timeout(std::time::Duration::from_secs(5), action)
-            .await
-            .expect("approved cancelled request must resume and refuse dispatch");
+        let response = action.await;
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -6154,6 +6170,316 @@ async fn guest_operations_do_not_follow_redirects_or_mint_delegation_tokens() {
     f.state.db.drop().await.unwrap();
 }
 
+async fn sheets_connection(f: &Fixture, url: &str) -> String {
+    use crate::services::assistant_team_service as team;
+    let db = &f.state.db;
+    let id = connected(db, &f.owner, "sheets", url).await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "api-google-sheets".into();
+    catalog.base_url = url.into();
+    db.collection::<crate::models::downstream_service::DownstreamService>(
+        crate::models::downstream_service::COLLECTION_NAME,
+    )
+    .insert_one(&catalog)
+    .await
+    .unwrap();
+    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    let spec = crate::services::catalog_spec_registry::spec_for_slug(&catalog.slug).unwrap();
+    for (method, path) in [
+        (
+            "post",
+            "/v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+        ),
+        ("put", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
+    ] {
+        let op = &spec["paths"][path][method];
+        let mut row = crate::test_utils::test_service_endpoint(
+            &catalog.id,
+            op["operationId"].as_str().unwrap(),
+            &method.to_ascii_uppercase(),
+            path,
+        );
+        row.parameters = Some(op["parameters"].clone());
+        row.request_body_schema =
+            Some(op["requestBody"]["content"]["application/json"]["schema"].clone());
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(row)
+        .await
+        .unwrap();
+    }
+    if !f.chat.is_orchestrator() {
+        team::set_grants(
+            db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    catalog.id
+}
+
+async fn sheets_stub() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let app = Router::new().fallback(any(|uri: axum::http::Uri| async move {
+            Json(json!({"query": uri.query()}))
+        }));
+        axum::serve(listener, app).await.unwrap();
+    });
+    (url, server)
+}
+
+#[tokio::test]
+async fn sheets_insert_rows_auto_specialist_executes_append_and_confirms_edits() {
+    let f = boxed_chat_fixture("sheets_auto").await;
+    let (url, server) = sheets_stub().await;
+    sheets_connection(&f, &url).await;
+    set_access_mode(&f, crate::models::assistant_settings::AccessMode::Nyxmode).await;
+    let auth = authenticate(&f).await;
+    let args = json!({"spreadsheetId":"sheet","range":"A1","valueInputOption":"RAW","body":{"values":[["value"]]}});
+    let mut append = args.clone();
+    append["insertDataOption"] = json!("INSERT_ROWS");
+    let sent = result(
+        call(&f, &auth, "sheets__sheets_append_values", append).await,
+        false,
+    )
+    .await;
+    assert!(
+        sent["query"]
+            .as_str()
+            .unwrap()
+            .contains("insertDataOption=INSERT_ROWS")
+    );
+    assert!(
+        acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for tool in [
+        "sheets__sheets_update_values",
+        "sheets__sheets_append_values",
+    ] {
+        let card = result(call(&f, &auth, tool, args.clone()).await, true).await;
+        assert_eq!(card["error"], "acknowledgement_required", "{tool}");
+    }
+    let cards = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(cards.len(), 2);
+    assert!(
+        cards
+            .iter()
+            .all(|card| card.confirmation.as_ref().unwrap().risk == "destructive")
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sheets_put_requires_one_action_card_then_one_service_approval() {
+    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME};
+    use crate::services::{feature_flag_admin_service as flags, feature_flag_service};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let mut f = Box::pin(orchestrator_fixture("sheets_card_before_service")).await;
+    let db = &f.state.db;
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updatedCells":1})))
+        .mount(&server)
+        .await;
+    sheets_connection(&f, &server.uri()).await;
+    set_access_mode(&f, crate::models::assistant_settings::AccessMode::Nyxmode).await;
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id": &f.owner},
+            doc! {"$unset": {"approval_required": ""}},
+        )
+        .await
+        .unwrap();
+    flags::mutate(
+        db,
+        feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
+        flags::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::User,
+            target_id: Some(f.owner.clone()),
+            enabled: Some(true),
+        },
+        &crate::services::audit_service::AuditActor {
+            user_id: f.owner.clone(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    let request = crate::services::assistant_nyxagent::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: Vec::new(),
+        agent_id: None,
+        conversation_id: None,
+        text: "Update the weekly ledger".into(),
+        model: None,
+        access_mode: None,
+    };
+    let mut start = crate::services::assistant_nyxagent::TurnStart::from(&request);
+    start.execution_enrollment = true;
+    f.row = Box::pin(crate::services::assistant_nyxagent::begin_turn(
+        db,
+        &f.owner,
+        start,
+        &f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().execution_task.is_some());
+    assert!(auth.execution_permission.is_some());
+    let requests = db.collection::<ApprovalRequest>(COLLECTION_NAME);
+    let tool = "sheets__sheets_update_values";
+    let mut args = json!({"spreadsheetId":"sheet","range":"'Weekly Ledger'!A1","valueInputOption":"RAW","body":{"values":[["value"]]}});
+    let next_approval = || async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(request) = requests.find_one(doc! {"status":"pending"}).await.unwrap() {
+                    return request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("service approval")
+    };
+    let card = tokio::select! {
+        response = call(&f, &auth, tool, args.clone()) => result(response, true).await,
+        _ = next_approval() => panic!("service approval raised before the action card"),
+    };
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert_eq!(requests.count_documents(doc! {}).await.unwrap(), 0);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let id = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(db, &f.owner, &f.row.id, id, true)
+        .await
+        .unwrap();
+    args["acknowledgement_id"] = json!(id);
+    let retry = authenticate(&f).await;
+    let (response, ()) = tokio::join!(direct_call(&f, &retry, tool, args), async {
+        let request = next_approval().await;
+        assert_eq!(
+            request.approval_mode,
+            crate::models::service_approval_config::ApprovalMode::PerRequest
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        approval_service::process_decision(
+            db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &request.id,
+            true,
+            None,
+            None,
+            "web",
+        )
+        .await
+        .unwrap();
+    });
+    assert_eq!(result(response, false).await["updatedCells"], 1);
+    assert_eq!(requests.count_documents(doc! {}).await.unwrap(), 1);
+    let cards = acks::history(db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].status, "used");
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method.as_str(), "PUT");
+    assert_eq!(
+        sent[0].body_json::<Value>().unwrap(),
+        json!({"values":[["value"]]})
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sheets_insert_rows_deny_destructive_policy_on_raw_proxy() {
+    use tower::ServiceExt;
+    let f = boxed_chat_fixture("sheets_deny_destructive").await;
+    let (url, server) = sheets_stub().await;
+    let catalog_id = sheets_connection(&f, &url).await;
+    set_access_mode(&f, crate::models::assistant_settings::AccessMode::Autopilot).await;
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::service_approval_config::COLLECTION_NAME)
+        .insert_one(doc! {"_id":"sheets-policy", "user_id":&f.owner, "service_id":catalog_id,
+            "service_name":"Sheets", "approval_required":false, "default_effect":"auto_allow",
+            "rules":[{"verbs":["destructive"],"effect":"deny"}], "created_at":now, "updated_at":now})
+        .await.unwrap();
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+    let router = router.with_state(f.state.clone());
+    for (method, suffix, status) in [
+        (
+            "POST",
+            ":append?insertDataOption=INSERT_ROWS",
+            StatusCode::OK,
+        ),
+        ("POST", ":append", StatusCode::FORBIDDEN),
+        ("PUT", "", StatusCode::FORBIDDEN),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!(
+                        "/api/v1/proxy/s/sheets/v4/spreadsheets/sheet/values/A1{suffix}"
+                    ))
+                    .header("x-api-key", key.raw_key.as_str())
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"values":[["value"]]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let actual = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            actual,
+            status,
+            "{method} {suffix}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn guest_append_mcp_checks_actual_query_and_intersects_guest_level() {
     use crate::services::assistant_team_service as team;
@@ -6246,9 +6572,10 @@ async fn guest_append_mcp_checks_actual_query_and_intersects_guest_level() {
                 .is_none(),
             allowed
         );
-        assert!(
-            prepared.guest_effects(metadata).destructive,
-            "owner approval classification stays destructive"
+        assert_eq!(prepared.effects().destructive, !allowed);
+        assert_eq!(
+            prepared.operation_descriptor().verb.as_str(),
+            if allowed { "write" } else { "destructive" }
         );
     }
     // A generic fallback must still classify the actual compiled route even
@@ -7965,7 +8292,10 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
 
 // #2271: drive both direct native and nyx__call_tool discovery through the
 // real authenticated handler. Only synthetic lengths/IDs enter these fixtures.
-async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+async fn operation_discovery_fixture(
+    name: &'static str,
+    count: usize,
+) -> (Fixture, String, Vec<String>) {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::assistant_team_service as team;
     let f = boxed_chat_fixture(name).await;
@@ -7989,7 +8319,7 @@ async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Ve
     .unwrap();
     let mut ids = Vec::new();
     let now = bson::DateTime::now();
-    let rows:Vec<_>=(0..120).map(|i| {
+    let rows:Vec<_>=(0..count).map(|i| {
         let id=uuid::Uuid::new_v4().to_string(); ids.push(id.clone());
         doc!{"_id":id,"service_id":&service,"name":format!("operation_{i}"),
             "description":"中文 JSON \"value\"\n# Markdown\\path".repeat(8),
@@ -8007,7 +8337,7 @@ async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Ve
 
 #[tokio::test]
 async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_filtered() {
-    let (f, service, expected) = operation_discovery_fixture("discovery_pages").await;
+    let (f, service, expected) = operation_discovery_fixture("discovery_pages", 120).await;
     let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let hidden = connected(
         &f.state.db,
@@ -8091,7 +8421,7 @@ async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_f
 async fn assistant_team_operation_discovery_live_revocation_and_cursor_binding() {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::assistant_team_service as team;
-    let (f, service, ids) = operation_discovery_fixture("discovery_fences").await;
+    let (f, service, ids) = operation_discovery_fixture("discovery_fences", 120).await;
     let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let initial = json!({"subagent":"worker","limit":1});
     let first = result(
@@ -8697,4 +9027,307 @@ async fn voice_rpc_error_envelopes_redact_links_in_json_and_sse_without_changing
         1
     );
     f.state.db.drop().await.unwrap();
+}
+
+async fn operation_effect_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+    let (f, service, ids) = operation_discovery_fixture(name, 5).await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let endpoints = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME);
+    endpoints
+        .update_one(doc! {"_id":&ids[4]}, doc! {"$set":{"publication":"draft"}})
+        .await
+        .unwrap();
+    for (id, method, risk) in [
+        (&ids[1], "POST", None),
+        (&ids[2], "POST", Some("read")),
+        (&ids[3], "DELETE", None),
+    ] {
+        endpoints
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"method":method,"risk":risk,"name":format!("read_{id}")}},
+            )
+            .await
+            .unwrap();
+    }
+    (f, service, ids)
+}
+
+#[tokio::test]
+async fn agent_operation_effect_filter_uses_closed_classes() {
+    let (f, service, ids) = operation_effect_fixture("closed_effect_filter").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    for (class, expected) in [
+        ("read", vec![&ids[0], &ids[2]]),
+        ("change", vec![&ids[1]]),
+        ("destructive", vec![&ids[3]]),
+        ("sensitive", vec![]),
+    ] {
+        let page = result(
+            call(
+                &f,
+                &auth,
+                "nyxid__get_agent_operations",
+                json!({"subagent":"worker","service_id":service,"effect_class":class}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        let actual: Vec<_> = page["services"][0]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|op| op["endpoint_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_operation_effect_read_only_snapshot_never_grows() {
+    let (f, service, ids) = operation_effect_fixture("closed_effect_snapshot").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let selection = json!({"subagent":"worker","service_id":service,"selection":{"expected_revision":0,"read_only":true}});
+    let saved = result(
+        call(&f, &auth, "nyxid__set_agent_operations", selection.clone()).await,
+        false,
+    )
+    .await;
+    assert_eq!(saved["revision"], 1);
+    let endpoints = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME);
+    endpoints
+        .update_one(
+            doc! {"_id":&ids[4]},
+            doc! {"$set":{"publication":"published"}},
+        )
+        .await
+        .unwrap();
+    let _ = result(
+        call(&f, &auth, "nyxid__set_agent_operations", selection).await,
+        true,
+    )
+    .await;
+    let page = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":"worker","service_id":service}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(page["services"][0]["revision"], 1);
+    assert_eq!(page["services"][0]["all_operations"], false);
+    assert_eq!(
+        page["services"][0]["endpoint_ids"],
+        json!([&ids[0], &ids[2]])
+    );
+    assert_eq!(
+        page["services"][0]["operations"].as_array().unwrap().len(),
+        5
+    );
+    // Existing selected reads keep their value limits, and a read omitted by
+    // the owner's explicit selection stays omitted on a later snapshot.
+    let limits = json!({"query":{"lang":{"required":true,"rule":{"type":"exact","value":"en"}}}});
+    let restricted = json!({"subagent":"worker","service_id":service,"selection":{
+        "expected_revision":1,"endpoint_ids":[ids[0]],"inputs":{(&ids[0]):limits}}});
+    result(
+        call(&f, &auth, "nyxid__set_agent_operations", restricted).await,
+        false,
+    )
+    .await;
+    result(
+        call(
+            &f,
+            &auth,
+            "nyxid__set_agent_operations",
+            json!({"subagent":"worker","service_id":service,
+        "selection":{"expected_revision":2,"read_only":true}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    let filtered = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":"worker","service_id":service,"effect_class":"read"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(filtered["services"][0]["endpoint_ids"], json!([ids[0]]));
+    assert_eq!(filtered["services"][0]["inputs"][&ids[0]], limits);
+    f.state.db.drop().await.unwrap();
+}
+
+async fn unconfirmed_skill_save(mode: crate::models::assistant_settings::AccessMode) {
+    use crate::models::assistant_settings::AccessMode;
+    use crate::services::{
+        assistant_activity_decision, assistant_nyxagent, assistant_settings_service,
+        assistant_skill_authoring::tests::{fixture, input, setup_ornn},
+    };
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let f = fixture("mcp_unconfirmed_skill_save").await;
+    assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        assistant_settings_service::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}})))
+        .mount(&server)
+        .await;
+    const PRIVATE: &str = "private-storage-host/bucket/operation";
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"detail":PRIVATE})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/skill-search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+        )
+        .mount(&server)
+        .await;
+    let auth = authenticate(&f).await;
+    let draft = || {
+        call(
+            &f,
+            &auth,
+            "nyxid__draft_agent_skill",
+            input(&f.chat.agent_id),
+        )
+    };
+    let result_value = result(draft().await, true).await;
+    let reviewed = mode != AccessMode::Autopilot;
+    let card = if reviewed {
+        assert_eq!(result_value["error"], "acknowledgement_required");
+        Some(result_value["acknowledgement_id"].as_str().unwrap())
+    } else {
+        None
+    };
+    let decide = |id: &str| {
+        crate::handlers::assistant_nyxagent::decide_acknowledgement(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((f.row.id.clone(), id.to_owned())),
+            Json(serde_json::from_value(json!({"decision":"allow"})).unwrap()),
+        )
+    };
+    let failure = if let Some(id) = card {
+        let error = decide(id).await.err().unwrap();
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        serde_json::to_value(error.response_body()).unwrap()
+    } else {
+        result_value.clone()
+    };
+    assert_eq!(
+        failure["details"]["reason"], "publication_ambiguous",
+        "{failure}"
+    );
+    assert_eq!(failure["details"]["recovery"], "check");
+    assert_eq!(failure["details"]["upstream_status"], 500);
+    assert!(!failure.to_string().contains(PRIVATE));
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not confirmed")
+    );
+    let mut activities = assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activities;
+    assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    let activity = activities.last().unwrap();
+    let diagnostic = activity.failure.as_ref().unwrap();
+    assert_eq!(diagnostic.reason.as_deref(), Some("publication_ambiguous"));
+    assert_eq!(diagnostic.status, Some(500));
+    assert!(!serde_json::to_string(activity).unwrap().contains(PRIVATE));
+    if let Some(id) = card {
+        assert_eq!(activity.decision.as_ref().unwrap().state, "failed");
+        let error = decide(id).await.err().unwrap();
+        assert_eq!(error.response_body().details.unwrap()["recovery"], "check");
+    } else {
+        assert_eq!(activity.status, "error");
+        assert!(activity.decision.is_none());
+        assert!(
+            failure["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("setup is incomplete")
+        );
+        assert!(
+            failure["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("guess a cause")
+        );
+        let proposal = f
+            .state
+            .db
+            .collection::<crate::models::assistant_agent_learning::AssistantAgentLearningProposal>(
+                crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+            )
+            .find_one(doc! {"agent_id":&f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.failure_code.as_deref(), Some("publish_uncertain"));
+        assert!(proposal.publication.unwrap().uncertain_dispatch);
+    }
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unconfirmed_skill_save_full_access() {
+    Box::pin(unconfirmed_skill_save(
+        crate::models::assistant_settings::AccessMode::Autopilot,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn unconfirmed_skill_save_review_card() {
+    Box::pin(unconfirmed_skill_save(
+        crate::models::assistant_settings::AccessMode::Nyxmode,
+    ))
+    .await;
 }

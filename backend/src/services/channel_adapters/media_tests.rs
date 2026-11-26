@@ -360,6 +360,105 @@ async fn channel_media_fetch_paths_success_size_and_host_contracts() {
 }
 
 #[tokio::test]
+async fn channel_lark_image_download_metadata_is_bounded_and_does_not_retype_files() {
+    let server = MockServer::start().await;
+    let http = reqwest::Client::new();
+    for platform in ["lark", "feishu"] {
+        let adapter = lark::LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::Gif,
+            image::ImageFormat::WebP,
+        ] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 2)
+                .write_to(&mut bytes, format)
+                .unwrap();
+            let bytes = bytes.into_inner();
+            for (event_kind, provider_type, name) in [
+                ("image", "application/octet-stream", None),
+                ("image", "image/jpeg", Some("照片".repeat(150))),
+                (
+                    "file",
+                    "application/octet-stream",
+                    Some("original.bin".into()),
+                ),
+            ] {
+                server.reset().await;
+                Mock::given(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"code":0,"tenant_access_token":"tenant","expire":7200}),
+                    ))
+                    .mount(&server)
+                    .await;
+                let mut reply = ResponseTemplate::new(200)
+                    .set_body_bytes(bytes.clone())
+                    .insert_header("content-type", provider_type);
+                if name.is_some() {
+                    reply = reply.insert_header(
+                        "content-disposition",
+                        "attachment; filename=provider-name.jpg",
+                    );
+                }
+                Mock::given(method("GET"))
+                    .and(path("/resource"))
+                    .respond_with(reply)
+                    .mount(&server)
+                    .await;
+                let mut source = attachment(format!("{}/resource", server.uri()));
+                source.content_type = event_kind.into();
+                source.filename = name;
+                let fetched = adapter
+                    .fetch_attachment(&http, &"app:secret".into(), &source, bytes.len() as u64)
+                    .await
+                    .unwrap();
+                assert_eq!(fetched.bytes.as_ref(), bytes);
+                assert_eq!(fetched.mime_type.as_deref(), Some(provider_type));
+                if event_kind == "image" {
+                    let expected = super::super::attachment_filename::original_name(
+                        source.filename.as_deref(),
+                        super::super::assistant_upload_service::MAX_FILENAME_CHARS,
+                    );
+                    assert_eq!(fetched.filename, expected);
+                } else {
+                    assert_eq!(fetched.filename.as_deref(), Some("original.bin"));
+                }
+                assert!(matches!(
+                    adapter
+                        .fetch_attachment(
+                            &http,
+                            &"app:secret".into(),
+                            &source,
+                            (bytes.len() - 1) as u64
+                        )
+                        .await,
+                    Err(AppError::ChannelMediaTooLarge)
+                ));
+            }
+        }
+        // Merely declared image types do not create an inferred filename.
+        server.reset().await;
+        Mock::given(path("/resource"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"opaque original".to_vec())
+                    .insert_header("content-type", "image/png"),
+            )
+            .mount(&server)
+            .await;
+        let mut source = attachment(format!("{}/resource", server.uri()));
+        source.content_type = "image".into();
+        source.filename = None;
+        let fetched = adapter
+            .fetch_attachment(&http, &"app:secret".into(), &source, 100)
+            .await
+            .unwrap();
+        assert!(fetched.filename.is_none());
+    }
+}
+
+#[tokio::test]
 async fn channel_media_native_upload_paths_all_declared_kinds() {
     let server = MockServer::start().await;
     let http = reqwest::Client::new();

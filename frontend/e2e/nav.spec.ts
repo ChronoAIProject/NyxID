@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openAssistant, SEEDED } from "./helpers";
+import { openAccountMenu, openAssistant, SEEDED } from "./helpers";
 
 const destinations = [
   { label: "Plugins", pathname: "/assistant/plugins" },
@@ -24,7 +24,10 @@ test.describe("assistant sidebar navigation", () => {
       }) => {
         await openAssistant(page, { conversation: source.conversation });
 
-        await page.getByRole("link", { name: destination.label }).click();
+        if (destination.label === "Studio") {
+          await openAccountMenu(page);
+          await page.getByRole("menuitem", { name: "Open Studio", exact: true }).click();
+        } else await page.getByRole("link", { name: destination.label }).click();
 
         await expectPathname(page, destination.pathname);
       });
@@ -39,7 +42,10 @@ test.describe("assistant sidebar navigation", () => {
           page.getByRole("button", { name: "Close chats" }).first(),
         ).toBeVisible();
 
-        await page.getByRole("link", { name: destination.label }).click();
+        if (destination.label === "Studio") {
+          await page.getByRole("button", { name: "Account menu", exact: true }).click();
+          await page.getByRole("menuitem", { name: "Open Studio", exact: true }).click();
+        } else await page.getByRole("link", { name: destination.label }).click();
 
         await expectPathname(page, destination.pathname);
         await expect(

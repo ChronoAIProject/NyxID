@@ -34,6 +34,8 @@ pub mod assistant_action_effects_services;
 pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
+#[cfg(test)]
+mod assistant_handoff_test_upstream;
 pub mod assistant_readiness;
 pub mod assistant_sharing;
 pub mod auth;
@@ -53,7 +55,7 @@ pub mod channel_conversations;
 pub mod channel_events;
 pub mod channel_managed;
 #[cfg(test)]
-mod channel_managed_tests;
+pub(crate) mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
@@ -88,12 +90,14 @@ pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
+pub mod mobile_app_links;
 pub(crate) mod mobile_redirect;
 pub mod node_admin;
 pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
+pub mod oauth_consent_disclosure;
 pub(crate) mod oauth_consent_response;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
@@ -136,6 +140,7 @@ pub mod social_auth;
 pub mod ssh_exec;
 pub mod ssh_tunnel;
 pub mod ssh_web_terminal;
+pub mod staging_qr;
 pub mod telegram_new;
 pub mod trigger_webhooks;
 pub mod triggers;
@@ -154,6 +159,7 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod admin_cma_sandbox_reservations;
 pub mod assistant_cma_agents;
 pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
@@ -248,3 +254,6 @@ pub(crate) mod invocation_diagnostics;
 
 mod platform_model_gateway;
 pub mod platform_models;
+
+pub mod channel_meta;
+pub mod crash_reports;

@@ -218,6 +218,121 @@ pub fn metadata(contract: &AsyncOperationContract, args: &Value) -> Option<CmaOp
     })
 }
 
+// Resolve a foreground read from the receiving turn's published catalog. The
+// watch authorizes only its lifecycle calls, and its service alias can change.
+pub(super) async fn snapshot_read(
+    state: &crate::AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    watch: &crate::models::async_service_operation::AsyncServiceOperation,
+    agent: &str,
+) -> Option<Value> {
+    use super::mcp_service::{self, McpToolSource, NodeScope};
+
+    let turn = row.active_turn.as_ref()?;
+    let key = super::key_service::get_api_key(&state.db, &row.user_id, &row.credential_api_key_id)
+        .await
+        .ok()?;
+    let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None)
+        .await
+        .ok()?;
+    let chat = auth.assistant_chat.as_deref()?;
+    if chat.guest
+        || !chat.turn_live
+        || chat.turn_stopped
+        || chat.conversation_id != row.id
+        || chat.turn_id.as_deref() != Some(turn.turn_id.as_str())
+        || chat.agent_id != watch.agent_id
+    {
+        return None;
+    }
+    if let Some(original) = watch.execution_binding.as_deref()
+        && super::assistant_service_execution::connection_binding(
+            &state.db,
+            &watch.service_id,
+            &key.id,
+        )
+        .await
+        .ok()?
+            != original
+    {
+        return None;
+    }
+    let nodes = if auth.allow_all_nodes {
+        NodeScope::Unrestricted
+    } else {
+        NodeScope::Allowed(&auth.allowed_node_ids)
+    };
+    let scope = mcp_service::caller_service_scope(
+        &row.user_id,
+        auth.assistant_agent_owner_id.as_deref(),
+        auth.org_agent_access.as_deref(),
+        Some(chat),
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+    );
+    let catalog = Box::pin(mcp_service::load_operation_catalog(
+        &state.db,
+        &state.node_ws_manager,
+        &row.user_id,
+        nodes,
+        scope,
+    ))
+    .await
+    .ok()?;
+    let service = catalog
+        .services
+        .iter()
+        .find(|s| s.service_id == watch.service_id && s.executable)?;
+    let granted = match &service.source {
+        McpToolSource::UserManaged { .. } => auth.allowed_service_ids.contains(&service.service_id),
+        McpToolSource::Platform { .. } => key
+            .allowed_platform_service_ids
+            .contains(&service.service_id),
+        McpToolSource::Internal => return None,
+    };
+    if !auth.allow_all_services && !granted {
+        return None;
+    }
+    let submit = service
+        .endpoints
+        .iter()
+        .find(|e| e.endpoint_id == watch.submit_endpoint_id)?;
+    if submit.async_operation.as_ref() != Some(&watch.contract) {
+        return None;
+    }
+    let mut matches = service.endpoints.iter().filter(|e| {
+        e.method == "GET"
+            && e.path == "/api/v2/agents/{agent_id}/events/snapshot"
+            && e.target_id == submit.target_id
+    });
+    let endpoint = matches.next()?;
+    if matches.next().is_some() || endpoint.request_body_required {
+        return None;
+    }
+    let name = format!("{}__{}", service.service_slug, endpoint.name);
+    let (resolved_service, resolved_endpoint) =
+        mcp_service::resolve_tool_call(&name, &catalog.services)?;
+    if resolved_service.service_id != service.service_id
+        || resolved_endpoint.endpoint_id != endpoint.endpoint_id
+        || name.len() > 200
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        || service.service_slug == "nyxid"
+        || service.service_slug == "nyx"
+    {
+        return None;
+    }
+    let args = serde_json::json!({"agent_id":agent});
+    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).ok()?;
+    prepared
+        .authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
+        .ok()?;
+    Some(serde_json::json!({"name":"nyx__call_tool","arguments":{
+        "tool_name":name,"arguments_json":args.to_string()
+    }}))
+}
+
 pub fn poll_id(
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
 ) -> Option<&str> {
@@ -654,6 +769,7 @@ fn approval_event(
     event.invocation_id = watch.delivery.invocation_id.clone();
     event.automation_work = watch.delivery.automation_work.clone();
     event.execution_task = watch.execution_task.clone();
+    event.channel_contexts = watch.meta_contexts.clone();
     event.bound = watch.delivery.report_provenance == REPORT_PROVENANCE_V1;
     event.report_to = carried_report_to(
         watch.delivery.report_to.as_deref(),
@@ -769,6 +885,7 @@ async fn observe_approval(
     session.start_transaction().and_run2(async move |session| {
         let result:crate::errors::AppResult<bool>=Box::pin(async {
             super::erasure_admission::fence_in_session(&db,&watch.user_id,session).await?;
+            super::async_service_operation::meta_lineage::fence(&db,session,&watch.meta_contexts,true).await?;
             if !super::assistant_invocation_service::fence_in_session(&db,session,&watch.user_id,watch.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             if let Some(work) = watch.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &watch.user_id, &watch.conversation_id, work, session).await?;}
             if let Some(task) = &watch.execution_task {super::execution_permission_dispatch::tasks::fence(&db, session, task).await?;}

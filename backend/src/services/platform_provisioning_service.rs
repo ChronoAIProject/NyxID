@@ -1493,7 +1493,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let job = claim_step(&f.state.db).await.unwrap().unwrap();
+        let job = f.claim().await;
         execute_step(&f.state, &job).await.unwrap();
         let candidate =
             child_candidate(&f.state.db, &f.state.encryption_keys, &f.owner, &f.setup.id)

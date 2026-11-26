@@ -8,6 +8,7 @@ export const SETTINGS_TABS = [
   "profile",
   "security",
   "sessions",
+  "notifications",
   "mcp",
   "display",
   "privacy",

@@ -1,3 +1,4 @@
+use crate::crypto::secret_json::to_secret_string;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +39,143 @@ const INTERNAL_PROXY_HEADERS: &str = "x-nyxid-proxy-headers";
 const INTERNAL_DISPATCHED: &str = "x-nyxid-dispatched";
 const INTERNAL_PATH_PREFIX: &str = "/internal/v1/nodes";
 
+const FENCE_REFUSED: &str = "x-nyxid-fence-refused";
+pub(crate) const HANDOVER_WAIT: Duration = Duration::from_secs(4);
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static WAITING_FOR_NODE_HANDOVER: Arc<tokio::sync::Notify>;
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NodeHandover {
+    previous: Option<String>,
+}
+
+impl NodeHandover {
+    fn for_failure(mut failure: NodeProxyFailure, previous: Option<String>) -> NodeProxyFailure {
+        if !failure.dispatched && matches!(failure.error, AppError::NodeOffline(_)) {
+            failure.handover = Some(Self { previous });
+        }
+        failure
+    }
+
+    pub(crate) async fn wait_recent_release(
+        db: &mongodb::Database,
+        manager: &NodeWsManager,
+        node_id: &str,
+    ) -> bool {
+        let recent =
+            chrono::Utc::now() - chrono::TimeDelta::seconds(HANDOVER_WAIT.as_secs() as i64);
+        tokio::time::timeout(HANDOVER_WAIT, async {
+            let filter = mongodb::bson::doc! {
+                "_id": node_id, "is_active": true,
+                "$or": [
+                    {"handover_released_at": {"$gt": mongodb::bson::DateTime::from_chrono(recent)}},
+                    {"connection_owner.claimed_at": {"$gt": mongodb::bson::DateTime::from_chrono(recent)}},
+                ]
+            };
+            if !db.collection::<Node>(NODES).find_one(filter).await.is_ok_and(|node| node.is_some()) {
+                return false;
+            }
+            Self { previous: None }.wait(db, manager, node_id).await
+        }).await.unwrap_or(false)
+    }
+
+    /// Only a failed operation pays for polling. A live legacy lease cannot
+    /// be stolen after a crash, so stop at the first unchanged legacy fence.
+    pub(crate) async fn wait(
+        &self,
+        db: &mongodb::Database,
+        manager: &NodeWsManager,
+        node_id: &str,
+    ) -> bool {
+        tokio::time::timeout(HANDOVER_WAIT, async {
+            loop {
+                let Ok(Some(node)) = db
+                    .collection::<Node>(NODES)
+                    .find_one(mongodb::bson::doc! {"_id": node_id})
+                    .await
+                else {
+                    return false;
+                };
+                if !node.is_active {
+                    return false;
+                }
+                let now = chrono::Utc::now();
+                match crate::services::node_owner_service::live_owner(&node, now) {
+                    Some(owner)
+                        if Some(owner.connection_id.as_str()) != self.previous.as_deref() =>
+                    {
+                        if owner.capabilities_resolved
+                            || manager.has_connection(node_id, &owner.connection_id)
+                        {
+                            return true;
+                        }
+                    }
+                    Some(owner)
+                        if owner.retirement_hash_v1.is_none() && !owner.handover_pending =>
+                    {
+                        return false;
+                    }
+                    None if node.connected_at.is_none()
+                        || node.updated_at
+                            < now - chrono::TimeDelta::seconds(HANDOVER_WAIT.as_secs() as i64) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+                #[cfg(test)]
+                let _ = WAITING_FOR_NODE_HANDOVER.try_with(|waiting| waiting.notify_one());
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+}
+
+fn transport_failure(error: reqwest::Error) -> NodeProxyFailure {
+    // This client has neither redirects nor automatic retries. is_connect()
+    // describes connection establishment on the single hop to the owner.
+    let before = error.is_connect();
+    let public = AppError::NodeOffline("Node owner replica is unavailable".into());
+    if before {
+        NodeProxyFailure::before_dispatch(public)
+    } else {
+        NodeProxyFailure::after_dispatch(public)
+    }
+}
+
+impl From<AppError> for NodeProxyFailure {
+    fn from(error: AppError) -> Self {
+        Self::after_dispatch(error)
+    }
+}
+
+async fn decode_control_response<T: for<'de> Deserialize<'de>>(
+    response: reqwest::Response,
+) -> Result<T, NodeProxyFailure> {
+    if response.status() == StatusCode::CONFLICT
+        && response
+            .headers()
+            .get(FENCE_REFUSED)
+            .is_some_and(|v| v == "true")
+    {
+        return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+            "Node owner replica rejected the request".into(),
+        )));
+    }
+    decode_json_response(response)
+        .await
+        .map_err(NodeProxyFailure::after_dispatch)
+}
+
+fn fence_refusal() -> Response {
+    (StatusCode::CONFLICT, [(FENCE_REFUSED, "true")]).into_response()
+}
+
 #[derive(Clone)]
 pub struct NodeDispatch {
     db: mongodb::Database,
@@ -55,7 +193,6 @@ impl NodeDispatch {
         db: mongodb::Database,
         manager: Arc<NodeWsManager>,
         identity: Arc<ReplicaIdentity>,
-        http_client: reqwest::Client,
         auth: InternalAuth,
         internal_message_limit: usize,
         duplex_handshake_timeout: Duration,
@@ -64,7 +201,14 @@ impl NodeDispatch {
             db,
             manager,
             identity,
-            http_client,
+            http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .no_proxy()
+                // Allow Linux to retransmit a lost SYN after its initial one-second timeout.
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .expect("internal node HTTP client"),
             auth,
             internal_message_limit,
             duplex_handshake_timeout,
@@ -129,6 +273,44 @@ impl NodeDispatch {
         }
     }
 
+    /// For control operations whose caller has selected a single node. A
+    /// refused open can move to another fence; established sessions never do.
+    async fn with_owner<T, F>(
+        &self,
+        node_id: &str,
+        send: impl Fn(OwnerTarget) -> F + Send + Sync,
+    ) -> Result<T, NodeProxyFailure>
+    where
+        F: std::future::Future<Output = Result<T, NodeProxyFailure>> + Send,
+    {
+        let first = self.owner_target(node_id).await;
+        let previous = first
+            .as_ref()
+            .ok()
+            .map(|target| target.fence().connection_id.clone());
+        let result = match first {
+            Ok(target) => send(target).await,
+            Err(error) => Err(NodeProxyFailure::before_dispatch(error)),
+        };
+        match result {
+            Err(failure)
+                if !failure.dispatched
+                    && matches!(failure.error, AppError::NodeOffline(_))
+                    && (NodeHandover { previous })
+                        .wait(&self.db, &self.manager, node_id)
+                        .await =>
+            {
+                send(
+                    self.owner_target(node_id)
+                        .await
+                        .map_err(NodeProxyFailure::before_dispatch)?,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
     async fn owner_target(&self, node_id: &str) -> AppResult<OwnerTarget> {
         let node = self
             .db
@@ -169,10 +351,10 @@ impl NodeDispatch {
         permit: BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let signature = signing_secret.map(|secret| sign_proxy_request(secret, &request));
-        let target = self
-            .owner_target(node_id)
-            .await
-            .map_err(NodeProxyFailure::before_dispatch)?;
+        let target = self.owner_target(node_id).await.map_err(|error| {
+            NodeHandover::for_failure(NodeProxyFailure::before_dispatch(error), None)
+        })?;
+        let previous = target.fence().connection_id.clone();
         match target {
             OwnerTarget::Local { fence } => {
                 self.manager
@@ -189,6 +371,7 @@ impl NodeDispatch {
                 self.remote_proxy(base_url, fence, request, signature).await
             }
         }
+        .map_err(|failure| NodeHandover::for_failure(failure, Some(previous)))
     }
 
     async fn remote_proxy(
@@ -216,7 +399,7 @@ impl NodeDispatch {
         let node_id = fence.node_id.clone();
         let request_id = request.request_id.clone();
         let path = internal_path(&node_id, "proxy");
-        let body = serde_json::to_vec(&ProxyEnvelope {
+        let body = to_secret_string(&ProxyEnvelope {
             fence: fence.clone(),
             request,
             signature,
@@ -226,6 +409,7 @@ impl NodeDispatch {
                 "Failed to encode internal node proxy request: {error}"
             )))
         })?;
+        let body = Bytes::from_owner(body);
         let headers = self.auth.signed_headers("POST", &path, &body);
         let url = join_internal_url(&base_url, &path).map_err(NodeProxyFailure::before_dispatch)?;
         let cancel_path = internal_path(&node_id, "proxy-cancel");
@@ -255,11 +439,7 @@ impl NodeDispatch {
             .body(body)
             .send()
             .await
-            .map_err(|_| {
-                NodeProxyFailure::after_dispatch(AppError::NodeOffline(
-                    "Node owner replica is unavailable".to_string(),
-                ))
-            })?;
+            .map_err(transport_failure)?;
         cancellation.disarm();
         if !response.status().is_success() {
             return Err(decode_proxy_failure(response).await);
@@ -347,7 +527,7 @@ impl NodeDispatch {
 
     pub(crate) async fn proxy_upload(
         &self,
-        request: nyxid_machine::Request,
+        request: nyxid_machine::Request<nyxid_service_adapters::secret_json::WireJson>,
         body: Body,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let node_id = request.node_id.clone();
@@ -365,29 +545,27 @@ impl NodeDispatch {
             OwnerTarget::Remote { fence, base_url } => {
                 let path = internal_path(&node_id, "proxy-upload");
                 let envelope =
-                    serde_json::to_vec(&MachineEnvelope { fence, request }).map_err(|_| {
+                    to_secret_string(&MachineEnvelope { fence, request }).map_err(|_| {
                         NodeProxyFailure::before_dispatch(AppError::Internal(
                             "Upload envelope encoding failed".into(),
                         ))
                     })?;
+                let encoded = zeroize::Zeroizing::new(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(envelope.as_bytes()),
+                );
+                let mut header = HeaderValue::from_str(&encoded).expect("base64 header");
+                header.set_sensitive(true);
                 let url = join_internal_url(&base_url, &path)
                     .map_err(NodeProxyFailure::before_dispatch)?;
                 let response = self
                     .http_client
                     .post(url)
-                    .headers(self.auth.signed_headers("POST", &path, &envelope))
-                    .header(
-                        "x-nyxid-upload-open",
-                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&envelope),
-                    )
+                    .headers(self.auth.signed_headers("POST", &path, envelope.as_bytes()))
+                    .header("x-nyxid-upload-open", header)
                     .body(reqwest::Body::wrap_stream(body.into_data_stream()))
                     .send()
                     .await
-                    .map_err(|_| {
-                        NodeProxyFailure::after_dispatch(AppError::NodeOffline(
-                            "Credential node replica unavailable".into(),
-                        ))
-                    })?;
+                    .map_err(transport_failure)?;
                 if !response.status().is_success() {
                     return Err(decode_proxy_failure(response).await);
                 }
@@ -456,7 +634,7 @@ impl NodeDispatch {
         request: NodeSshExecRequest,
         signing_secret: Option<&[u8]>,
         permit: BillingEgressPermit,
-    ) -> AppResult<NodeSshExecResult> {
+    ) -> Result<NodeSshExecResult, NodeProxyFailure> {
         let signature = signing_secret.map(|secret| sign_ssh_exec_request(secret, &request));
         self.exec_prepared(node_id, ExecRequest::Cert { request, signature }, permit)
             .await
@@ -470,33 +648,37 @@ impl NodeDispatch {
         permit: BillingEgressPermit,
     ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
         let signature = signing_secret.map(|secret| sign_ssh_tunnel_request(secret, &request));
-        match self.owner_target(node_id).await? {
-            OwnerTarget::Local { fence } => {
-                self.manager
-                    .open_ssh_tunnel_prepared(
-                        node_id,
-                        request,
-                        signature,
-                        Some(&fence.connection_id),
-                        permit,
-                    )
-                    .await
-            }
-            OwnerTarget::Remote { fence, base_url } => {
-                let session_id = request.session_id.clone();
-                let (sender, mut incoming, _) = self
-                    .open_remote_duplex(
-                        base_url,
-                        node_id,
-                        DuplexOpen::SshTunnel { request, signature },
-                        fence,
-                    )
-                    .await?;
-                let key = duplex_key("ssh", node_id, &session_id);
-                self.remote_duplex.insert(key.clone(), sender.clone());
-                let (tx, rx) = mpsc::channel(256);
-                let sessions = self.remote_duplex.clone();
-                crate::services::shutdown::process().spawn(async move {
+        self.with_owner(node_id, |target| {
+            let request = request.clone();
+            let signature = signature.clone();
+            async move {
+                match target {
+                    OwnerTarget::Local { fence } => {
+                        self.manager
+                            .open_ssh_tunnel_prepared(
+                                node_id,
+                                request,
+                                signature,
+                                Some(&fence.connection_id),
+                                permit,
+                            )
+                            .await
+                    }
+                    OwnerTarget::Remote { fence, base_url } => {
+                        let session_id = request.session_id.clone();
+                        let (sender, mut incoming, _) = self
+                            .open_remote_duplex(
+                                base_url,
+                                node_id,
+                                DuplexOpen::SshTunnel { request, signature },
+                                fence,
+                            )
+                            .await?;
+                        let key = duplex_key("ssh", node_id, &session_id);
+                        self.remote_duplex.insert(key.clone(), sender.clone());
+                        let (tx, rx) = mpsc::channel(256);
+                        let sessions = self.remote_duplex.clone();
+                        crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -530,9 +712,13 @@ impl NodeDispatch {
                         reason: None,
                     });
                 });
-                Ok(rx)
+                        Ok(rx)
+                    }
+                }
             }
-        }
+        })
+        .await
+        .map_err(|failure| failure.error)
     }
 
     pub fn send_ssh_tunnel_data(
@@ -577,7 +763,10 @@ impl NodeDispatch {
         permit: BillingEgressPermit,
     ) -> AppResult<mpsc::Receiver<WebTerminalChunk>> {
         let signature = signing_secret.map(|secret| sign_web_terminal_request(secret, &request));
-        match self.owner_target(node_id).await? {
+        self.with_owner(node_id, |target| {
+            let request = request.clone();
+            let signature = signature.clone();
+            async move { match target {
             OwnerTarget::Local { fence } => {
                 self.manager
                     .open_web_terminal_prepared(
@@ -640,6 +829,7 @@ impl NodeDispatch {
                 Ok(rx)
             }
         }
+        }}).await.map_err(|failure| failure.error)
     }
 
     pub fn send_web_terminal_data(
@@ -704,7 +894,10 @@ impl NodeDispatch {
         permit: BillingEgressPermit,
     ) -> AppResult<NodeWsProxySession> {
         let signature = signing_secret.map(|secret| sign_ws_proxy_request(secret, &request));
-        match self.owner_target(node_id).await? {
+        self.with_owner(node_id, |target| {
+            let request = request.clone();
+            let signature = signature.clone();
+            async move { match target {
             OwnerTarget::Local { fence } => {
                 self.manager
                     .open_ws_proxy_prepared(
@@ -781,6 +974,7 @@ impl NodeDispatch {
                 })
             }
         }
+        }}).await.map_err(|failure| failure.error)
     }
 
     pub fn send_ws_proxy_text(&self, node_id: &str, session_id: &str, data: &str) -> AppResult<()> {
@@ -841,16 +1035,20 @@ impl NodeDispatch {
         node_id: &str,
         operation: DuplexOpen,
         fence: NodeOwnerFence,
-    ) -> AppResult<(
-        mpsc::Sender<DuplexClientFrame>,
-        mpsc::Receiver<DuplexServerFrame>,
-        Option<String>,
-    )> {
+    ) -> Result<
+        (
+            mpsc::Sender<DuplexClientFrame>,
+            mpsc::Receiver<DuplexServerFrame>,
+            Option<String>,
+        ),
+        NodeProxyFailure,
+    > {
         let machine_desktop = matches!(&operation, DuplexOpen::MachineDesktop { .. });
         let path = internal_path(node_id, "duplex");
-        let body = serde_json::to_vec(&DuplexEnvelope { fence, operation }).map_err(|error| {
+        let body = to_secret_string(&DuplexEnvelope { fence, operation }).map_err(|error| {
             AppError::Internal(format!("Failed to encode node duplex request: {error}"))
         })?;
+        let body = Bytes::from_owner(body);
         let mut url = join_internal_url(&base_url, &path)?;
         url.set_scheme(if base_url.scheme() == "https" {
             "wss"
@@ -872,13 +1070,13 @@ impl NodeDispatch {
             tokio_tungstenite::connect_async_with_config(request, Some(websocket_config), false)
                 .await
                 .map_err(|_| {
-                    AppError::NodeOffline("Node owner replica is unavailable".to_string())
+                    NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        "Node owner replica is unavailable".into(),
+                    ))
                 })?;
         socket
             .send(TungsteniteMessage::Text(
-                String::from_utf8(body)
-                    .expect("serialized JSON is UTF-8")
-                    .into(),
+                body.try_into().expect("serialized JSON is UTF-8"),
             ))
             .await
             .map_err(|_| AppError::NodeOffline("Node owner replica is unavailable".to_string()))?;
@@ -893,11 +1091,21 @@ impl NodeDispatch {
             })?;
         let selected_protocol = match first {
             DuplexServerFrame::Opened { selected_protocol } => selected_protocol,
-            DuplexServerFrame::Failed { failure } => return Err(decode_wire_failure(failure)),
+            DuplexServerFrame::Failed { failure } if !failure.dispatched => {
+                return Err(NodeProxyFailure::before_dispatch(decode_wire_failure(
+                    failure,
+                )));
+            }
+            DuplexServerFrame::Failed { failure } => {
+                return Err(NodeProxyFailure::after_dispatch(decode_wire_failure(
+                    failure,
+                )));
+            }
             _ => {
                 return Err(AppError::NodeOffline(
                     "Invalid response from node owner replica".to_string(),
-                ));
+                )
+                .into());
             }
         };
         let (outgoing_tx, mut outgoing_rx) =
@@ -944,7 +1152,7 @@ impl NodeDispatch {
         request: NodeSshNodeKeyExecRequest,
         signing_secret: Option<&[u8]>,
         permit: BillingEgressPermit,
-    ) -> AppResult<NodeSshExecResult> {
+    ) -> Result<NodeSshExecResult, NodeProxyFailure> {
         let signature = signing_secret.map(|secret| sign_ssh_node_exec_request(secret, &request));
         self.exec_prepared(node_id, ExecRequest::NodeKey { request, signature }, permit)
             .await
@@ -955,8 +1163,12 @@ impl NodeDispatch {
         node_id: &str,
         request: ExecRequest,
         permit: BillingEgressPermit,
-    ) -> AppResult<NodeSshExecResult> {
-        match self.owner_target(node_id).await? {
+    ) -> Result<NodeSshExecResult, NodeProxyFailure> {
+        let target = self.owner_target(node_id).await.map_err(|error| {
+            NodeHandover::for_failure(NodeProxyFailure::before_dispatch(error), None)
+        })?;
+        let previous = target.fence().connection_id.clone();
+        let result = match target {
             OwnerTarget::Local { fence } => match request {
                 ExecRequest::Cert { request, signature } => {
                     self.manager
@@ -985,23 +1197,28 @@ impl NodeDispatch {
                 let path = internal_path(node_id, "exec");
                 let body =
                     serde_json::to_vec(&ExecEnvelope { fence, request }).map_err(|error| {
-                        AppError::Internal(format!(
+                        NodeProxyFailure::before_dispatch(AppError::Internal(format!(
                             "Failed to encode internal SSH request: {error}"
-                        ))
+                        )))
                     })?;
                 let response = self
                     .http_client
-                    .post(join_internal_url(&base_url, &path)?)
+                    .post(
+                        join_internal_url(&base_url, &path)
+                            .map_err(NodeProxyFailure::before_dispatch)?,
+                    )
                     .headers(self.auth.signed_headers("POST", &path, &body))
                     .body(body)
                     .send()
-                    .await
-                    .map_err(|_| {
-                        AppError::NodeOffline("Node owner replica is unavailable".to_string())
-                    })?;
-                decode_json_response(response).await
+                    .await;
+                match response {
+                    Err(error) => Err(transport_failure(error)),
+                    Ok(response) if !response.status().is_success() => Err(decode_proxy_failure(response).await),
+                    Ok(response) => response.json().await.map_err(|_| NodeProxyFailure::after_dispatch(AppError::SshNodeExecChannelClosed("SSH command outcome is unknown because the owner response was incomplete".into()))),
+                }
             }
-        }
+        };
+        result.map_err(|failure| NodeHandover::for_failure(failure, Some(previous)))
     }
 
     pub async fn send_credential_update(
@@ -1087,12 +1304,12 @@ impl NodeDispatch {
             .await
     }
 
-    pub async fn send_pending_credential_ciphertext(
+    pub(crate) async fn send_pending_credential_ciphertext(
         &self,
         node_id: &str,
         params: &PendingCredentialCiphertextParams<'_>,
-    ) -> AppResult<()> {
-        self.send_command(
+    ) -> Result<(), NodeProxyFailure> {
+        self.send_command_classified(
             node_id,
             NodeCommand::PendingCredentialCiphertext {
                 pending_id: params.pending_id.to_string(),
@@ -1106,16 +1323,42 @@ impl NodeDispatch {
     }
 
     async fn send_command(&self, node_id: &str, command: NodeCommand) -> AppResult<()> {
-        match self.owner_target(node_id).await? {
+        self.send_command_classified(node_id, command)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn send_command_classified(
+        &self,
+        node_id: &str,
+        command: NodeCommand,
+    ) -> Result<(), NodeProxyFailure> {
+        // Generation-aware credential writers and the enrollment queue own the retry.
+        // Let the caller reconstruct the material and validate the pending row before a new send.
+        let target = self
+            .owner_target(node_id)
+            .await
+            .map_err(NodeProxyFailure::before_dispatch)?;
+        let ciphertext = matches!(command, NodeCommand::PendingCredentialCiphertext { .. });
+        match target {
             OwnerTarget::Local { fence } => {
-                execute_local_command(&self.manager, node_id, &fence.connection_id, command).await
+                execute_local_command(&self.manager, node_id, &fence.connection_id, command)
+                    .await
+                    .map_err(|error| {
+                        if ciphertext {
+                            NodeProxyFailure::before_dispatch(error)
+                        } else {
+                            NodeProxyFailure::after_dispatch(error)
+                        }
+                    })
             }
             OwnerTarget::Remote { fence, base_url } => {
                 let path = internal_path(node_id, "command");
                 let body =
-                    serde_json::to_vec(&CommandEnvelope { fence, command }).map_err(|error| {
+                    to_secret_string(&CommandEnvelope { fence, command }).map_err(|error| {
                         AppError::Internal(format!("Failed to encode node command: {error}"))
                     })?;
+                let body = Bytes::from_owner(body);
                 let response = self
                     .http_client
                     .post(join_internal_url(&base_url, &path)?)
@@ -1123,10 +1366,12 @@ impl NodeDispatch {
                     .body(body)
                     .send()
                     .await
-                    .map_err(|_| {
-                        AppError::NodeOffline("Node owner replica is unavailable".to_string())
-                    })?;
-                let _: EmptyResponse = decode_json_response(response).await?;
+                    .map_err(transport_failure)?;
+                if ciphertext && !response.status().is_success() {
+                    // For this command both protocol versions return an error only if try_send failed.
+                    return Err(decode_proxy_failure(response).await);
+                }
+                let _: EmptyResponse = decode_control_response(response).await?;
                 Ok(())
             }
         }
@@ -1232,6 +1477,14 @@ enum OwnerTarget {
     },
 }
 
+impl OwnerTarget {
+    fn fence(&self) -> &NodeOwnerFence {
+        match self {
+            Self::Local { fence } | Self::Remote { fence, .. } => fence,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct ProxyEnvelope {
     fence: NodeOwnerFence,
@@ -1240,9 +1493,9 @@ struct ProxyEnvelope {
 }
 
 #[derive(Serialize, Deserialize)]
-struct MachineEnvelope {
+struct MachineEnvelope<P = serde_json::Value> {
     fence: NodeOwnerFence,
-    request: nyxid_machine::Request,
+    request: nyxid_machine::Request<P>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1251,7 +1504,7 @@ struct ExecEnvelope {
     request: ExecRequest,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ExecRequest {
     Cert {
@@ -1270,7 +1523,7 @@ struct CommandEnvelope {
     command: NodeCommand,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NodeCommand {
     CredentialUpdate {
@@ -1508,7 +1761,16 @@ async fn serve_internal_duplex(
         return;
     };
     if !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await {
-        let _ = socket.close().await;
+        let _ = send_axum_json(
+            &mut socket,
+            &DuplexServerFrame::Failed {
+                failure: encode_wire_failure(
+                    &AppError::NodeOffline("Owner fence refused".into()),
+                    false,
+                ),
+            },
+        )
+        .await;
         return;
     }
     let expected_connection_id = envelope.fence.connection_id;
@@ -1584,11 +1846,11 @@ async fn serve_internal_duplex(
                         .await;
                     }
                 }
-                Err(error) => {
+                Err(failure) => {
                     let _ = send_axum_json(
                         &mut socket,
                         &DuplexServerFrame::Failed {
-                            failure: encode_wire_failure(&error, true),
+                            failure: encode_wire_failure(&failure.error, failure.dispatched),
                         },
                     )
                     .await;
@@ -1627,11 +1889,11 @@ async fn serve_internal_duplex(
                         .await;
                     }
                 }
-                Err(error) => {
+                Err(failure) => {
                     let _ = send_axum_json(
                         &mut socket,
                         &DuplexServerFrame::Failed {
-                            failure: encode_wire_failure(&error, true),
+                            failure: encode_wire_failure(&failure.error, failure.dispatched),
                         },
                     )
                     .await;
@@ -1670,11 +1932,11 @@ async fn serve_internal_duplex(
                         .await;
                     }
                 }
-                Err(error) => {
+                Err(failure) => {
                     let _ = send_axum_json(
                         &mut socket,
                         &DuplexServerFrame::Failed {
-                            failure: encode_wire_failure(&error, true),
+                            failure: encode_wire_failure(&failure.error, failure.dispatched),
                         },
                     )
                     .await;
@@ -1857,7 +2119,7 @@ async fn internal_proxy(
         return StatusCode::BAD_REQUEST.into_response();
     };
     if !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await {
-        return StatusCode::CONFLICT.into_response();
+        return fence_refusal();
     }
     let request_id = envelope.request.request_id.clone();
     let expected_connection_id = envelope.fence.connection_id;
@@ -1887,7 +2149,11 @@ async fn internal_proxy_upload(
     if encoded.len() > 64 * 1024 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let Ok(envelope) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
+    let mut envelope = zeroize::Zeroizing::new(Vec::new());
+    if base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode_vec(encoded, &mut envelope)
+        .is_err()
+    {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let path = internal_path(&node_id, "proxy-upload");
@@ -1898,7 +2164,9 @@ async fn internal_proxy_upload(
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Ok(envelope) = serde_json::from_slice::<MachineEnvelope>(&envelope) else {
+    let Ok(envelope) = serde_json::from_slice::<
+        MachineEnvelope<nyxid_service_adapters::secret_json::WireJson>,
+    >(&envelope) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     if envelope.request.node_id != node_id
@@ -1910,9 +2178,9 @@ async fn internal_proxy_upload(
         )
         || !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await
     {
-        return StatusCode::CONFLICT.into_response();
+        return fence_refusal();
     }
-    let limit = envelope.request.parameters["max_bytes"]
+    let limit = envelope.request.parameters.0["max_bytes"]
         .as_u64()
         .unwrap_or(0)
         .min(crate::services::machine_gateway_service::GIT_MAX_BYTES as u64)
@@ -2033,7 +2301,7 @@ async fn internal_machine(
     if envelope.request.node_id != node_id
         || !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await
     {
-        return StatusCode::CONFLICT.into_response();
+        return fence_refusal();
     }
     json_result(
         dispatch
@@ -2061,7 +2329,7 @@ async fn internal_exec(
         return StatusCode::BAD_REQUEST.into_response();
     };
     if !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await {
-        return StatusCode::CONFLICT.into_response();
+        return fence_refusal();
     }
     let expected_connection_id = envelope.fence.connection_id;
     let permit = crate::services::billing::route_inventory::internal_node_dispatch_permit();
@@ -2091,7 +2359,10 @@ async fn internal_exec(
                 .await
         }
     };
-    json_result(result)
+    match result {
+        Ok(result) => axum::Json(result).into_response(),
+        Err(failure) => wire_failure_response(failure.error, failure.dispatched),
+    }
 }
 
 async fn internal_command(
@@ -2112,7 +2383,7 @@ async fn internal_command(
         return StatusCode::BAD_REQUEST.into_response();
     };
     if !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await {
-        return StatusCode::CONFLICT.into_response();
+        return fence_refusal();
     }
     match execute_local_command(
         &dispatch.manager,
@@ -2406,19 +2677,29 @@ fn decode_wire_failure(failure: WireFailure) -> AppError {
 }
 
 async fn decode_proxy_failure(response: reqwest::Response) -> NodeProxyFailure {
-    let dispatched = response
-        .headers()
-        .get(INTERNAL_DISPATCHED)
-        .and_then(|value| value.to_str().ok())
-        == Some("true");
-    let error = match response.json::<WireFailure>().await {
-        Ok(failure) => decode_wire_failure(failure),
-        Err(_) => AppError::NodeOffline("Node owner replica rejected the request".to_string()),
-    };
-    if dispatched {
-        NodeProxyFailure::after_dispatch(error)
-    } else {
-        NodeProxyFailure::before_dispatch(error)
+    if response.status() == StatusCode::CONFLICT
+        && response
+            .headers()
+            .get(FENCE_REFUSED)
+            .is_some_and(|v| v == "true")
+    {
+        return NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+            "Node owner replica rejected the request".into(),
+        ));
+    }
+    let unsent = response.status() == StatusCode::BAD_GATEWAY
+        && response
+            .headers()
+            .get(INTERNAL_DISPATCHED)
+            .is_some_and(|v| v == "false");
+    match response.json::<WireFailure>().await {
+        Ok(failure) if unsent && !failure.dispatched => {
+            NodeProxyFailure::before_dispatch(decode_wire_failure(failure))
+        }
+        Ok(failure) => NodeProxyFailure::after_dispatch(decode_wire_failure(failure)),
+        Err(_) => NodeProxyFailure::after_dispatch(AppError::NodeOffline(
+            "Node owner replica rejected the request".into(),
+        )),
     }
 }
 
@@ -2517,7 +2798,8 @@ impl NodeDispatch {
                         },
                         fence,
                     )
-                    .await?;
+                    .await
+                    .map_err(|failure| failure.error)?;
                 let key = duplex_key("desktop", node, viewer);
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let sessions = self.remote_duplex.clone();
@@ -2560,9 +2842,49 @@ mod tests {
     use crate::models::node::NodeConnectionOwner;
     use chrono::{Duration, Utc};
 
+    #[tokio::test]
+    async fn older_node_owner_relays_location_headers() {
+        let headers = vec![
+            (
+                "Location".to_owned(),
+                "https://files.example/export".to_owned(),
+            ),
+            ("Operation-Location".into(), "/jobs/1".into()),
+            ("Content-Location".into(), "result".into()),
+            ("etag".into(), "version".into()),
+        ];
+        for kind in ["complete", "streaming"] {
+            let encoded = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&headers).unwrap());
+            let envelope = axum::http::Response::builder()
+                .header(INTERNAL_PROXY_KIND, kind)
+                .header(INTERNAL_PROXY_STATUS, "302")
+                .header(INTERNAL_PROXY_HEADERS, encoded)
+                .body(reqwest::Body::from(""))
+                .unwrap();
+            let result = NodeDispatch::decode_proxy_response(envelope.into(), "request".into())
+                .await
+                .unwrap();
+            match result {
+                ProxyResponseType::Complete(response) => assert_eq!(response.headers, headers),
+                ProxyResponseType::Streaming(mut rx) => {
+                    let Some(StreamChunk::Start {
+                        headers: received, ..
+                    }) = rx.recv().await
+                    else {
+                        panic!("expected stream headers")
+                    };
+                    assert_eq!(received, headers);
+                }
+            }
+        }
+    }
+
     fn owner(instance_name: &str, generation_id: &str) -> NodeConnectionOwner {
         let now = Utc::now();
         NodeConnectionOwner {
+            retirement_hash_v1: None,
+            handover_pending: false,
             http_signature_v2: false,
             proxy_upload_v1: false,
             http_cancellation: false,

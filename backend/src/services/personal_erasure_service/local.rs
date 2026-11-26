@@ -10,11 +10,15 @@ const PAGE: i64 = 32;
 
 /// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
 /// the durable domain shape and intentionally remains unchanged for old jobs.
-pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 4;
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 5;
 
 pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
+        (
+            m::client_error_report::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (
             m::assistant_cma_sandbox::COLLECTION_NAME,
             doc! {"user_id":owner},
@@ -159,6 +163,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner,"$or":[{"event_kind":{"$ne":"sms_send"}},{"billing_finalized":true}]},
         ),
         (m::channel_adapter::CLAIMS, doc! {"user_id":owner}),
+        (
+            m::channel_meta::SESSIONS,
+            doc! {"$or":[{"owner_id":owner},{"actor_id":owner}]},
+        ),
         (m::channel_email::SUBSCRIPTIONS, doc! {"user_id":owner}),
         (m::channel_email::SENDS, doc! {"user_id":owner}),
         (m::channel_email::BATCHES, doc! {"user_id":owner}),
@@ -199,6 +207,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::session::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::session::MFA_CHALLENGES, doc! {"user_id":owner}),
+        (
+            m::mobile_social::MobileSocialDelivery::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::refresh_token::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::api_key::COLLECTION_NAME, doc! {"user_id":owner}),
         (
@@ -526,10 +538,20 @@ pub(crate) fn inventory_owner_fields(
     }
 
     let mut fields = std::collections::BTreeMap::new();
-    for (collection, filter) in inventory(owner) {
+    let acl_filter = super::super::org_agent_service::member_list_filter(owner);
+    for (collection, filter) in inventory(owner).into_iter().chain([
+        (crate::models::assistant_agent::COLLECTION_NAME, acl_filter),
+        (
+            crate::models::service_approval_config::COLLECTION_NAME,
+            super::super::org_service_approvers::member_list_filter(owner),
+        ),
+    ]) {
         let mut row = std::collections::BTreeSet::new();
         collect(&bson::Bson::Document(filter), None, owner, &mut row);
-        fields.insert(collection, row);
+        fields
+            .entry(collection)
+            .or_insert_with(std::collections::BTreeSet::new)
+            .extend(row);
     }
     fields
 }
@@ -907,6 +929,22 @@ pub(super) async fn erase_page(
             )
             .await?;
         }
+        if collection == crate::models::channel_bot::COLLECTION_NAME {
+            // Meta control rows are keyed by bot and provider participant, so
+            // they cannot be found through the owner's user_id inventory.  A
+            // bot row is still present in this transaction; remove its
+            // participant identifiers before the parent is erased.
+            db.collection::<Document>(crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME)
+                .delete_many(
+                    doc! {"namespace": "meta-inbox-inbound", "channel_bot_id": {"$in": &ids}},
+                )
+                .session(&mut tx)
+                .await?;
+            db.collection::<Document>(crate::services::channel_adapters::meta::CONTROLS)
+                .delete_many(doc! {"bot_id": {"$in": &ids}})
+                .session(&mut tx)
+                .await?;
+        }
         db.collection::<Document>(collection)
             .delete_many(doc! {"$and":[filter, {"_id":{"$in":ids}}]})
             .session(&mut tx)
@@ -1170,7 +1208,27 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
     if !clear {
         return Ok(false);
     }
-    if redact_shared(&db, &job.user_id).await? {
+    if redact_page(
+        &db,
+        &job.user_id,
+        crate::models::service_approval_config::COLLECTION_NAME,
+        super::super::org_service_approvers::member_list_filter(&job.user_id),
+        super::super::org_service_approvers::prune_update(&job.user_id),
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    if redact_page(
+        &db,
+        &job.user_id,
+        crate::models::assistant_agent::COLLECTION_NAME,
+        super::super::org_agent_service::member_list_filter(&job.user_id),
+        super::super::org_agent_service::prune_member_update(&job.user_id),
+    )
+    .await?
+        || redact_shared(&db, &job.user_id).await?
+    {
         return Ok(false);
     }
     if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
@@ -1413,7 +1471,8 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
     let result:AppResult<bool>=async {
         if !remote_cleanup_clear(db,&job.user_id,&mut tx).await? {return Ok(false);}
         if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]}).session(&mut tx).await?.is_some() {return Ok(false);}
-        for (collection,filter) in inventory(&job.user_id) {
+        let acl_filter = super::super::org_agent_service::member_list_filter(&job.user_id);
+        for (collection,filter) in inventory(&job.user_id).into_iter().chain([(crate::models::assistant_agent::COLLECTION_NAME, acl_filter)]) {
             if db.collection::<Document>(collection).find_one(filter).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
         }
         for spec in super::super::personal_data_registry::ATTRIBUTIONS {
@@ -1453,4 +1512,22 @@ pub(super) static BEFORE_NODE_DRAIN: std::sync::LazyLock<
 #[cfg(test)]
 fn before_node_drain_test_hook(db: &Database) -> Option<std::sync::Arc<BeforeNodeDrainHook>> {
     BEFORE_NODE_DRAIN.get(db.name()).map(|entry| entry.clone())
+}
+
+#[cfg(test)]
+mod crash_inventory_tests {
+    #[test]
+    fn crash_reports_are_erased_by_owner_and_anonymous_counters_are_retained() {
+        let rows = super::inventory("owner-sentinel");
+        assert!(
+            rows.iter()
+                .any(|(name, filter)| *name == "client_error_reports"
+                    && filter.get_str("user_id") == Ok("owner-sentinel"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|(name, _)| *name == "client_error_report_counters")
+        );
+    }
 }

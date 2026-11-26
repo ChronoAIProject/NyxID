@@ -264,6 +264,7 @@ pub async fn begin_app(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn approve_app_identity(
     db: &Database,
     key: &[u8],
@@ -272,6 +273,7 @@ pub async fn approve_app_identity(
     mfa_assured: bool,
     revision: Option<&str>,
     authority: super::session_authority::DerivedMfaAuthority,
+    staging: Option<super::staging_qr::VerifiedMatch>,
 ) -> AppResult<()> {
     let id = request.login_approval_id.as_deref().ok_or_else(invalid)?;
     let approval = db
@@ -296,9 +298,11 @@ pub async fn approve_app_identity(
         revision.map(str::to_owned),
         input.clone(),
         Zeroizing::new(key.to_vec()),
+        staging,
     );
     super::transaction_service::run_db_only(db, &context, move |tx, c| Box::pin(async move {
-        let (db, request, actor, revision, input, key) = c;
+        let (db, request, actor, revision, input, key, staging) = c;
+        if let Some(verified) = staging { verified.fence(db, actor, tx, mfa_assured).await?; }
         app_policy::fence_approval(db, actor, authority, revision.as_deref(), tx).await?;
         let result = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
             doc! {"_id": &request.id, "status": "pending", "expires_at": {"$gt": mongodb::bson::DateTime::now()}},

@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { reportCrash } from "@/lib/crash-reporting/reporter";
 import { useEffect } from "react";
 import { Link, useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
@@ -82,6 +83,7 @@ function AssetLoadError() {
 
 /** Everything that is a genuine render error rather than a missing asset. */
 function RenderError({ error, reset }: ErrorComponentProps) {
+  useEffect(() => { void reportCrash(error, "render_error"); }, [error]);
   const { t } = useUiTranslation();
   const router = useRouter();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);

@@ -218,7 +218,7 @@ pub(crate) async fn prepare(
                 }
                 row.content_sha256.clone()
             }
-            uploads::EgressAttachment::Tool(..) => None,
+            uploads::EgressAttachment::Tool(..) | uploads::EgressAttachment::Pdf(_) => None,
         };
         let sha256 = if let Some(hash) = stored {
             hash
@@ -640,7 +640,7 @@ async fn run(
             return Err(Failure::AttachmentIntegrity.error(invalid()).into());
         }
         let args = json!({"attachment_id":input.id,"parent_type":if attachment.content_type().starts_with("image/") {"bitable_image"}else{"bitable_file"},"parent_node":prepared.app});
-        let fields = attachment::multipart::fields(&args, attachment.label(), input.size)?;
+        let fields = attachment::multipart::fields(&args, &attachment.filename(), input.size)?;
         let (body, content_type) =
             attachment::multipart::encode(&fields, attachment.content_type(), &bytes)?;
         drop(bytes);

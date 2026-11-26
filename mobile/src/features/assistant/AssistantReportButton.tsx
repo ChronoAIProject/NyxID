@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Pressable, StyleSheet, View } from "react-native";
 import { Flag } from "lucide-react-native";
@@ -20,6 +22,7 @@ export function AssistantReportButton({
   /** Sits between Copy and the date, so its expansion stops at half the gap. */
   beforeDate?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [reported, setReported] = useState(initiallyReported);
   const [sending, setSending] = useState(false);
@@ -41,14 +44,18 @@ export function AssistantReportButton({
       if (!mounted.current) return;
       setReported(true);
       Alert.alert(
-        "Report sent",
-        "Thanks for letting us know. The NyxID team reviews every report.",
+        translateApp("Report sent"),
+        translateApp(
+          "Thanks for letting us know. The NyxID team reviews every report.",
+        ),
       );
     } catch {
       if (mounted.current)
         Alert.alert(
-          "Couldn't send report",
-          "Check your connection and try again, or email contact@chrono-ai.fun.",
+          translateApp("Couldn't send report"),
+          translateApp(
+            "Check your connection and try again, or email contact@chrono-ai.fun.",
+          ),
         );
     } finally {
       if (mounted.current) setSending(false);
@@ -58,14 +65,17 @@ export function AssistantReportButton({
   function choose() {
     if (sending) return;
     Alert.alert(
-      reported ? "Report this response again?" : "Report this response?",
-      "Choose what is wrong. The NyxID team reviews every report.",
+      reported ? translateApp("Report this response again?")
+        : translateApp("Report this response?"),
+      translateApp(
+        "Choose what is wrong. The NyxID team reviews every report.",
+      ),
       [
         ...REPORT_REASONS.map((reason) => ({
           text: reason,
           onPress: () => void send(reason),
         })),
-        { text: "Cancel", style: "cancel" as const },
+        { text: translateApp("Cancel"), style: "cancel" as const },
       ],
     );
   }
@@ -74,8 +84,12 @@ export function AssistantReportButton({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={reported ? "Reported response" : "Report response"}
-      accessibilityHint="Flag this response as offensive, harmful or inaccurate"
+      accessibilityLabel={reported ? translateApp("Reported response")
+          : translateApp("Report response")
+      }
+      accessibilityHint={translateApp(
+        "Flag this response as offensive, harmful or inaccurate",
+      )}
       accessibilityState={{ disabled: sending }}
       disabled={sending}
       hitSlop={{ top: 10, bottom: 10, left: 4, right: beforeDate ? 4 : 16 }}

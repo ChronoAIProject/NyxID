@@ -190,9 +190,14 @@ async fn send_inner(
     let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
         return Err(missing_reply_source());
     };
-    let context: Value = serde_json::from_slice(&Zeroizing::new(
-        state.encryption_keys.decrypt(ciphertext).await?,
-    ))
+    let context: Value = serde_json::from_slice(
+        &crate::services::nyxbot_event_record::event_context(
+            &state.encryption_keys,
+            &event,
+            ciphertext,
+        )
+        .await?,
+    )
     .map_err(|_| missing_reply_source())?;
     let reference = context["event_ref"]
         .as_str()

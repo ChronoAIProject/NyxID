@@ -2,11 +2,18 @@ use std::future::Future;
 use std::time::Duration;
 
 use mongodb::Database;
+use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::coordination::CoordinationHolder;
-use crate::services::coordination_service::{SlotStore, SlotToken};
+use crate::services::coordination_service::{SlotGrant, SlotStore, SlotToken};
+
+#[derive(Clone, Copy)]
+enum SlotUse {
+    Capacity,
+    Exclusive,
+}
 
 #[derive(Clone)]
 pub struct RenewableSlotManager {
@@ -17,6 +24,37 @@ pub struct RenewableSlotManager {
 }
 
 impl RenewableSlotManager {
+    pub(crate) async fn transfer(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &SlotToken,
+        namespace: &str,
+        owner: &str,
+        limit: u32,
+    ) -> AppResult<Option<SlotGrant>> {
+        SlotStore::transfer(
+            &self.db,
+            session,
+            token,
+            namespace,
+            owner,
+            &self.holder,
+            self.ttl,
+            limit,
+        )
+        .await
+    }
+
+    pub(crate) fn guard(&self, grant: SlotGrant) -> RenewableSlotGuard {
+        RenewableSlotGuard::new(
+            self.db.clone(),
+            grant,
+            self.ttl,
+            self.renew_interval,
+            SlotUse::Capacity,
+        )
+    }
+
     pub fn new(
         db: Database,
         holder: CoordinationHolder,
@@ -37,18 +75,42 @@ impl RenewableSlotManager {
         scope: &str,
         limit: u32,
     ) -> AppResult<Option<RenewableSlotGuard>> {
-        let Some(token) =
+        self.acquire_for(namespace, scope, limit, SlotUse::Capacity)
+            .await
+    }
+
+    /// An exclusive operation must stop by the last confirmed lease deadline.
+    pub async fn acquire_exclusive(
+        &self,
+        namespace: &str,
+        scope: &str,
+    ) -> AppResult<Option<RenewableSlotGuard>> {
+        self.acquire_for(namespace, scope, 1, SlotUse::Exclusive)
+            .await
+    }
+
+    async fn acquire_for(
+        &self,
+        namespace: &str,
+        scope: &str,
+        limit: u32,
+        use_case: SlotUse,
+    ) -> AppResult<Option<RenewableSlotGuard>> {
+        let Some(grant) =
             SlotStore::acquire(&self.db, namespace, scope, limit, &self.holder, self.ttl).await?
         else {
             return Ok(None);
         };
 
-        Ok(Some(RenewableSlotGuard::new(
+        let guard = RenewableSlotGuard::new(
             self.db.clone(),
-            token,
+            grant,
             self.ttl,
             self.renew_interval,
-        )))
+            use_case,
+        );
+        // A delayed acquisition response can arrive after its confirmed lifetime.
+        Ok((!guard.lost.is_cancelled()).then_some(guard))
     }
 }
 
@@ -60,51 +122,98 @@ pub struct RenewableSlotGuard {
 }
 
 impl RenewableSlotGuard {
-    fn new(db: Database, token: SlotToken, ttl: Duration, renew_interval: Duration) -> Self {
+    pub(crate) fn token(&self) -> &SlotToken {
+        &self.token
+    }
+
+    fn new(
+        db: Database,
+        grant: SlotGrant,
+        ttl: Duration,
+        renew_interval: Duration,
+        use_case: SlotUse,
+    ) -> Self {
         let stop = CancellationToken::new();
         let lost = CancellationToken::new();
-        let renewal_db = db.clone();
-        let renewal_token = token.clone();
-        let renewal_stop = stop.clone();
-        let renewal_lost = lost.clone();
-        crate::services::shutdown::process().spawn_worker(async move {
-            loop {
+        let db_for_renewal = db.clone();
+        let lease = grant.clone();
+        let loss = lost.clone();
+        let stopped = stop.clone();
+        let confirmed_until = grant.dispatched_at + ttl;
+        if Instant::now() >= confirmed_until {
+            lost.cancel();
+        } else {
+            crate::services::shutdown::process().spawn_worker(async move {
                 tokio::select! {
-                    () = renewal_stop.cancelled() => return,
-                    () = tokio::time::sleep(renew_interval) => {}
+                    biased;
+                    () = stopped.cancelled() => {}
+                    () = Self::renew(&db_for_renewal, &lease, ttl, renew_interval, use_case) => loss.cancel(),
                 }
-
-                match SlotStore::renew(&renewal_db, &renewal_token, ttl).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        tracing::warn!(
-                            namespace = %renewal_token.namespace,
-                            slot = renewal_token.slot,
-                            "Cluster capacity slot ownership was lost"
-                        );
-                        renewal_lost.cancel();
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            namespace = %renewal_token.namespace,
-                            slot = renewal_token.slot,
-                            %error,
-                            "Cluster capacity slot renewal failed"
-                        );
-                        renewal_lost.cancel();
-                        return;
-                    }
-                }
-            }
-        });
+            });
+        }
 
         Self {
             db,
-            token,
+            token: grant.token,
             stop,
             lost,
         }
+    }
+
+    async fn renew(
+        db: &Database,
+        grant: &SlotGrant,
+        ttl: Duration,
+        interval: Duration,
+        use_case: SlotUse,
+    ) {
+        // MongoDB measures its TTL from $$NOW during the write. Counting from
+        // dispatch keeps a slow acknowledgement from extending local ownership.
+        let lease = &grant.token;
+        let mut deadline = grant.dispatched_at + ttl;
+        let mut next = grant.dispatched_at + interval;
+        let first_retry = interval.min(Duration::from_secs(1));
+        let mut backoff = first_retry;
+        let mut last_error = None;
+        loop {
+            sleep_until(next.min(deadline)).await;
+            let started = Instant::now();
+            if started >= deadline {
+                break;
+            }
+            // A capacity renewal may already have matched on the primary while
+            // its acknowledgement is outstanding. Wait at most its own TTL.
+            let reply_deadline = match use_case {
+                SlotUse::Exclusive => deadline,
+                SlotUse::Capacity => started + ttl,
+            };
+            let result = tokio::select! {
+                biased;
+                () = sleep_until(reply_deadline) => break,
+                result = SlotStore::renew(db, lease, ttl) => result,
+            };
+            match result {
+                Ok(true) => {
+                    deadline = started + ttl;
+                    next = started + interval;
+                    backoff = first_retry;
+                    last_error = None;
+                }
+                Ok(false) => {
+                    tracing::warn!(namespace = %lease.namespace, slot = lease.slot, "Cluster capacity slot ownership was lost");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(namespace = %lease.namespace, slot = lease.slot, %error, "Cluster capacity slot renewal failed, retrying within lease");
+                    last_error = Some(error);
+                    next = Instant::now() + backoff;
+                    backoff = backoff.saturating_mul(2).min(interval);
+                }
+            }
+        }
+        tracing::error!(namespace = %lease.namespace, slot = lease.slot,
+            error = last_error.as_ref().map(tracing::field::display),
+            "Cluster capacity slot expired without a confirmed renewal");
     }
 
     pub async fn cancelled(&self) {
@@ -122,13 +231,14 @@ impl RenewableSlotGuard {
         self.lost.clone()
     }
 
-    pub async fn run_until_lost<F, T>(&self, future: F) -> AppResult<T>
+    pub async fn run_until_lost<F, T, E>(&self, future: F) -> Result<T, E>
     where
-        F: Future<Output = AppResult<T>>,
+        F: Future<Output = Result<T, E>>,
+        E: From<AppError>,
     {
         tokio::select! {
             biased;
-            () = self.cancelled() => Err(AppError::RateLimited),
+            () = self.cancelled() => Err(AppError::RateLimited.into()),
             result = future => result,
         }
     }

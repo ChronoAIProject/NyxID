@@ -69,7 +69,9 @@ export function startBuildUpdates(options: BuildUpdateOptions) {
         await response.arrayBuffer();
       }
     }));
-    const response = await fetcher("/index.html", {
+    // Public routing keeps the raw shell internal. A real app route serves that
+    // same shell without redirecting or booting the application in this fetch.
+    const response = await fetcher("/assistant", {
       cache: "no-store", credentials: "omit", signal,
     });
     if (!response.ok) throw new Error("App document unavailable");

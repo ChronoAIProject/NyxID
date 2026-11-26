@@ -1,4 +1,5 @@
 import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { channelDetail } from "./channelPresentation";
 import { useState } from "react";
 import { Alert, Linking, Switch } from "react-native";
@@ -45,6 +46,7 @@ export function OrgGuestChannel({
     !query.isError
       ? query.data
       : undefined;
+  const canManage = settings?.can_manage && agent.can_maintain !== false;
   return (
     <>
       <SettingsRow
@@ -56,18 +58,18 @@ export function OrgGuestChannel({
       {open && (
         <SettingsGroup
           inset={false}
-          title="Who can talk to this bot"
-          footer={EXPLANATION}
+          title={translateApp("Who can talk to this bot")}
+          footer={translateApp(EXPLANATION)}
         >
           <SettingsRow
-            label="Allow guests"
+            label={translateApp("Allow guests")}
             accessory={
               <Switch
-                accessibilityLabel="Allow guests"
+                accessibilityLabel={translateApp("Allow guests")}
                 value={settings?.guest_enabled ?? false}
                 disabled={
                   !settings ||
-                  !settings.can_manage ||
+                  !canManage ||
                   session.busy ||
                   channel.status !== "active" ||
                   (!settings.guest_enabled &&
@@ -75,7 +77,7 @@ export function OrgGuestChannel({
                       Boolean(settings.readiness_reason)))
                 }
                 onValueChange={(enabled) => {
-                  if (settings?.can_manage && !session.busy)
+                  if (settings && canManage && !session.busy)
                     void session.run(() =>
                       orgGuestApi.toggle(
                         channel.id,
@@ -90,46 +92,60 @@ export function OrgGuestChannel({
           />
           {settings ? (
             <>
-              {!settings.can_manage && <Notice message="An organization admin can change these settings." />}
+              {!canManage && <Notice message={t("An organization admin can change these settings.")} />}
+              {(settings.guest_policy_mode === "grants" || settings.binding_limits_guest_services) && (
+                <SettingsRow
+                  label={translateApp("Guests can use")}
+                  detail={
+                    settings.effective_guest_services.map((s) => s.label).join(", ") ||
+                    translateApp("Model-only chat")
+                  }
+                />
+              )}
               {settings.guest_policy_mode === "legacy" ? (
                 <SettingsRow
-                  label="Existing guest limits are kept. Review them in Grants."
+                  label={settings.binding_limits_guest_services
+                    ? translateApp("This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.")
+                    : translateApp("Existing guest limits are kept. Review them in Grants.")}
                   onPress={() => openGrants(agent.id)}
                 />
               ) : (
-                <>
-                  <SettingsRow
-                    label="Guests can use"
-                    detail={
-                      settings.effective_guest_services
-                        .map((s) => s.label)
-                        .join(", ") || "Model-only chat"
-                    }
-                  />
-                  <SettingsRow
-                    label="Enabling guests applies this specialist's Grants, including the default Use access."
-                    onPress={() => openGrants(agent.id)}
-                  />
-                </>
+                <SettingsRow
+                  label={translateApp(
+                    "Enabling guests applies this specialist's Grants, including the default Use access.",
+                  )}
+                  onPress={() => openGrants(agent.id)}
+                />
               )}
               <SettingsRow
-                label="Guest service access · Grants"
+                label={translateApp("Guest service access · Grants")}
                 onPress={() => openGrants(agent.id)}
               />
               {settings.can_manage && settings.spent_today_credits !== undefined && settings.reserved_today_credits !== undefined && <SettingsRow
-                label="Organization spend today"
-                value={`${settings.spent_today_credits} credits (${settings.reserved_today_credits} reserved)`}
-                detail="This bot's guest spend today, including earlier connections. The organization pays."
+                label={translateApp("Organization spend today")}
+                value={translateApp(
+                  "{{spent}} credits ({{reserved}} reserved)",
+                  {
+                    spent: settings.spent_today_credits,
+                    reserved: settings.reserved_today_credits,
+                  },
+                )}
+                detail={translateApp(
+                  "This bot's guest spend today, including earlier connections. The organization pays.",
+                )}
               />}
               {!settings.grants_ready && (
-                <Notice message="Guest settings are upgrading. Existing service limits and the legacy daily cap still apply until every server is ready." />
+                <Notice message={translateApp(
+                    "Guest settings are upgrading. Existing service limits and the legacy daily cap still apply until every server is ready.",
+                  )}
+                />
               )}
               {!!settings.readiness_reason && (
                 <Notice
                   message={
                     settings.readiness_reason === "org_wallet_suspended"
-                      ? "The organization wallet is suspended."
-                      : "Set up organization billing to serve guests."
+                      ? translateApp("The organization wallet is suspended.")
+                      : translateApp("Set up organization billing to serve guests.")
                   }
                 />
               )}
@@ -138,8 +154,10 @@ export function OrgGuestChannel({
             <Notice
               message={
                 query.isError
-                  ? "Could not load guest settings. Reopen to retry."
-                  : "Loading guest settings…"
+                  ? translateApp(
+                      "Could not load guest settings. Reopen to retry.",
+                    )
+                  : translateApp("Loading guest settings…")
               }
             />
           )}
@@ -157,6 +175,7 @@ export function OrgGuestGrantsAdoption({
   agent: AssistantAgent;
   disabled: boolean;
 }) {
+  useAppLanguage();
   const session = useCollaborationSession("nyxbot:org-specialist-channels");
   const query = useQuery({
     queryKey: [...session.key, "org-guest-adoption", agent.id],
@@ -174,22 +193,35 @@ export function OrgGuestGrantsAdoption({
   return (
     <SettingsGroup
       inset={false}
-      footer="Existing guest limits are kept. Save any Grants edits before reviewing the handoff."
+      footer={translateApp(
+        "Existing guest limits are kept. Save any Grants edits before reviewing the handoff.",
+      )}
     >
       <SettingsRow
-        label="Use these guest settings for all linked organization bots"
+        label={translateApp(
+          "Use these guest settings for all linked organization bots",
+        )}
         disabled={disabled || session.busy || !preview?.ready}
         onPress={() =>
           void session.run(async () => {
             const review = await orgGuestApi.preview(agent.id);
             session.guard();
             Alert.alert(
-              "Use these guest settings for all linked organization bots",
-              `This replaces each bot's existing service limits with saved Grants. Disabled bots use these settings if enabled later. The organization pays.\n\nAffected bots: ${review.bots.map((b) => b.name).join(", ")}\n\n${review.services.map((s) => `${s.label}: ${GUEST_ACCESS_LABEL[s.access]}${s.limited_operations ? " · Selected operations only" : ""}`).join("\n") || "Model-only chat"}`,
-              [
-                { text: "Cancel", style: "cancel" },
+              translateApp(
+                "Use these guest settings for all linked organization bots",
+              ),
+              translateApp(
+                "This replaces each bot's existing service limits with saved Grants. Disabled bots use these settings if enabled later. The organization pays.\n\nAffected bots: {{name}}\n\n{{label}}",
                 {
-                  text: "Apply reviewed guest settings",
+                  name: review.bots.map((b) => b.name).join(", "),
+                  label:
+                    review.services.map((s) => `${s.label}: ${GUEST_ACCESS_LABEL[s.access]}${s.limited_operations ? " · Selected operations only" : ""}`).join("\n") || "Model-only chat",
+                },
+              ),
+              [
+                { text: translateApp("Cancel"), style: "cancel" },
+                {
+                  text: translateApp("Apply reviewed guest settings"),
                   onPress: () => {
                     if (session.valid())
                       void session.run(() =>
@@ -208,7 +240,9 @@ export function OrgGuestGrantsAdoption({
       />
       {query.isError && (
         <Notice
-          message="Could not load guest settings. Reload to review."
+          message={translateApp(
+            "Could not load guest settings. Reload to review.",
+          )}
           tone="error"
         />
       )}

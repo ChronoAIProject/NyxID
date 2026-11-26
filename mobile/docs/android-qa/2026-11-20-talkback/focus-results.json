@@ -1,0 +1,168 @@
+{
+  "environment": {
+    "android": "API 34 AOSP ARM64",
+    "avd": "NyxID_QA_API34_B",
+    "talkback": "com.android.talkback 16.2, GrapheneOS prebuilt",
+    "runtime": "Expo Go SDK 55, production WorkspacePushShell and native stack header, fixture content"
+  },
+  "syntheticInputSwipeWithFix": [
+    {
+      "step": 0,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 1,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 2,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 3,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 4,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 5,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 6,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 7,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 8,
+      "focus": "null|Open navigation|null"
+    }
+  ],
+  "hardwareTouchscreenWithFix": [
+    {
+      "step": 0,
+      "focus": "null"
+    },
+    {
+      "step": 1,
+      "focus": "Tools|null|null"
+    },
+    {
+      "step": 2,
+      "focus": "Tools|null|null"
+    },
+    {
+      "step": 3,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 4,
+      "focus": "Home|null|null"
+    },
+    {
+      "step": 5,
+      "focus": "Home title|null|null"
+    },
+    {
+      "step": 6,
+      "focus": "null|Activity|null"
+    },
+    {
+      "step": 7,
+      "focus": "null|Agent list|null"
+    },
+    {
+      "step": 8,
+      "focus": "null|Scan QR|null"
+    },
+    {
+      "step": 9,
+      "focus": "null|New chat|null"
+    },
+    {
+      "step": 10,
+      "focus": "Message|Message|null"
+    }
+  ],
+  "syntheticInputSwipeBaseline": [
+    {
+      "step": 0,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 1,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 2,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 3,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 4,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 5,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 6,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 7,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 8,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    }
+  ],
+  "hardwareTouchscreenBaseline": [
+    {
+      "step": 0,
+      "focus": "null|Splash Screen Image|null"
+    },
+    {
+      "step": 1,
+      "focus": "null|Tools|null"
+    },
+    {
+      "step": 2,
+      "focus": "Tools|null|null"
+    },
+    {
+      "step": 3,
+      "focus": "Tools|null|null"
+    },
+    {
+      "step": 4,
+      "focus": "null||workspace-sidebar-reveal-edge"
+    },
+    {
+      "step": 5,
+      "focus": "null|Open navigation|null"
+    },
+    {
+      "step": 6,
+      "focus": "Home|null|null"
+    },
+    {
+      "step": 7,
+      "focus": "Home title|null|null"
+    },
+    {
+      "step": 8,
+      "focus": "null|Activity|null"
+    }
+  ]
+}

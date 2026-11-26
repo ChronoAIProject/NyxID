@@ -1,6 +1,9 @@
 import type { ComponentProps, ReactNode } from "react";
-import { View } from "react-native";
-import { AssistantMentionInput } from "./AssistantMentionInput";
+import { StyleSheet, View } from "react-native";
+import {
+  AssistantMentionInput,
+  type ComposerActionsLayout,
+} from "./AssistantMentionInput";
 import {
   ComposerDictationButton,
   ComposerDictationReview,
@@ -40,13 +43,18 @@ export function ChatComposerInput({
   );
 }
 
-/** Private and crew chats share the same control order and dictation affordance. */
+/**
+ * Private and crew chats share the same control order and dictation affordance.
+ * The input, attachment, dictation and trailing controls stay mounted when the
+ * composer collapses. Mentions and the mode trigger appear only when expanded.
+ */
 export function ChatComposerToolbar({
   attach,
   mention,
   settings,
   dictation,
   dictationDisabled,
+  layout,
   children,
 }: {
   attach: ComponentProps<typeof ComposerAttachButton>;
@@ -54,19 +62,57 @@ export function ChatComposerToolbar({
   settings?: ReactNode;
   dictation: ComposerDictationState;
   dictationDisabled: boolean;
+  /** From the input's `renderActions`; omitted keeps the two-row layout. */
+  layout?: ComposerActionsLayout;
   children: ReactNode;
 }) {
+  if (!layout)
+    return (
+      <ChatComposerRow>
+        <ComposerAttachButton {...attach} />
+        {mention}
+        {settings}
+        <View style={{ flex: 1 }} />
+        <ComposerDictationButton
+          dictation={dictation}
+          disabled={dictationDisabled}
+        />
+        {children}
+      </ChatComposerRow>
+    );
+  const compact = !!layout.compact;
   return (
-    <ChatComposerRow>
-      <ComposerAttachButton {...attach} />
-      {mention}
+    <ChatComposerRow overlay={compact}>
+      <View
+        testID="chat-composer-leading"
+        style={styles.group}
+        onLayout={(event) =>
+          layout?.onLeadingWidth(event.nativeEvent.layout.width)
+        }
+      >
+        <ComposerAttachButton {...attach} />
+        {compact ? null : mention}
+      </View>
       {settings}
-      <View style={{ flex: 1 }} />
-      <ComposerDictationButton
-        dictation={dictation}
-        disabled={dictationDisabled}
-      />
-      {children}
+      <View style={styles.spacer} pointerEvents="none" />
+      <View
+        testID="chat-composer-trailing"
+        style={styles.group}
+        onLayout={(event) =>
+          layout?.onTrailingWidth(event.nativeEvent.layout.width)
+        }
+      >
+        <ComposerDictationButton
+          dictation={dictation}
+          disabled={dictationDisabled}
+        />
+        {children}
+      </View>
     </ChatComposerRow>
   );
 }
+
+const styles = StyleSheet.create({
+  group: { flexDirection: "row", alignItems: "center" },
+  spacer: { flex: 1 },
+});

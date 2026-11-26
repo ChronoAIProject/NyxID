@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import { ApiError } from "../../../lib/api/ApiError";
 import { voiceStartDetailsSchema } from "./voiceContracts";
 
@@ -25,34 +26,53 @@ export function voiceStartRecovery(
   if (error.errorCode === 11300)
     return {
       kind: "credits",
-      message:
+      message: translateApp(
         "There are not enough available credits for the initial voice reservation. Open Billing to review your balance and applicable benefits, or choose another eligible voice source.",
+      ),
     };
   if (error.errorCode === 11307)
     return {
       kind: "wallet_suspended",
-      message:
+      message: translateApp(
         "Your billing wallet is suspended. Open Billing to review your wallet status before starting voice again.",
+      ),
     };
   if (error.errorCode === 11301 || error.errorCode === 11302)
     return {
       kind: "billing_unavailable",
-      message:
+      message: translateApp(
         "Voice billing is temporarily unavailable. Try again later, or choose another eligible voice source.",
+      ),
     };
   return undefined;
 }
 
 type StartStage = ReturnType<typeof voiceStartDetailsSchema.parse>["stage"];
 const stageMessages: Record<StartStage, string> = {
-  flag: "Voice is not enabled for this account",
-  thread: "Voice is unavailable for this conversation",
-  origin: "Voice origin was refused",
-  credential: "Voice credential is unavailable or not authorized",
-  billing_reservation: "Voice billing could not be reserved",
-  provider_create: "Voice provider could not create the session",
-  provider_answer: "Voice provider returned an invalid session answer",
-  transport: "Voice transport could not connect",
+  get flag() {
+    return translateApp("Voice is not enabled for this account");
+  },
+  get thread() {
+    return translateApp("Voice is unavailable for this conversation");
+  },
+  get origin() {
+    return translateApp("Voice origin was refused");
+  },
+  get credential() {
+    return translateApp("Voice credential is unavailable or not authorized");
+  },
+  get billing_reservation() {
+    return translateApp("Voice billing could not be reserved");
+  },
+  get provider_create() {
+    return translateApp("Voice provider could not create the session");
+  },
+  get provider_answer() {
+    return translateApp("Voice provider returned an invalid session answer");
+  },
+  get transport() {
+    return translateApp("Voice transport could not connect");
+  },
 };
 
 // The contract already bounds identifiers and excludes prose and URLs. Apply
@@ -63,12 +83,14 @@ function diagnosticIdentifier(value?: string) {
 
 function apiMessage(error: ApiError) {
   if (error.statusCode === 409)
-    return "Voice state changed before the call could start. Check call status and try again.";
-  if (error.errorCode === 11300) return "Insufficient voice credits";
-  if (error.errorCode === 11307) return "Voice billing wallet is suspended";
+    return translateApp(
+      "Voice state changed before the call could start. Check call status and try again.",
+    );
+  if (error.errorCode === 11300) return translateApp("Insufficient voice credits");
+  if (error.errorCode === 11307) return translateApp("Voice billing wallet is suspended");
   if (error.errorCode === 11301 || error.errorCode === 11302)
-    return "Voice billing is unavailable";
-  if (error.errorCode === 12500) return "Voice is busy. Try again shortly";
+    return translateApp("Voice billing is unavailable");
+  if (error.errorCode === 12500) return translateApp("Voice is busy. Try again shortly");
   return undefined;
 }
 
@@ -103,21 +125,29 @@ export function voiceStartError(error: unknown, step: VoiceStartStep): string {
       const message =
         known ??
         (d.stage === "provider_create" && d.provider_status
-          ? "Voice provider rejected the session"
+          ? translateApp("Voice provider rejected the session")
           : stageMessages[d.stage]);
       return `${message} (${hint}${code ? ` · ${code}` : ""})`;
     }
     const message =
       known ??
       (error.statusCode === 401
-        ? "Your session has expired. Sign in again before starting voice"
+        ? translateApp(
+            "Your session has expired. Sign in again before starting voice",
+          )
         : error.statusCode === 403
-          ? "Voice access was refused. Check your account and provider connection"
+          ? translateApp(
+              "Voice access was refused. Check your account and provider connection",
+            )
           : error.statusCode === 429
-            ? "Too many voice requests. Wait a moment and try again"
+            ? translateApp(
+                "Too many voice requests. Wait a moment and try again",
+              )
             : error.statusCode === 400 || error.statusCode === 422
-              ? "Voice settings were rejected. Check your source and voice"
-              : "Voice server could not start the call");
+              ? translateApp(
+                  "Voice settings were rejected. Check your source and voice",
+                )
+              : translateApp("Voice server could not start the call"));
     const status =
       Number.isInteger(error.statusCode) &&
       error.statusCode >= 100 &&
@@ -129,13 +159,15 @@ export function voiceStartError(error: unknown, step: VoiceStartStep): string {
   }
   if (step === "microphone") {
     const name = error instanceof Error ? error.name : "";
-    if (name === "NotAllowedError") return "Microphone permission was denied";
-    if (name === "NotFoundError") return "No microphone found";
-    return "Microphone could not be opened";
+    if (name === "NotAllowedError") return translateApp("Microphone permission was denied");
+    if (name === "NotFoundError") return translateApp("No microphone found");
+    return translateApp("Microphone could not be opened");
   }
-  if (step === "webrtc") return "WebRTC negotiation failed";
+  if (step === "webrtc") return translateApp("WebRTC negotiation failed");
   if (step === "response")
-    return "Voice server returned an invalid session answer";
-  if (step === "transport") return "Voice control connection could not open";
-  return "Voice server could not be reached. Check the active call before trying again.";
+    return translateApp("Voice server returned an invalid session answer");
+  if (step === "transport") return translateApp("Voice control connection could not open");
+  return translateApp(
+    "Voice server could not be reached. Check the active call before trying again.",
+  );
 }

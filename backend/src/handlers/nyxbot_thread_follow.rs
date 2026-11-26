@@ -47,13 +47,21 @@ pub(super) async fn inbound(
     payload: &Value,
     message: &str,
     text: &str,
+    truncated_original_bytes: Option<usize>,
     event_key: &str,
 ) -> AppResult<bool> {
     if row.transport != "direct" {
         return Ok(false);
     }
     Ok(Box::pin(inbound_impl(
-        state, row, payload, message, text, event_key, false,
+        state,
+        row,
+        payload,
+        message,
+        text,
+        truncated_original_bytes,
+        event_key,
+        false,
     ))
     .await?
     .is_some())
@@ -79,6 +87,7 @@ pub(super) async fn gateway_inbound(
         &payload,
         activity["event_id"].as_str().unwrap_or_default(),
         text,
+        None,
         event_key,
         true,
     ))
@@ -92,19 +101,29 @@ pub(super) async fn inbound_impl(
     payload: &Value,
     message: &str,
     text: &str,
+    truncated_original_bytes: Option<usize>,
     event_key: &str,
     gateway: bool,
 ) -> AppResult<Option<Inbound>> {
     let result = Box::pin(inbound_impl_inner(
-        state, row, payload, message, text, event_key, gateway,
+        state,
+        row,
+        payload,
+        message,
+        text,
+        truncated_original_bytes,
+        event_key,
+        gateway,
     ))
     .await;
     if payload["conversation"]["type"] != "private" {
         match &result {
             Ok(Some(outcome)) => {
-                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?
+                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?;
             }
-            Err(_) => admission_diagnostics::outcome(state, row, message, Err(())).await?,
+            Err(_) => {
+                admission_diagnostics::outcome(state, row, message, Err(())).await?;
+            }
             Ok(None) => {
                 crate::services::nyxbot_admission_service::selection(
                     &state.db, row, message, "legacy", None,
@@ -123,6 +142,7 @@ async fn inbound_impl_inner(
     payload: &Value,
     message: &str,
     text: &str,
+    truncated_original_bytes: Option<usize>,
     event_key: &str,
     gateway: bool,
 ) -> AppResult<Option<Inbound>> {
@@ -192,6 +212,7 @@ async fn inbound_impl_inner(
         return Ok(Some(Inbound::Silent("refused_empty_content")));
     }
     let sender = Sender {
+        truncated_original_bytes,
         original_kind: None,
         media: crate::services::telegram_input::stored_attachments(&source.attachments),
         original_message: canonical_platform(&row.platform) != "telegram"
@@ -199,7 +220,11 @@ async fn inbound_impl_inner(
         kind: facts.sender_kind,
         owner_eligible: facts.sender_kind == ThreadSenderKind::Human,
         id: sender_id,
-        display_name: payload["sender"]["display_name"].as_str(),
+        display_name: if gateway {
+            payload["sender"]["display_name"].as_str()
+        } else {
+            source.sender_display_name.as_deref()
+        },
     };
     let stop_requested = sender.kind == ThreadSenderKind::Human && text.trim() == "stop following";
     if stop_requested && !sender.original_message {
@@ -410,7 +435,9 @@ async fn inbound_impl_inner(
                     metadata: None,
                 };
                 if gateway {
-                    return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                    return Ok(Some(Inbound::Reply(
+                        reply.text.clone().unwrap_or_default().into(),
+                    )));
                 }
                 threads::delivery::send_reply(
                     &state.db,
@@ -469,7 +496,9 @@ async fn inbound_impl_inner(
                 metadata: None,
             };
             if gateway {
-                return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                return Ok(Some(Inbound::Reply(
+                    reply.text.clone().unwrap_or_default().into(),
+                )));
             }
             threads::delivery::send_reply(
                 &state.db,
@@ -506,7 +535,7 @@ async fn inbound_impl_inner(
         on,
     )
     .await;
-    let (child, binding, stopped) = match selection {
+    let (mut child, binding, stopped) = match selection {
         Ok(follow::Selection::Legacy) => return Ok(None),
         Ok(follow::Selection::Quiet(reason)) => {
             if !private {
@@ -524,15 +553,15 @@ async fn inbound_impl_inner(
         }
         Err(AppError::Conflict(_)) => {
             let reply = OutboundReply {
-                text: Some(
-                    "I can't follow another thread right now. Please try again later.".into(),
-                ),
+                text: Some(Notice::ThreadLimit.text(settings.notice_language).into()),
                 attachments: Vec::new(),
                 reply_to_platform_message_id: None,
                 metadata: None,
             };
             if gateway {
-                return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                return Ok(Some(Inbound::Reply(
+                    reply.text.clone().unwrap_or_default().into(),
+                )));
             }
             threads::delivery::send_reply(
                 &state.db,
@@ -547,6 +576,7 @@ async fn inbound_impl_inner(
         }
         Err(e) => return Err(e),
     };
+    child.notice_language = settings.notice_language;
     if !private {
         crate::services::nyxbot_admission_service::selection(
             &state.db,
@@ -587,9 +617,9 @@ async fn inbound_impl_inner(
         .collection::<NyxbotEvent>(EVENTS)
         .update_one(
             if row.gateway_source.is_some() {
-                doc! {"channel_id":&row.id,"_id":event_key}
+                doc! {"channel_id":&row.id,"_id":event_key,"org_notice":null}
             } else {
-                doc! {"channel_id":&row.id,"event_id":message}
+                doc! {"channel_id":&row.id,"event_id":message,"org_notice":null}
             },
             doc! {"$set":{"resolved_thread_id":&child.id,"resolved_conversation_id":conversation}},
         )
@@ -610,7 +640,7 @@ async fn inbound_impl_inner(
     }
     let result = if stopped {
         Ok(Inbound::Reply(
-            "Stopped following this thread. Its history is still available in NyxID.".into(),
+            Notice::Stopped.text(settings.notice_language).into(),
         ))
     } else {
         Box::pin(start_chat_turn(
@@ -638,28 +668,47 @@ async fn inbound_impl_inner(
             .await?;
     }
     if gateway {
-        return Ok(Some(match result {
-            Ok(Inbound::Busy) => {
-                Inbound::Reply("I'm busy right now. Please try again in a moment.".into())
-            }
+        let mut result = match result {
+            Ok(Inbound::Busy) => Inbound::Reply(InboundReply::fixed(
+                NoticeKind::FollowBusy,
+                Notice::FollowBusy.text(settings.notice_language),
+            )),
             Ok(value) => value,
-            Err(_) => Inbound::Reply("I could not start that. Please try again.".into()),
-        }));
+            Err(_) => Inbound::Reply(InboundReply::fixed(
+                NoticeKind::StartFailure,
+                Notice::StartFailure.text(settings.notice_language),
+            )),
+        };
+        if let Inbound::Reply(reply) = &mut result
+            && reply.kind.is_some()
+            && row.org_specialist.is_some()
+            && row.gateway_source.is_none()
+            && threads::gateway::negotiated(row)
+            && let Some(binding_id) = &row.binding_id
+        {
+            reply.followed = Some(Box::new(response_read::SelectedThread {
+                binding,
+                binding_id: binding_id.clone(),
+                partition: child.partition,
+                target_sha256: crate::services::nyxbot_response_read::notice_target_digest(facts),
+            }));
+        }
+        return Ok(Some(result));
     }
     let reply = match result {
-        Ok(Inbound::Reply(reply)) => Some(reply),
+        Ok(Inbound::Reply(reply)) => Some(reply.text),
         Ok(Inbound::Queued) => {
             late_delivery::process(state, event_key).await;
             None
         }
         Ok(Inbound::Silent(_)) => None,
-        Ok(Inbound::Busy) => Some("I'm busy right now. Please try again in a moment.".into()),
+        Ok(Inbound::Busy) => Some(Notice::FollowBusy.text(settings.notice_language).into()),
         Ok(Inbound::Turn(receiver)) => {
             let _ = final_reply(receiver).await;
             late_delivery::process(state, event_key).await;
             None
         }
-        Err(_) => Some("I could not start that. Please try again.".into()),
+        Err(_) => Some(Notice::StartFailure.text(settings.notice_language).into()),
     };
     if let Some(reply) = reply {
         send(state, &row.user_id, &origin, conversation, &reply, None).await?;
@@ -849,6 +898,16 @@ async fn send_impl(
     }
     if let Some(decision) = decision.as_mut() {
         decision.anchor = super::supplemental::Anchor::ThreadBinding;
+        if decision.needs_post_turn_claim() {
+            bound_image_audience(state, &channel, owner, origin, conversation).await?;
+            super::supplemental::prepare_result_text(&text, &channel.platform, "")?;
+            if !decision
+                .claim_result(state, owner, conversation, origin)
+                .await?
+            {
+                return Ok(());
+            }
+        }
         decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
     }
     let outcome = send_bound_reply(
@@ -1157,9 +1216,16 @@ pub(crate) async fn prelude(
     );
     // JSON quoting makes sender/body boundaries explicit without interpreting
     // provider display names as owner identity or instruction delimiters.
+    let mut truncations = Vec::new();
     for m in context.history.messages {
-        prelude
-            .push_str(&json!({"sender":m.sender_id,"time":m.created_at,"text":m.text}).to_string());
+        let mut item = json!({"message_id":m.message_id,"sender":m.sender_id,"time":m.created_at,"text":m.text});
+        if let Some(bytes) = m.truncated_original_bytes {
+            item["truncated"] = json!(true);
+            item["original_bytes"] = json!(bytes);
+            item["notice"] = json!("[message truncated]");
+            truncations.push(doc! {"message_id": m.message_id, "truncated": true, "original_bytes": bytes as i64});
+        }
+        prelude.push_str(&item.to_string());
         prelude.push('\n');
     }
     for m in context.metadata {
@@ -1178,7 +1244,7 @@ pub(crate) async fn prelude(
             .collection::<NyxbotThread>(THREADS)
             .update_one(
                 context_filter,
-                doc! {"$set":{"context_status":status,"context_message_count":count as i64}},
+                doc! {"$set":{"context_status":status,"context_message_count":count as i64, "context_text_truncations":truncations}},
             )
             .await
     })

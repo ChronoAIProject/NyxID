@@ -1,5 +1,7 @@
 # Telegram manager as a public channel bot
 
+> **Status:** Historical — implementation and acceptance plan for a shipped feature. Current spec: [Telegram bot creation](TELEGRAM_NEW.md#using-the-manager-as-a-channel-bot).
+
 ## Outcome and scope
 
 An existing, configured Telegram manager can be connected through the ordinary

@@ -194,7 +194,15 @@ impl Fixture {
         Box::pin(Self::with_org(name, false)).await
     }
     async fn with_org(name: &str, org: bool) -> Self {
-        let (state, calls, model) = setup(name).await;
+        Box::pin(Self::with_output(
+            name,
+            org,
+            message_output("Here is your answer"),
+        ))
+        .await
+    }
+    async fn with_output(name: &str, org: bool, output: Value) -> Self {
+        let (state, calls, model) = Box::pin(setup_with_output(name, output)).await;
         let (mut row, key) = if org {
             let (row, key, _, _) = org_channel_tests::org_channel(&state, false).await;
             (row, key)
@@ -874,6 +882,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 chat_delivery: None,
                 image_input: None,
                 image_input_reason: None,
+                pdf: None,
                 image_inspection: None,
             });
         }
@@ -917,6 +926,19 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
             }),
         )
         .await;
+        deliver_to(&f.state, &row, &origin, "event result", None).await;
+        let duplicate = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {
+                "event_type":"nyxbot_channel_supplemental_delivery",
+                "event_data.turn_id":&turn_id,
+                "event_data.reason":"already_claimed",
+            })
+            .await
+            .unwrap();
+        assert_eq!(duplicate, 1);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
         let requests = f.platform.received_requests().await.unwrap();
         let replies: Vec<_> = requests
@@ -1220,7 +1242,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         } else {
             let signed = |id: &str| {
                 let payload = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
-                    "conversation":{"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
+                    "conversation":{"id":f.row.route_id,"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
                     "sender":{"platform_id":"human"},"content":{"type":"image","text":"receipt with caption"},
                     "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"human"}}}}});
                 let bytes = serde_json::to_vec(&payload).unwrap();
@@ -1472,17 +1494,6 @@ async fn supplemental_followed_reply_preserves_thread_callback_variants_and_part
                 let response=axum::Router::new().route(endpoint,route).with_state(f.state.clone()).oneshot(Request::builder().method("POST").uri(endpoint).header("authorization",format!("Bearer {token}")).header("content-type","application/json").body(Body::from(json!({"message_id":id,"reply":{"text":"中文 English မြန်မာစာ\n".repeat(8000)}}).to_string())).unwrap()).await.unwrap();
                 let status=response.status();
                 let bytes=axum::body::to_bytes(response.into_body(),8192).await.unwrap();
-                if commonmark {
-                    // Current gateway thread negotiation supports Lark/Feishu;
-                    // CommonMark callback routes support Telegram only.
-                    assert_eq!(status,StatusCode::BAD_REQUEST);
-                    assert!(String::from_utf8_lossy(&bytes).contains("CommonMark relay formatting is supported for Telegram"));
-                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),0);
-                    assert_eq!(f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count(),usize::from(notice));
-                    assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
-                    f.state.db.drop().await.unwrap();
-                    continue;
-                }
                 assert_eq!(status,StatusCode::OK,"{}",String::from_utf8_lossy(&bytes));
                 let reply:Value=serde_json::from_slice(&bytes).unwrap();
                 let requests:Vec<Value>=f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).map(|r|serde_json::from_slice(&r.body).unwrap()).collect();
@@ -1599,6 +1610,7 @@ async fn org_member_group_dm_group(linking_admin: bool) {
         OWNER,
         &f.row,
         serde_json::from_value(json!({"enabled":false})).unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -1827,7 +1839,7 @@ async fn org_member_group_dm_group(linking_admin: bool) {
             let health = crate::services::channel_bot_health::recommend(
                 &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true),
             );
-            assert_eq!(health.action, "none");
+            assert_eq!(health.action, "reconnect");
             assert_eq!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
                 .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":&id,"event_data.reason":"thread_target_rejected"}).await.unwrap(),1);
             f.state
@@ -2360,7 +2372,8 @@ async fn delayed_source_identity(newer_message: bool) {
                 OWNER,
                 &conversation,
                 work,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -2537,7 +2550,7 @@ async fn thread_health_records_closed_failures_once_excludes_transients_and_clea
                 &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
             )
             .action,
-            "none"
+            "reconnect"
         );
         channel_bot_service::record_outbound_outcome(&f.state.db, &f.row.channel_bot_id, None)
             .await;

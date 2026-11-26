@@ -248,6 +248,8 @@ pub struct McpDurableEndpointMetadata {
     /// method says otherwise (NyxID's `x-nyxid-changes-existing`: a POST that
     /// edits, a PUT that only acts); `None` leaves it to the method.
     pub changes_existing: Option<bool>,
+    /// Generic proxy calls use the resolved catalog's compiled routes.
+    pub generic_spec_key: Option<&'static str>,
     /// Compiled NyxID overlay only; remote specs cannot assert this.
     pub append_only: bool,
     pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
@@ -276,6 +278,26 @@ pub fn operation_effects(
     method: &reqwest::Method,
     metadata: McpDurableEndpointMetadata,
 ) -> OperationEffects {
+    request_effects(method, metadata, None, false)
+}
+
+pub(super) fn request_effects(
+    method: &reqwest::Method,
+    mut metadata: McpDurableEndpointMetadata,
+    query: Option<&str>,
+    method_override: bool,
+) -> OperationEffects {
+    metadata.append_only = metadata.append_only
+        && !method_override
+        && append_query_allowed(metadata.append_only_query, query);
+    possible_operation_effects(method, metadata)
+}
+
+/// Discovery includes operations whose conditions can be satisfied at execution.
+pub(super) fn possible_operation_effects(
+    method: &reqwest::Method,
+    metadata: McpDurableEndpointMetadata,
+) -> OperationEffects {
     let safe = matches!(
         *method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
@@ -289,16 +311,14 @@ pub fn operation_effects(
         Some(false) if metadata.catalog_contract => false,
         _ => !(safe || *method == reqwest::Method::POST),
     };
-    let destructive = *method == reqwest::Method::DELETE || metadata.destructive;
+    let append = metadata.catalog_contract
+        && metadata.append_only
+        && *method == reqwest::Method::POST
+        && !changes;
+    let destructive = *method == reqwest::Method::DELETE || (metadata.destructive && !append);
     OperationEffects {
-        reads: reads && !changes && !destructive,
-        // Keep Aevatar's destructive classification for approvals/webhooks.
-        // Only this NyxID contract permits additive guest use despite it.
-        uses: !changes
-            && (!destructive
-                || (metadata.catalog_contract
-                    && metadata.append_only
-                    && *method == reqwest::Method::POST)),
+        reads: reads && !changes && !destructive && !append,
+        uses: !changes && !destructive,
         destructive,
     }
 }
@@ -939,6 +959,14 @@ pub fn caller_service_scope<'a>(
     allow_all_services: bool,
     allowed_service_ids: &'a [String],
 ) -> ServiceScope<'a> {
+    // An org guest acts as the org itself. Its authenticated service IDs
+    // already include the live binding check and are a discovery boundary.
+    if request_access
+        .and_then(|access| access.channel())
+        .is_some_and(|channel| channel.execution().guest)
+    {
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
     if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
         if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
             && chat.is_some()
@@ -1797,7 +1825,7 @@ async fn load_user_tools_with_grants(
                         None if !template_rows.endpoints.is_empty() => {
                             tracing::warn!(
                                 user_service_id = %us.id,
-                                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                                 "User-mounted spec unusable; falling back to catalog template endpoints"
                             );
                             (template_rows, false, false)
@@ -1978,31 +2006,39 @@ fn service_endpoint_durable_metadata(
 ) -> HashMap<String, McpDurableEndpointMetadata> {
     eps.iter()
         .map(|endpoint| {
-            let marks = catalog_slug
-                .map(|slug| {
-                    super::catalog_spec_registry::operation_marks(
-                        slug,
-                        &endpoint.method,
-                        &endpoint.path,
-                        &endpoint.name,
-                    )
-                })
-                .unwrap_or_default();
             (
                 endpoint.id.clone(),
-                McpDurableEndpointMetadata {
-                    risk: endpoint.risk,
-                    catalog_contract: true,
-                    destructive: marks.destructive,
-                    changes_existing: marks.changes_existing,
-                    append_only: marks.append_only,
-                    append_only_query: marks.append_only_query,
-                    supports_idempotency_key: endpoint.supports_idempotency_key,
-                    operation_generation: endpoint.operation_generation,
-                },
+                stored_endpoint_metadata(endpoint, catalog_slug),
             )
         })
         .collect()
+}
+
+pub(super) fn stored_endpoint_metadata(
+    endpoint: &ServiceEndpoint,
+    catalog_slug: Option<&str>,
+) -> McpDurableEndpointMetadata {
+    let marks = catalog_slug
+        .map(|slug| {
+            super::catalog_spec_registry::operation_marks(
+                slug,
+                &endpoint.method,
+                &endpoint.path,
+                &endpoint.name,
+            )
+        })
+        .unwrap_or_default();
+    McpDurableEndpointMetadata {
+        risk: endpoint.risk,
+        catalog_contract: true,
+        destructive: marks.destructive,
+        changes_existing: marks.changes_existing,
+        append_only: marks.append_only,
+        append_only_query: marks.append_only_query,
+        supports_idempotency_key: endpoint.supports_idempotency_key,
+        operation_generation: endpoint.operation_generation,
+        generic_spec_key: None,
+    }
 }
 
 /// An instance-mounted spec of a catalog service keeps what the catalog
@@ -2018,6 +2054,10 @@ fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &st
             &endpoint.name,
         );
         if let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id) {
+            if endpoint.endpoint_id == GENERIC_PROXY_ENDPOINT_ID {
+                metadata.generic_spec_key =
+                    super::catalog_spec_registry::spec_key_for_slug(catalog_slug);
+            }
             metadata.append_only = metadata.catalog_contract && marks.append_only;
             metadata.append_only_query = marks.append_only_query;
             metadata.destructive |= marks.destructive;
@@ -2043,6 +2083,7 @@ fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
             risk: None,
             destructive: false,
             changes_existing: None,
+            generic_spec_key: None,
             append_only: false,
             append_only_query: None,
             catalog_contract: false,
@@ -2139,6 +2180,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
                 risk: parsed_endpoint.risk,
                 destructive: parsed_endpoint.destructive,
                 changes_existing: parsed_endpoint.changes_existing,
+                generic_spec_key: None,
                 append_only: false,
                 append_only_query: None,
                 catalog_contract: false,
@@ -2201,7 +2243,7 @@ async fn try_user_spec_endpoints(
         Ok(_) => {
             tracing::debug!(
                 user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 "Parsed user OpenAPI spec contained no operations"
             );
             None
@@ -2209,7 +2251,7 @@ async fn try_user_spec_endpoints(
         Err(error) => {
             tracing::warn!(
                 user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 %error,
                 "Failed to parse user OpenAPI spec"
             );
@@ -2987,6 +3029,25 @@ pub fn generate_tool_definitions(
     });
 
     tools.push(McpToolDefinition {
+        name: "nyx__diagnose_invocation".to_string(),
+        description: "Redeem one short-lived NyxID invocation-diagnostic handle using this exact current identity. The original tool error remains authoritative. Call at most once, except one retry when the result explicitly reports diagnostic_not_ready; never retry the failed business operation automatically."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Opaque nyx_diag_ handle returned by the immediately preceding failed NyxID invocation"
+                }
+            },
+            "required": ["handle"],
+            "additionalProperties": false
+        }),
+    });
+
+    tools.push(McpToolDefinition {
         name: "nyx__ssh_exec".to_string(),
         description: "Execute a command on a remote SSH service. Returns stdout, stderr, \
             and exit code. The command runs on the remote machine authenticated via NyxID \
@@ -3072,12 +3133,16 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
-        "nyxid__task_status" | "nyxid__list_notifications" | "nyxid__read_tool_result" => {
-            (true, false, false)
-        }
+        "nyxid__set_agent_operations" => (false, false, false),
+        "nyxid__get_agent_operations"
+        | "nyxid__task_status"
+        | "nyxid__list_notifications"
+        | "nyxid__list_schedules"
+        | "nyxid__read_tool_result" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
+        | "nyx__diagnose_invocation"
         | "nyx__wait_for_connection"
         | "nyx__ssh_list_services"
         | "nyx__oracle_pools"
@@ -3124,8 +3189,11 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyxid__get_agent_operations" => "List specialist operations by effect",
+        "nyxid__set_agent_operations" => "Set specialist operation scope",
         "nyxid__task_status" => "Read task execution status",
         "nyxid__list_notifications" => "Read NyxBot notifications",
+        "nyxid__list_schedules" => "List NyxBot schedules and automations",
         "nyxid__read_tool_result" => "Read a retained tool result",
         "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
@@ -3134,6 +3202,7 @@ pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
         "nyx__wait_for_connection" => "Wait for a connection",
         "nyx__discover_services" => "Discover services",
         "nyx__list_connected_services" => "List connected services",
+        "nyx__diagnose_invocation" => "Diagnose a failed invocation",
         "nyx__ssh_list_services" => "List SSH services",
         "nyx__ssh_exec" => "Run an SSH command",
         "nyx__oracle_pools" => "List oracle pools",
@@ -3984,7 +4053,12 @@ impl AutomaticReceipt {
     }
 }
 
+type ServiceApprovalWait =
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>> + Send + Sync>;
+
 pub struct PreparedProxyCall {
+    /// Create the connected approval only after this exact action passes assistant admission.
+    service_approval: Option<ServiceApprovalWait>,
     lark_message: Option<super::lark_im_tool::MessageMode>,
     managed_base: Option<super::lark_base_writes::Prepared>,
     attachment_binding: Option<super::lark_attachment_tool::Binding>,
@@ -4007,6 +4081,16 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) fn defer_service_approval(
+        &mut self,
+        wait: impl FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.service_approval = Some(Box::new(wait));
+    }
+
     pub(crate) async fn admit_execution_permission(
         &self,
         state: &crate::AppState,
@@ -4289,7 +4373,7 @@ impl PreparedProxyCall {
         );
         operation_descriptor::apply_operation_effects(
             &mut descriptor,
-            operation_effects(&self.method, self.approval_metadata),
+            self.effects(),
             self.carries_method_override(),
         );
         descriptor
@@ -4301,6 +4385,38 @@ impl PreparedProxyCall {
         service: &McpToolService,
         endpoint: &McpToolEndpoint,
     ) -> AppResult<()> {
+        let (body, mime) = self.scope_input();
+        self.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            super::agent_operation_scope_service::InputBody::Request(body, mime),
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn scope_input(&self) -> (&[u8], Option<&str>) {
+        if let Some(json) = self
+            .attachment_binding
+            .as_ref()
+            .and_then(|b| b.scope_json())
+        {
+            (json, Some("application/json"))
+        } else {
+            (
+                self.body.as_deref().unwrap_or_default(),
+                self.body_content_type.as_deref(),
+            )
+        }
+    }
+
+    fn authorize_operation_inputs(
+        &self,
+        scopes: &crate::models::agent_operation_scope::OperationScopes,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+        input: super::agent_operation_scope_service::InputBody<'_>,
+    ) -> AppResult<bool> {
         use super::agent_operation_scope_service as operations;
         if operations::applicable(
             scopes,
@@ -4310,7 +4426,7 @@ impl PreparedProxyCall {
         .next()
         .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
         let path = if self.is_generic_proxy_endpoint {
             super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)?
@@ -4330,7 +4446,7 @@ impl PreparedProxyCall {
             self.carries_override(true),
             false,
         )?;
-        operations::check_inputs(
+        operations::evaluate_inputs(
             scopes,
             &service.service_id,
             operations::mcp_catalog_id(service),
@@ -4338,18 +4454,33 @@ impl PreparedProxyCall {
             self.method.as_str(),
             &path,
             self.query.as_deref(),
-            self.body.as_deref().unwrap_or_default(),
-            self.body_content_type.as_deref(),
+            input,
         )
     }
 
-    pub(crate) fn guest_effects(
-        &self,
-        mut metadata: McpDurableEndpointMetadata,
-    ) -> OperationEffects {
-        metadata.append_only &=
-            append_query_allowed(metadata.append_only_query, self.query.as_deref());
-        operation_effects(&self.method, metadata)
+    pub(crate) fn effects(&self) -> OperationEffects {
+        let metadata = self.approval_metadata;
+        let method_override = (metadata.append_only || metadata.generic_spec_key.is_some())
+            && self.carries_method_override();
+        let effects = request_effects(&self.method, metadata, self.query(), method_override);
+        if let Some(key) = metadata.generic_spec_key
+            && let Ok(path) = self.canonical_path()
+            && super::catalog_spec_registry::compiled_effects(
+                key,
+                &self.method,
+                &path,
+                self.query(),
+                method_override,
+            )
+            .is_some_and(|compiled| compiled.destructive)
+        {
+            return OperationEffects {
+                reads: false,
+                uses: false,
+                destructive: true,
+            };
+        }
+        effects
     }
 
     pub(crate) fn query(&self) -> Option<&str> {
@@ -4480,6 +4611,7 @@ pub(crate) fn http_carries_method_override(
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
+        service_approval: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -4612,6 +4744,7 @@ fn prepare_proxy_tool_call_inner(
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
+        service_approval: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -4630,15 +4763,11 @@ fn prepare_proxy_tool_call_inner(
             .then(|| request_content_type_or_default(endpoint).to_string()),
         body,
         is_generic_proxy_endpoint,
-        approval_metadata: if is_generic_proxy_endpoint {
-            Default::default()
-        } else {
-            service
-                .durable_endpoint_metadata
-                .get(&endpoint.endpoint_id)
-                .copied()
-                .unwrap_or_default()
-        },
+        approval_metadata: service
+            .durable_endpoint_metadata
+            .get(&endpoint.endpoint_id)
+            .copied()
+            .unwrap_or_default(),
     })
 }
 
@@ -4648,6 +4777,7 @@ pub fn prepare_chat_proxy_tool_call<'a>(
     db: &'a mongodb::Database,
     keys: &'a EncryptionKeys,
     chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    scopes: &'a crate::models::agent_operation_scope::OperationScopes,
     service: &'a McpToolService,
     endpoint: &'a McpToolEndpoint,
     args: &'a serde_json::Value,
@@ -4724,10 +4854,8 @@ pub fn prepare_chat_proxy_tool_call<'a>(
             );
             return Ok(prepared);
         }
-        let materialized = Box::pin(super::lark_attachment_tool::materialize(
-            db, keys, chat, service, endpoint, args,
-        ))
-        .await?;
+        let chat =
+            super::lark_attachment_tool::require_upload_chat(db, chat, service, endpoint).await?;
         // Reuse route/policy preparation with no caller body. This private copy
         // changes only body construction; consent and identity keep the real endpoint.
         let mut route = endpoint.clone();
@@ -4735,6 +4863,31 @@ pub fn prepare_chat_proxy_tool_call<'a>(
         route.request_body_schema = None;
         route.request_body_required = false;
         let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        use super::agent_operation_scope_service::InputBody;
+        let body_limited = prepared.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            InputBody::BeforeUpload,
+        )?;
+        let upload = super::lark_attachment_tool::UploadArguments::new(args, body_limited)?;
+        if let Some(body) = upload.scope_json() {
+            prepared.authorize_operation_inputs(
+                scopes,
+                service,
+                endpoint,
+                InputBody::Request(body, Some("application/json")),
+            )?;
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, upload,
+        ))
+        .await?;
+        if body_limited {
+            prepared
+                .server_owned_headers
+                .push(("content-type".into(), materialized.content_type.clone()));
+        }
         prepared.body = Some(materialized.body);
         prepared.body_content_type = Some(materialized.content_type);
         prepared.attachment_binding = Some(materialized.binding);
@@ -5631,11 +5784,6 @@ pub(crate) fn execute_tool_response_with_outcome<'a>(
         if let Some(scopes) = exec_ctx.operation_scopes {
             prepared.authorize_agent_operations(scopes, service, endpoint)?;
         }
-        let http_client = if scoped_execution(exec_ctx, service) {
-            proxy_service::no_redirect_http_client()
-        } else {
-            http_client
-        };
         let ResolvedToolTarget {
             target,
             node_route,
@@ -5763,7 +5911,7 @@ impl ToolResponse {
 
     /// Only the server's execution gate can construct this control response.
     /// Provider bodies are always downstream content, even if they resemble it.
-    fn policy_refusal(refusal: serde_json::Value) -> Self {
+    fn policy_refusal(refusal: impl std::fmt::Display) -> Self {
         Self {
             resources: None,
             concurrency: None,
@@ -6056,7 +6204,7 @@ async fn collect_file_node_stream_response(
 /// this so the attested resolution is the one that produces the effect.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_tool_resolved<'a>(
-    http_client: &'a reqwest::Client,
+    _http_client: &'a reqwest::Client,
     db: &'a mongodb::Database,
     encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
@@ -6086,6 +6234,7 @@ pub fn execute_tool_resolved<'a>(
             && (node_route.is_some()
                 || target
                     .catalog_default_headers
+                    .configured()
                     .iter()
                     .chain(&target.user_service_default_headers)
                     .any(|header| header.name.eq_ignore_ascii_case("upgrade")))
@@ -6120,22 +6269,31 @@ pub fn execute_tool_resolved<'a>(
         .flatten();
         let wiki_slug = catalog_service_slug
             .filter(|_| super::lark_wiki::matches(catalog_service_slug, service, endpoint));
-        let http_client = if resource_source.is_some() || wiki_slug.is_some() {
-            super::resource_adapter::http_client()
+        let redirects = if resource_source.is_some()
+            || wiki_slug.is_some()
+            || scoped_execution(exec_ctx, service)
+        {
+            proxy_service::Redirects::Return
         } else {
-            http_client
+            proxy_service::Redirects::SameOrigin
         };
         let managed = super::telnyx_platform_service::contract(&target.service).is_some();
-        let lease = super::service_concurrency_service::acquire(
-            db,
-            &target.service,
-            exec_ctx.actor_user_id.unwrap_or(user_id),
-        )
-        .await?;
+        // A connected human decision can outlive a service's capacity budget.
+        // Acquire its slot only once the owner has decided.
+        let lease = if prepared.service_approval.is_some() {
+            None
+        } else {
+            super::service_concurrency_service::acquire(
+                db,
+                &target.service,
+                exec_ctx.actor_user_id.unwrap_or(user_id),
+            )
+            .await?
+        };
         let im_kind = super::lark_im_tool::kind(endpoint);
         let message_mode = prepared.lark_message.clone();
         let execution = execute_tool_resolved_boxed(
-            http_client,
+            redirects,
             db,
             encryption_keys,
             node_ws_manager,
@@ -6165,16 +6323,7 @@ pub fn execute_tool_resolved<'a>(
         if managed {
             return execution.await;
         }
-        let mut outcome = match lease {
-            Some(lease) => {
-                let mut outcome = lease.run(execution).await?;
-                if let McpToolExecutionOutcome::Response(response) = &mut outcome {
-                    response.concurrency = Some(lease);
-                }
-                outcome
-            }
-            None => execution.await?,
-        };
+        let mut outcome = hold_tool_capacity(lease, execution).await?;
         if let (Some(kind), McpToolExecutionOutcome::Response(response)) = (im_kind, &mut outcome)
             && matches!(response.origin, ToolResponseOrigin::Downstream)
         {
@@ -6213,9 +6362,23 @@ pub fn execute_tool_resolved<'a>(
     })
 }
 
+async fn hold_tool_capacity(
+    lease: Option<super::service_concurrency_service::Lease>,
+    execution: futures::future::BoxFuture<'_, AppResult<McpToolExecutionOutcome>>,
+) -> AppResult<McpToolExecutionOutcome> {
+    let Some(lease) = lease else {
+        return execution.await;
+    };
+    let mut outcome = lease.run(execution).await?;
+    if let McpToolExecutionOutcome::Response(response) = &mut outcome {
+        response.concurrency = Some(lease);
+    }
+    Ok(outcome)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_tool_resolved_boxed<'a>(
-    http_client: &'a reqwest::Client,
+    redirects: proxy_service::Redirects,
     db: &'a mongodb::Database,
     encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
@@ -6241,7 +6404,7 @@ fn execute_tool_resolved_boxed<'a>(
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
-        http_client,
+        redirects,
         db,
         encryption_keys,
         node_ws_manager,
@@ -6277,9 +6440,19 @@ where
     Box::pin(make())
 }
 
+fn forward_with_capacity<'a, F>(
+    lease: Option<super::service_concurrency_service::Lease>,
+    make: impl FnOnce() -> F,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>>
+where
+    F: std::future::Future<Output = AppResult<McpToolExecutionOutcome>> + Send + 'a,
+{
+    Box::pin(hold_tool_capacity(lease, box_mcp_forwarding(make)))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_resolved_inner(
-    http_client: &reqwest::Client,
+    redirects: proxy_service::Redirects,
     db: &mongodb::Database,
     encryption_keys: &std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
@@ -6288,7 +6461,7 @@ async fn execute_tool_resolved_inner(
     billing_principal_user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
-    prepared: PreparedProxyCall,
+    mut prepared: PreparedProxyCall,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
     connection_expiry_notifier: &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
@@ -6342,6 +6515,14 @@ async fn execute_tool_resolved_inner(
         {
             return Err(super::lark_attachment_tool::refused());
         }
+        if binding.scope_json().is_some()
+            && proxy_service::credential_header_name(&target)
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-type"))
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "The credential conflicts with the scoped upload content type".into(),
+            ));
+        }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
     if let Some(base) = &prepared.managed_base {
@@ -6382,21 +6563,6 @@ async fn execute_tool_resolved_inner(
     if exec_ctx.assistant_chat.is_some_and(|chat| chat.guest) {
         super::agent_operation_scope_service::validate_target(&target, prepared.method().as_str())?;
     }
-    let http_client = if scoped_execution(exec_ctx, service)
-        && super::resource_adapter::source(
-            service,
-            endpoint,
-            &target,
-            node_route.is_some(),
-            catalog_service_slug,
-        )
-        .is_none()
-    {
-        proxy_service::no_redirect_http_client()
-    } else {
-        http_client
-    };
-
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
@@ -6417,10 +6583,19 @@ async fn execute_tool_resolved_inner(
     let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
         Some(chat.clone())
     } else {
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            user_id,
+            exec_ctx.api_key_id,
+            0,
+            None,
+        )
+        .await?
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
+    let deferred = prepared.service_approval.take();
+    let approval_deferred = deferred.is_some();
     if let Some(chat) = assistant_chat.as_ref()
         && let McpToolSource::UserManaged {
             user_service_id,
@@ -6466,12 +6641,7 @@ async fn execute_tool_resolved_inner(
                 super::assistant_service_execution::async_contract_binding(service, endpoint)?
             );
         }
-        let metadata = service
-            .durable_endpoint_metadata
-            .get(&endpoint.endpoint_id)
-            .copied()
-            .unwrap_or_default();
-        let effects = operation_effects(prepared.method(), metadata);
+        let effects = prepared.effects();
         let read = effects.reads && !prepared.carries_method_override();
         let destructive = effects.destructive || prepared.carries_method_override();
         let summary = super::cma_operation::control_confirmation(
@@ -6494,6 +6664,14 @@ async fn execute_tool_resolved_inner(
                 service.service_slug
             )
         });
+        let semantic_input = if prepared.attachment_binding.is_some() {
+            prepared.scope_input()
+        } else {
+            (
+                prepared.body.as_deref().unwrap_or_default(),
+                Some("application/json"),
+            )
+        };
         let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
@@ -6515,14 +6693,7 @@ async fn execute_tool_resolved_inner(
                 prepared.acknowledgement_id.as_deref(),
                 &summary,
                 &target,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         } else {
@@ -6544,14 +6715,7 @@ async fn execute_tool_resolved_inner(
                 false,
                 Some(&target),
                 false,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         };
@@ -6559,6 +6723,13 @@ async fn execute_tool_resolved_inner(
         if let Some(refusal) = decision.refusal {
             return Ok(McpToolExecutionOutcome::Response(
                 ToolResponse::policy_refusal(refusal),
+            ));
+        }
+        if let Some(wait) = deferred
+            && let Err(message) = wait().await
+        {
+            return Ok(McpToolExecutionOutcome::Response(
+                ToolResponse::policy_refusal(message),
             ));
         }
         if let Some(mut admission) = decision.admission {
@@ -6580,10 +6751,37 @@ async fn execute_tool_resolved_inner(
                 .await?;
             assistant_admission = Some(admission);
         }
+    } else if approval_deferred {
+        return Err(AppError::Forbidden(
+            "Assistant service approval requires a chat connection".into(),
+        ));
     }
 
     target.require_credential_materialized()?;
-    box_mcp_forwarding(move || async move {
+    let caller_bearer = Box::pin(proxy_service::admit_caller_bearer(
+        db,
+        exec_ctx.actor_user_id.unwrap_or(user_id),
+        billing_context_builder.user_service_id.as_deref(),
+        &target,
+        node_route.as_ref(),
+        exec_ctx.caller_token,
+        &prepared.server_owned_headers,
+    ))
+    .await?;
+    let deferred_lease = if approval_deferred {
+        super::service_concurrency_service::acquire(
+            db,
+            &target.service,
+            exec_ctx.actor_user_id.unwrap_or(user_id),
+        )
+        .await?
+    } else {
+        None
+    };
+    let managed = super::telnyx_platform_service::contract(&target.service).is_some();
+    let service_lease = service_lease.or_else(|| deferred_lease.clone());
+    let capacity = deferred_lease.filter(|_| !managed);
+    forward_with_capacity(capacity, move || async move {
         if let Some(permit) = &target.execution_permission {
             let mut headers = axum::http::HeaderMap::new();
             for (name, value) in &prepared.parameter_headers {
@@ -6596,6 +6794,7 @@ async fn execute_tool_resolved_inner(
             permit.validate_prepared_headers(&headers)?;
         }
         let PreparedProxyCall {
+            service_approval: _,
             lark_message: _,
             managed_base,
             attachment_binding,
@@ -6609,7 +6808,7 @@ async fn execute_tool_resolved_inner(
             path,
             query,
             parameter_headers,
-            server_owned_headers,
+            mut server_owned_headers,
             mut body,
             mut body_content_type,
             is_generic_proxy_endpoint,
@@ -6855,6 +7054,9 @@ async fn execute_tool_resolved_inner(
                 _ => None,
             },
         };
+        let has_server_owned_headers = !server_owned_headers.is_empty();
+        server_owned_headers.push(super::llm_usage_service::identity_encoding_header());
+
         let dispatch_admission = {
             super::service_dispatch_registry::admit(db,encryption_keys,jwt_keys,config,&dispatch_caller,
                 exec_ctx.org_agent_access.is_none()
@@ -6863,7 +7065,7 @@ async fn execute_tool_resolved_inner(
                     && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
                 &target,method.as_str(),&path,query.as_deref(),body.as_deref().unwrap_or_default(),|| {
                     let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
-                    let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
+                    let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_headers(), target.user_service_default_headers.as_slice()]);
                     Ok(proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers))
                 },node_route.is_some()).await?
         };
@@ -6933,7 +7135,7 @@ async fn execute_tool_resolved_inner(
         request_audit.assistant(assistant_chat.as_ref());
         request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
-            if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
+            if node_route.is_some() || !delegated.is_empty() || has_server_owned_headers {
                 return Err(AppError::BadRequest(
                     "This Telnyx platform operation requires direct managed execution".into(),
                 ));
@@ -7011,7 +7213,7 @@ async fn execute_tool_resolved_inner(
             let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
                 super::lark_base_writes::transport::Transport {
                     target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
-                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:caller_bearer,
                 }).await;
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
@@ -7064,7 +7266,7 @@ async fn execute_tool_resolved_inner(
                 base_headers,
                 &identity_headers,
                 &delegated,
-                exec_ctx.caller_token,
+                caller_bearer,
                 &server_owned_headers,
             )?;
             let node_request = NodeProxyRequest {
@@ -7087,7 +7289,10 @@ async fn execute_tool_resolved_inner(
             let mut last_error: Option<AppError> = None;
             let mut node_failure_evidence =
                 super::assistant_service_execution::NodeFailureEvidence::default();
-            for nid in &all_node_ids {
+            let mut nodes = all_node_ids.iter().peekable();
+            let mut retry = None;
+            let mut waited = false;
+            while let Some(nid) = retry.take().or_else(|| nodes.next()) {
                 let mut attempt = node_request.clone();
                 attempt.request_id = uuid::Uuid::new_v4().to_string();
 
@@ -7166,9 +7371,25 @@ async fn execute_tool_resolved_inner(
                         billing_egress_permit,
                     )
                     .await;
+                if let Err(failure) = &node_result
+                    && !failure.dispatched && !matches!(failure.error, AppError::NodeCredentialMissing(_)) {
+                    if let Some(permit) = target.execution_permission.as_ref().filter(|permit| permit.single_dispatch()) {
+                        permit.node_not_sent().await?;
+                        destination_audit.denied();
+                        billing.reject_before_send(&metered, "node_not_sent", false).await?;
+                        return Err(AppError::NodeOffline("Nothing was sent to the node".into()));
+                    }
+                    if !waited && nodes.peek().is_none() && let Some(handover) = &failure.handover
+                        && handover.wait(db, node_ws_manager, nid).await {
+                        waited = true;
+                        retry = Some(nid);
+                        continue;
+                    }
+                }
                 if let Some(permit) = &target.execution_permission { permit.complete(node_result.is_ok()).await?; }
                 match node_result {
                     Ok(ProxyResponseType::Complete(resp)) => {
+                        super::llm_usage_service::warn_node_usage_encoding(&target.service.id, resp.status, &resp.headers);
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
                                 if exec_ctx.strict_response_utf8 {
@@ -7204,11 +7425,13 @@ async fn execute_tool_resolved_inner(
                                 super::assistant_tool_files::reserve().await
                             } else { None };
                             let text = if reservation.is_some() && !response_body_limit.is_some_and(|n| resp.body.len() > n) {
+                                let legacy_text = std::str::from_utf8(&resp.body).ok();
                                 super::assistant_tool_files::response_text(db,encryption_keys,chat,resp.status,
-                                    mime,header_value(&resp.headers,"content-disposition"),&endpoint.name,&resp.body).await
+                                    mime,header_value(&resp.headers,"content-disposition"),&endpoint.name,
+                                    legacy_text,&resp.body).await
                             } else { None };
                             if let Some(text) = text {
-                                return Ok(McpToolExecutionOutcome::Response(tool_response(resp.status,Some("application/json"),text.as_bytes())));
+                                return Ok(McpToolExecutionOutcome::Response(ToolResponse::execution_receipt(resp.status, text)));
                             }
                         }
                         return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
@@ -7230,7 +7453,10 @@ async fn execute_tool_resolved_inner(
                         };
                         let NodeFileResponse { status, headers, body: body_buf, received,
                             reservation: file_reservation } = match collected {
-                            Ok(response) => response,
+                            Ok(response) => {
+                                super::llm_usage_service::warn_node_usage_encoding(&target.service.id, response.status, &response.headers);
+                                response
+                            },
                             Err(error) => return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error)),
                         };
                         box_mcp_forwarding(|| billing.settle(
@@ -7260,8 +7486,9 @@ async fn execute_tool_resolved_inner(
                             && let Some(chat) = node_file_chat
                             && let Some(text) = super::assistant_tool_files::response_text(db,encryption_keys,chat,status,
                                 header_value(&headers,"content-type").unwrap_or_default(),
-                                header_value(&headers,"content-disposition"),&endpoint.name,&body_buf).await {
-                            return Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())));
+                                header_value(&headers,"content-disposition"),&endpoint.name,
+                                std::str::from_utf8(&body_buf).ok(),&body_buf).await {
+                            return Ok(McpToolExecutionOutcome::Response(ToolResponse::execution_receipt(status, text)));
                         }
                         return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             status,
@@ -7337,7 +7564,7 @@ async fn execute_tool_resolved_inner(
             query.as_deref(), exec_ctx.assistant_chat.is_some()
                 && assistant_admission.is_some() && node_route.is_none()
                 && body.as_ref().is_none_or(|bytes| bytes.is_empty())
-                && delegated.is_empty() && server_owned_headers.is_empty(),
+                && delegated.is_empty() && !has_server_owned_headers,
         ).await {
             Ok(proof) => proof,
             Err(error) => {
@@ -7358,7 +7585,7 @@ async fn execute_tool_resolved_inner(
         }
         let catalog_route = super::lark_attachment_tool::routing::for_call(db, &target, service, endpoint, &path).await?;
         let response = match proxy_service::forward_request_with_resource_proof(
-            http_client,
+            redirects,
             &target,
             method.clone(),
             &path,
@@ -7367,7 +7594,7 @@ async fn execute_tool_resolved_inner(
             proxy_service::ProxyBody::Buffered(body),
             identity_headers,
             delegated,
-            exec_ctx.caller_token,
+            caller_bearer,
             token_exchange_cache,
             cloud_response_cache,
             server_owned_headers,
@@ -7389,6 +7616,12 @@ async fn execute_tool_resolved_inner(
                 billing
                     .reject_before_send(&metered, "assistant_authority_changed", false)
                     .await?;
+                if matches!(error, AppError::PoolAttemptTransport(crate::errors::PoolAttemptTransportKind::ResolutionUnavailable)) {
+                    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+                        admission.record_unavailable(db, chat, "pre_dispatch").await?;
+                    }
+                    return Ok(McpToolExecutionOutcome::ProviderUnreachable(error));
+                }
                 return Err(error);
             }
             Err(proxy_service::ForwardRequestError::Application(error)) => {
@@ -7443,6 +7676,7 @@ async fn execute_tool_resolved_inner(
             }
         };
 
+        super::llm_usage_service::warn_http_usage_encoding(&target.service.id, &response);
         let status = response.status().as_u16();
         if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
             admission.response(db, chat, status).await?;
@@ -7505,10 +7739,34 @@ async fn execute_tool_resolved_inner(
                         break;
                     }
                 }
-                if file_reservation.is_some()
-                    && let Some(text) = super::assistant_tool_files::response_text(db, encryption_keys, chat,
-                        status, &response_mime, disposition.as_deref(), &endpoint.name, &bytes).await {
-                    return Ok((ToolResponse::execution_receipt(status, text), None));
+                if file_reservation.is_some() {
+                    let legacy_text = if std::str::from_utf8(&bytes).is_ok()
+                        && super::assistant_tool_files::is_file(status, &response_mime, disposition.as_deref(), &bytes) {
+                        // Large text remains readable from the attachment; drop
+                        // its temporary decoder allocation before encryption.
+                        Some(legacy_buffered_response_text(headers.clone(), bytes.clone()).await?)
+                            .filter(|text| text.chars().take(8_001).count() <= 8_000)
+                    } else {
+                        None
+                    };
+                    if let Some(text) = super::assistant_tool_files::response_text(
+                        db,
+                        encryption_keys,
+                        chat,
+                        status,
+                        &response_mime,
+                        disposition.as_deref(),
+                        &endpoint.name,
+                        legacy_text.as_deref(),
+                        &bytes,
+                    )
+                    .await
+                    {
+                        let usage = mcp_platform_usage_for_path(
+                            &bytes, request_len, &target.service, &path, status,
+                        );
+                        return Ok((ToolResponse::execution_receipt(status, text), Some(usage)));
+                    }
                 }
                 // Non-files keep the bounded/strict decoder and accounting,
                 // or reqwest's exact original charset/BOM decoder when unbounded.
@@ -8357,6 +8615,7 @@ pub async fn connect_service_with_binding(
         .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    super::catalog_service::require_connection_access(db, user_id, &catalog).await?;
     let created = crate::services::unified_key_service::create_platform_key(
         db,
         user_id,
@@ -8394,6 +8653,7 @@ pub async fn connect_service(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     let has_credential = credential.is_some_and(|value| !value.trim().is_empty());
     if !scopes.is_empty() && has_credential {
         return Err(AppError::ValidationError(
@@ -8789,6 +9049,30 @@ mod tests {
             ),
             (20, 20, 100, 1)
         );
+    }
+
+    #[test]
+    fn mcp_retained_file_usage_counts_original_bytes_for_token_services() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::models::service_billing::ServiceBilling;
+
+        let mut service = dummy_service();
+        service.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(
+                    serde_json::json!({"metric": "tokens", "credits_per_unit": "1"}),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let file = vec![b'x'; 10 * 1024 * 1024];
+        let handle = br#"{"attachment_id":"id","name":"large.bin","type":"application/octet-stream","size":10485760}"#;
+        let file_usage = mcp_platform_usage_for_path(&file, 17, &service, "/files", 200);
+        let handle_usage = mcp_platform_usage_for_path(handle, 17, &service, "/files", 200);
+        assert_eq!(file_usage.bytes, 17 + file.len() as i64);
+        assert_eq!(handle_usage.bytes, 17 + handle.len() as i64);
+        assert!(file_usage.tokens > handle_usage.tokens);
     }
 
     use super::*;
@@ -9657,6 +9941,7 @@ mod tests {
                         risk: None,
                         destructive: false,
                         changes_existing: None,
+                        generic_spec_key: None,
                         append_only: false,
                         append_only_query: None,
                         catalog_contract: true,
@@ -10694,6 +10979,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
@@ -12856,8 +13142,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 8 meta-tools (6 core + 2 SSH)
-        assert_eq!(tools.len(), 8);
+        // Should only have the 9 meta-tools (7 core + 2 SSH)
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -12882,8 +13168,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 8 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 9);
+        // 9 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -12907,8 +13193,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 8 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 10);
+        // 9 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -12929,6 +13215,12 @@ mod tests {
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
         let tools = generate_tool_definitions(&[], None);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "nyx__diagnose_invocation"),
+            "diagnostic redemption must be available to MCP callers"
+        );
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")
@@ -15680,7 +15972,7 @@ mod tests {
                 auth_key_name: service.auth_key_name.clone(),
                 credential: Default::default(),
                 service,
-                catalog_default_headers: Vec::new(),
+                catalog_default_headers: Default::default(),
                 user_service_default_headers: Vec::new(),
                 ws_frame_injections: Vec::new(),
                 connection_id: None,
@@ -16287,6 +16579,8 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -16442,6 +16736,10 @@ mod guest_append_classification_tests {
             spec["paths"][path]["post"]["x-aevatar-tool"]["destructive"],
             true
         );
+        assert_eq!(
+            spec["paths"][path]["post"]["x-aevatar-tool"]["requiresApproval"],
+            true
+        );
         let marks = super::super::catalog_spec_registry::operation_marks(
             "api-google-workspace",
             "POST",
@@ -16455,7 +16753,7 @@ mod guest_append_classification_tests {
             append_only_query: marks.append_only_query,
             ..Default::default()
         };
-        assert!(operation_effects(&reqwest::Method::POST, metadata).uses);
+        assert!(possible_operation_effects(&reqwest::Method::POST, metadata).uses);
         assert!(operation_effects(&reqwest::Method::POST, metadata).destructive);
         for (query, allowed) in [
             (None, false),
@@ -16468,21 +16766,18 @@ mod guest_append_classification_tests {
             (Some("insertDataOption=INSERT_ROWS%26x"), false),
         ] {
             assert_eq!(
-                append_query_allowed(metadata.append_only_query, query),
-                allowed
+                request_effects(&reqwest::Method::POST, metadata, query, false).destructive,
+                !allowed
             );
         }
-        assert!(!operation_effects(&reqwest::Method::DELETE, metadata).uses);
-        assert!(
-            !operation_effects(
-                &reqwest::Method::POST,
-                McpDurableEndpointMetadata {
-                    changes_existing: Some(true),
-                    ..metadata
-                }
-            )
-            .uses
-        );
+        let query = Some("insertDataOption=INSERT_ROWS");
+        assert!(request_effects(&reqwest::Method::DELETE, metadata, query, false).destructive);
+        assert!(request_effects(&reqwest::Method::POST, metadata, query, true).destructive);
+        let changes = McpDurableEndpointMetadata {
+            changes_existing: Some(true),
+            ..metadata
+        };
+        assert!(request_effects(&reqwest::Method::POST, changes, query, false).destructive);
         for (method, path) in [
             ("POST", "/v4/spreadsheets/{spreadsheetId}:batchUpdate"),
             ("PUT", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
@@ -16504,7 +16799,8 @@ mod guest_append_classification_tests {
                 append_only: marks.append_only,
                 ..Default::default()
             };
-            assert!(!operation_effects(&method.parse().unwrap(), metadata).uses);
+            let effects = request_effects(&method.parse().unwrap(), metadata, query, false);
+            assert!(effects.destructive && !effects.uses);
         }
     }
 
@@ -16524,7 +16820,13 @@ mod guest_append_classification_tests {
             let metadata = published.durable_metadata[&endpoint.endpoint_id];
             assert!(!metadata.append_only);
             if endpoint.path.ends_with(":append") || endpoint.path.ends_with(":batchUpdate") {
-                assert!(!operation_effects(&reqwest::Method::POST, metadata).uses);
+                let effects = request_effects(
+                    &reqwest::Method::POST,
+                    metadata,
+                    Some("insertDataOption=INSERT_ROWS"),
+                    false,
+                );
+                assert!(effects.destructive && !effects.uses);
             }
         }
         let forged = super::super::catalog_spec_registry::operation_marks(

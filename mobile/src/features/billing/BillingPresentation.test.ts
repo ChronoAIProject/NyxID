@@ -6,6 +6,7 @@ import * as credits from "./credits";
 import * as summary from "./balanceSummary";
 import { allowancesSchema, grantsSchema, serviceUsage, usageSchema, walletSchema } from "./billingContracts";
 import { allowanceFixture, grantFixture, usageFixture, walletFixture } from "./billingFixtures";
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 
 type Element = { type: unknown; props: Record<string, any> };
 function elements(root: Element): Element[] {
@@ -56,7 +57,7 @@ test("grants stay in Balance while allowances group under their service with one
   });
   t.after(screen.harness.unmount);
   const titles = screen.all().filter((item) => item.type === "SettingsGroup").map((item) => item.props.title);
-  assert.deepEqual(titles, ["Balance", "Included · example · this month"]);
+  assert.deepEqual(titles, ["Balance", "Included · example · This month"]);
   assert.ok(rows(screen).some((row) => /Included credits · example · service limits apply/.test(row.label)));
   assert.ok(rows(screen).some((row) => /^Expiring .*2026/.test(row.label)));
   assert.deepEqual(
@@ -85,4 +86,34 @@ test("usage history is a disclosure row that reports its expansion state", (t) =
   assert.equal(row!.value, undefined);
   row!.onPress();
   assert.equal(presses, 1);
+});
+
+test("allowance metric rows follow Chinese language changes without translating service identities", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  const metrics = ["input_tokens", "cache_write_tokens", "output_tokens", "cache_read_tokens", "images"];
+  const screen = setup("BillingWalletCard", {
+    wallet: walletSchema.parse(walletFixture),
+    grants: [],
+    now: Date.parse("2026-10-28T00:00:00Z"),
+    allowances: allowancesSchema.parse({ allowances: metrics.map((metric) => ({
+      ...allowanceFixture,
+      allowance: { ...allowanceFixture.allowance, id: metric, service_slug: "OpenAI GPT-4o", metric },
+    })) }).allowances,
+  });
+  t.after(screen.harness.unmount);
+  for (const [language, names] of [
+    ["zh-CN", ["输入词元", "缓存写入词元", "输出词元", "缓存读取词元", "图像"]],
+    ["zh-TW", ["輸入詞元", "快取寫入詞元", "輸出詞元", "快取讀取詞元", "影像"]],
+  ] as const) {
+    setAppTranslationLanguage(language);
+    screen.harness.render();
+    const expectedNames = new Set<string>(names);
+    const metricRows = rows(screen).filter((row) => expectedNames.has(row.label));
+    assert.deepEqual(metricRows.map((row) => row.label), [...names]);
+    assert.ok(metricRows.every((row) => row.value === "剩余 690 / 1,000" || row.value === "剩餘 690 / 1,000"));
+    const groups = screen.all().filter((row) => row.type === "SettingsGroup");
+    assert.ok(groups.some((group) => group.props.title.includes("OpenAI GPT-4o")));
+    assert.ok(groups.some((group) => group.props.title.includes("本月")));
+    assert.ok(!metricRows.some((row) => /tokens|Images/i.test(row.label)));
+  }
 });

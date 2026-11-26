@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
-type E = { type: any; props: Record<string, any> };
+type E = { type: any; props: Record<string, any>; key?: unknown };
 const nodes = (n: any): E[] =>
   n?.props
     ? typeof n.type === "function" &&
@@ -19,7 +19,11 @@ const nodes = (n: any): E[] =>
       ? nodes(n.type(n.props))
       : [
           n,
-          ...[n.props.children, n.props.ListFooterComponent]
+          ...[
+            n.props.children,
+            n.props.ListFooterComponent,
+            n.type === "Input" ? n.props.expandedContent : null,
+          ]
             .flat(Infinity)
             .flatMap(nodes),
         ]
@@ -28,9 +32,11 @@ const nodes = (n: any): E[] =>
 function setup({
   draftStore = createAssistantDraftStore(() => 1),
   missingResearch = false,
+  cornerWindow = false,
   android = undefined as (typeof androidCases)[number] | undefined,
 } = {}) {
   let options: any;
+  let columnHeader: any;
   let settingsOpened = 0;
   let dictationOptions: any;
   let dictation: any = { active: false, phase: "idle" };
@@ -69,7 +75,28 @@ function setup({
       collaboration_decisions: [] as any[],
     },
   };
+  let fontScale = 1;
+  let windowWidth = 390;
+  const uploads = {
+    files: [] as any[],
+    picking: false,
+    sourcePicker: undefined as
+      | {
+          choices: { label: string; onPress: () => void }[];
+          onClose: () => void;
+        }
+      | undefined,
+    session: {
+      sending: false,
+      submit: (send: (files?: unknown) => Promise<boolean>) => send(),
+    },
+  };
+  const corner = { value: cornerWindow };
   const h = hookHarness<E>({
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceQuickRailContext: corner,
+    },
+    "@react-navigation/native": { useIsFocused: () => true },
     "./CrewVoiceComposer": { CrewVoiceComposer: "CrewVoice" },
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
@@ -82,8 +109,19 @@ function setup({
       assistantDraftStore: draftStore,
     },
     "react/jsx-runtime": {
-      jsx: (type: unknown, props: unknown) => ({ type, props }),
-      jsxs: (type: unknown, props: unknown) => ({ type, props }),
+      jsx: (type: unknown, props: unknown, key?: unknown) => ({
+        type,
+        props,
+        key,
+      }),
+      jsxs: (type: unknown, props: unknown, key?: unknown) => ({
+        type,
+        props,
+        key,
+      }),
+    },
+    "react-native-safe-area-context": {
+      useSafeAreaInsets: () => ({ top: 0, left: 0, bottom: 0, right: 0 }),
     },
     "react-native": {
       Platform: { OS: android ? "android" : "ios" },
@@ -91,7 +129,11 @@ function setup({
         currentState: "active",
         addEventListener: () => ({ remove() {} }),
       },
-      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
+      useWindowDimensions: () => ({
+        width: windowWidth,
+        height: 844,
+        fontScale,
+      }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -115,6 +157,9 @@ function setup({
       Plus: "Plus",
       MoreHorizontal: "MoreHorizontal",
       X: "X",
+    },
+    "../assistant/ChatHeaderActions": {
+      CrewHeaderActions: "CrewHeaderActions",
     },
     "../assistant/ChatIdentityHeader": {
       ChatHeaderFrame: "ChatHeaderFrame",
@@ -161,6 +206,9 @@ function setup({
       useWorkspaceBack: (p: any) => {
         options = p.options;
       },
+      useWorkspaceColumnHeader: (p: any) => {
+        columnHeader = p;
+      },
     },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../assistant/AssistantPendingUploads": {
@@ -188,14 +236,11 @@ function setup({
       AssistantMessageTime: "Time",
     },
     "../assistant/assistantSelectableMarkdown": {},
+    "../assistant/AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "../assistant/useAssistantUploads": {
       useAssistantUploads: () => ({
         choose: (...actions: unknown[]) => attachmentChoices.push(actions),
-        files: [],
-        session: {
-          sending: false,
-          submit: (send: (files?: unknown) => Promise<boolean>) => send(),
-        },
+        ...uploads,
       }),
     },
     "../assistant/useComposerDictation": {
@@ -316,8 +361,14 @@ function setup({
     chat,
     posted,
     attachmentChoices,
+    uploads,
+    setWidth: (value: number) => {
+      windowWidth = value;
+      h.render();
+    },
     identity,
     headerActions: () => nodes(options.headerRight()),
+    columnHeader: () => columnHeader,
     settingsOpened: () => settingsOpened,
     input,
     submit,
@@ -325,6 +376,10 @@ function setup({
     dictationOptions: () => dictationOptions,
     realDictation: () => dictation,
     nativeStarts,
+    setFontScale: (value: number) => {
+      fontScale = value;
+      h.render();
+    },
   };
 }
 
@@ -408,6 +463,28 @@ test("crew header shows member identity and narrows recipients through its picke
       .props.ListFooterComponent.props.children.filter(Boolean).length,
     0,
   );
+  h.unmount();
+});
+
+test("on the Duo's full screen the crew's bar controls move to the column: Back, the crew's picker, Crew options", () => {
+  const { h, columnHeader, settingsOpened } = setup();
+  const column = columnHeader();
+  // The same Back as the bar (the crew is pushed), the crew as its member
+  // avatars with one spoken name, and Crew options.
+  assert.equal(column.role, "back");
+  assert.equal(column.disabled, false);
+  assert.equal(column.identity.label, "Launch crew. Choose agent");
+  assert.equal(column.identity.members.length, 2);
+  assert.equal(column.identity.disabled, false);
+  assert.equal(column.more.label, "Crew options");
+  // The crew opens the same recipient picker as the identity pill.
+  column.identity.onPress();
+  h.flush();
+  assert.ok(
+    nodes(h.value()).some((n) => n.type === "Modal" && n.props.visible),
+  );
+  column.more.onPress();
+  assert.equal(settingsOpened(), 1);
   h.unmount();
 });
 
@@ -884,18 +961,11 @@ test("crew voice exposes only speech controls and ending restores the normal com
 test("crew options use the private header overflow affordance and avoid a duplicate composer control", () => {
   const f = setup();
   const actions = f.headerActions();
-  const options = actions.find(
-    (n) => n.props.accessibilityLabel === "Crew options",
-  )!;
-  assert.ok(options);
-  assert.ok(
-    actions.some((n) => n.type === "MoreHorizontal" && n.props.size === 23),
-  );
-  assert.equal(
-    actions.some((n) => n.type === "Settings"),
-    false,
-  );
-  options.props.onPress();
+  const options = actions.find((n) => n.type === "CrewHeaderActions")!;
+  assert.ok(options, "crew uses the shared anchored capsule menu");
+  assert.equal(options.props.scope, "1:crew");
+  assert.equal(options.props.disabled, false);
+  options.props.onSettings();
   assert.equal(f.settingsOpened(), 1);
   const toolbar = nodes(f.input().props.renderActions());
   assert.equal(
@@ -924,3 +994,72 @@ for (const scenario of androidCases) {
     x.h.unmount();
   });
 }
+
+test("on the Duo a live text-size change remounts the crew transcript so every row re-measures", () => {
+  const f = setup({ cornerWindow: true });
+  const list = () => nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  const before = list().key;
+  f.h.render();
+  assert.equal(list().key, before, "ordinary renders keep the list");
+  f.setFontScale(3.12);
+  assert.notEqual(list().key, before);
+  f.h.unmount();
+});
+
+test("scrolling the crew transcript dismisses the keyboard and never swallows a first tap", () => {
+  const f = setup();
+  const list = nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  assert.equal(list.props.keyboardDismissMode, "on-drag");
+  assert.equal(list.props.keyboardShouldPersistTaps, "handled");
+  f.h.unmount();
+});
+
+test("ordinary, corner and wide crew composers share the idle row while dictation keeps its controls", () => {
+  const ordinary = setup();
+  assert.equal(ordinary.input().props.compactWhenIdle, true);
+  const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
+  assert.ok(
+    nodes(ordinary.input().props.renderActions(undefined, layout)).some(
+      (n) => n.props.overlay === true,
+    ),
+  );
+  ordinary.uploads.files.push({
+    key: "photo",
+    handle: "image-1",
+    kind: "image",
+    file: { name: "photo.png" },
+  });
+  ordinary.h.render();
+  assert.equal(ordinary.input().props.compactWhenIdle, true, "attachments keep their own preview strip");
+  ordinary.uploads.files.length = 0;
+  ordinary.dictation.active = true;
+  ordinary.h.render();
+  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  ordinary.dictation.active = false;
+  ordinary.setWidth(1024);
+  assert.equal(ordinary.input().props.compactWhenIdle, true, "wide windows use the same idle row");
+  ordinary.h.unmount();
+  const f = setup({ cornerWindow: true });
+  assert.equal(f.input().props.compactWhenIdle, true);
+  f.h.unmount();
+});
+
+test("P9 ordinary crew transcript keeps its base identity across text size changes", () => {
+  const f = setup();
+  const list = () => nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  const before = list().key;
+  f.setFontScale(3.12);
+  assert.equal(list().key, before);
+  f.h.unmount();
+});
+
+test("crew mounts the guarded attachment-source sheet returned by its upload session", () => {
+  const x = setup();
+  const sourcePicker = { choices: [{ label: "Files", onPress() {} }], onClose() {} };
+  x.uploads.sourcePicker = sourcePicker;
+  x.h.render();
+  const picker = nodes(x.h.value()).find(n => n.type === "AttachmentSourcePicker")!;
+  assert.equal(picker.props.choices, sourcePicker.choices);
+  assert.equal(picker.props.onClose, sourcePicker.onClose);
+  x.h.unmount();
+});

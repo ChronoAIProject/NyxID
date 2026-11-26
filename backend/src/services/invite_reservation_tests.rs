@@ -89,7 +89,8 @@ async fn signup_storage_command_counts() {
     .unwrap();
     let direct = std::mem::take(&mut *commands.lock().unwrap());
     println!("INVITE_COMMANDS password_direct: {direct:?}");
-    assert_eq!(direct.len(), 3);
+    // Both signup paths read live targets and the two schedule timings.
+    assert_eq!(direct.len(), 6);
     let reservation = reserve_invite_code(&db, &code.code, "invited@example.test")
         .await
         .unwrap();
@@ -106,7 +107,7 @@ async fn signup_storage_command_counts() {
     assert!(user.actually_created);
     let invited = std::mem::take(&mut *commands.lock().unwrap());
     println!("INVITE_COMMANDS password_invited: {invited:?}");
-    assert_eq!(invited.len(), 6);
+    assert_eq!(invited.len(), 9);
     db.drop().await.unwrap();
 }
 

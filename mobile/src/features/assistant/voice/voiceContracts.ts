@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import { z } from "zod";
 import { conversationIdSchema } from "../assistantTypes";
 
@@ -11,7 +12,11 @@ const providerLabel = z
   .trim()
   .min(1)
   .max(128)
-  .refine((value) => !/\p{Cc}/u.test(value), "Invalid provider label");
+  .refine((value) => !/\p{Cc}/u.test(value), {
+    get error() {
+      return () => translateApp("Invalid provider label");
+    },
+  });
 export const voiceProtocolSchema = z.enum(["openai_live", "xai_realtime"]);
 export const voiceBillingMetricSchema = z.enum([
   "voice_seconds",
@@ -52,14 +57,14 @@ export const voiceMetadataSchema = z
         context.addIssue({
           code: "custom",
           path: [field],
-          message: "Provider IDs must be unique",
+          message: translateApp("Provider IDs must be unique"),
         });
     }
     if (value.models.filter((model) => model.default).length > 1)
       context.addIssue({
         code: "custom",
         path: ["models"],
-        message: "Voice source has multiple defaults",
+        message: translateApp("Voice source has multiple defaults"),
       });
     if (
       new Set(value.billing_metrics).size !== value.billing_metrics.length ||
@@ -68,7 +73,9 @@ export const voiceMetadataSchema = z
       context.addIssue({
         code: "custom",
         path: ["billing_metrics"],
-        message: "Unique metrics including voice seconds are required",
+        message: translateApp(
+          "Unique metrics including voice seconds are required",
+        ),
       });
     if (
       value.usage_source !==
@@ -79,7 +86,7 @@ export const voiceMetadataSchema = z
       context.addIssue({
         code: "custom",
         path: ["usage_source"],
-        message: "Usage source must match the provider protocol",
+        message: translateApp("Usage source must match the provider protocol"),
       });
   });
 
@@ -99,7 +106,11 @@ export const voicePreferencesSchema = z
     (value) => (value.key_source === "own") === (value.connection_id !== null),
     {
       path: ["connection_id"],
-      message: "An own-key voice source requires its connection ID",
+      get message() {
+        return translateApp(
+          "An own-key voice source requires its connection ID",
+        );
+      },
     },
   );
 
@@ -178,7 +189,11 @@ export const accountActiveVoiceSessionSchema = z
   .refine(
     (value) => (value.session === null) === (value.conversation_id === null),
     {
-      message: "An active voice call must identify its conversation",
+      get message() {
+        return translateApp(
+          "An active voice call must identify its conversation",
+        );
+      },
     },
   );
 export const voiceTaskSchema = z.object({

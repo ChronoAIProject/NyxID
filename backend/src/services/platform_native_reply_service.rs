@@ -10,7 +10,7 @@ use crate::{
     errors::AppResult,
     models::{
         channel_bot::ChannelBot,
-        platform_entry_identity::{EntryPlatform, NativeControlSurface, NativeEntryReceipt},
+        platform_entry_identity::{EntryPlatform, NativeEntryReceipt},
         platform_entry_projection::{
             StoredEntryIdentity, StoredEventIdentity, StoredSenderIdentity,
         },
@@ -23,6 +23,9 @@ use mongodb::{ClientSession, bson::doc};
 use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
+#[path = "platform_native_reply_record.rs"]
+pub(crate) mod record;
+
 pub(crate) fn binding_digest(receipt: &NativeEntryReceipt) -> AppResult<String> {
     validate_configuration(&receipt.configuration)?;
     opaque(&receipt.sender.sender_id)?;
@@ -33,7 +36,10 @@ pub(crate) fn binding_digest(receipt: &NativeEntryReceipt) -> AppResult<String> 
         || receipt.manager_authority_epoch <= 0
         || !receipt.original_private_human
         || receipt.expires_at <= receipt.received_at
-        || receipt.expires_at > receipt.received_at + Duration::minutes(10)
+        || receipt
+            .expires_at
+            .signed_duration_since(receipt.received_at)
+            > Duration::minutes(10)
     {
         return Err(refused());
     }
@@ -50,22 +56,6 @@ pub(crate) fn binding_digest(receipt: &NativeEntryReceipt) -> AppResult<String> 
         receipt.received_at.timestamp_millis(),
         receipt.expires_at.timestamp_millis()
     ])))
-}
-
-fn check_handle(handle: &NativeReplyHandle, receipt: &NativeEntryReceipt) -> AppResult<()> {
-    if !uuid::Uuid::parse_str(&handle.id).is_ok_and(|id| id.get_version_num() == 4)
-        || handle.receipt_id != receipt.id
-        || handle.binding_digest != binding_digest(receipt)?
-        || handle.created_at < receipt.received_at
-        || handle.created_at > Utc::now()
-        || handle.expires_at <= Utc::now()
-        || handle.expires_at > receipt.expires_at
-        || handle.ciphertext.is_empty()
-        || handle.ciphertext.len() > 16 * 1024
-    {
-        return Err(refused());
-    }
-    Ok(())
 }
 
 /// Ciphertext, live credential snapshot and destination captured by the send
@@ -224,7 +214,7 @@ pub(crate) async fn capture_in_session(
             .session(&mut *session)
             .await?
             .ok_or_else(refused)?;
-        check_handle(&handle, &receipt)?;
+        record::check_live(&handle, &receipt)?;
         Some(handle)
     } else {
         None
@@ -443,36 +433,10 @@ async fn materialize_and_send(
         return Ok(NativeSendOutcome::Refused);
     }
     if authority.receipt.configuration.identity.platform == EntryPlatform::Discord {
-        let handle = authority.handle.as_ref().ok_or_else(refused)?;
-        check_handle(handle, &authority.receipt)?;
-        let plaintext = Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt_with_aad(&handle.ciphertext, handle.binding_digest.as_bytes())
-                .await
-                .map_err(|_| refused())?,
-        );
-        if plaintext.len() > 4096 {
-            return Ok(NativeSendOutcome::Refused);
-        }
-        let secret: DiscordReplySecret =
-            serde_json::from_slice(&plaintext).map_err(|_| refused())?;
-        let NativeControlSurface::DiscordCommand { application_id, .. } =
-            &authority.receipt.configuration.control_surface
-        else {
-            return Ok(NativeSendOutcome::Refused);
-        };
-        if secret.application_id != *application_id
-            || secret.token.is_empty()
-            || secret.token.len() > 2048
-            || !secret
-                .token
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-            || !application_id.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Ok(NativeSendOutcome::Refused);
-        }
+        let secret = record::open_claimed(&state.encryption_keys, authority)
+            .await
+            .map_err(|_| refused())?;
+        let application_id = &secret.application_id;
         // An interaction has exactly this provider follow-up surface. Never call
         // the ordinary adapter's /channels fallback, even on missing/old data.
         let url = Zeroizing::new(format!(

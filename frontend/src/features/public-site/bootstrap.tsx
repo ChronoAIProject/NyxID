@@ -2,6 +2,8 @@ import { assertPublicConfiguration } from "./configuration-boundary";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { publicRouter } from "./router";
+import { crashRootOptions } from "@/lib/crash-reporting/install";
+import { reportCrash } from "@/lib/crash-reporting/reporter";
 import "../../app.css";
 export async function bootPublicSite() {
   const root = document.getElementById("root");
@@ -15,9 +17,13 @@ export async function bootPublicSite() {
   const tree = <RouterProvider router={router} />;
   if (root.dataset.publicRender === "v1")
     hydrateRoot(root, tree, {
-      onRecoverableError: (error) => console.error("[public-hydration]", error),
+      ...crashRootOptions,
+      onRecoverableError: (error) => {
+        console.error("[public-hydration]", error);
+        void reportCrash(error, "recoverable_error");
+      },
     });
-  else createRoot(root).render(tree);
+  else createRoot(root, crashRootOptions).render(tree);
   if (import.meta.env.VITE_STATIC_PREVIEW === "true") {
     // Static previews have no API or session. Keep docs display settings and public controls.
     const [{ updatePublicDocsRuntime }, { PublicDocsTheme }] = await Promise.all([

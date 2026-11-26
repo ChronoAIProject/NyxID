@@ -16,18 +16,23 @@ pub const MANAGER_LEASE_SECS: i64 = 120;
 
 #[derive(Clone)]
 pub enum Parent {
+    SavedReply { id: String, claim: String },
     Manager { id: String, claim: String },
     Scheduled { id: String, claim: String },
 }
 impl Parent {
     fn collection(&self) -> &'static str {
         match self {
+            Self::SavedReply { .. } => crate::models::assistant_message::COLLECTION_NAME,
             Self::Manager { .. } => crate::models::platform_manager_delivery::COLLECTION_NAME,
             Self::Scheduled { .. } => crate::models::trigger_run::COLLECTION_NAME,
         }
     }
     fn filter(&self) -> Document {
         match self {
+            Self::SavedReply { id, claim } => {
+                doc! {"_id":id,"role":"assistant","handoff_delivery_lease":claim,"$expr":{"$gt":["$handoff_delivery_due_at","$$NOW"]}}
+            }
             Self::Manager { id, claim } => doc! {"_id":id,"state":"dispatching","claim_id":claim,
             "$expr":{"$and":[{"$gt":["$expires_at","$$NOW"]},
                 {"$gt":["$updated_at",{"$subtract":["$$NOW",MANAGER_LEASE_SECS*1000]}]}]}},
@@ -41,6 +46,9 @@ impl Parent {
     }
     fn touch(&self) -> Vec<Document> {
         let field = match self {
+            Self::SavedReply { .. } => {
+                return vec![doc! {"$set":{"handoff_delivery_due_at":{"$add":["$$NOW",120_000]}}}];
+            }
             Self::Manager { .. } => "updated_at",
             Self::Scheduled { .. } => "result_delivery.effect_checked_at",
         };
@@ -50,6 +58,7 @@ impl Parent {
 
 struct Boundary {
     db: Database,
+    meta_grant: Option<crate::models::channel_meta::GrantRef>,
     parent: Parent,
     id: String,
     fingerprint: String,
@@ -78,6 +87,7 @@ pub async fn with_part<F: Future>(
             .scope(
                 Arc::new(Boundary {
                     db: db.clone(),
+                    meta_grant: row.meta_grant.clone(),
                     parent,
                     id: row.id.clone(),
                     fingerprint: row.fingerprint.clone(),
@@ -122,10 +132,15 @@ pub async fn claim(
             "preparation": {"version":1, "lease_until":{"$add":["$$NOW", PREPARATION_SECS*1000]}},
         },
     );
-    let changed = db
-        .collection::<Document>(COLLECTION_NAME)
-        .update_one(filter, vec![doc! {"$set": set}])
-        .await?;
+    let changed = super::channel_meta_service::scopes::update_record(
+        db,
+        row.meta_grant.as_ref(),
+        true,
+        COLLECTION_NAME,
+        filter,
+        vec![doc! {"$set":set}],
+    )
+    .await?;
     if changed.matched_count == 1 {
         #[cfg(test)]
         {
@@ -162,6 +177,9 @@ async fn commit_effect(boundary: Arc<Boundary>) -> AppResult<()> {
         .and_run(boundary, |session, boundary| {
             Box::pin(async move {
                 let result: AppResult<()> = async {
+                    if let Some(grant)=&boundary.meta_grant {
+                        super::channel_meta_service::scopes::fence_reference(&boundary.db,session,grant,true).await?;
+                    }
                     // The parent write conflicts with recovery, so a survivor cannot
                     // replace its claim between this check and the part transition.
                     let parent = boundary
@@ -230,7 +248,7 @@ pub async fn release(
     attempt: &str,
 ) -> AppResult<bool> {
     let prefix = format!("parts.{index}");
-    Ok(db.collection::<Document>(COLLECTION_NAME).update_one(
+    Ok(super::channel_meta_service::scopes::update_record(db,row.meta_grant.as_ref(),false,COLLECTION_NAME,
         doc! {"_id":&row.id,format!("{prefix}.state"):"pending",format!("{prefix}.attempt_id"):attempt,format!("{prefix}.preparation.version"):1},
         doc! {"$unset":{format!("{prefix}.preparation"):""}},
     ).await?.matched_count==1)

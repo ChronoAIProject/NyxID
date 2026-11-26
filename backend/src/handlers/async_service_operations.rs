@@ -157,6 +157,7 @@ pub(super) async fn call(
             service,
             &prepared.operation_descriptor(),
             None,
+            None,
         )
         .await
         .map_err(|_| denied())?;
@@ -273,6 +274,12 @@ where
 }
 
 async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::AppResult<()> {
+    if watches::meta_lineage::retire_unavailable(&state.db, w).await? {
+        return Ok(());
+    }
+    if w.state == "queued" {
+        return watches::defer(&state.db, w).await;
+    }
     if w.state == "ready" {
         if watches::enqueue(&state.db, w).await? {
             crate::handlers::assistant_team::wake(state, &w.user_id, &w.conversation_id).await;

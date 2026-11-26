@@ -25,6 +25,7 @@ pub(super) enum Endpoint {
     Events,
     ResponseGet,
     Dispatches,
+    RelayCallback,
 }
 impl Endpoint {
     fn name(self) -> &'static str {
@@ -35,6 +36,7 @@ impl Endpoint {
             Self::Events => "events",
             Self::ResponseGet => "response_get",
             Self::Dispatches => "dispatches",
+            Self::RelayCallback => "relay_callback",
         }
     }
 }
@@ -46,6 +48,7 @@ struct Context {
     partition_known: bool,
     partition: Option<String>,
     event_hash: Option<String>,
+    telegram_group: Option<TelegramGroup>,
 }
 tokio::task_local! { static CONTEXT: RefCell<Context>; }
 fn update(f: impl FnOnce(&mut Context)) {
@@ -88,6 +91,58 @@ async fn partition_history(db: &mongodb::Database, channel: &str, partition: &st
         _ => "unavailable",
     }
 }
+// Set only after provider authentication. On refusal, confirm the retained
+// inbound row before attributing a failed attempt to a bot.
+struct TelegramGroup {
+    bot: String,
+    owner: String,
+    source: bson::Document,
+}
+
+pub(super) fn telegram_group(
+    row: &crate::models::nyxbot_channel::NyxbotChannel,
+    activity: &serde_json::Value,
+) {
+    if row.platform != "telegram"
+        || row.transport != "gateway"
+        || row.gateway_source.is_some()
+        || activity["conversation"]["kind"] != "group"
+        || activity["source"]["type"] != "nyxid_relay"
+        || activity["source"]["platform"]
+            .as_str()
+            .map(crate::services::channel_platform::canonical_platform)
+            != Some("telegram")
+    {
+        return;
+    }
+    let (Some(route), Some(message), Some(chat), Some(sender)) = (
+        row.route_id.as_deref(),
+        activity["event_id"].as_str(),
+        activity["conversation"]["id"].as_str(),
+        activity["actor"]["id"].as_str(),
+    ) else {
+        return;
+    };
+    if activity["source"]["route_id"] != route
+        || uuid::Uuid::parse_str(message).is_err()
+        || chat.len() > 64
+        || sender.len() > 64
+    {
+        return;
+    }
+    let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
+    update(|context| {
+        context.telegram_group = Some(TelegramGroup {
+            bot: row.channel_bot_id.clone(),
+            owner: owner.to_owned(),
+            source: bson::doc! {"_id":message,"channel_bot_id":&row.channel_bot_id,"user_id":owner,"direction":"inbound",
+            "platform":{"$in":["telegram","telegram-new"]},"conversation_id":route,"agent_api_key_id":&row.route_api_key_id,
+            "platform_conversation_id":chat,"sender_platform_id":sender,"nyxbot_admission.turn_id":null,
+            "nyxbot_admission.disposition":{"$in":[bson::Bson::Null,bson::Bson::String("received".into())]}},
+        })
+    });
+}
+
 pub(super) fn event(value: &str) {
     // Hash only bounded correlation IDs; never retain their raw value.
     if !value.is_empty() && value.len() <= 4096 {
@@ -112,7 +167,7 @@ pub(super) fn error(error: AppError) -> Response {
 }
 
 // A fixed number of slots; no unauthenticated identifiers or database work.
-static WARN_AFTER: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+static WARN_AFTER: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 fn warn(endpoint: Endpoint, status: StatusCode, code: &str) {
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let slot = &WARN_AFTER[endpoint as usize];
@@ -160,6 +215,22 @@ pub(super) async fn scope(
             data["binding_match"] = context.binding_match.map_or(serde_json::Value::String("unknown".into()), serde_json::Value::Bool);
         }
         if let Some(hash) = context.event_hash { data["event_correlation_hash"] = hash.into(); }
+        if let Some(group) = context.telegram_group && code != "conversation_in_progress" {
+            let observed = tokio::time::timeout(Duration::from_secs(1), async {
+                let source = db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                    .find_one(group.source).projection(bson::doc! {"_id":1}).await?;
+                if source.is_some() {
+                    let outcome = match code {
+                        "conversation_not_found" => "telegram_group_partition_missing",
+                        "media_source_refused" => "telegram_group_source_refused",
+                        _ => "telegram_group_provider_refused",
+                    };
+                    crate::services::channel_inbound_diagnostics::telegram_outcome(db, &group.bot, &group.owner, outcome, None).await;
+                }
+                Ok::<_,mongodb::error::Error>(())
+            }).await;
+            if !matches!(observed,Ok(Ok(()))) { warn(endpoint,response.status(),code); }
+        }
         // Diagnostics cannot hold a provider request indefinitely or alter its outcome.
         let result = tokio::time::timeout(Duration::from_secs(1), async {
             if RateWindowStore::admit(db, "nyxbot-provider-refused-v1", &key, 1, Duration::from_secs(60)).await?.allowed {

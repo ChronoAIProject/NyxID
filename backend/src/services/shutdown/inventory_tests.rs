@@ -481,6 +481,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
         "handlers/assistant_team.rs",
         "spawn_sweeps",
+        "crate::services::assistant_cma_reservation_recovery::spawn_worker",
+        1,
+        "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
+    ),
+    (
+        "handlers/assistant_team.rs",
+        "spawn_sweeps",
         "crate::services::assistant_notification_service::spawn_worker",
         1,
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
@@ -491,6 +498,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "crate::services::nyxbot_gateway_release_service::spawn_worker",
         1,
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
+    ),
+    (
+        "handlers/assistant_team.rs",
+        "spawn_sweeps",
+        "super::assistant_nyxagent::survivor::spawn",
+        1,
+        "The change-stream listener and the offer scanner are tracked shutdown workers. Both stop on intake closure.",
     ),
     (
         "handlers/assistant_titles.rs",
@@ -778,6 +792,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "body_stream",
         1,
         "Work (a): bounded result/transfer body; middleware retains work through EOF/Drop.",
+    ),
+    (
+        "services/assistant_upload_service/pdf_renderer.rs",
+        "render_with",
+        "method::spawn",
+        1,
+        "The turn awaits the renderer. Dropping the render future kills the process group, and the child uses kill_on_drop.",
     ),
     (
         "services/attachment_extraction.rs",

@@ -1,4 +1,5 @@
 use crate::models::default_request_header::SecretHeaders;
+use nyxid_service_adapters::SecretText;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
@@ -85,10 +86,9 @@ pub struct ProxyTarget {
     pub credential: Zeroizing<String>,
     pub service: DownstreamService,
     /// Admin-configured catalog-level default headers resolved from the
-    /// owning `DownstreamService`. Applied to every outbound request in
-    /// both the direct and node-routed paths. See
+    /// owning `DownstreamService`. Applied only at its approved destinations. See
     /// [`crate::models::default_request_header`] for precedence semantics.
-    pub catalog_default_headers: Vec<DefaultRequestHeader>,
+    pub(crate) catalog_default_headers: CatalogHeaders,
     /// Per-user overrides sourced from `UserService.default_request_headers`.
     /// Applied after the catalog layer; non-overridable entries win against
     /// lower layers including the catalog defaults and caller-supplied headers.
@@ -105,6 +105,71 @@ pub struct ProxyTarget {
     /// `event_data` with the connection — answering "which Lark Custom
     /// App made this call?" without a second DB read per request.
     pub connection_id: Option<String>,
+}
+
+/// A catalog header layer carries the recipients authorized by the same catalog
+/// snapshot. A connection can be rerouted after its credentials are resolved.
+#[derive(Default, Clone)]
+pub(crate) struct CatalogHeaders {
+    base_url: String,
+    targets: std::collections::BTreeMap<String, String>,
+    values: Vec<DefaultRequestHeader>,
+}
+
+impl CatalogHeaders {
+    pub(crate) async fn load(
+        keys: Option<&EncryptionKeys>,
+        service: &DownstreamService,
+    ) -> AppResult<Self> {
+        if service
+            .default_request_headers
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        {
+            return Ok(Self::default());
+        }
+        Ok(Self {
+            base_url: service.base_url.clone(),
+            targets: service.destination_targets.clone(),
+            values: super::default_header_service::catalog(keys, service).await?,
+        })
+    }
+
+    pub(crate) fn configured(&self) -> &[DefaultRequestHeader] {
+        &self.values
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.values.clear();
+    }
+
+    pub(crate) fn retain(&mut self, f: impl FnMut(&DefaultRequestHeader) -> bool) {
+        self.values.retain(f);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_base(base_url: &str, values: Vec<DefaultRequestHeader>) -> Self {
+        Self {
+            base_url: base_url.to_owned(),
+            values,
+            ..Self::default()
+        }
+    }
+}
+
+/// Keep the existing approval representation where defaults apply. A withheld
+/// layer still binds its configured values and a change in forwarding eligibility.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum CatalogHeaderBinding<T> {
+    Applied(T),
+    Withheld { withheld: T },
+}
+
+fn same_header_destination(left: &str, right: &str) -> bool {
+    !left.is_empty()
+        && !right.is_empty()
+        && left.trim_end_matches('/') == right.trim_end_matches('/')
 }
 
 /// The effective owner used for catalog consent and proxy resource checks.
@@ -168,6 +233,76 @@ async fn decrypt_master_credential_string(
 }
 
 impl ProxyTarget {
+    fn catalog_header_destination(&self) -> bool {
+        let layer = &self.catalog_default_headers;
+        same_header_destination(&layer.base_url, &self.base_url)
+            || self.target_id.as_ref().and_then(|id| layer.targets.get(id)) == Some(&self.base_url)
+    }
+
+    pub(crate) fn catalog_headers(&self) -> &[DefaultRequestHeader] {
+        if self.catalog_header_destination() {
+            self.catalog_default_headers.configured()
+        } else {
+            &[]
+        }
+    }
+
+    pub(crate) fn catalog_header_binding<'a, T>(
+        &'a self,
+        project: impl FnOnce(&'a [DefaultRequestHeader]) -> T,
+    ) -> CatalogHeaderBinding<T> {
+        let configured = self.catalog_default_headers.configured();
+        let values = project(configured);
+        if configured.is_empty() || self.catalog_header_destination() {
+            CatalogHeaderBinding::Applied(values)
+        } else {
+            CatalogHeaderBinding::Withheld { withheld: values }
+        }
+    }
+
+    fn approved_private_base(&self) -> Option<&str> {
+        self.service
+            .approved_private_base_url
+            .as_deref()
+            .filter(|base| {
+                self.catalog_slug.is_some()
+                    && self.service.owner_user_id.is_none()
+                    && *base == self.service.base_url
+            })
+    }
+
+    pub(crate) async fn direct_destination(
+        &self,
+        url: &str,
+        path: &str,
+    ) -> AppResult<super::proxy_destination::Destination> {
+        super::proxy_destination::Destination::for_request(
+            self.approved_private_base(),
+            &self.base_url,
+            url,
+        )
+        .await
+        .inspect_err(|failure| failure.log(&self.service, "GET", path, false))
+        .map_err(AppError::from)
+    }
+
+    fn http_clients(
+        &self,
+        url: &reqwest::Url,
+        method: &str,
+        path: &str,
+        redirect: bool,
+    ) -> AppResult<Arc<super::proxy_destination::http::Clients>> {
+        super::proxy_destination::http::for_url(
+            self.approved_private_base(),
+            &self.base_url,
+            url,
+            false,
+        )
+        .inspect_err(|failure| failure.log(&self.service, method, path, redirect))
+        .map_err(AppError::from)
+    }
+
     pub(crate) fn require_credential_materialized(&self) -> AppResult<()> {
         if self.credential_deferred {
             return Err(AppError::Forbidden(
@@ -387,8 +522,8 @@ fn is_valid_master_credential_service(service: &DownstreamService) -> bool {
 }
 
 pub(crate) struct PreparedDelegatedRequest {
-    pub path: String,
-    pub query: Option<String>,
+    pub path: SecretText,
+    pub query: Option<SecretText>,
     pub delegated_headers: SecretHeaders,
 }
 
@@ -437,7 +572,7 @@ pub(crate) fn build_effective_outbound_headers(
     outbound_headers = default_request_header::merge_into_header_list(
         outbound_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -477,7 +612,7 @@ pub(crate) fn apply_server_owned_headers(
     headers
 }
 
-/// Request-local bearer material. Never persisted in MCP sessions or exposed by Debug.
+/// Request-local verified credential material. Never persisted in MCP sessions or exposed by Debug.
 #[derive(Clone)]
 pub(crate) struct CallerToken(zeroize::Zeroizing<String>);
 
@@ -491,6 +626,14 @@ impl std::ops::Deref for CallerToken {
 impl std::fmt::Debug for CallerToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CallerToken([REDACTED])")
+    }
+}
+
+impl CallerToken {
+    /// Retain a credential only for the lifetime of the authenticated request.
+    /// The caller must validate and classify the value before constructing it.
+    pub(crate) fn from_verified(value: &str) -> Self {
+        Self(zeroize::Zeroizing::new(value.to_owned()))
     }
 }
 
@@ -508,7 +651,93 @@ pub(crate) fn caller_bearer_token_for_downstream(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(|value| CallerToken(zeroize::Zeroizing::new(value.to_owned())))
+        .map(CallerToken::from_verified)
+}
+
+/// Release a supplied credential only to the authorized concrete destination
+/// and, for node HTTP, to a route whose possible recipients the caller owns.
+pub(crate) async fn admit_caller_bearer<'a>(
+    db: &mongodb::Database,
+    actor: &str,
+    connection: Option<&str>,
+    target: &ProxyTarget,
+    route: Option<&super::node_routing_service::NodeRoute>,
+    bearer: Option<&'a str>,
+    server_headers: &[(String, String)],
+) -> AppResult<Option<&'a str>> {
+    let Some(bearer) = forwarded_caller_token(target, bearer, server_headers) else {
+        return Ok(None);
+    };
+    let denied =
+        || AppError::Forbidden("This destination cannot receive the caller's access token".into());
+    if let Some(route) = route {
+        let ids: Vec<_> = std::iter::once(route.node_id.as_str())
+            .chain(route.fallback_node_ids.iter().map(String::as_str))
+            .collect();
+        let owned = db
+            .collection::<mongodb::bson::Document>(crate::models::node::COLLECTION_NAME)
+            .count_documents(doc! {"_id": {"$in": &ids}, "user_id": actor, "is_active": true})
+            .await?;
+        if owned != ids.len() as u64 {
+            return Err(denied());
+        }
+    }
+    let mut personal_endpoint = false;
+    if let Some(id) = connection {
+        let row = super::service_history::collection::<UserService>(
+            db,
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": id, "is_active": true, "deleted_at": null})
+        .await?
+        .ok_or_else(denied)?;
+        if !row.forward_access_token
+            || row.catalog_service_id.as_deref().unwrap_or(&row.id) != target.service.id
+        {
+            return Err(denied());
+        }
+        if row.user_id == actor
+            && row.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
+            && target.target_id.is_none()
+        {
+            personal_endpoint =
+                super::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .count_documents(
+                        doc! {"_id": &row.endpoint_id, "user_id": actor, "url": &target.base_url},
+                    )
+                    .await?
+                    != 0;
+            if personal_endpoint && row.catalog_service_id.is_none() {
+                return Ok(Some(bearer));
+            }
+        }
+    }
+    if target.catalog_slug.is_none() {
+        return Err(denied());
+    }
+    let catalog = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id": &target.service.id, "is_active": true})
+        .await?
+        .ok_or_else(denied)?;
+    // A directly owned connection may opt in independently of its catalog
+    // defaults. An inherited forwarding flag needs approval for the catalog destination.
+    if !catalog.forward_access_token {
+        return if personal_endpoint {
+            Ok(Some(bearer))
+        } else {
+            Err(denied())
+        };
+    }
+    if super::caller_token_approval::approved(
+        &catalog,
+        target.target_id.as_deref(),
+        &target.base_url,
+    ) {
+        Ok(Some(bearer))
+    } else {
+        Err(denied())
+    }
 }
 
 /// Credential ownership follows the resolved service, falling back to the
@@ -922,20 +1151,20 @@ fn contains_raw_path_breaker(value: &str) -> bool {
 }
 
 fn contains_percent_encoded_path_breaker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
+    let lower = Zeroizing::new(value.to_ascii_lowercase());
     lower.contains("%2f")
         || lower.contains("%5c")
         || lower.contains("%00")
         || lower.contains("%3f")
         || lower.contains("%23")
         || lower.split('/').any(|segment| {
-            let decoded_dots = segment.replace("%2e", ".");
-            decoded_dots == "." || decoded_dots == ".."
+            let decoded_dots = Zeroizing::new(segment.replace("%2e", "."));
+            matches!(decoded_dots.as_str(), "." | "..")
         })
 }
 
 fn contains_nested_percent_encoded_path_breaker(value: &str) -> bool {
-    let mut current = value.to_string();
+    let mut current = Zeroizing::new(value.to_string());
 
     // Axum decodes one layer before handlers see the wildcard path. Some
     // downstream routers and proxies decode additional layers, so walk a few
@@ -946,14 +1175,12 @@ fn contains_nested_percent_encoded_path_breaker(value: &str) -> bool {
             return true;
         }
 
-        let decoded = match urlencoding::decode(&current) {
-            Ok(decoded) => decoded.into_owned(),
-            Err(_) => break,
-        };
-
-        if decoded == current {
+        let std::borrow::Cow::Owned(bytes) = urlencoding::decode_binary(current.as_bytes()) else {
             break;
-        }
+        };
+        let Ok(decoded) = crate::crypto::guarded_utf8(Zeroizing::new(bytes)) else {
+            break;
+        };
 
         if contains_raw_path_breaker(&decoded) {
             return true;
@@ -1054,31 +1281,23 @@ pub fn extend_with_path_credential(delegated: &mut Vec<DelegatedCredential>, tar
 pub(crate) fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
-) -> AppResult<String> {
+) -> AppResult<SecretText> {
     validate_requested_proxy_path(path)?;
-
-    let mut prefix_segments = Vec::new();
+    let mut parts: Vec<&str> = Vec::new();
     for cred in delegated_credentials {
         if cred.injection_method == "path" {
             validate_path_injection_prefix(&cred.injection_key)?;
             validate_path_injection_credential(&cred.credential)?;
-            prefix_segments.push(format!(
-                "{}{}",
-                cred.injection_key,
-                cred.credential.as_str()
-            ));
+            parts.extend([cred.injection_key.as_str(), cred.credential.as_str(), "/"]);
         }
     }
-
-    let trimmed_path = path.trim_start_matches('/');
-    let final_path = if prefix_segments.is_empty() {
-        trimmed_path.to_string()
-    } else if trimmed_path.is_empty() {
-        prefix_segments.join("/")
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        parts.pop();
     } else {
-        format!("{}/{}", prefix_segments.join("/"), trimmed_path)
-    };
-
+        parts.push(path);
+    }
+    let final_path = SecretText::concat(&parts);
     validate_requested_proxy_path(&final_path)?;
     Ok(final_path)
 }
@@ -1089,9 +1308,10 @@ pub(crate) fn prepare_delegated_request(
     delegated_credentials: &[DelegatedCredential],
 ) -> AppResult<PreparedDelegatedRequest> {
     let mut delegated_headers = SecretHeaders::default();
-    let mut forwarded_query = query
-        .map(str::to_string)
-        .filter(|existing| !existing.is_empty());
+    let mut query_parts = Vec::new();
+    if let Some(query) = query.filter(|q| !q.is_empty()) {
+        query_parts.push(SecretText::from(query));
+    }
 
     for cred in delegated_credentials {
         match cred.injection_method.as_str() {
@@ -1106,16 +1326,12 @@ pub(crate) fn prepare_delegated_request(
                 ));
             }
             "query" => {
-                let encoded = form_urlencoded::Serializer::new(String::new())
+                // Percent encoding uses at most three output bytes per input byte.
+                let capacity = 3 * (cred.injection_key.len() + cred.credential.len()) + 1;
+                let encoded = form_urlencoded::Serializer::new(String::with_capacity(capacity))
                     .append_pair(&cred.injection_key, &cred.credential)
                     .finish();
-                match forwarded_query.as_mut() {
-                    Some(existing) => {
-                        existing.push('&');
-                        existing.push_str(&encoded);
-                    }
-                    None => forwarded_query = Some(encoded),
-                }
+                query_parts.push(SecretText::from(encoded));
             }
             "path" => {}
             _ => {}
@@ -1124,14 +1340,24 @@ pub(crate) fn prepare_delegated_request(
 
     Ok(PreparedDelegatedRequest {
         path: build_forward_path(path, delegated_credentials)?,
-        query: forwarded_query,
+        query: match query_parts.len() {
+            0 | 1 => query_parts.pop(),
+            _ => Some(
+                query_parts
+                    .iter()
+                    .map(SecretText::as_str)
+                    .collect::<Vec<_>>()
+                    .join("&")
+                    .into(),
+            ),
+        },
         delegated_headers,
     })
 }
 
 pub(crate) struct PreparedNodeRequest {
-    pub path: String,
-    pub query: Option<String>,
+    pub path: SecretText,
+    pub query: Option<SecretText>,
     pub headers: SecretHeaders,
 }
 
@@ -1154,9 +1380,9 @@ pub(crate) fn prepare_node_request(
     extend_with_path_credential(&mut node_delegated, target);
     let prepared = prepare_delegated_request(path, query, &node_delegated)?;
     let path = if prepared.path.starts_with('/') {
-        prepared.path.clone()
+        prepared.path
     } else {
-        format!("/{}", prepared.path)
+        SecretText::concat(&["/", &prepared.path])
     };
     if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
         base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
@@ -1247,8 +1473,7 @@ pub async fn resolve_admin_proxy_target(
         )));
     }
 
-    let catalog_default_headers =
-        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+    let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
 
     if service.auth_method == "none" {
@@ -1391,11 +1616,7 @@ pub async fn resolve_curation_proxy_target(
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential,
-            catalog_default_headers: super::default_header_service::catalog(
-                Some(encryption_keys),
-                &service,
-            )
-            .await?,
+            catalog_default_headers: CatalogHeaders::load(Some(encryption_keys), &service).await?,
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -1418,7 +1639,7 @@ pub async fn resolve_proxy_target(
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<ProxyTarget> {
     // Load the downstream service
-    let service = db
+    let mut service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": service_id })
         .await?
@@ -1426,6 +1647,7 @@ pub async fn resolve_proxy_target(
 
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1496,11 +1718,10 @@ pub async fn resolve_proxy_target(
         if service.provider_config_id.is_none() && service.platform_key.is_some() {
             super::platform_key_service::require(db, &service, user_id).await?;
         }
-        let base_url = resolve_gateway_url_override(db, user_id, &service)
+        let base_url = resolve_gateway_url_override(db, user_id, &mut service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
-        let catalog_default_headers =
-            super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+        let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
             catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
@@ -1551,12 +1772,11 @@ pub async fn resolve_proxy_target(
         Zeroizing::default()
     };
 
-    let base_url = resolve_gateway_url_override(db, user_id, &service)
+    let base_url = resolve_gateway_url_override(db, user_id, &mut service)
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
-    let catalog_default_headers =
-        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+    let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
         catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
@@ -1604,11 +1824,7 @@ pub(crate) async fn resolve_catalog_platform_target(
             auth_method: "none".into(),
             auth_key_name: String::new(),
             credential: Default::default(),
-            catalog_default_headers: super::default_header_service::catalog(
-                Some(encryption_keys),
-                &service,
-            )
-            .await?,
+            catalog_default_headers: CatalogHeaders::load(Some(encryption_keys), &service).await?,
             user_service_default_headers: vec![],
             ws_frame_injections: service.ws_frame_injections.clone(),
             connection_id: None,
@@ -1639,11 +1855,7 @@ pub(crate) async fn resolve_catalog_platform_target(
         auth_method,
         auth_key_name,
         credential,
-        catalog_default_headers: super::default_header_service::catalog(
-            Some(encryption_keys),
-            &service,
-        )
-        .await?,
+        catalog_default_headers: CatalogHeaders::load(Some(encryption_keys), &service).await?,
         user_service_default_headers: vec![],
         ws_frame_injections: service.ws_frame_injections.clone(),
         connection_id: None,
@@ -1662,7 +1874,7 @@ pub async fn resolve_proxy_target_lenient(
     service_id: &str,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<(ProxyTarget, bool)> {
-    let service = db
+    let mut service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": service_id })
         .await?
@@ -1670,6 +1882,7 @@ pub async fn resolve_proxy_target_lenient(
 
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1727,13 +1940,12 @@ pub async fn resolve_proxy_target_lenient(
             super::platform_key_service::require(db, &service, user_id).await?;
         }
         let (base_url, has_server_credential) =
-            match resolve_gateway_url_override(db, user_id, &service).await {
+            match resolve_gateway_url_override(db, user_id, &mut service).await {
                 Ok(Some(url)) => (url, true),
                 Ok(None) => (service.base_url.clone(), true),
                 Err(_) => (String::new(), false),
             };
-        let catalog_default_headers =
-            super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+        let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
@@ -1808,12 +2020,11 @@ pub async fn resolve_proxy_target_lenient(
         (Zeroizing::default(), false)
     };
 
-    let base_url = resolve_gateway_url_override(db, user_id, &service)
+    let base_url = resolve_gateway_url_override(db, user_id, &mut service)
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
-    let catalog_default_headers =
-        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+    let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
@@ -3199,7 +3410,7 @@ async fn finish_resolution(
     // Decode header values only after every local policy/ACL/credential branch
     // below has admitted this request. Read-only authority mode performs only
     // this bounded local decode and never provider credential effects.
-    let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
+    let catalog_default_headers = CatalogHeaders::default();
     let catalog_proxy_authorization =
         box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service, Some(&endpoint))).await?;
     if let Some((catalog_id, url, spec)) = &catalog_proxy_authorization.managed_target {
@@ -3612,6 +3823,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    approved_private_base_url: Option<String>,
     managed_target: Option<(String, String, Option<String>)>,
     catalog_id: Option<String>,
     catalog_slug: Option<String>,
@@ -3657,6 +3869,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
         .await?;
     let service =
         service.ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
+    super::catalog_service::require_connection_access(db, &user_service.user_id, &service).await?;
     super::destination_routing::validate_credential_source(&service)?;
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
@@ -3682,7 +3895,20 @@ async fn load_catalog_proxy_authorization_for_user_service(
     } else {
         None
     };
+    let approved_private_base_url = if service.owner_user_id.is_none()
+        && service.approved_private_base_url.as_ref() == Some(&service.base_url)
+        && (platform_target
+            || endpoint.is_some_and(|endpoint| {
+                super::catalog_endpoint_service::linked(user_service, endpoint, &service)
+            }))
+        && super::catalog_endpoint_service::catalog_owns_url(db, &service).await?
+    {
+        service.approved_private_base_url.clone()
+    } else {
+        None
+    };
     Ok(CatalogProxyAuthorization {
+        approved_private_base_url,
         managed_target,
         catalog_id: Some(service.id.clone()),
         catalog_slug: Some(service.slug.clone()),
@@ -3712,6 +3938,9 @@ fn apply_catalog_proxy_authorization(
     if let Some(id) = &authorization.catalog_id {
         service.id = id.clone();
     }
+    service
+        .approved_private_base_url
+        .clone_from(&authorization.approved_private_base_url);
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
     service.platform_key = authorization.platform_key.clone();
@@ -3734,16 +3963,16 @@ async fn load_catalog_default_headers_for_user_service(
     db: &mongodb::Database,
     encryption_keys: Option<&EncryptionKeys>,
     catalog_id: Option<&str>,
-) -> AppResult<Vec<DefaultRequestHeader>> {
+) -> AppResult<CatalogHeaders> {
     let Some(catalog_id) = catalog_id else {
-        return Ok(Vec::new());
+        return Ok(CatalogHeaders::default());
     };
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! {"_id":catalog_id})
         .await?
         .ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
-    super::default_header_service::catalog(encryption_keys, &service).await
+    CatalogHeaders::load(encryption_keys, &service).await
 }
 
 async fn load_catalog_ws_frame_injections_for_user_service(
@@ -4244,6 +4473,8 @@ fn build_minimal_downstream_service(
         requires_user_credential: !platform_managed_catalog_service,
         is_active: true,
         created_by: "system".to_string(),
+        caller_token_approved_destinations: Default::default(),
+        approved_private_base_url: None,
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,
@@ -4310,7 +4541,7 @@ fn build_minimal_downstream_service(
 async fn resolve_gateway_url_override(
     db: &mongodb::Database,
     user_id: &str,
-    service: &DownstreamService,
+    service: &mut DownstreamService,
 ) -> AppResult<Option<String>> {
     let provider_config_id = match &service.provider_config_id {
         Some(id) => id,
@@ -4327,6 +4558,7 @@ async fn resolve_gateway_url_override(
         _ => return Ok(None),
     };
 
+    service.approved_private_base_url = None;
     let user_token = db
         .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
         .find_one(doc! {
@@ -4345,6 +4577,12 @@ async fn resolve_gateway_url_override(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Redirects {
+    SameOrigin,
+    Return,
+}
+
 /// Forward a request to the downstream service with credential injection,
 /// identity propagation headers, and delegated provider credentials.
 ///
@@ -4352,7 +4590,7 @@ async fn resolve_gateway_url_override(
 /// Preserves the original HTTP method for all auth methods including query auth.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_request(
-    client: &Client,
+    redirects: Redirects,
     target: &ProxyTarget,
     method: reqwest::Method,
     path: &str,
@@ -4370,7 +4608,7 @@ pub async fn forward_request(
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<reqwest::Response> {
     forward_request_with_extra_outbound_headers(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4467,32 +4705,9 @@ pub fn no_redirect_http_client() -> &'static reqwest::Client {
     &CLIENT
 }
 
-fn target_http_client() -> Client {
-    #[cfg(test)]
-    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
-        return build_target_http_client(builder);
-    }
-    static CLIENT: std::sync::LazyLock<Client> =
-        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
-    CLIENT.clone()
-}
-
-fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
-    // See `no_redirect_http_client`: reused mock-server ports make idle
-    // sockets in this process-wide client fail after dispatch in tests.
-    #[cfg(test)]
-    let builder = builder.pool_max_idle_per_host(0);
-    builder
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .build()
-        .expect("target HTTP client")
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
-    client: &'a Client,
+    redirects: Redirects,
     target: &'a ProxyTarget,
     method: reqwest::Method,
     path: &'a str,
@@ -4508,7 +4723,7 @@ pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     forward_request_with_egress_guard(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4528,7 +4743,7 @@ pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_request_with_egress_guard<'a>(
-    client: &'a Client,
+    redirects: Redirects,
     target: &'a ProxyTarget,
     method: reqwest::Method,
     path: &'a str,
@@ -4545,7 +4760,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
     egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     forward_request_with_resource_proof(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4569,7 +4784,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_request_with_resource_proof<'a>(
-    client: &'a Client,
+    redirects: Redirects,
     target: &'a ProxyTarget,
     method: reqwest::Method,
     path: &'a str,
@@ -4590,7 +4805,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     catalog_route: Option<&'a super::lark_attachment_tool::routing::BotRoute>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4612,9 +4827,94 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     ))
 }
 
+/// Relative references followed before the response was returned to the proxy.
+#[derive(Clone)]
+pub(crate) struct FollowedLocations(pub Vec<reqwest::header::HeaderValue>);
+
+async fn return_or_follow_same_origin(
+    target: &ProxyTarget,
+    mut client: Client,
+    mut request: reqwest::Request,
+    path: &str,
+    egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
+) -> Result<reqwest::Response, ForwardRequestError> {
+    use reqwest::header::{
+        CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, TRANSFER_ENCODING,
+    };
+    let mut followed = Vec::new();
+    let mut response = loop {
+        let replay = request.try_clone();
+        let method = request.method().clone();
+        let response = client.execute(request).await.map_err(|error| {
+            if !followed.is_empty()
+                && let Some(failure) = super::proxy_destination::http::connection_failure(&error)
+            {
+                // The first request already reached the provider.
+                failure.log(&target.service, method.as_str(), path, true);
+                ForwardRequestError::Application(failure.into())
+            } else {
+                ForwardRequestError::from(error)
+            }
+        })?;
+        let status = response.status();
+        if followed.len() == 5 || !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            break response;
+        }
+        let Some(mut next) = replay else {
+            break response;
+        };
+        let Some(location) = response.headers().get(LOCATION) else {
+            break response;
+        };
+        let Some(url) = location
+            .to_str()
+            .ok()
+            .and_then(|location| next.url().join(location).ok())
+        else {
+            break response;
+        };
+        if next.url().origin() != url.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            break response;
+        }
+        followed.push(location.clone());
+        *next.url_mut() = url;
+        next.url_mut().set_fragment(None);
+        if status.as_u16() == 303
+            || (matches!(status.as_u16(), 301 | 302) && next.method() == reqwest::Method::POST)
+        {
+            *next.method_mut() = reqwest::Method::GET;
+            *next.body_mut() = None;
+            for name in [
+                CONTENT_LENGTH,
+                CONTENT_TYPE,
+                CONTENT_ENCODING,
+                TRANSFER_ENCODING,
+            ] {
+                next.headers_mut().remove(name);
+            }
+        }
+        client = target
+            .http_clients(next.url(), next.method().as_str(), path, true)?
+            .ordinary()?;
+        if let Some(guard) = egress_guard {
+            Box::pin(guard.revalidate()).await?;
+        }
+        request = next;
+    };
+    if !followed.is_empty() {
+        response
+            .extensions_mut()
+            .insert(FollowedLocations(followed));
+    }
+    Ok(response)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward_request_with_egress_guard_inner(
-    client: &Client,
+    redirects: Redirects,
     target: &ProxyTarget,
     method: reqwest::Method,
     path: &str,
@@ -4692,11 +4992,6 @@ async fn forward_request_with_egress_guard_inner(
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
 
-    // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
-    // Currently base_url is only validated at service creation/update time. An attacker
-    // could change DNS to point to a private IP after validation. Consider using a custom
-    // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
-
     // Scope/permission/admission identities retain the existing logical path.
     // This capability only changes the wire prefix for two trusted bot calls;
     // it independently verifies the final destination policy and exact path.
@@ -4705,32 +5000,24 @@ async fn forward_request_with_egress_guard_inner(
             .map_err(ForwardRequestError::PreDispatchRejected)?,
         None => prepared.path.as_str(),
     };
-    let url = if let Some(q) = prepared.query.as_deref() {
-        format!(
-            "{}/{}?{}",
-            target.base_url.trim_end_matches('/'),
-            wire_path,
-            q
-        )
-    } else {
-        format!(
-            "{}/{}",
-            target.base_url.trim_end_matches('/'),
-            wire_path
-        )
+    let base = target.base_url.trim_end_matches('/');
+    let url = match prepared.query.as_deref() {
+        Some(q) => SecretText::concat(&[base, "/", wire_path, "?", q]),
+        None => SecretText::concat(&[base, "/", wire_path]),
     };
 
-    let destination_client;
-    let client = if target.target_id.is_some()
-        || target.auth_method == "github_git"
-        || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
-    {
-        destination_client = target_http_client();
-        &destination_client
+    let url = reqwest::Url::parse(&url).map_err(|_| {
+        let failure = super::proxy_destination::Failure::UrlShape;
+        failure.log(&target.service, method.as_str(), path, false);
+        ForwardRequestError::PreDispatchRejected(failure.into())
+    })?;
+    let clients = target.http_clients(&url, method.as_str(), path, false).map_err(ForwardRequestError::PreDispatchRejected)?;
+    let client = if super::credential_verification::checking() {
+        clients.verification()?
     } else {
-        client
+        clients.ordinary()?
     };
-    let mut request = client.request(method.clone(), &url);
+    let mut request = client.request(method.clone(), url.clone());
 
     // Build the final outbound header list up front so reqwest's
     // append-by-default `RequestBuilder::header()` doesn't produce
@@ -4751,7 +5038,7 @@ async fn forward_request_with_egress_guard_inner(
     let outbound_headers = collect_forward_headers_with_defaults(
         &headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -4772,7 +5059,7 @@ async fn forward_request_with_egress_guard_inner(
                 .await
                 .map_err(ForwardRequestError::PreDispatchRejected)?;
         }
-        return nyxid_service_adapters::ifttt::client()
+        return clients.ifttt()?
             .forward(
                 &target.base_url,
                 &method,
@@ -4806,7 +5093,7 @@ async fn forward_request_with_egress_guard_inner(
                     }
                 })
             };
-        return nyxid_service_adapters::ifttt_mcp::client()
+        return clients.ifttt_mcp()?
             .forward_with_guard(
                 &target.base_url,
                 &method,
@@ -4876,7 +5163,7 @@ async fn forward_request_with_egress_guard_inner(
     // BLOCKER 1) and two AWS JSON-RPC operations with the same body
     // but different `x-amz-target` headers don't replay each other
     // (BLOCKER 2).
-    let cache_key: Option<String> =
+    let cache_key: Option<SecretText> =
         if cloud_response_cache::is_cacheable_auth_method(&target.auth_method) {
             let body_bytes_for_key: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
@@ -4889,7 +5176,7 @@ async fn forward_request_with_egress_guard_inner(
                 }
             };
             let path_and_query = match prepared.query.as_deref() {
-                Some(q) => format!("{}?{}", prepared.path, q),
+                Some(q) => SecretText::concat(&[&prepared.path, "?", q]),
                 None => prepared.path.clone(),
             };
             // Headers that have actually been attached to the outgoing
@@ -4908,7 +5195,7 @@ async fn forward_request_with_egress_guard_inner(
             if let Some(cached) = cloud_response_cache.get(&key) {
                 tracing::debug!(
                     auth_method = %target.auth_method,
-                    base_url = %target.base_url,
+                    host = %crate::services::url_validation::url_host_for_logs(&target.base_url),
                     "cloud_response_cache hit"
                 );
                 if let Some(guard) = egress_guard {
@@ -4999,15 +5286,20 @@ async fn forward_request_with_egress_guard_inner(
                 &target.credential,
                 &exchange_config.credential_fields,
             )?;
-            let token = provider_token_exchange_service::get_cached_exchange_token(
-                token_exchange_cache,
-                client,
-                &target.base_url,
-                &target.credential,
-                exchange_config,
-                &credential_map,
-            )
-            .await?;
+            let cache_key = provider_token_exchange_service::cache_key(&target.base_url, &target.credential, exchange_config);
+            let token = token_exchange_cache.get_or_fetch(&cache_key, || async {
+                let exchange_url = provider_token_exchange_service::resolve_endpoint(&exchange_config.endpoint, &target.base_url);
+                let url = reqwest::Url::parse(&exchange_url).map_err(|_| super::proxy_destination::refused())?;
+                let client = target.http_clients(&url, "POST", "/{token_exchange}", false)?.ordinary()?;
+                provider_token_exchange_service::fetch_exchange_token(&client, &target.base_url, exchange_config, &credential_map).await
+            }).await.map_err(|error| {
+                if matches!(error, AppError::PoolAttemptTransport(crate::errors::PoolAttemptTransportKind::ResolutionUnavailable)) {
+                    super::proxy_destination::Failure::ResolutionUnavailable.log(&target.service, "POST", "/{token_exchange}", false);
+                    ForwardRequestError::PreDispatchRejected(error)
+                } else {
+                    ForwardRequestError::Application(error)
+                }
+            })?;
             request = provider_token_exchange_service::apply_injection(
                 request,
                 &exchange_config.injection,
@@ -5039,7 +5331,7 @@ async fn forward_request_with_egress_guard_inner(
                 )
             })?;
             let signed_headers =
-                aws_sigv4::sign_request(method.as_str(), &url, signed_input, body_bytes, &creds)
+                aws_sigv4::sign_request(method.as_str(), url.as_str(), signed_input, body_bytes, &creds)
                     .map_err(|e| {
                         tracing::error!(error = %e, "aws_sigv4 request signing failed");
                         AppError::BadRequest(
@@ -5110,7 +5402,7 @@ async fn forward_request_with_egress_guard_inner(
         if let Some(context) = &target.execution_request {
             context.native_dispatched();
         }
-        let result = no_redirect_http_client().execute(request).await;
+        let result = client.execute(request).await;
         if let Some(permit) = &target.execution_permission {
             permit
                 .complete(result.is_ok())
@@ -5137,7 +5429,7 @@ async fn forward_request_with_egress_guard_inner(
         if let Some(context) = &target.execution_request {
             context.native_dispatched();
         }
-        let result = no_redirect_http_client().execute(request).await;
+        let result = client.execute(request).await;
         if let Some(permit) = &target.execution_permission {
             permit
                 .complete(result.is_ok())
@@ -5157,13 +5449,19 @@ async fn forward_request_with_egress_guard_inner(
             if let Some(context) = &target.execution_request {
                 context.native_dispatched();
             }
-            no_redirect_http_client().execute(request).await
+            client.execute(request).await.map_err(ForwardRequestError::from)
         } else {
             let request = request.build()?;
             if let Some(context) = &target.execution_request {
                 context.native_dispatched();
             }
-            client.execute(request).await
+            if redirects == Redirects::SameOrigin
+                && target.target_id.is_none() && target.auth_method != "github_git"
+                && target.service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+                && !super::telegram_new_api::original_bot_api_request(request.url())
+            {
+                return_or_follow_same_origin(target, client, request, path, egress_guard).await
+            } else { client.execute(request).await.map_err(ForwardRequestError::from) }
         };
         if let Some(permit) = &target.execution_permission {
             permit
@@ -5190,6 +5488,19 @@ async fn forward_request_with_egress_guard_inner(
     Ok(response)
 
     }).await;
+    let result = result.map_err(|error| {
+        if let ForwardRequestError::Transport(transport) = &error
+            && let Some(failure) = super::proxy_destination::http::connection_failure(transport)
+        {
+            failure.log(&target.service, method.as_str(), path, false);
+            if failure == super::proxy_destination::Failure::ResolutionUnavailable {
+                super::credential_verification::record("not_verified", "check_unavailable");
+            }
+            ForwardRequestError::PreDispatchRejected(failure.into())
+        } else {
+            error
+        }
+    });
     if let Err(ForwardRequestError::Transport(error)) = &result {
         super::credential_verification::record(
             "not_verified",
@@ -5241,16 +5552,17 @@ fn inject_credential_into_json_body(
     key: &str,
     credential: &str,
 ) -> Result<bytes::Bytes, AppError> {
-    let mut value: serde_json::Value = match existing {
+    use nyxid_service_adapters::secret_json::WireJson;
+    let mut value: WireJson = match existing {
         Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
             AppError::BadRequest(format!(
                 "Body auth method requires a JSON request body: {e}"
             ))
         })?,
-        _ => serde_json::Value::Object(serde_json::Map::new()),
+        _ => serde_json::Value::Object(serde_json::Map::new()).into(),
     };
 
-    let obj = value.as_object_mut().ok_or_else(|| {
+    let obj = value.0.as_object_mut().ok_or_else(|| {
         AppError::BadRequest(
             "Body auth method requires a JSON object as the request body".to_string(),
         )
@@ -5264,11 +5576,11 @@ fn inject_credential_into_json_body(
         );
     }
 
-    let bytes = serde_json::to_vec(&value).map_err(|e| {
+    let bytes = crate::crypto::secret_json::to_secret_string(&value).map_err(|e| {
         AppError::Internal(format!("Failed to re-serialize body after injection: {e}"))
     })?;
 
-    Ok(bytes::Bytes::from(bytes))
+    Ok(bytes::Bytes::from_owner(bytes))
 }
 
 /// Reuse the exact execution resolver's live ACL, destination and credential
@@ -5296,6 +5608,9 @@ pub(crate) async fn read_connection_authority(
 
 #[cfg(test)]
 mod tests {
+    mod pooled_http {
+        include!("proxy_pool_tests.rs");
+    }
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::org_membership::{
@@ -5427,12 +5742,15 @@ mod tests {
     fn actual_http_request_debug_redacts_injected_defaults_and_custom_credentials() {
         let secret = "distinctive-injected-header-6ac3";
         let mut target = make_proxy_target("https://example.invalid".into());
-        target.catalog_default_headers = vec![DefaultRequestHeader {
-            name: "x-private-default".into(),
-            value: secret.to_owned().into(),
-            overridable: false,
-            sensitive: true,
-        }];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![DefaultRequestHeader {
+                name: "x-private-default".into(),
+                value: secret.to_owned().into(),
+                overridable: false,
+                sensitive: true,
+            }],
+        );
         let headers = build_effective_outbound_headers(
             &target,
             vec![],
@@ -5469,7 +5787,7 @@ mod tests {
             };
             target.credential = secret.to_owned().into();
             let failure = super::forward_request_with_extra_outbound_headers(
-                &Client::new(),
+                super::Redirects::Return,
                 &target,
                 reqwest::Method::GET,
                 "/operation",
@@ -5695,11 +6013,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some(actor_id.clone()),
             created_at: now,
@@ -5735,6 +6055,7 @@ mod tests {
         let consent = crate::models::consent::Consent {
             revision: None,
             write_version: None,
+            reviewed_redirect_hash: None,
             issuance_fence: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
@@ -5847,6 +6168,123 @@ mod tests {
             rejected.is_err(),
             "credential-bearing assistant rows without a credential must reach the gate"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_headers_follow_the_resolved_connection_destination() {
+        let db = connect_test_database("catalog_header_destination")
+            .await
+            .unwrap();
+        let mut catalog = dummy_service();
+        catalog.base_url = "https://catalog.example.test/v1".into();
+        catalog.default_request_headers = Some(
+            serde_json::from_value(serde_json::json!([
+                {"name":"X-Catalog", "value":"catalog"}
+            ]))
+            .unwrap(),
+        );
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let keys = test_encryption_keys();
+        let nodes = Arc::new(NodeWsManager::new(30, 100));
+        for (idx, (url, expected)) in [
+            (catalog.base_url.as_str(), true),
+            ("https://endpoint.example.test/v1", false),
+            ("https://catalog.example.test/another-service", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for node in [None, Some("node")] {
+                let id = format!("instance-{idx}-{}", node.unwrap_or("direct"));
+                let endpoint = test_user_endpoint(&id, &owner, &id, url, None, Some(&catalog.id));
+                let mut instance =
+                    test_user_service(&id, &owner, &id, &id, Some(&catalog.id), node);
+                instance.default_request_headers = Some(
+                    serde_json::from_value(serde_json::json!([
+                        {"name":"X-Instance", "value":"instance"}
+                    ]))
+                    .unwrap(),
+                );
+                db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                    .insert_one(endpoint)
+                    .await
+                    .unwrap();
+                db.collection::<UserService>(USER_SERVICES)
+                    .insert_one(instance)
+                    .await
+                    .unwrap();
+                let target = Box::pin(resolve_proxy_target_from_user_service(
+                    &db,
+                    &keys,
+                    &nodes,
+                    &owner,
+                    Some(&id),
+                    None,
+                    test_execution_context(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .target;
+                assert_eq!(target.base_url, url);
+                let headers = build_effective_outbound_headers(&target, vec![], &[], &[], &[]);
+                assert_eq!(
+                    headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("X-Catalog")),
+                    expected
+                );
+                assert!(
+                    headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("X-Instance"))
+                );
+                let handshake = crate::handlers::proxy::build_downstream_ws_request(
+                    &url.replacen("https:", "wss:", 1),
+                    &target,
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                )
+                .unwrap();
+                assert_eq!(handshake.headers().contains_key("x-catalog"), expected);
+                assert!(handshake.headers().contains_key("x-instance"));
+                assert_eq!(target.user_service_default_headers[0].name, "X-Instance");
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_defaults_follow_authorized_operation_targets() {
+        let mut service = dummy_service();
+        service.base_url = "https://catalog.example.test".into();
+        service
+            .destination_targets
+            .insert("editor".into(), "https://editor.example.test".into());
+        service.default_request_headers = Some(
+            serde_json::from_value(serde_json::json!([
+                {"name":"X-Catalog","value":"version"}
+            ]))
+            .unwrap(),
+        );
+        let mut target = make_proxy_target("https://endpoint.example.test".into());
+        target.catalog_default_headers =
+            CatalogHeaders::load(Some(&test_encryption_keys()), &service)
+                .await
+                .unwrap();
+        assert!(target.catalog_headers().is_empty());
+        target.target_id = Some("editor".into());
+        assert!(target.catalog_headers().is_empty());
+        target.base_url = service.destination_targets["editor"].clone();
+        assert_eq!(target.catalog_headers().len(), 1);
+        target.target_id = None;
+        assert!(target.catalog_headers().is_empty());
     }
 
     #[tokio::test]
@@ -5963,7 +6401,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     async fn forward_request(
-        client: &Client,
+        _client: &Client,
         target: &ProxyTarget,
         method: reqwest::Method,
         path: &str,
@@ -5977,7 +6415,7 @@ mod tests {
         cloud_response_cache: &CloudResponseCache,
     ) -> AppResult<reqwest::Response> {
         super::forward_request(
-            client,
+            super::Redirects::SameOrigin,
             target,
             method,
             path,
@@ -6693,6 +7131,285 @@ mod tests {
         // TTL=0 disables storage; tests covering cacheable paths
         // construct a separate instance with a real TTL.
         CloudResponseCache::new(0)
+    }
+
+    #[tokio::test]
+    async fn caller_bearer_authority_follows_destination_ownership() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("caller_bearer_authority").await;
+        let person = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&person, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org, &person, OrgRole::Member, None))
+            .await
+            .unwrap();
+        let endpoint = test_user_endpoint(
+            "endpoint",
+            &org,
+            "Service",
+            "https://service.example.test",
+            None,
+            None,
+        );
+        let mut service =
+            test_user_service("connection", &org, "service", &endpoint.id, None, None);
+        service.forward_access_token = true;
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        for (actor, expected) in [(&org, true), (&person, false)] {
+            let resolution = resolve_proxy_target_by_user_service_id(
+                &db,
+                &test_encryption_keys(),
+                actor,
+                &service.id,
+                None,
+                None,
+                test_execution_context(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let authority = admit_caller_bearer(
+                &db,
+                actor,
+                Some(&service.id),
+                &resolution.target,
+                None,
+                Some("fixture"),
+                &[],
+            )
+            .await;
+            if !expected {
+                assert!(matches!(authority, Err(AppError::Forbidden(_))));
+                continue;
+            }
+            let admitted = authority.unwrap();
+            let route = super::super::node_routing_service::NodeRoute {
+                node_id: "primary".into(),
+                fallback_node_ids: vec!["fallback".into()],
+            };
+            let nodes =
+                db.collection::<mongodb::bson::Document>(crate::models::node::COLLECTION_NAME);
+            nodes
+                .insert_many([
+                    doc! {"_id": "primary", "user_id": actor, "is_active": true},
+                    doc! {"_id": "fallback", "user_id": &person, "is_active": true},
+                ])
+                .await
+                .unwrap();
+            assert!(matches!(
+                admit_caller_bearer(
+                    &db,
+                    actor,
+                    Some(&service.id),
+                    &resolution.target,
+                    Some(&route),
+                    Some("fixture"),
+                    &[]
+                )
+                .await,
+                Err(AppError::Forbidden(_))
+            ));
+            nodes
+                .update_one(doc! {"_id": "fallback"}, doc! {"$set": {"user_id": actor}})
+                .await
+                .unwrap();
+            assert_eq!(
+                admit_caller_bearer(
+                    &db,
+                    actor,
+                    Some(&service.id),
+                    &resolution.target,
+                    Some(&route),
+                    Some("fixture"),
+                    &[]
+                )
+                .await
+                .unwrap(),
+                admitted
+            );
+            let ws = crate::handlers::proxy::build_downstream_ws_request(
+                "wss://service.example.test/",
+                &resolution.target,
+                &[],
+                &[],
+                &[],
+                admitted,
+            )
+            .unwrap();
+            assert_eq!(ws.headers().contains_key("authorization"), expected);
+            let node = prepare_node_request(
+                &resolution.target,
+                "/",
+                None,
+                vec![],
+                &[],
+                &[],
+                admitted,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                node.headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chrono_sandbox_personal_connection_retains_owner_forwarding() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("personal_sandbox_forward").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.slug = "chrono-sandbox".into();
+        catalog.auth_method = "none".into();
+        catalog.requires_user_credential = false;
+        catalog.forward_access_token = false;
+        let endpoint = test_user_endpoint(
+            "endpoint",
+            &owner,
+            "Sandbox",
+            &catalog.base_url,
+            None,
+            Some(&catalog.id),
+        );
+        let mut service = test_user_service(
+            "connection",
+            &owner,
+            &catalog.slug,
+            &endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        service.forward_access_token = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let target = read_connection_authority(&db, &owner, &service.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .target;
+        assert_eq!(
+            admit_caller_bearer(
+                &db,
+                &owner,
+                Some(&service.id),
+                &target,
+                None,
+                Some("fixture"),
+                &[],
+            )
+            .await
+            .unwrap(),
+            Some("fixture")
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_catalog_destination_retains_caller_bearer_authority() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("catalog_bearer_authority").await;
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let creator = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
+        let mut catalog = dummy_service();
+        catalog.created_by.clone_from(&creator.id);
+        catalog.slug = crate::services::assistant_service::AEVATAR_SLUG.into();
+        catalog.auth_method = "none".into();
+        catalog.service_category = "internal".into();
+        catalog.requires_user_credential = false;
+        catalog.identity_propagation_mode = "jwt".into();
+        catalog.forward_access_token = true;
+        db.collection::<User>(USERS)
+            .insert_one(creator)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let approved = super::super::caller_token_approval::bootstrap(
+            &db,
+            crate::services::audit_service::audit_chain_hmac_key().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved, [(catalog.id.clone(), catalog.slug.clone())]);
+        let target = resolve_proxy_target(
+            &db,
+            &test_encryption_keys(),
+            &uuid::Uuid::new_v4().to_string(),
+            &catalog.id,
+            disabled_platform_rate_limit(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            admit_caller_bearer(&db, "caller", None, &target, None, Some("fixture"), &[])
+                .await
+                .unwrap(),
+            Some("fixture")
+        );
+        assert_eq!(target.base_url, catalog.base_url);
+        let aevatar = crate::services::assistant_service::resolve_admin_service(&db)
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let mut assistant = resolve_admin_proxy_target(&db, &keys, &aevatar.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            admit_caller_bearer(&db, "caller", None, &assistant, None, Some("fixture"), &[])
+                .await
+                .unwrap(),
+            Some("fixture")
+        );
+        assistant.base_url = "https://other.example.test".into();
+        assert!(matches!(
+            admit_caller_bearer(&db, "caller", None, &assistant, None, Some("fixture"), &[]).await,
+            Err(AppError::Forbidden(_))
+        ));
+
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = crate::services::assistant_nyxagent::SERVICE_SLUG.into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        assert!(
+            crate::services::assistant_nyxagent::catalog_contract(&db, &keys)
+                .await
+                .unwrap()
+                .valid()
+        );
     }
 
     #[tokio::test]
@@ -7486,6 +8203,8 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -7526,7 +8245,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -7797,6 +8516,202 @@ mod tests {
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_dials_the_approved_address_for_streaming() {
+        use reqwest::dns::{Name, Resolve, Resolving};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        // The transport resolver deliberately has no answer. The request has
+        // one address from validation and must retain it through the TCP dial.
+        struct NoSecondLookup;
+        impl Resolve for NoSecondLookup {
+            fn resolve(&self, _: Name) -> Resolving {
+                Box::pin(async { Err(std::io::Error::other("unexpected second lookup").into()) })
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("stream response"))
+            .mount(&server)
+            .await;
+        let host = "stream-fixture.invalid";
+        let base = format!("http://{host}:{}", server.address().port());
+        let client_builder = || {
+            Client::builder()
+                .no_proxy()
+                .dns_resolver(Arc::new(NoSecondLookup))
+        };
+        let client = client_builder().build().unwrap();
+        let fixture = crate::services::channel_media_service::TestPinnedTransport {
+            target: format!("{base}/stream"),
+            host: host.into(),
+            addresses: vec![*server.address()],
+            builder: Arc::new(client_builder),
+        };
+        let target = make_proxy_target(base);
+        let tokens = empty_token_cache();
+        let responses = empty_response_cache();
+        let response = crate::services::channel_media_service::TEST_PINNED_TRANSPORT
+            .scope(
+                fixture,
+                forward_request(
+                    &client,
+                    &target,
+                    reqwest::Method::POST,
+                    "stream",
+                    None,
+                    Default::default(),
+                    ProxyBody::Streaming(axum::body::Body::from("stream request")),
+                    vec![],
+                    vec![],
+                    None,
+                    &tokens,
+                    &responses,
+                ),
+            )
+            .await
+            .expect("use the validated socket");
+        assert_eq!(response.text().await.unwrap(), "stream response");
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_follows_five_same_origin_hops() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let server = MockServer::start().await;
+        for hop in 0..7 {
+            Mock::given(path(format!("/{hop}")))
+                .respond_with(
+                    ResponseTemplate::new(308).insert_header("Location", format!("/{}", hop + 1)),
+                )
+                .mount(&server)
+                .await;
+        }
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(server.uri()),
+            reqwest::Method::GET,
+            "0",
+            None,
+            Default::default(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers()["Location"], "/6");
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_redirect_methods_and_streaming_bodies() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        for status in [301, 302, 303, 307, 308] {
+            let server = MockServer::start().await;
+            Mock::given(path("/start"))
+                .respond_with(ResponseTemplate::new(status).insert_header("Location", "/end"))
+                .mount(&server)
+                .await;
+            Mock::given(path("/end"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let mut target = make_proxy_target(server.uri());
+            target.auth_method = "header".into();
+            target.auth_key_name = "x-test-auth".into();
+            target.credential = String::from("fixture").into();
+            for streaming in [false, true] {
+                let body = if streaming {
+                    ProxyBody::Streaming(axum::body::Body::from("request"))
+                } else {
+                    ProxyBody::Buffered(Some(bytes::Bytes::from_static(b"request")))
+                };
+                let response = forward_request(
+                    &Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    "start",
+                    None,
+                    Default::default(),
+                    body,
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                )
+                .await
+                .unwrap();
+                if streaming {
+                    assert_eq!(response.status().as_u16(), status);
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK);
+                let requests = server.received_requests().await.unwrap();
+                let last = requests.last().unwrap();
+                assert_eq!(last.headers["x-test-auth"], "fixture");
+                if matches!(status, 301..=303) {
+                    assert_eq!(last.method, reqwest::Method::GET);
+                    assert!(last.body.is_empty());
+                } else {
+                    assert_eq!(last.method, reqwest::Method::POST);
+                    assert_eq!(last.body, b"request");
+                }
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_returns_the_first_redirect() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let origin = MockServer::start().await;
+        for host in ["127.0.0.1", "elsewhere.invalid"] {
+            let location = format!("http://{host}:0/elsewhere");
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(302).insert_header("Location", location.as_str()),
+                )
+                .mount(&origin)
+                .await;
+            let mut target = make_proxy_target(origin.uri());
+            target.auth_method = "header".into();
+            target.auth_key_name = "x-test-key".into();
+            target.credential = String::from("fixture").into();
+            let client = Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::custom(|hop| {
+                    hop.error("cross-origin redirect reached the transport")
+                }))
+                .build()
+                .unwrap();
+            let response = forward_request(
+                &client,
+                &target,
+                reqwest::Method::GET,
+                "resource",
+                None,
+                Default::default(),
+                ProxyBody::Buffered(None),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_response_cache(),
+            )
+            .await
+            .expect("return redirect");
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()["Location"], location);
+            origin.reset().await;
+        }
     }
 
     #[tokio::test]
@@ -8304,7 +9219,7 @@ mod tests {
         )
         .expect("delegated request should prepare");
 
-        assert_eq!(prepared.path, "models");
+        assert_eq!(prepared.path.as_str(), "models");
         assert_eq!(
             prepared.query.as_deref(),
             Some("stream=true&api_key=abc+123")
@@ -8330,7 +9245,7 @@ mod tests {
         ] {
             assert!(
                 super::forward_request(
-                    &Client::new(),
+                    super::Redirects::Return,
                     &target,
                     reqwest::Method::POST,
                     path,
@@ -8413,7 +9328,7 @@ mod tests {
         target.service.slug = "my-worker".into();
         target.catalog_slug = Some("cma".into());
         let error = super::forward_request_with_resource_proof(
-            &Client::new(),
+            super::Redirects::Return,
             &target,
             reqwest::Method::GET,
             "/api/v1/agents",
@@ -8735,7 +9650,7 @@ mod tests {
         )
         .expect("delegated request should prepare");
 
-        assert_eq!(prepared.path, "bot123456:ABC-DEF/sendMessage");
+        assert_eq!(prepared.path.as_str(), "bot123456:ABC-DEF/sendMessage");
         assert_eq!(prepared.query.as_deref(), Some("chat_id=123"));
         assert!(
             prepared.delegated_headers.is_empty(),
@@ -8774,6 +9689,57 @@ mod tests {
     }
 
     // ─── inject_credential_into_json_body tests ─────────────────────────
+
+    #[test]
+    fn credential_transport_preserves_body_and_delegated_wire_bytes() {
+        let sentinel = "dummy/quoted\"+λ";
+        let body =
+            inject_credential_into_json_body(Some(br#"{"caller":7}"#), "key", sentinel).unwrap();
+        assert_eq!(
+            body.as_ref(),
+            serde_json::to_vec(&serde_json::json!({"caller":7, "key":sentinel})).unwrap()
+        );
+
+        let request = prepare_delegated_request(
+            "v1/list",
+            Some("a=%2f"),
+            &[DelegatedCredential {
+                provider_slug: "test".into(),
+                injection_method: "query".into(),
+                injection_key: "access".into(),
+                credential: sentinel.to_owned().into(),
+            }],
+        )
+        .unwrap();
+        let query = request.query.unwrap();
+        assert_eq!(query.as_str(), "a=%2f&access=dummy%2Fquoted%22%2B%CE%BB");
+        assert_eq!(format!("{query:?}"), "SecretText([REDACTED])");
+        assert_eq!(serde_json::to_value(&query).unwrap(), query.as_str());
+    }
+
+    #[test]
+    fn body_injection_preserves_nested_duplicate_key_order_and_parse_errors() {
+        let body = br#"{"first":0,"nested":[{"a":0,"b":2,"a":3}],"first":1}"#;
+        let mut expected: serde_json::Value = serde_json::from_slice(body).unwrap();
+        expected["token"] = "dummy-token".into();
+        let actual = inject_credential_into_json_body(Some(body), "token", "dummy-token").unwrap();
+        assert_eq!(actual.as_ref(), serde_json::to_vec(&expected).unwrap());
+
+        for input in [r#"{"x":"dummy-value","y":["#, r#"{"x":"dummy-value"} 1"#] {
+            let parse_error = serde_json::from_str::<serde_json::Value>(input).unwrap_err();
+            let AppError::BadRequest(message) =
+                inject_credential_into_json_body(Some(input.as_bytes()), "token", "dummy-token")
+                    .unwrap_err()
+            else {
+                panic!("expected the JSON body validation error");
+            };
+            assert_eq!(
+                message,
+                format!("Body auth method requires a JSON request body: {parse_error}")
+            );
+            assert!(!message.contains("dummy"));
+        }
+    }
 
     #[test]
     fn body_injection_merges_into_existing_object() {
@@ -8959,6 +9925,8 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -8999,7 +9967,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -9369,6 +10337,8 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -9409,7 +10379,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -9619,6 +10589,8 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -9659,7 +10631,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -9881,6 +10853,8 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "system".into(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -9993,7 +10967,7 @@ mod tests {
             credential: "TOKEN".to_string().into(),
         }];
         assert_eq!(
-            build_forward_path("v1/send", &creds).unwrap(),
+            build_forward_path("v1/send", &creds).unwrap().as_str(),
             "botTOKEN/v1/send"
         );
     }
@@ -10006,12 +10980,15 @@ mod tests {
             injection_key: "bot".to_string(),
             credential: "T".to_string().into(),
         }];
-        assert_eq!(build_forward_path("", &creds).unwrap(), "botT");
+        assert_eq!(build_forward_path("", &creds).unwrap().as_str(), "botT");
     }
 
     #[test]
     fn build_forward_path_no_creds() {
-        assert_eq!(build_forward_path("/v1/models", &[]).unwrap(), "v1/models");
+        assert_eq!(
+            build_forward_path("/v1/models", &[]).unwrap().as_str(),
+            "v1/models"
+        );
     }
 
     // ---- credential_header_name tests ----
@@ -10031,7 +11008,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10057,7 +11034,7 @@ mod tests {
             auth_key_name: "X-Api-Key".to_string(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10083,7 +11060,7 @@ mod tests {
             auth_key_name: "  ".to_string(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10106,7 +11083,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10129,7 +11106,7 @@ mod tests {
             auth_key_name: "key".to_string(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10152,7 +11129,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10209,7 +11186,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: "tok".to_string().into(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10234,7 +11211,7 @@ mod tests {
             auth_key_name: "bot".to_string(),
             credential: "TOKEN".to_string().into(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10462,7 +11439,7 @@ mod tests {
             auth_key_name: auth_key_name.into(),
             credential: "secret".to_owned().into(),
             service: ds,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10503,12 +11480,15 @@ mod tests {
     fn assistant_authorization_survives_cookie_and_jwt_on_direct_and_node_paths() {
         let mut target = make_proxy_target_with_auth("none", "");
         target.service.forward_access_token = true;
-        target.catalog_default_headers = vec![DefaultRequestHeader {
-            name: "Authorization".into(),
-            value: "Bearer catalog".to_owned().into(),
-            overridable: false,
-            sensitive: true,
-        }];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![DefaultRequestHeader {
+                name: "Authorization".into(),
+                value: "Bearer catalog".to_owned().into(),
+                overridable: false,
+                sensitive: true,
+            }],
+        );
         let extra = vec![("aUtHoRiZaTiOn".into(), "Bearer assistant-key".into())];
         for caller in [None, Some("human-jwt")] {
             // Direct HTTP assembles shared headers, then applies bearer forwarding.
@@ -10551,12 +11531,15 @@ mod tests {
     #[test]
     fn effective_headers_include_non_overridable_operation_defaults() {
         let mut target = make_proxy_target_with_auth("none", "");
-        target.catalog_default_headers = vec![DefaultRequestHeader {
-            name: "X-Amz-Target".to_string(),
-            value: "Catalog.Write".to_string().into(),
-            overridable: false,
-            sensitive: false,
-        }];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![DefaultRequestHeader {
+                name: "X-Amz-Target".to_string(),
+                value: "Catalog.Write".to_string().into(),
+                overridable: false,
+                sensitive: false,
+            }],
+        );
         let headers = build_effective_outbound_headers(
             &target,
             vec![("x-amz-target".to_string(), "Caller.Write".to_string())],
@@ -10575,26 +11558,29 @@ mod tests {
     #[test]
     fn effective_headers_apply_caller_and_default_precedence_after_shared_admission() {
         let mut target = make_proxy_target_with_auth("none", "");
-        target.catalog_default_headers = vec![
-            DefaultRequestHeader {
-                name: "Content-Type".to_string(),
-                value: "application/octet-stream".to_string().into(),
-                overridable: true,
-                sensitive: false,
-            },
-            DefaultRequestHeader {
-                name: "Idempotency-Key".to_string(),
-                value: "catalog-key".to_string().into(),
-                overridable: true,
-                sensitive: false,
-            },
-            DefaultRequestHeader {
-                name: "X-Trace-ID".to_string(),
-                value: "catalog-trace".to_string().into(),
-                overridable: false,
-                sensitive: false,
-            },
-        ];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![
+                DefaultRequestHeader {
+                    name: "Content-Type".to_string(),
+                    value: "application/octet-stream".to_string().into(),
+                    overridable: true,
+                    sensitive: false,
+                },
+                DefaultRequestHeader {
+                    name: "Idempotency-Key".to_string(),
+                    value: "catalog-key".to_string().into(),
+                    overridable: true,
+                    sensitive: false,
+                },
+                DefaultRequestHeader {
+                    name: "X-Trace-ID".to_string(),
+                    value: "catalog-trace".to_string().into(),
+                    overridable: false,
+                    sensitive: false,
+                },
+            ],
+        );
         target.user_service_default_headers = vec![DefaultRequestHeader {
             name: "x-trace-id".to_string(),
             value: "user-service-trace".to_string().into(),
@@ -10703,7 +11689,7 @@ mod tests {
             credential: "sk-123".to_owned().into(),
         }];
         let result = prepare_delegated_request("/chat", None, &creds).unwrap();
-        assert_eq!(result.path, "chat");
+        assert_eq!(result.path.as_str(), "chat");
         assert_eq!(result.delegated_headers.len(), 1);
         assert_eq!(result.delegated_headers[0].0, "Authorization");
         assert_eq!(result.delegated_headers[0].1, "Bearer sk-123");
@@ -10773,7 +11759,7 @@ mod tests {
     #[test]
     fn prepare_delegated_empty_creds() {
         let result = prepare_delegated_request("/plain", Some("q=1"), &[]).unwrap();
-        assert_eq!(result.path, "plain");
+        assert_eq!(result.path.as_str(), "plain");
         assert_eq!(result.query.as_deref(), Some("q=1"));
         assert!(result.delegated_headers.is_empty());
     }

@@ -24,18 +24,9 @@ impl AssistantVersion {
     }
 
     pub(crate) fn of(row: &ApprovalRequest) -> AppResult<Self> {
-        let e = row.execution_proposal.as_ref().ok_or_else(conflict)?;
-        match e.version {
-            1 if e.v1.is_some() && e.v2.is_none() && e.v3.is_none() && e.v4.is_none() => {
-                Ok(Self::V1)
-            }
-            3 if e.v3.is_some() && e.v1.is_none() && e.v2.is_none() && e.v4.is_none() => {
-                Ok(Self::V3)
-            }
-            4 if e.v4.is_some() && e.v1.is_none() && e.v2.is_none() && e.v3.is_none() => {
-                Ok(Self::V4)
-            }
-            _ => Err(conflict()),
+        match Arm::of(row)? {
+            Arm::Assistant(version, _) => Ok(version),
+            Arm::V2(_) => Err(conflict()),
         }
     }
 

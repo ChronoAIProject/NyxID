@@ -61,14 +61,16 @@ test("only a definite refusal before admission can restore editable text and upl
   assert.equal(restoreRefusedAssistantSend(new Error("timeout"), false), false);
 });
 
-test("native new turns use the server default and strip legacy selection fields", () => {
+test("the explicit model is sent only when creating a new conversation", () => {
   const input = {
     text: "Hello",
     agentId: "specialist",
     model: "nyxagent/research",
   };
+  assert.deepEqual(assistantTurnBody({ text: "Hello" }), { text: "Hello" });
   assert.deepEqual(assistantTurnBody(input), {
     agent_id: "specialist",
+    model: "nyxagent/research",
     text: "Hello",
   });
   assert.deepEqual(assistantTurnBody({ ...input, conversationId: id }), {

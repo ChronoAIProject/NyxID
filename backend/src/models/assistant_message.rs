@@ -171,6 +171,12 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    /// One entry per represented channel source, keyed by its accepted event ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub channel_text_completeness:
+        std::collections::BTreeMap<String, super::channel_message::TextCompleteness>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continued_after_restart: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_link_publication: Option<VoiceLinkPublication>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,7 +190,7 @@ pub struct TurnMetadata {
     pub work: Option<WorkEvidence>,
     #[serde(default)]
     pub timing: Option<TurnTiming>,
-    /// Closed metadata from a failed model callback, or the upstream code alone.
+    /// Metadata-only explanation of a failed turn. Legacy failures can omit it.
     #[serde(default)]
     pub failure_reason: Option<Box<TurnFailureReason>>,
     #[serde(default)]
@@ -211,6 +217,20 @@ pub struct TurnFailureReason {
     pub code: String,
     pub http_status: Option<u16>,
     pub nyxid_error_code: Option<u32>,
+}
+
+impl TurnFailureReason {
+    pub fn new(source: &'static str, stage: &str, code: &str, http_status: Option<u16>) -> Self {
+        Self {
+            source: source.into(),
+            stage: stage.into(),
+            code: code.into(),
+            http_status,
+            nyxid_error_code: None,
+            model_route: None,
+            guest_setup_step: None,
+        }
+    }
 }
 
 /// Bounded internal setup location; never an upstream error or payload.

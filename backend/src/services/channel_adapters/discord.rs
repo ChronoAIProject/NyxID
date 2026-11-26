@@ -987,7 +987,8 @@ mod tests {
         assert_eq!(
             channel_bot_service::decrypt_bot_token(&state.encryption_keys, &created.bot)
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_str(),
             "private-token"
         );
         // Two prefixes are not silently normalized twice: verification must use
@@ -1351,6 +1352,7 @@ mod tests {
 
     fn make_test_bot(public_key: Option<&str>) -> ChannelBot {
         ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -1369,6 +1371,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

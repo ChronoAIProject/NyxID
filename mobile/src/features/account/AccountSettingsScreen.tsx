@@ -1,6 +1,8 @@
+import { localizedToast } from "../../i18n/localizedToast";
+import { translateApp } from "../../i18n/appTranslation";
 import { LANGUAGES } from "../../i18n/language";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Image,
@@ -19,9 +21,11 @@ import {
   Mail,
   Palette,
   Languages,
+  PanelRight,
   ScrollText,
   ShieldCheck,
   Wallet,
+  Watch,
 } from "lucide-react-native";
 import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
@@ -43,7 +47,9 @@ import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
+import { nativeWatchLink } from "../../lib/watch/watchLink";
 import { AccountDeletionSheet } from "./AccountDeletionSheet";
+import { WorkspaceRailWindowContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { isApiError } from "../../lib/api/ApiError";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -67,6 +73,7 @@ export function AccountSettingsTitle({
   children: string;
   tintColor?: string;
 }) {
+  useAppLanguage();
   return (
     <Text
       role="heading"
@@ -97,13 +104,13 @@ function resolveDeleteAccountError(error: unknown): {
       key === "token_expired"
     ) {
       return {
-        message: "Session expired. Please sign in again.",
+        message: translateApp("Session expired. Please sign in again."),
         shouldForceSignOut: true,
       };
     }
     if (key === "not_found" || error.statusCode === 404) {
       return {
-        message: "Account not found or already deleted.",
+        message: translateApp("Account not found or already deleted."),
         shouldForceSignOut: true,
       };
     }
@@ -117,7 +124,7 @@ function resolveDeleteAccountError(error: unknown): {
     lower.includes("request_failed_401")
   ) {
     return {
-      message: "Session expired. Please sign in again.",
+      message: translateApp("Session expired. Please sign in again."),
       shouldForceSignOut: true,
     };
   }
@@ -127,13 +134,13 @@ function resolveDeleteAccountError(error: unknown): {
     lower.includes("failed to fetch")
   ) {
     return {
-      message: "Network error. Check API server and try again.",
+      message: translateApp("Network error. Check API server and try again."),
       shouldForceSignOut: false,
     };
   }
 
   const fallback =
-    __DEV__ && raw ? raw : "Failed to delete account. Please try again.";
+    __DEV__ && raw ? raw : translateApp("Failed to delete account. Please try again.");
   return { message: fallback, shouldForceSignOut: false };
 }
 
@@ -156,12 +163,12 @@ function getIdentityName(
 ): string {
   const trimmedName = name?.trim();
   if (trimmedName) return trimmedName;
-  if (provider === "apple") return "Apple account";
-  return "User";
+  if (provider === "apple") return translateApp("Apple account");
+  return translateApp("User");
 }
 
 function formatSignInMethod(provider?: string | null): string {
-  if (!provider) return "Email/Password";
+  if (!provider) return translateApp("Email/Password");
   switch (provider.toLowerCase()) {
     case "google":
       return "Google";
@@ -179,7 +186,10 @@ function formatSignInMethod(provider?: string | null): string {
  * sub-page that holds the actual controls; only Sign Out and Delete Account act here.
  */
 export function AccountSettingsScreen({ navigation, route }: Props) {
+  useAppLanguage();
   const { language, t } = useAppLanguage();
+  // Quick access customises the Duo's rail: offered where the rail exists.
+  const railWindow = useContext(WorkspaceRailWindowContext);
   const section = route?.params?.section;
   useEffect(() => {
     if (section) navigation.push(SECTION_PAGES[section]);
@@ -192,7 +202,12 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     () => createStyles(colors, stacked, fontScale),
     [colors, stacked, fontScale],
   );
+  const signingOutRef = useRef(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutFailed, setSignOutFailed] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  // Only iOS builds that include the watch app can set it up.
+  const watchSupported = useMemo(() => nativeWatchLink() !== null, []);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
   const { isConnected, recheckConnection } = useNetworkStatus();
@@ -211,8 +226,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
   });
   const voiceEnabled = !!voiceFeatures.data?.includes("assistant:voice");
 
-  const showToast = (message: string, kind: ToastKind) =>
-    setToast({ message, kind });
+  const showToast = (message: () => string, kind: ToastKind) =>
+    setToast(localizedToast(() => ({ message: message(), kind })));
 
   useEffect(() => {
     if (!toast) return;
@@ -224,9 +239,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async (result) => {
       showToast(
-        result.status === "complete"
-          ? "Account erasure complete. You have been signed out."
-          : "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
+        () => (result.status === "complete"
+          ? translateApp("Account erasure complete. You have been signed out.")
+          : translateApp(
+              "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
+            )),
         "success",
       );
       try {
@@ -236,7 +253,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     },
     onError: (error) => {
       const resolved = resolveDeleteAccountError(error);
-      showToast(resolved.message, "error");
+      showToast(() => (resolveDeleteAccountError(error).message), "error");
       if (resolved.shouldForceSignOut) {
         void signOut()
           .then(() => queryClient.clear())
@@ -245,19 +262,31 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     },
   });
 
+  const runSignOut = async () => {
+    if (signingOutRef.current) return;
+    signingOutRef.current = true;
+    setSigningOut(true);
+    setSignOutFailed(false);
+    setToast(null);
+    try {
+      await signOut();
+      queryClient.clear();
+      showToast(() => translateApp("You are signed out."), "info");
+    } catch {
+      setSignOutFailed(true);
+      showToast(() => translateApp("Couldn't sign out on this device. Please try again."), "error");
+    } finally {
+      signingOutRef.current = false;
+      setSigningOut(false);
+    }
+  };
   const handleSignOut = () => {
-    Alert.alert("Sign Out", "Do you want to sign out from this account?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Sign Out",
-        style: "destructive",
-        onPress: () => {
-          showToast("You are signed out.", "info");
-          void signOut()
-            .then(() => queryClient.clear())
-            .catch(() => {});
-        },
-      },
+    if (signingOutRef.current) return;
+    Alert.alert(
+      translateApp("Sign Out"),
+      translateApp("Do you want to sign out from this account?"), [
+      { text: translateApp("Cancel"), style: "cancel" },
+      { text: translateApp("Sign Out"), style: "destructive", onPress: () => { void runSignOut(); } },
     ]);
   };
 
@@ -298,12 +327,13 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
       <SettingsPage>
         {isOffline && (
           <OfflineBanner
-            subtitle="Some features unavailable"
+            subtitle={translateApp("Some features unavailable")}
             onRetry={async () => {
               const online = await recheckConnection();
               if (online) void refetchProfile();
               else
-                showToast("Still offline — will retry when connected", "error");
+                showToast(
+                  () => (translateApp("Still offline — will retry when connected")), "error");
             }}
           />
         )}
@@ -386,6 +416,14 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             value={LANGUAGES.find(({ code }) => code === language)?.label}
             onPress={() => navigation.push("LanguageSettings")}
           />
+          {/* The Duo only: the rail beside the status column (synced list). */}
+          {railWindow ? (
+            <SettingsRow
+              icon={PanelRight}
+              label={t("Quick access")}
+              onPress={() => navigation.push("QuickAccessSettings")}
+            />
+          ) : null}
           {/* Dictation is available to everyone; live voice only with its flag. */}
           <SettingsRow
             icon={AudioLines}
@@ -394,6 +432,13 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
               navigation.push("VoiceSettings", { voice: voiceEnabled })
             }
           />
+          {watchSupported ? (
+            <SettingsRow
+              icon={Watch}
+              label={t("Apple Watch")}
+              onPress={() => navigation.push("AppleWatchSettings")}
+            />
+          ) : null}
           <SettingsRow
             icon={Lock}
             label={t("Privacy")}
@@ -434,22 +479,30 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             label={t("Contact support")}
             value={SUPPORT_EMAIL}
             accessibilityRole="link"
-            accessibilityHint={`Email ${SUPPORT_EMAIL}`}
+            accessibilityHint={translateApp("Email {{email}}", {
+              email: SUPPORT_EMAIL,
+            })}
             onPress={() => {
+              const subject = encodeURIComponent(translateApp("NyxID app support"));
               Linking.openURL(
-                `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("NyxID app support")}`,
+                `mailto:${SUPPORT_EMAIL}?subject=${subject}`,
               ).catch(() =>
-                Alert.alert("Contact support", `Email us at ${SUPPORT_EMAIL}.`),
+                Alert.alert(
+                  translateApp("Contact support"),
+                  translateApp("Email us at {{email}}.", {
+                    email: SUPPORT_EMAIL,
+                  }),
+                ),
               );
             }}
           />
         </SettingsGroup>
 
-        <SettingsGroup>
+        <SettingsGroup footer={signOutFailed ? t("Couldn't sign out on this device. Please try again.") : undefined}>
           <SettingsRow
             centered
-            label={t("Sign Out")}
-            disabled={deleting || isOffline}
+            label={signingOut ? t("Signing out...") : t("Sign Out")}
+            disabled={deleting || signingOut}
             onPress={handleSignOut}
           />
         </SettingsGroup>
@@ -463,7 +516,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             centered
             destructive
             label={deleting ? t("Deleting...") : t("Delete Account")}
-            disabled={deleting || isOffline}
+            disabled={deleting || signingOut || isOffline}
             onPress={handleDeleteAccount}
           />
         </SettingsGroup>

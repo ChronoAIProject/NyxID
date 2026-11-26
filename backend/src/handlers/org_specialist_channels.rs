@@ -7,9 +7,89 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestIndexQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestHistoryQuery {
+    limit: Option<i64>,
+    before_seq: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct GuestIndex {
+    conversations: Vec<org::guest_history::Conversation>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GuestHistory {
+    conversation: org::guest_history::Conversation,
+    messages: Vec<org::guest_history::Message>,
+    before_seq: Option<i64>,
+}
+
+pub async fn guest_conversations(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(agent): Path<String>,
+    Query(query): Query<GuestIndexQuery>,
+) -> AppResult<Json<GuestIndex>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &actor).await?;
+    let limit = super::assistant_nyxagent::limit(query.limit)?;
+    let (conversations, next_cursor) =
+        org::guest_history::list(&state.db, &actor, &agent, limit, query.cursor.as_deref()).await?;
+    Ok(Json(GuestIndex {
+        conversations,
+        next_cursor,
+    }))
+}
+
+pub async fn guest_history(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<GuestHistoryQuery>,
+) -> AppResult<Json<GuestHistory>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &actor).await?;
+    let limit = super::assistant_nyxagent::limit(query.limit)?;
+    if query.before_seq.is_some_and(|seq| seq <= 0) {
+        return Err(AppError::BadRequest("Invalid before_seq".into()));
+    }
+    let (org, conversation, messages, before_seq) =
+        org::guest_history::history(&state.db, &actor, &id, limit, query.before_seq).await?;
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        "org_channel_guest_history_read",
+        Some(json!({
+            "org_id": org,
+            "conversation_id": conversation.id,
+            "agent_id": conversation.agent_id,
+            "channel_id": conversation.channel.nyxbot_channel_id,
+        })),
+    )
+    .await?;
+    Ok(Json(GuestHistory {
+        conversation,
+        messages,
+        before_seq,
+    }))
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +110,7 @@ pub async fn preview(
         Box::pin(org::preview::load(
             &state.db,
             &state.encryption_keys,
+            &state.config.base_url,
             &actor,
             &input.bot_id,
             &input.agent_id,
@@ -58,7 +139,19 @@ pub async fn update(
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     let row = org::management::load(&state.db, &actor, &id, true).await?;
-    org::management::update(&state.db, &actor, &row, input).await?;
+    org::management::update(
+        &state.db,
+        &actor,
+        &row,
+        input,
+        Some(
+            &crate::services::nyxbot_channel_query_service::direct_callback(
+                &state.config.base_url,
+                &row.id,
+            ),
+        ),
+    )
+    .await?;
     let row = org::management::load(&state.db, &actor, &id, true).await?;
     Ok(Json(org::management::view(&state.db, &actor, &row).await?))
 }
@@ -74,7 +167,19 @@ pub(crate) async fn update_tool(
     let input: org::management::GuestSettingsPatch = serde_json::from_value(input.clone())
         .map_err(|_| AppError::ValidationError("Invalid organization guest settings".into()))?;
     let row = org::management::load(&state.db, actor, id, true).await?;
-    org::management::patch(&state.db, actor, &row, input).await?;
+    org::management::patch(
+        &state.db,
+        actor,
+        &row,
+        input,
+        Some(
+            &crate::services::nyxbot_channel_query_service::direct_callback(
+                &state.config.base_url,
+                &row.id,
+            ),
+        ),
+    )
+    .await?;
     let row = org::management::load(&state.db, actor, id, true).await?;
     org::management::view(&state.db, actor, &row).await
 }

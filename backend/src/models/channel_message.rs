@@ -3,6 +3,29 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_messages";
 
+/// Completeness of the normalized UTF-8 text at one delivery boundary.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TextCompleteness {
+    pub original_bytes: usize,
+    pub truncated: bool,
+}
+
+/// Server-owned reply authority from one authenticated private inbox message.
+/// No customer text or bearer credential is retained.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MetaMessageAuthority {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    pub generation: i64,
+    pub asset_id: String,
+    pub sender_id: String,
+    pub binding: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub event_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub reply_expires_at: DateTime<Utc>,
+}
+
 /// Provider handles and descriptive metadata only; never media bytes or captions.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAttachment {
@@ -57,6 +80,9 @@ pub enum CallbackRefusal {
 /// Admission metadata only. No actor/role names, mentioned IDs, text or raw payloads.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyxbotAdmission {
+    /// A retained source must still find its exact event before a notice can be delivered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_org_notice: bool,
     pub disposition: String,
     pub bot_mentioned: Option<bool>,
     pub managed_role_mentioned: bool,
@@ -81,6 +107,14 @@ pub struct NyxbotAdmission {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<TextCompleteness>,
+    /// Private download-name overrides aligned with top-level attachments.
+    /// Public callback/history DTOs continue to expose the raw source metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effective_attachment_filenames: Vec<Option<String>>,
+    #[serde(default)]
+    pub meta_authority: Option<MetaMessageAuthority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nyxbot_admission: Option<NyxbotAdmission>,
     /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
@@ -151,6 +185,8 @@ pub struct ChannelMessage {
     /// Callback delivery status: "pending", "delivered", "failed", "timeout"
     #[serde(default)]
     pub callback_status: Option<String>,
+    #[serde(default)]
+    pub callback_failure_reason: Option<String>,
     /// HTTP status the callback URL answered with when delivery failed, if
     /// it answered at all. A status code only, never the response body.
     #[serde(default)]
@@ -194,10 +230,13 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            text_completeness: None,
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,
@@ -218,6 +257,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: None,
             callback_status: None,
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: None,

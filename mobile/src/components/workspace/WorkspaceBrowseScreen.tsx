@@ -1,3 +1,6 @@
+import { searchFieldContent, searchFieldInput } from "./searchFieldStyles";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FlatList,
@@ -9,6 +12,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 import {
@@ -35,6 +39,7 @@ import {
 } from "lucide-react-native";
 import { AgentAvatar, AgentAvatarStack } from "../AgentAvatar";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
+import { fittingPlaceholder, SEARCH_FIELD } from "./textFit";
 import { useIsFocused } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import type { ContentScreenProps } from "../../app/navigationTypes";
@@ -62,6 +67,7 @@ import {
   type WorkspaceSearchEntry,
   type WorkspaceSearchTarget,
 } from "./workspaceSearchModel";
+import { useRailScrollIndicator } from "./workspaceFloatingInset";
 
 const recentKey = (item: WorkspaceRecent) => item.key;
 const searchKey = (item: WorkspaceSearchEntry) => item.key;
@@ -90,6 +96,7 @@ const destinationIcons: Record<string, typeof Search> = {
 };
 
 function useBrowseData(agentId?: string) {
+  useAppLanguage();
   const focused = useIsFocused();
   const data = useWorkspaceRecents(focused, agentId);
   const epoch = getAuthEpoch();
@@ -118,15 +125,28 @@ function useBrowseData(agentId?: string) {
 function BrowseSearchField({
   value,
   onChange,
-  label,
+  placeholders,
   autoFocus = false,
 }: {
   value: string;
   onChange: (value: string) => void;
-  label: string;
+  /**
+   * Complete phrases, most descriptive first; the first is also the field's
+   * accessibility label. The placeholder is the first that fits the field at
+   * the current text size, else the last (e.g. "Search"), so it never clips.
+   */
+  placeholders: readonly string[];
   autoFocus?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
+  const { fontScale } = useWindowDimensions();
+  const [textWidth, setTextWidth] = useState<number>();
+  const placeholder = fittingPlaceholder(
+    placeholders,
+    textWidth,
+    SEARCH_FIELD.fontSize * fontScale,
+  );
   return (
     <View
       style={[
@@ -134,13 +154,22 @@ function BrowseSearchField({
         { backgroundColor: colors.cardSoft, borderColor: colors.border },
       ]}
     >
-      <Search size={18} color={colors.textMuted} accessible={false} />
+      <Search
+        size={SEARCH_FIELD.iconSize}
+        color={colors.textMuted}
+        accessible={false}
+      />
       <TextInput
-        accessibilityLabel={label}
-        placeholder={label}
+        accessibilityLabel={placeholders[0]}
+        placeholder={placeholder}
         placeholderTextColor={colors.textMuted}
         value={value}
         onChangeText={onChange}
+        onLayout={(event) =>
+          setTextWidth(
+            event.nativeEvent.layout.width - SEARCH_FIELD.textPaddingRight,
+          )
+        }
         autoFocus={autoFocus}
         autoCorrect={false}
         autoCapitalize="none"
@@ -152,7 +181,7 @@ function BrowseSearchField({
       {!!value && (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Clear search"
+          accessibilityLabel={translateApp("Clear search")}
           style={styles.clear}
           onPress={() => onChange("")}
         >
@@ -167,6 +196,8 @@ export function WorkspaceRecentsScreen({
   navigation,
   route,
 }: ContentScreenProps<"WorkspaceRecents" | "AssistantHistory">) {
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
   const { colors } = useTheme();
   const [query, setQuery] = useState("");
   const [agentId, setAgentId] = useState(route.params?.agentId);
@@ -200,7 +231,7 @@ export function WorkspaceRecentsScreen({
     [openChat],
   );
   const filters = [
-    { id: undefined, name: "All agents & crews" },
+    { id: undefined, name: translateApp("All agents & crews") },
     ...data.agents
       .filter((a) => a.status !== "destroyed")
       .map((agent) => ({
@@ -210,7 +241,7 @@ export function WorkspaceRecentsScreen({
   ];
   return (
     <WorkspacePage
-      title={history ? "Chat history" : "Recents"}
+      title={history ? translateApp("Chat history") : translateApp("Recents")}
       showHeading={false}
       scroll={false}
       contentStyle={styles.page}
@@ -219,17 +250,19 @@ export function WorkspaceRecentsScreen({
         {history && (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="New chat"
+            accessibilityLabel={translateApp("New chat")}
             style={styles.more}
             onPress={() =>
               openChat({ kind: "agent", agentId: route.params?.agentId })
             }
           >
-            <Text style={{ color: colors.textPrimary }}>New chat</Text>
+            <Text style={{ color: colors.textPrimary }}>
+              {translateApp("New chat")}
+            </Text>
           </Pressable>
         )}
         <BrowseSearchField
-          label="Search chats"
+          placeholders={[translateApp("Search chats"), translateApp("Search")]}
           value={query}
           onChange={setQuery}
         />
@@ -243,7 +276,9 @@ export function WorkspaceRecentsScreen({
             <Pressable
               key={filter.id ?? "all"}
               accessibilityRole="button"
-              accessibilityLabel={`Filter chats: ${filter.name}`}
+              accessibilityLabel={translateApp("Filter chats: {{name}}", {
+                name: filter.name,
+              })}
               accessibilityState={{ selected: agentId === filter.id }}
               onPress={() => setAgentId(filter.id)}
               style={[
@@ -275,7 +310,7 @@ export function WorkspaceRecentsScreen({
             accessibilityRole="header"
             style={[styles.heading, { color: colors.textPrimary }]}
           >
-            {history ? "Chats" : "Recent chats"}
+            {history ? translateApp("Chats") : translateApp("Recent chats")}
           </Text>
         }
         refreshControl={
@@ -289,7 +324,7 @@ export function WorkspaceRecentsScreen({
           data.loading ? (
             <SkeletonRows
               rows={5}
-              accessibilityLabel="Loading recent chats"
+              accessibilityLabel={translateApp("Loading recent chats")}
               style={styles.skeleton}
             />
           ) : (
@@ -298,12 +333,12 @@ export function WorkspaceRecentsScreen({
               style={[styles.note, { color: colors.textMuted }]}
             >
               {data.error
-                ? "Couldn’t load recent chats. Pull to refresh."
+                ? translateApp("Couldn’t load recent chats. Pull to refresh.")
                 : !data.online
-                  ? "Offline · showing saved recent chats."
+                  ? translateApp("Offline · showing saved recent chats.")
                   : query.trim()
-                    ? "No matching chats in loaded history."
-                    : "No recent chats."}
+                    ? translateApp("No matching chats in loaded history.")
+                    : translateApp("No recent chats.")}
             </Text>
           )
         }
@@ -319,11 +354,13 @@ export function WorkspaceRecentsScreen({
               onPress={data.loadMore}
             >
               <Text style={{ color: colors.textSecondary }}>
-                {data.loadingMore ? "Loading older chats…" : "Load older chats"}
+                {data.loadingMore ? translateApp("Loading older chats…")
+                  : translateApp("Load older chats")}
               </Text>
             </Pressable>
           ) : null
         }
+        {...railIndicator}
       />
     </WorkspacePage>
   );
@@ -332,6 +369,8 @@ export function WorkspaceRecentsScreen({
 export function WorkspaceSearchScreen({
   navigation,
 }: ContentScreenProps<"WorkspaceSearch">) {
+  const railIndicator = useRailScrollIndicator();
+  const appLanguage = useAppLanguage().language;
   const { colors, setPreference } = useTheme();
   const [query, setQuery] = useState("");
   const data = useBrowseData();
@@ -344,7 +383,7 @@ export function WorkspaceSearchScreen({
         data.agents,
         data.crews,
       ),
-    [query, data.conversations, data.agents, data.crews],
+    [query, data.conversations, data.agents, data.crews, appLanguage],
   );
   const select = useCallback(
     (target: WorkspaceSearchTarget) => {
@@ -423,14 +462,17 @@ export function WorkspaceSearchScreen({
   );
   return (
     <WorkspacePage
-      title="Search"
+      title={translateApp("Search")}
       showHeading={false}
       scroll={false}
       contentStyle={styles.page}
     >
       <View style={styles.toolbar}>
         <BrowseSearchField
-          label="Search chats, agents, crews, pages and settings"
+          placeholders={[
+            translateApp("Search chats, agents, settings"),
+            translateApp("Search"),
+          ]}
           value={query}
           onChange={setQuery}
           autoFocus
@@ -440,7 +482,7 @@ export function WorkspaceSearchScreen({
         data.loading && (
           <SkeletonRows
             rows={3}
-            accessibilityLabel="Loading chats, agents and crews"
+            accessibilityLabel={translateApp("Loading chats, agents and crews")}
             style={styles.searchSkeleton}
           />
         )
@@ -450,8 +492,8 @@ export function WorkspaceSearchScreen({
           style={[styles.notice, { color: colors.textMuted }]}
         >
           {!data.online
-            ? "Offline · searching saved data."
-            : "Some results couldn’t load. Pull to refresh."}
+            ? translateApp("Offline · searching saved data.")
+            : translateApp("Some results couldn’t load. Pull to refresh.")}
         </Text>
       )}
       <SectionList
@@ -483,9 +525,10 @@ export function WorkspaceSearchScreen({
             accessibilityLiveRegion="polite"
             style={[styles.note, { color: colors.textMuted }]}
           >
-            No results.
+            {translateApp("No results.")}
           </Text>
         }
+        {...railIndicator}
       />
     </WorkspacePage>
   );
@@ -496,23 +539,8 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   list: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 40 },
   toolbar: { paddingHorizontal: 16, paddingTop: 12, gap: 10 },
-  search: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingLeft: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    gap: 8,
-    minHeight: 48,
-  },
-  input: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 48,
-    fontFamily: fonts.bodyRegular,
-    fontSize: 15,
-    paddingVertical: 10,
-  },
+  search: { ...searchFieldContent, borderRadius: 12, borderWidth: SEARCH_FIELD.border },
+  input: searchFieldInput,
   clear: {
     width: 44,
     height: 44,

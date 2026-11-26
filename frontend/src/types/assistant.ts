@@ -43,6 +43,11 @@ export interface ApprovalCardContentBlock {
   readonly block_id: string;
   readonly approval_request_id: string;
   readonly body: string;
+  /** Present for locally constructed copy. Other bodies are displayed verbatim. */
+  readonly body_template?:
+    | { readonly kind: "approval" }
+    | { readonly kind: "tool"; readonly tool: string }
+    | { readonly kind: "target"; readonly action: string; readonly target: string };
   readonly service_slug: string;
   readonly agent_key_prefix: string;
   readonly approval_mode: "per_request" | "grant";
@@ -112,10 +117,12 @@ export interface ActionCardContentBlock {
 }
 
 export interface Conversation {
+  readonly read_only?: boolean;
   readonly platform_thread?: PlatformThread | null;
   readonly active_turn?: { readonly turn_id: string; readonly started_at: string } | null;
   readonly id: string;
   readonly title: string;
+  readonly title_source?: string;
   readonly created_at: string;
   readonly last_message_at: string;
   readonly message_count?: number;

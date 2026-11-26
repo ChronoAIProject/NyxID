@@ -44,6 +44,7 @@ pub enum KeyAuthority {
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
         String,
+        i64,
     ),
 }
 
@@ -63,7 +64,16 @@ impl KeyAuthority {
                 agent.grants.clone(),
                 agent.operation_scopes.clone(),
                 agent.user_id.clone(),
+                agent.org_use_revision,
             ),
+        }
+    }
+
+    pub(crate) fn org_use_revision(&self) -> i64 {
+        match self {
+            Self::Subagent(_, _, _, revision) => *revision,
+            Self::Collaboration(inner, _) => inner.org_use_revision(),
+            _ => 0,
         }
     }
 
@@ -103,7 +113,7 @@ impl KeyAuthority {
                 "allow_auto_connected_services": true,
                 "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
             },
-            Self::Subagent(grants, scopes, owner) => doc! {
+            Self::Subagent(grants, scopes, owner, _) => doc! {
                 "assistant_agent_owner_id": owner,
                 "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
                 "allow_all_services": false,
@@ -152,7 +162,18 @@ pub async fn authority_in_session(
     conversation: &AssistantConversation,
     session: &mut ClientSession,
 ) -> AppResult<KeyAuthority> {
-    Box::pin(authority_with_access(db, conversation, session, None)).await
+    let current = Box::pin(authority_with_access(
+        db,
+        conversation,
+        session,
+        None,
+        false,
+    ))
+    .await?;
+    if current.org_use_revision() != conversation.org_use_revision {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
+    Ok(current)
 }
 
 pub(crate) async fn authority_with_access(
@@ -160,6 +181,7 @@ pub(crate) async fn authority_with_access(
     conversation: &AssistantConversation,
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    turn_admission: bool,
 ) -> AppResult<KeyAuthority> {
     if !conversation.credential_api_key_id.is_empty() {
         require_ordinary_key(
@@ -229,7 +251,7 @@ pub(crate) async fn authority_with_access(
     }
     if agent.user_id != conversation.user_id && conversation.group_id.is_some() {
         let access = match snapshot {
-            Some(access) if access.matches(&conversation.user_id, &agent.user_id) => access.clone(),
+            Some(access) if access.permits_agent(&conversation.user_id, &agent) => access.clone(),
             Some(_) => return Err(super::org_group_service::missing()),
             None => super::org_agent_service::resolve_key_access(
                 db,
@@ -254,7 +276,7 @@ pub(crate) async fn authority_with_access(
             }
         }
     } else if let Some(access) = snapshot {
-        if !access.matches(&conversation.user_id, &agent.user_id) {
+        if !access.permits_agent(&conversation.user_id, &agent) {
             return Err(super::org_group_service::missing());
         }
     } else {
@@ -300,12 +322,20 @@ pub(crate) async fn authority_with_access(
     // rotated key never carries authority the agent no longer has.
     let mut live = filter;
     live.insert("destroyed_at", bson::Bson::Null);
-    let agent = agents
-        .find_one_and_update(live, doc! {"$inc": {"thread_fence": 1}})
-        .return_document(mongodb::options::ReturnDocument::After)
-        .session(&mut *session)
-        .await?
-        .ok_or_else(destroyed)?;
+    let member_admission = turn_admission
+        && super::org_agent_service::ordinary_member_org(conversation).is_some()
+        && !snapshot.is_some_and(|access| access.channel().is_some() || access.shared().is_some());
+    let agent = if member_admission {
+        // Existing keys contend on their own key row with a destroy or grant change.
+        // Admission fences a replacement key on the specialist before commit.
+        agent
+    } else {
+        agents
+            .find_one_and_update(live, doc! {"$inc": {"thread_fence": 1}})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(destroyed)?
+    };
     if let Some(shared) = snapshot.and_then(|a| a.shared()) {
         let mut grants = agent.grants.clone();
         grants.account_read = false;
@@ -333,6 +363,26 @@ pub(crate) async fn authority_with_access(
             grants,
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
+        ));
+    }
+    if agent.user_id != conversation.user_id
+        && !snapshot.is_some_and(|s| s.channel().is_some())
+        && !Box::pin(super::org_agent_service::member_rights_in_session(
+            db,
+            session,
+            &conversation.user_id,
+            &agent,
+            if turn_admission {
+                super::org_agent_service::MemberFence::Member
+            } else {
+                super::org_agent_service::MemberFence::MemberAndOrg
+            },
+        ))
+        .await?
+        .can_use
+    {
+        return Err(AppError::Forbidden(
+            "Specialist use access is required".into(),
         ));
     }
     Ok(KeyAuthority::for_agent(&agent))
@@ -486,13 +536,20 @@ async fn clear_key_bindings(
     let conversation_collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     let update = conversation_collection.update_many(
         doc! {"user_id": user_id, "credential_api_key_id": key_id},
-        doc! {"$set": {
+        vec![doc! {"$set": {
             "nyxagent_session_id": bson::Bson::Null,
             "nyxagent_instruction_binding": bson::Bson::Null,
             "nyxagent_last_response_id": bson::Bson::Null,
             "context_reset_at": bson::DateTime::from_chrono(Utc::now()),
             "context_reset_reason": "credential_replaced",
-        }},
+            "active_turn": {"$cond": [
+                {"$eq": ["$active_turn.restart_admission.credential_id", {"$literal": key_id}]},
+                {"$mergeObjects": ["$active_turn", {"restart_admission": {"$mergeObjects": [
+                    "$active_turn.restart_admission", {"credential_ended": true}
+                ]}}]},
+                "$active_turn"
+            ]}
+        }}],
     );
     match session {
         Some(s) => update.session(s).await?,
@@ -569,6 +626,51 @@ pub async fn adopt_rotated_key(
     }
     clear_key_bindings(db, user_id, predecessor_id, Some(session)).await?;
     Ok(exists)
+}
+
+pub(super) async fn replace_stopped_secret(
+    db: &Database,
+    keys: &EncryptionKeys,
+    row: &AssistantConversation,
+    credential: &mut AssistantCredential,
+    session: &mut ClientSession,
+) -> AppResult<crate::models::assistant_conversation::ThreadSecretFence> {
+    let key_id = credential.api_key_id.as_str();
+    if key_id != row.credential_api_key_id
+        || row
+            .stopped_window
+            .as_ref()
+            .is_none_or(|stopped| stopped.credential_id != key_id)
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let (prefix, raw, hash) = key_service::generate_scoped_api_key();
+    let raw = Zeroizing::new(raw);
+    let mut filter = valid_key_filter(&row.user_id, key_id, &credential.raw_key);
+    filter.insert("platform", ASSISTANT_PLATFORM);
+    let matched = mutations::update_one(
+        db,
+        filter,
+        doc! {"$set":{"key_hash": hash, "key_prefix": prefix}},
+        Some(&mut *session),
+    )
+    .await?;
+    if matched.matched_count != 1
+        || !adopt_rotated_key(db, keys, &row.user_id, key_id, key_id, &raw, session).await?
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    credential.raw_key = raw;
+    let key = db
+        .collection::<ApiKey>(KEYS)
+        .find_one(doc! {"_id":key_id, "user_id": &row.user_id})
+        .session(session)
+        .await?
+        .ok_or(AppError::AssistantTurnRequired)?;
+    Ok(crate::models::assistant_conversation::ThreadSecretFence {
+        api_key_id: key.id,
+        min_state_version: key.state_version,
+    })
 }
 
 /// User disable revokes every API key; remove its private assistant copy too.
@@ -834,7 +936,12 @@ pub async fn load_or_provision(
     user_id: &str,
     conversation_id: &str,
 ) -> AppResult<AssistantCredential> {
-    recover_or_replace(db, keys, user_id, conversation_id, None, None).await
+    recover_or_replace(db, keys, user_id, conversation_id, None, None, None).await
+}
+
+struct ReplacementFence {
+    worker: super::assistant_nyxagent::WorkerFence,
+    key_hash: String,
 }
 
 async fn recover_or_replace(
@@ -843,6 +950,7 @@ async fn recover_or_replace(
     user_id: &str,
     conversation_id: &str,
     replace_key_id: Option<&str>,
+    attempt: Option<ReplacementFence>,
     platform: Option<(
         super::platform_manager_contract::TurnRef,
         super::platform_manager_contract::PlatformTurnOrigin,
@@ -860,20 +968,31 @@ async fn recover_or_replace(
     let credential = session
         .start_transaction()
         .and_run(
-            (db, keys, user_id, conversation_id, replace_key_id, platform),
-            |session, (db, keys, user_id, conversation_id, replace_key_id, platform)| {
+            (db, keys, user_id, conversation_id, replace_key_id, attempt, platform),
+            |session, (db, keys, user_id, conversation_id, replace_key_id, attempt, platform)| {
                 Box::pin(async move {
                     let operation = async {
                         // Write the conversation as well to fence concurrent deletion.
+                        let mut filter = doc! {"_id": conversation_id.as_str(), "user_id": user_id.as_str()};
+                        if let Some(fence) = attempt.as_ref() {
+                            filter.extend(fence.worker.filter());
+                            filter.insert("active_turn.restart_admission", bson::Bson::Null);
+                            filter.insert("active_turn.restart_offer", bson::Bson::Null);
+                            filter.insert("active_turn.stop_requested", false);
+                            filter.insert("credential_api_key_id", replace_key_id.as_deref());
+                        }
                         let result = db
                             .collection::<AssistantConversation>(CONVERSATIONS)
                             .update_one(
-                                doc! {"_id": conversation_id.as_str(), "user_id": user_id.as_str()},
+                                filter,
                                 doc! {"$inc": {"credential_fence": 1}},
                             )
                             .session(&mut *session)
                             .await?;
                         if result.matched_count != 1 {
+                            if attempt.is_some() {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
                             return Err(AppError::NotFound("Conversation not found".into()));
                         }
                         let conversation = db
@@ -882,6 +1001,9 @@ async fn recover_or_replace(
                             .session(&mut *session)
                             .await?
                             .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                        if attempt.is_some() && super::assistant_nyxagent::live_turn(&conversation, Utc::now()).is_none() {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
                         if let Some((turn, expected)) = platform.as_ref() {
                             let expected_model = super::platform_personal_turn_service::model_origin(expected);
                             if expected.authority.user_id != user_id.as_str()
@@ -906,7 +1028,16 @@ async fn recover_or_replace(
                         let authority = authority_in_session(db, &conversation, session).await?;
                         let mut revoked_children = Vec::new();
                         if let Some(key_id) = replace_key_id.as_deref() {
-                            require_ordinary_key(db, user_id.as_str(), key_id, Some(&mut *session)).await?;
+                            if let Some(fence) = attempt.as_ref() {
+                                db.collection::<bson::Document>(KEYS)
+                                    .find_one(valid_key_hash_filter(user_id, key_id, &fence.key_hash))
+                                    .projection(doc! {"_id": 1})
+                                    .session(&mut *session)
+                                    .await?
+                                    .ok_or(AppError::AssistantTurnRequired)?;
+                            } else {
+                                require_ordinary_key(db, user_id.as_str(), key_id, Some(&mut *session)).await?;
+                            }
                             match key_service::delete_api_key_in_session(
                                 db, user_id.as_str(), key_id, None, Some(&mut *session),
                             ).await {
@@ -1009,6 +1140,7 @@ pub async fn audit_provision(
     }
 }
 
+#[cfg(test)]
 pub async fn replace(
     db: &Database,
     keys: &std::sync::Arc<EncryptionKeys>,
@@ -1016,7 +1148,16 @@ pub async fn replace(
     conversation_id: &str,
     old_key_id: &str,
 ) -> AppResult<AssistantCredential> {
-    recover_or_replace(db, keys, user_id, conversation_id, Some(old_key_id), None).await
+    recover_or_replace(
+        db,
+        keys,
+        user_id,
+        conversation_id,
+        Some(old_key_id),
+        None,
+        None,
+    )
+    .await
 }
 
 /// Personal recovery adopts its successor before the next typed request. Its
@@ -1025,13 +1166,16 @@ pub(crate) async fn replace_for_turn(
     db: &Database,
     keys: &std::sync::Arc<EncryptionKeys>,
     row: &AssistantConversation,
-    old_key_id: &str,
+    admitted: &AssistantCredential,
 ) -> AppResult<AssistantCredential> {
-    let platform = row
+    let turn = row
         .active_turn
         .as_ref()
-        .and_then(|turn| turn.platform_origin.as_ref().map(|origin| (turn, origin)))
-        .map(|(turn, origin)| {
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let platform = turn
+        .platform_origin
+        .as_ref()
+        .map(|origin| {
             Ok::<_, AppError>((
                 super::platform_manager_contract::TurnRef {
                     conversation_id: row.id.clone(),
@@ -1041,20 +1185,95 @@ pub(crate) async fn replace_for_turn(
             ))
         })
         .transpose()?;
-    if platform.is_none() {
-        return replace(db, keys, &row.user_id, &row.id, old_key_id).await;
-    }
-    recover_or_replace(db, keys, &row.user_id, &row.id, Some(old_key_id), platform).await
+    let fence = ReplacementFence {
+        worker: super::assistant_nyxagent::WorkerFence::capture(row)?,
+        key_hash: hash_token(&admitted.raw_key),
+    };
+    recover_or_replace(
+        db,
+        keys,
+        &row.user_id,
+        &row.id,
+        Some(&admitted.api_key_id),
+        Some(fence),
+        platform,
+    )
+    .await
 }
 
 fn valid_key_filter(user_id: &str, key_id: &str, raw: &str) -> bson::Document {
+    valid_key_hash_filter(user_id, key_id, &hash_token(raw))
+}
+
+fn valid_key_hash_filter(user_id: &str, key_id: &str, key_hash: &str) -> bson::Document {
     doc! {
-        "_id": key_id, "user_id": user_id, "key_hash": hash_token(raw), "is_active": true,
+        "_id": key_id, "user_id": user_id, "key_hash": key_hash, "is_active": true,
         "$and": [
             {"$or": [{"expires_at": bson::Bson::Null}, {"expires_at": {"$gt": bson::DateTime::now()}}]},
             {"$or": [{"purpose": "general"}, {"purpose": {"$exists": false}}]},
         ],
     }
+}
+
+pub(crate) async fn validate_claimed(
+    db: &Database,
+    row: &AssistantConversation,
+    credential: &AssistantCredential,
+) -> AppResult<()> {
+    let mut filter = super::assistant_nyxagent::WorkerFence::capture(row)?.filter();
+    if let Some(turn) = row
+        .active_turn
+        .as_ref()
+        .filter(|turn| turn.restart_admission.is_some())
+    {
+        filter.insert(
+            "active_turn.restart_admission.credential_id",
+            &credential.api_key_id,
+        );
+        filter.insert(
+            "active_turn.restart_admission.credential_ended",
+            doc! {"$ne": true},
+        );
+        filter.insert("active_turn.stop_requested", false);
+        if turn.restart_offer.is_some() {
+            let worker = turn
+                .worker_instance
+                .as_ref()
+                .ok_or(AppError::AssistantTurnRequired)?;
+            if !super::assistant_turn_restart::owns_subscriber(row, &worker.id) {
+                return Err(AppError::AssistantTurnRequired);
+            }
+            filter.insert("active_turn.restart_offer.claimed_by", &worker.id);
+        } else {
+            filter.insert("active_turn.restart_offer", bson::Bson::Null);
+        }
+    }
+    filter.insert("credential_api_key_id", &credential.api_key_id);
+    let live = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one(filter)
+        .projection(doc! {"_id": 1})
+        .await?;
+    if live.is_none() {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    db.collection::<bson::Document>(CREDENTIALS)
+        .find_one(doc! {"user_id": &row.user_id, "conversation_id": &row.id, "api_key_id": &credential.api_key_id})
+        .projection(doc! {"_id": 1})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
+    let active = db
+        .collection::<bson::Document>(KEYS)
+        .find_one(valid_key_filter(
+            &row.user_id,
+            &credential.api_key_id,
+            &credential.raw_key,
+        ))
+        .projection(doc! {"_id": 1})
+        .await?;
+    active
+        .map(|_| ())
+        .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))
 }
 
 async fn decrypt(
@@ -1230,6 +1449,485 @@ mod tests {
         ] {
             assert!(require_ordinary_purpose(&doc! {"purpose": purpose}).is_err());
         }
+    }
+
+    async fn watch_initialize(state: &crate::AppState, raw: &str) -> axum::response::Response {
+        thread_mcp(state, raw, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"nyxagent","version":"0.1.0"}}}"#).await
+    }
+
+    async fn thread_mcp(
+        state: &crate::AppState,
+        raw: &str,
+        message: &'static str,
+    ) -> axum::response::Response {
+        use crate::services::billing::{BillingIngress, route_inventory::BillingRoutePolicy};
+        use axum::{Extension, body::Body, extract::State, http::Request};
+        let request = Request::post("/mcp")
+            .header("x-api-key", raw)
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-11-25")
+            .body(Body::from(message))
+            .unwrap();
+        Box::pin(crate::handlers::mcp_transport::mcp_post(
+            State(state.clone()),
+            Extension(BillingRoutePolicy::Metered(BillingIngress::Mcp)),
+            request,
+        ))
+        .await
+    }
+
+    #[tokio::test]
+    async fn revoked_thread_secret_loses_the_initialize_used_by_reattach_cancel() {
+        use axum::http::StatusCode;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let capture = commands.clone();
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "nyxa_reattach_revoked_cancel",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    capture.lock().unwrap().push(event.command_name);
+                }
+            }),
+        )
+        .await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let row = new_chat(&state, &owner).await;
+        let credential = load_for_conversation(&state.db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let initialize = || watch_initialize(&state, &credential.raw_key);
+        commands.lock().unwrap().clear();
+        let initialized = Box::pin(initialize()).await;
+        let baseline = std::mem::take(&mut *commands.lock().unwrap());
+        assert_eq!(baseline, ["find", "update", "find", "find", "find", "find"]);
+        assert_eq!(initialized.status(), StatusCode::OK);
+        assert!(!initialized.headers().contains_key("mcp-session-id"));
+        let bytes = axum::body::to_bytes(initialized.into_body(), 65536)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["result"]["protocolVersion"],
+            "2025-11-25"
+        );
+        let threads = state.db.collection::<bson::Document>(CONVERSATIONS);
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"mcp_session_created"})
+                .await
+                .unwrap(),
+            0
+        );
+        let now = bson::DateTime::now();
+        for transition in [
+            doc! {"active_turn.running_response":null,"active_turn.continuations":1},
+            doc! {"active_turn.model_refusal":{"code":"model_policy_denied","attempt_id":"attempt","at":now}},
+            doc! {"active_turn.restart_offer":{"from_worker":"first","reason":"shutdown","offered_at":now,"due_at":now},"active_turn.lease_expires_at":bson::DateTime::from_millis(0)},
+            doc! {"active_turn.restart_offer.claimed_by":"second","active_turn.worker_instance":{"id":"second"},"active_turn.heartbeat_at":now,"active_turn.lease_expires_at":bson::DateTime::from_millis(now.timestamp_millis()+60_000)},
+            doc! {"active_turn":null},
+        ] {
+            threads
+                .update_one(doc! {"_id": &row.id}, doc! {"$set":transition})
+                .await
+                .unwrap();
+            commands.lock().unwrap().clear();
+            let response = Box::pin(initialize()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key("mcp-session-id"));
+            assert_eq!(std::mem::take(&mut *commands.lock().unwrap()), baseline);
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["result"]["protocolVersion"],
+                "2025-11-25"
+            );
+        }
+        threads
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set":{"active_turn": "malformed"}},
+            )
+            .await
+            .unwrap();
+        assert!(Box::pin(initialize()).await.status().is_server_error());
+        threads
+            .update_one(doc! {"_id": &row.id}, doc! {"$unset":{"active_turn": ""}})
+            .await
+            .unwrap();
+        key_service::delete_api_key(&state.db, &owner, &credential.api_key_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            Box::pin(initialize()).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            load_for_conversation(&state.db, &state.encryption_keys, &owner, &row.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_watch_terminal_after_thread_delete_and_specialist_destroy() {
+        use crate::services::{assistant_authority_tests, assistant_team_service};
+        use axum::http::StatusCode;
+        for destroy in [false, true] {
+            let fixture =
+                Box::pin(assistant_authority_tests::fixture("nyxa_watch_lifecycle")).await;
+            let credential = load_for_conversation(
+                &fixture.state.db,
+                &fixture.state.encryption_keys,
+                &fixture.owner,
+                &fixture.row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let refusal = Box::pin(assistant_authority_tests::account_gate(
+                &fixture.state.db,
+                &fixture.chat,
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(refusal["acknowledgement_id"].is_string());
+            fixture.state.shutdown.begin_drain().unwrap();
+            assert_eq!(
+                watch_initialize(&fixture.state, &credential.raw_key)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let survivor = test_app_state(fixture.state.db.clone());
+            let check = || watch_initialize(&survivor, &credential.raw_key);
+            let response = check().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key("mcp-session-id"));
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["result"]["protocolVersion"],
+                "2025-11-25"
+            );
+            if destroy {
+                Box::pin(assistant_team_service::destroy(
+                    &fixture.state.db,
+                    &fixture.owner,
+                    &fixture.chat.agent_id,
+                ))
+                .await
+                .unwrap();
+            } else {
+                Box::pin(engine::delete(
+                    &fixture.state.db,
+                    &fixture.owner,
+                    &fixture.row.id,
+                ))
+                .await
+                .unwrap();
+            }
+            assert_eq!(check().await.status(), StatusCode::UNAUTHORIZED);
+            fixture.state.db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_after_unconfirmed_stop_replaces_only_the_thread_secret() {
+        let (state, owner, row) = fixture("nyxa_stopped_window_admission").await;
+        let db = &state.db;
+        let old = load_for_conversation(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        let (_, predecessor, _) = key_service::validate_api_key(db, &old.raw_key)
+            .await
+            .unwrap();
+        let in_flight = Box::pin(crate::mw::auth::api_key_auth_user(
+            db,
+            &predecessor,
+            None,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            in_flight.assistant_chat.as_ref().unwrap().turn_id.as_ref(),
+            Some(&turn.turn_id)
+        );
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(
+            doc! {"_id": &row.id, "active_turn.turn_id": &turn.turn_id},
+            doc! {"$set": {"active_turn": bson::Bson::Null, "stopped_window": {
+                "turn_id": &turn.turn_id, "credential_id": &old.api_key_id, "window_key": Uuid::new_v4().to_string()
+            }}},
+        ).await.unwrap();
+        let mut pending = db.client().start_session().await.unwrap();
+        pending.start_transaction().await.unwrap();
+        assert!(matches!(
+            Box::pin(crate::services::assistant_acknowledgement_service::fence(
+                db,
+                in_flight.assistant_chat.as_deref().unwrap(),
+                &mut pending,
+            ))
+            .await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+        pending.abort_transaction().await.unwrap();
+        let tool_request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+        assert_eq!(
+            thread_mcp(&state, &old.raw_key, tool_request)
+                .await
+                .status(),
+            axum::http::StatusCode::CONFLICT
+        );
+        assert_eq!(
+            watch_initialize(&state, &old.raw_key).await.status(),
+            axum::http::StatusCode::OK
+        );
+        let (_, authenticated_before_admission, _) =
+            key_service::validate_api_key(db, &old.raw_key)
+                .await
+                .unwrap();
+        let mut input = engine::parse_turn(br#"{"text":"next"}"#).unwrap();
+        input.conversation_id = Some(row.id.clone());
+        let next = Box::pin(engine::claim_turn(
+            db,
+            &owner,
+            &input,
+            &state.encryption_keys,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(next.credential.api_key_id, old.api_key_id);
+        assert!(next.credential.raw_key != old.raw_key);
+        assert!(next.conversation.stopped_window.is_none());
+        let committed = engine::get(db, &owner, &row.id).await.unwrap();
+        assert!(committed.stopped_window.is_none());
+        assert!(committed.credential_version_floor() > in_flight.thread_key_version());
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(matches!(
+            Box::pin(crate::services::assistant_acknowledgement_service::fence(
+                db,
+                in_flight.assistant_chat.as_deref().unwrap(),
+                &mut session
+            ))
+            .await,
+            Err(AppError::Unauthorized(_))
+        ));
+        session.abort_transaction().await.unwrap();
+        assert!(matches!(
+            Box::pin(crate::handlers::mcp::get_mcp_config(
+                axum::extract::State(state.clone()),
+                in_flight
+            ))
+            .await,
+            Err(AppError::Unauthorized(_))
+        ));
+        let (_, successor, _) = key_service::validate_api_key(db, &next.credential.raw_key)
+            .await
+            .unwrap();
+        let successor_auth = Box::pin(crate::mw::auth::api_key_auth_user(
+            db, &successor, None, None, None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            successor_auth.assistant_chat.as_ref().unwrap().turn_id,
+            committed
+                .active_turn
+                .as_ref()
+                .map(|turn| turn.turn_id.clone())
+        );
+        let config = Box::pin(crate::handlers::mcp::get_mcp_config(
+            axum::extract::State(state.clone()),
+            successor_auth,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(config.user_id, owner);
+        assert!(matches!(
+            super::super::assistant_acknowledgement_service::chat_for_authenticated_key(
+                db,
+                &authenticated_before_admission,
+                None
+            )
+            .await,
+            Err(AppError::Unauthorized(_))
+        ));
+        assert_eq!(
+            thread_mcp(&state, &old.raw_key, tool_request)
+                .await
+                .status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            watch_initialize(&state, &old.raw_key).await.status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        assert!(next.conversation.nyxagent_session_id.is_none());
+        assert_eq!(
+            next.conversation.context_reset_reason.as_deref(),
+            Some("credential_replaced")
+        );
+        assert!(matches!(
+            key_service::validate_api_key(db, &old.raw_key).await,
+            Err(AppError::Unauthorized(_))
+        ));
+        assert!(
+            key_service::validate_api_key(db, &next.credential.raw_key)
+                .await
+                .is_ok()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn committed_driver_keeps_its_admitted_credential_across_rotation() {
+        let (state, owner, _) = fixture("nyxa_committed_driver_credential").await;
+        let db = &state.db;
+        let start = engine::parse_turn(br#"{"text":"hello"}"#).unwrap();
+        let claim = Box::pin(engine::claim_turn(
+            db,
+            &owner,
+            &start,
+            &state.encryption_keys,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        validate_claimed(db, &claim.conversation, &claim.credential)
+            .await
+            .unwrap();
+        let successor = key_service::rotate_api_key(
+            db,
+            &state.encryption_keys,
+            &owner,
+            &claim.credential.api_key_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            validate_claimed(db, &claim.conversation, &claim.credential)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            replace_for_turn(
+                db,
+                &state.encryption_keys,
+                &claim.conversation,
+                &claim.credential
+            )
+            .await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+        let retained =
+            load_for_conversation(db, &state.encryption_keys, &owner, &claim.conversation.id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(retained.api_key_id, successor.id);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn committed_credential_check_keeps_the_reload_command_budget() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let capture = commands.clone();
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "nyxa_claimed_key_cost",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    capture.lock().unwrap().push(event.command_name);
+                }
+            }),
+        )
+        .await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let start = engine::parse_turn(br#"{"text":"hello"}"#).unwrap();
+        let claim = Box::pin(engine::claim_turn(
+            &db,
+            &owner,
+            &start,
+            &state.encryption_keys,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        commands.lock().unwrap().clear();
+        load_for_conversation(&db, &state.encryption_keys, &owner, &claim.conversation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let reload = std::mem::take(&mut *commands.lock().unwrap());
+        validate_claimed(&db, &claim.conversation, &claim.credential)
+            .await
+            .unwrap();
+        let claimed = std::mem::take(&mut *commands.lock().unwrap());
+        assert_eq!(reload, ["find", "find", "find"]);
+        assert_eq!(claimed, reload);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_recovery_requires_the_running_turn_and_its_exact_secret() {
+        let (state, owner, row) = fixture("nyxa_recover_live_secret").await;
+        let db = &state.db;
+        let mut credential = load_for_conversation(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let original = std::mem::replace(
+            &mut credential.raw_key,
+            Zeroizing::new(Uuid::new_v4().to_string()),
+        );
+        assert!(matches!(
+            replace_for_turn(db, &state.encryption_keys, &row, &credential).await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+        credential.raw_key = original;
+        engine::request_stop(db, &owner, &row.id).await.unwrap();
+        assert!(matches!(
+            replace_for_turn(db, &state.encryption_keys, &row, &credential).await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+        let retained = load_for_conversation(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.api_key_id, credential.api_key_id);
+        assert!(retained.raw_key.as_str() == credential.raw_key.as_str());
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

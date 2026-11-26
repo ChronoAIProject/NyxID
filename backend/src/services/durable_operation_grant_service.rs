@@ -1177,13 +1177,26 @@ pub(crate) async fn mark_send_rejected(
     db: &mongodb::Database,
     reservation: &DurableExecutionReservation,
 ) {
+    mark_unsent(
+        db,
+        reservation,
+        "assistant authority changed before actual send",
+    )
+    .await;
+}
+
+pub(crate) async fn mark_unsent(
+    db: &mongodb::Database,
+    reservation: &DurableExecutionReservation,
+    detail: &str,
+) {
     let now = bson::DateTime::now();
     let _ = db
         .collection::<DurableOperationExecution>(EXECUTIONS)
         .update_one(
             doc! {"_id": &reservation.execution_id, "status": {"$in": ["reserved", "dispatched"]}},
             doc! {"$set": {"status": "rejected", "downstream_attempts": 0_i64,
-            "terminal_detail": "assistant authority changed before actual send",
+            "terminal_detail": detail,
             "terminal_at": now, "updated_at": now}},
         )
         .await;
@@ -2320,6 +2333,160 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn durable_node_http_records_unsent_or_uncertain_at_the_writer_boundary() {
+        use crate::models::user::UserType;
+        use crate::services::node_service;
+        use crate::test_utils;
+        use axum::{body::Body, http::Request};
+        let db = test_utils::connect_transaction_test_database("durable_node_boundary").await;
+        let state = test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection("users")
+            .insert_one(test_utils::test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let (_, token, _) =
+            node_service::create_registration_token(&db, &owner, "durable-node", 5, 120)
+                .await
+                .unwrap();
+        let (node, _, _) = node_service::register_node(&db, &state.encryption_keys, &token, None)
+            .await
+            .unwrap();
+        let endpoint = endpoint();
+        let connection = Uuid::new_v4().to_string();
+        let user_endpoint = Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = endpoint.service_id.clone();
+        catalog.slug = "durable-catalog".into();
+        catalog.requires_user_credential = false;
+        db.collection(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint,
+                &owner,
+                "durable",
+                "https://durable.invalid",
+                None,
+                Some(&endpoint.service_id),
+            ))
+            .await
+            .unwrap();
+        db.collection(USER_SERVICES)
+            .insert_one(test_user_service(
+                &connection,
+                &owner,
+                "durable-test",
+                &user_endpoint,
+                Some(&endpoint.service_id),
+                Some(&node.id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(&endpoint)
+            .await
+            .unwrap();
+        let mut key = scheduled_key(&Uuid::new_v4().to_string(), &owner, &connection);
+        key.allowed_node_ids.push(node.id.clone());
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&db, &key, None, None, None)
+            .await
+            .unwrap();
+        let grant = grant(
+            &Uuid::new_v4().to_string(),
+            &owner,
+            &key.id,
+            &connection,
+            &endpoint,
+        );
+        db.collection::<DurableOperationGrant>(GRANTS)
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        for delivered in [false, true] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            test_utils::register_test_node_connection(&state, &node.id, tx).await;
+            if !delivered {
+                rx.close();
+            }
+            let operation = Uuid::new_v4().to_string();
+            let request = Request::post("/proxy/s/durable-test/items/42?mode=sync")
+                .extension(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Proxy,
+                    ),
+                )
+                .header("content-type", "application/json")
+                .header(DURABLE_GRANT_HEADER, &grant.id)
+                .header(OPERATION_ID_HEADER, &operation)
+                .body(Body::from(r#"{"name":"alpha"}"#))
+                .unwrap();
+            let mut slug = String::new();
+            let send = crate::handlers::proxy::proxy_request_by_slug_inner(
+                &state,
+                &auth,
+                "durable-test",
+                "items/42",
+                request,
+                &mut slug,
+            );
+            let agent = async {
+                if delivered {
+                    assert!(rx.recv().await.is_some());
+                    state.node_ws_manager.unregister_connection(&node.id);
+                }
+            };
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                tokio::join!(send, agent)
+            })
+            .await
+            .unwrap();
+            let err = result.unwrap_err();
+            if delivered {
+                assert!(
+                    matches!(err, AppError::DurableOperationOutcomeUncertain),
+                    "{err}"
+                );
+            } else {
+                assert!(
+                    matches!(&err,AppError::NodeOffline(message) if message.contains("Nothing was sent")),
+                    "{err}"
+                );
+            }
+            let row = db
+                .collection::<DurableOperationExecution>(EXECUTIONS)
+                .find_one(doc! {"operation_id":operation})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.status,
+                if delivered {
+                    DurableExecutionStatus::OutcomeUncertain
+                } else {
+                    DurableExecutionStatus::Rejected
+                }
+            );
+            assert_eq!(row.downstream_attempts, i64::from(delivered));
+            while let Ok(crate::services::node_ws_manager::NodeOutboundMessage::Text(frame)) =
+                rx.try_recv()
+            {
+                assert_ne!(
+                    serde_json::from_str::<Value>(&frame).unwrap()["type"],
+                    "proxy_request"
+                );
+            }
+        }
     }
 
     #[tokio::test]

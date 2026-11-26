@@ -163,6 +163,12 @@ async fn startup_preserves_assistant_route_clear_and_owner_priority() {
     let f = fixture(Migration::NodeCreate).await;
     migrate_node_service_bindings(&f.db).await.unwrap();
     let id = service(&f).await.id;
+    assert_eq!(active_bindings(&f).await, [(f.node.clone(), 7)]);
+    let fallback = uuid::Uuid::new_v4().to_string();
+    insert_node(&f, &fallback).await;
+    crate::services::node_service::create_binding(&f.db, &f.owner, &fallback, &f.catalog)
+        .await
+        .unwrap();
     let new_node = uuid::Uuid::new_v4().to_string();
     insert_node(&f, &new_node).await;
     let state = test_app_state(f.db.clone());
@@ -186,7 +192,12 @@ async fn startup_preserves_assistant_route_clear_and_owner_priority() {
             (edited.node_id.as_ref(), edited.node_priority),
             (node.as_ref(), 23)
         );
-        assert_eq!(active_bindings(&f).await, [(f.node.clone(), 7)]);
+        let mut expected = vec![(fallback.clone(), 0)];
+        expected.extend(node.map(|primary| (primary, 0)));
+        expected.sort();
+        let mut active = active_bindings(&f).await;
+        active.sort();
+        assert_eq!(active, expected);
         let before = snapshot(&f.db).await;
         let (replica, _, trace) = monitored(&f.db).await;
         migrate_node_service_bindings(&replica).await.unwrap();
@@ -207,7 +218,7 @@ async fn unified_route_edits_sync_node_but_keep_binding_priority_separate() {
         &uuid::Uuid::new_v4().to_string(),
         &f.owner,
         "Fixture",
-        "https://example.invalid",
+        "https://127.0.0.1",
         None,
         Some(&f.catalog),
     );

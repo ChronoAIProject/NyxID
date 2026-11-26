@@ -1,8 +1,8 @@
 # NyxBot: a persistent personal agent with specialist agents
 
-Status: implemented in 0.31.0 (2026-09-28). The normative contract is
-[08-nyxagent-engine.md](08-nyxagent-engine.md) (Authority, NyxBot agents, Channel
-bots). Base: `main` at `2b6311c0` (0.30.2).
+Status: implemented in 0.31.0 (2026-09-28). This document is the NyxBot team and
+channel design; the engine contract (turns, routes, persistence, authority) is
+[08-nyxagent-engine.md](08-nyxagent-engine.md). Base: `main` at `2b6311c0` (0.30.2).
 
 ## 1. Decision in one paragraph
 
@@ -10,8 +10,9 @@ Every person gets **one persistent personal agent, NyxBot**: their chief of
 staff, in the spirit of Meta's Muse (one agent per person that remembers what
 matters, works across the app and chat apps, keeps working in the background, and
 checks before sensitive actions) and xAI's Grok Bot (persistent, named bots with
-memory that work together, with a Chief of Staff bot). NyxBot runs with Full
-access, remembers durable facts, and delegates to **specialist agents** that the
+memory that work together, with a Chief of Staff bot). NyxBot holds full account
+authority (the owner's [access mode](#access-modes), Auto by default, decides which
+actions it confirms first), remembers durable facts, and delegates to **specialist agents** that the
 user or NyxBot creates: persistent, named agents with a role description, their
 own memory and only the services they were granted. Talk to an agent and that
 agent handles the whole request itself: a specialist you talk to directly
@@ -120,6 +121,9 @@ notice).
 - Unchanged: secret exclusions, per-service proxy approval policies, node
   routing, billing to the acting person.
 
+For setup outside a specialist's authority, the browser supports an explicit
+[user-started setup handoff](05-frontend-ui.md#specialist-setup-handoffs).
+
 ## 6. Thread authority and permission modes
 
 New and legacy NyxBot threads retain the full account authority needed by NyxBot; the owner-level permission mode and agent override govern confirmations. A legacy Ask-mode row
@@ -128,6 +132,14 @@ consent cards expire. `PATCH /conversations/{id}/access-mode` answers `410 Gone`
 `POST /turns` ignores `access_mode`. The conversation-level consent selector is retired. The composer permission selector updates the owner setting described under Access modes.
 
 ## 7. Native tools
+
+The authoritative tool registry is `backend/src/services/assistant_team_tools.rs`
+(`TOOL_NAMES` for NyxBot, `AGENT_TOOL_NAMES` for every agent; a name such as
+`draft_agent_skill` can appear in both, with a narrower meaning for specialists). Beyond the tools
+described here it includes schedule, sharing, operation, skill, learning,
+collaboration-group, channel-chat and machine-setup tools, `update_settings` (owner
+settings, only when asked) and `channel_setup_guide` (the built-in channel setup
+procedure).
 
 NyxBot only: `spawn_subagent` (name, description, services, account_read,
 specialty, optional task), `message_subagent` (runs in the specialist's home
@@ -165,8 +177,10 @@ enforcement is independent of the flag.
 validation, capacity, missing-replacement, authorization, conflict and storage/internal
 diagnostics in the tool result and activity panel. Keep notes to 500 characters
 and 50 total; split long facts deliberately. Confirm saved facts only from
-successful receipts, and report any still-unresolved writes. Later success never
-silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+successful receipts, and report any still-unresolved writes. Pass the rejected
+attempt's `failed_activity_id` in `recovery` when retrying or splitting the
+same intent. The web activity shows the count of committed parts beside the
+original diagnostic. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
 Memory and personas refuse obvious
 credential shapes.
 
@@ -790,42 +804,44 @@ authority checks, including agent-key presence, remain. Checking/capacity/machin
 progress keeps the original 29-minute reference gates and skip reasons;
 permission occurrences retain their own event/target gates.
 
-Widened results claim their exact settled assistant message per stable
-destination before text dispatch (#2462). Primary and additional delivery to
-the same chat share one claim. Repeated hooks audit `already_claimed` and do not
-send; a claim database error follows `source_unavailable` without sending.
-Confirmed, rejected, unknown and interrupted attempts are never retried. There
-is no preparation lease: a crash after the claim can lose the text. The optional
-serde-defaulted claim list is internal, absent from API/log/audit, and purged with
-the message. New replicas share it; old replicas ignore it and keep the 29-minute
-behavior until drained (also on rollback). There is no readiness gate or
-retroactive protection for pre-upgrade sends. Other transports and primary
-answer claims do not use this marker. Direct and relay-era
-`direct_reply` paths are unchanged. Failed local supplemental text keeps its
-receipts and audit without adding a primary-answer failure event to the web
-transcript. The existing live-turn notice claim selects
-one attempt across replicas; an already claimed local notice completing just
-after the final cannot suppress or duplicate it.
+Post-turn team and additional-chat text claims the exact settled assistant
+reply per stable destination after delivery preparation. Direct relay,
+relay-era, native gateway and followed-thread sends participate. Primary team
+updates and additional delivery to the same chat share one claim. A missing
+settled reply authorizes no send. Repeated hooks audit `already_claimed`. A
+claim database error audits `source_unavailable` and prevents text dispatch.
+Confirmed, rejected, unknown and interrupted attempts keep the claim. A crash
+after the claim can lose the text. Claims contain only destination digests.
+API responses, logs and audits never expose the reply's saved destinations or
+claim digests. Purging the reply removes both. Drain older replicas for full
+coverage, including on rollback. Saved handoff delivery and primary channel
+answers use their own durable delivery paths. A repeated hook audits
+`already_claimed` for each saved destination after the handoff delivery has
+finished, while a pending handoff remains eligible for its existing recovery.
+Failed local supplemental text keeps its receipts and audit. The live-turn
+notice claim selects one attempt across replicas. An already claimed local
+notice completing just after the final cannot suppress or duplicate it.
 
-Native progress is not sent. Genuine independent native team/followed/permission
-results retain today's event reply behavior. While the same event's primary
-answer is pending, those sends can still suppress that answer on confirmation
-or leave both uncertain under the gateway's routed unknown-tool barrier. This
-needs the gateway's non-answer-send contract. Metadata-only
-`nyxbot_channel_supplemental_delivery` audits include those `gateway_event`
-results as well as local sends/skips, their closed purpose/outcome/reason and
-anchor (`event_source`, `chat_pointer`, `chat_reference_event`, `thread_binding`,
-`none`), plus turn/event/conversation IDs. No text, inbound references, tokens
-or binding digests are recorded. No owner action is needed; drain old replicas
-to apply the result window and claims everywhere.
+Native Discord and WhatsApp progress and independent results use side messages when the original
+event advertises support. When the capability is unavailable, independent
+results use event replies and progress skips with
+`native_progress_unsupported`. The original event window, post-turn claims
+and permission receipt fences apply to both routes. See the [gateway delivery
+contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-provider-late-replies-and-cma-contract-boundary).
+
+Metadata-only `nyxbot_channel_supplemental_delivery` audits record native side
+messages, gateway event replies, local sends and skips. They include the
+closed purpose, egress, outcome, reason and anchor class (`event_source`,
+`chat_pointer`, `chat_reference_event`, `thread_binding`, `none`), plus
+turn/event/conversation IDs. They omit text, inbound references, tokens and
+binding digests.
 
 Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.
 Per-destination MongoDB image claims are taken inside the existing text claim for
 direct/late replies, gateway streams and automation results. Event-turn sends
-retain their image claims and image-before-text preparation. Widened relay-source
-results then acquire the supplemental text claim described above; other event-turn
-text retains its prior best-effort behavior. A crash after images and before text
+retain their image claims and image-before-text preparation, then acquire the
+supplemental text claim described above. A crash after images and before text
 can leave images without text. Claimed text is not replayed. An attachment claimed by a new writer
 but not yet uploaded has a MongoDB-time preparation lease and is recovered
 independently under current authority; confirmed or uncertain uploads are never
@@ -940,18 +956,31 @@ too, not only for the callback claims, header and payload; before that fix it
 refused every such message with 401 `reply_binding_mismatch`, while BotFather
 (`telegram`) bots worked.
 
-**Deployment prerequisite.** The gateway only calls operator-allowlisted
-providers, read once at startup. This entry in `CMAEG_PROVIDERS` (CMA repository,
-`infra/cmaeg/configmap.yaml`, ChronoAIProject/cma#953) must be deployed before
-Telegram bots can be linked:
+**Deployment prerequisite.** The gateway reads its provider allowlist
+(`CMAEG_PROVIDERS`) at startup.
+Register `nyxbot` in every environment where users link Telegram bots, including
+staging. In `ChronoAIProject/cma-infra`, production uses
+`prod/chrono-cd/apps/cmaeg-prod.yaml` and staging uses
+`staging/apps/cmaeg-staging.yaml`. Set `base_url` to that environment's NyxID
+API. The production entry is shown below.
 
 ```json
-{"slug":"nyxbot","base_url":"https://nyx-api.chrono-ai.fun","kind":"responses_http",
- "paths":{"agent_card":"/api/v1/nyxbot/agent-card",
-  "binding":"/api/v1/nyxbot/bindings/{binding_id}",
-  "conversation":"/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
-  "responses":"/api/v1/nyxbot/responses"},
- "max_inflight":256}
+{
+  "slug": "nyxbot",
+  "base_url": "https://nyx-api.chrono-ai.fun",
+  "kind": "responses_http",
+  "paths": {
+    "agent_card": "/api/v1/nyxbot/agent-card",
+    "binding": "/api/v1/nyxbot/bindings/{binding_id}",
+    "conversation": "/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
+    "responses": "/api/v1/nyxbot/responses",
+    "recovery": {
+      "response": "/api/v1/nyxbot/responses/{response_id}",
+      "events": "/api/v1/nyxbot/responses/{response_id}/events"
+    }
+  },
+  "max_inflight": 256
+}
 ```
 
 `max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
@@ -996,6 +1025,7 @@ store message text or the raw provider partition.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `notice_language` | English | Managers can set `en`, `zh-CN`, `zh-TW` or `default` through the chat PATCH or NyxBot tool. Followed threads share the settings chat’s language. |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
@@ -1092,8 +1122,8 @@ guest authorization; their catalog inclusion grants no execution access.
     Sheets' `values:clear`, Docs' `batchUpdate`, IFTTT's
     triggers and tool calls), never, except a POST with a compiled NyxID
     `x-nyxid-append-only: true` attestation. This attests adding data without
-    changing or removing existing data; it does not clear Aevatar's marker or
-    bypass owner approvals. A compiled `x-nyxid-append-only-query` object may
+    changing or removing existing data. NyxID classifies a matching request as
+    a write for owner access modes and service approval rules. A compiled `x-nyxid-append-only-query` object may
     require exact query values. Sheets `values:append` requires
     `insertDataOption=INSERT_ROWS`; absent, duplicate, or overwrite values are
     refused under `use`. DELETE and `changes-existing: true` always win.
@@ -1285,7 +1315,12 @@ short excerpt. When a message arrives while its thread is busy:
   owner asked on Telegram and again on Lark), another original-source record
   joins the exact running answer. Each source retains its own destination and
   irreversible delivery claim; the bound is `MAX_ALSO_DELIVER + 1` (five
-  destinations including the first);
+  destinations including the first). Settlement stores additional destinations
+  privately on the exact assistant reply, including chats added while the turn
+  ran. The hook reads that reply's result and destinations, even when a newer
+  turn has settled. Failed turns send the additional chats a short failure
+  notice. Replies without saved destinations have an empty list. The legacy
+  conversation slot is reserved for draining older replicas;
 - if the same question is already queued, it is not queued again, and a repeat
   from another eligible chat adds its independently anchored source to that
   question within the same destination bound. Guest busy/refusal behavior
@@ -1388,7 +1423,8 @@ direct chats; gateway provider and direct relay.
 
 Role-to-profile routing (NyxBot, specialist, channel, per specialty) is
 admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
-(`ROUTING_ACTIVE = false`): specialists use NyxBot's profile.
+(`ROUTING_ACTIVE = false`): a new specialist starts with NyxBot's model, and each
+agent's threads use that agent's own configured model.
 
 ## 15. Risks
 
@@ -1397,7 +1433,7 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 | Prompt injection through a specialist's tool results asks for more access | Requests carry the user's words; NyxBot's prompt forbids granting on a tool's say-so; account writes are NyxBot-only; proxy approvals still apply; non-involved work cannot request anything and gets `missing_access` |
 | Runaway wake-ups and cost | Event caps, owner pool and limits, NyxAgent caps, out-of-credits handling |
 | Memory stores something sensitive | Bounded notes, credential-shape refusal, owner can review and delete |
-| A stranger reaches a Full-access agent through a chat app | Owner-verified senders only; refusal without a turn |
+| A stranger reaches a Full-access agent through a chat app | Only owner-verified senders act as the owner; others are admitted only as guests where the bot's audience settings allow it (§12a), without owner authority; anyone else gets a refusal without a turn |
 
 ## 16. Decisions (answered 2026-09-28)
 
@@ -1519,7 +1555,8 @@ owner's identity and billing and the target's normal grants and credential key.
 The final reply stays in the thread unless `deliver_to` selects an owner-approved
 channel chat or push notification. Chat posting checks live ownership, agent
 assignment, posting permission and bot status again at delivery. Chat outputs
-respect each platform's message limit; a shortened reply says so and links its full thread.
+respect each platform's message limit and the shared 64-part rule in
+[Full saved reply delivery](../TELEGRAM_NEW.md#full-saved-reply-delivery).
 
 Trigger turns have their own budget (30/hour, 300/day by default), use the existing
 owner turn pool, and do not increment or reset `MAX_EVENT_STREAK`. A busy thread,
@@ -1713,6 +1750,14 @@ instructions. Retained payloads use envelope encryption, are erased on settlemen
 or cancellation, and expire after 4 hours even if delivery is deferred. An expired
 payload produces `result_expired`; terminal metadata is TTL-cleaned. Audit contains
 identifiers and stable reasons, never operation payloads, returned IDs or credentials.
+
+A CMA provisioning receipt confirms that the agent was created. The agent's event
+snapshot carries its task output. For successful provisioning and agent-input
+wakes, NyxID supplies the observed CMA agent ID and, when available, a complete
+`nyx__call_tool` request for the published snapshot GET. The event turn resolves
+the name from its current catalog using the watch's connection and target.
+The model can call it directly under the turn's ordinary permissions. If the
+lookup fails or takes more than two seconds, the turn still receives its receipt.
 
 Completion, `operation_failed`, `timeout`, `authority_lost`, `result_unavailable`,
 `result_too_large`, and submission failures resume the same thread with a stable
@@ -2077,6 +2122,10 @@ delayed send failures appear in existing bot Health with metadata-only audit;
 replay and transient preflight errors do not. Failed sends preserve the existing
 provider reason and add a separate bounded thread reason. Health describes the
 missing reply without asking the owner to inspect internal delivery logs.
+A fixed refusal before a turn starts can still reach the original followed
+thread when a guest wallet is suspended or out of credit. Removing the member,
+switching off guests, closing the follow or retiring the binding prevents that
+delivery.
 Expired delayed references report
 expiry without an owner action. Confirmed bot outbound clears the thread error.
 Queued questions enter that transcript atomically with source acceptance; queue
@@ -2126,6 +2175,31 @@ with the flag off; observed support from all executing workers and recorded
 activation then permit enabling for an admin, without roster/drain declarations. Disable and retire before binary downgrade.
 
 ### Guest settings and binding recovery
+
+Current organization admins can read retained guest conversations for a
+specialist's current organization channel bindings in first-party NyxID
+clients. This permission follows live organization membership, including for
+admins outside the specialist's use or maintenance lists. It applies to guest
+DMs and guest exchanges in shared chats on the current binding, including
+exchanges retained from earlier guest-policy revisions and while guest execution
+is suspended. The read requires the channel and specialist to retain the same
+organization binding. A pending or failed channel with current binding
+authority remains readable. Disconnecting the channel, deactivating its bot,
+or retiring the binding for lost organization access removes the view.
+Source chats use NyxID's opaque chat identifiers.
+
+The read-only transcript contains guest input, retained final reply text, and
+bounded outcome codes. A retained reply is an execution record. Delivery status
+appears separately when a typed delivery outcome is available. Member exchanges,
+working context, tool inputs and results, credentials, attachments, and action
+cards are outside the transcript projection. History pages record a
+metadata-only audit entry for the administrator, organization, and conversation.
+Personal erasure removes verified account-linked transcript content and retains
+the sender revocation tombstone described above. Historically anonymous guest
+turns remain under their original channel or provider-grant retention and
+erasure scope. A later member verification does not assign those turns to the
+member's account. Channel, organization, and provider-grant erasure remove the
+associated guest history from the view according to their existing scopes.
 
 Every listed binding has a **Who can talk to this bot** section on web and mobile:
 Allow guests; a localized explanation of guest identity and org payment; named

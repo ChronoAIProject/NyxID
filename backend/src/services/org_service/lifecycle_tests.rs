@@ -312,7 +312,7 @@ async fn org_lifecycle_request_command_counts() {
             commands.len()
         );
         let expected = match action {
-            Action::Create => 21,
+            Action::Create => 24,
             Action::Profile => 15,
             Action::Set | Action::Clear => 5,
         };

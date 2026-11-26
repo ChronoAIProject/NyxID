@@ -379,7 +379,7 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
   color: var(--color-text-tertiary);
 }
 
-html:is(.theme-light, .theme-dark) :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .ui-icon-button, [data-grouped-row], .shell-user-block)):has(> :is(svg.lucide, svg[data-ui-icon])) {
+html:is(.theme-light, .theme-dark) :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .ui-icon-button, [data-grouped-row], [data-thread-title], .shell-user-block)):has(> :is(svg.lucide, svg[data-ui-icon])) {
   column-gap: calc(0.5em * var(--display-density));
   padding-inline: calc(0.75em * var(--display-density));
   padding-block: calc(0.375em * var(--display-density));
@@ -439,7 +439,7 @@ html:is(.theme-light, .theme-dark) [data-grouped-list] [data-slot="grouped-selec
 
 html:is(.theme-light, .theme-dark) [data-grouped-row] > * { margin-block: 0; }
 
-html:is(.theme-light, .theme-dark) button:has(> svg.lucide):not([data-icon-button]):not(.shell-nav-item):not([data-composer-settings] button) {
+html:is(.theme-light, .theme-dark) button:has(> svg.lucide):not([data-icon-button]):not([data-thread-title]):not(.shell-nav-item):not([data-composer-settings-trigger]):not([data-composer-settings] button) {
   flex-wrap: wrap;
 }
 

@@ -88,7 +88,7 @@ pub(crate) async fn fence_person_authority_loss(
     db: &Database,
     person: &str,
     tx: &mut ClientSession,
-    permanent: bool,
+    departure_actor: Option<&str>,
 ) -> AppResult<()> {
     let target = db
         .collection::<User>(USERS)
@@ -115,9 +115,16 @@ pub(crate) async fn fence_person_authority_loss(
         .delete_many(doc! {"used":false,"$or":[{"issuer_user_id":person},{"user_id":person}]})
         .session(&mut *tx)
         .await?;
-    if !permanent {
+    let Some(departure_actor) = departure_actor else {
         return Ok(());
-    }
+    };
+    let actor = super::audit_service::AuditActor {
+        user_id: departure_actor.to_owned(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
     let mut cursor = db
         .collection::<OrgMembership>(MEMBERSHIPS)
         .find(doc! {
@@ -155,6 +162,14 @@ pub(crate) async fn fence_person_authority_loss(
                 &membership.org_user_id,
                 person,
                 &mut *tx,
+            )
+            .await?;
+            super::org_invite_service::retire_issuer_in_session(
+                db,
+                &membership.org_user_id,
+                person,
+                Some(&actor),
+                tx,
             )
             .await?;
         }
@@ -226,7 +241,7 @@ mod tests {
             .write_concern(mongodb::options::WriteConcern::majority())
             .await?;
         let result: AppResult<()> = async {
-            fence_person_authority_loss(db, person, &mut tx, true).await?;
+            fence_person_authority_loss(db, person, &mut tx, Some(person)).await?;
             db.collection::<bson::Document>(USERS)
                 .update_one(
                     doc! {"_id":person},
@@ -238,6 +253,66 @@ mod tests {
         }
         .await;
         finish(tx, result).await
+    }
+
+    #[tokio::test]
+    async fn pending_invites_follow_the_issuing_admin_membership() {
+        use crate::services::org_invite_service::{
+            create_invite, list_invites_for_org, redeem_invite,
+        };
+        for change in ["demote", "remove", "depart"] {
+            let (db, org, [issuer, other]) = fixture().await;
+            let mut invites = Vec::new();
+            for admin in [&issuer, &other] {
+                invites.push(
+                    create_invite(
+                        &db,
+                        &org,
+                        admin,
+                        OrgRole::Member,
+                        MemberScopeSource::Inherit,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+                );
+            }
+            match change {
+                "demote" => {
+                    let row = org_service::get_active_membership(&db, &org, &issuer)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    org_service::update_membership(&db, &row.id, Some(OrgRole::Member), None, None)
+                        .await
+                        .unwrap();
+                }
+                "remove" => org_service::revoke_membership(&db, &org, &issuer)
+                    .await
+                    .unwrap(),
+                _ => depart(&db, &issuer).await.unwrap(),
+            }
+            let remaining = list_invites_for_org(&db, &org).await.unwrap();
+            assert_eq!(
+                remaining.iter().map(|row| &row.id).collect::<Vec<_>>(),
+                [&invites[1].id],
+                "{change}"
+            );
+            let recipient = uuid::Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&recipient, UserType::Person))
+                .await
+                .unwrap();
+            assert!(matches!(
+                redeem_invite(&db, &invites[0].nonce, &recipient).await,
+                Err(AppError::OrgInviteInvalid(_))
+            ));
+            redeem_invite(&db, &invites[1].nonce, &recipient)
+                .await
+                .unwrap();
+            db.drop().await.unwrap();
+        }
     }
 
     #[tokio::test]

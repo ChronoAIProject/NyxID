@@ -22,6 +22,48 @@ impl std::fmt::Debug for Resume {
     }
 }
 impl Resume {
+    pub(in crate::services::execution_permission_dispatch) async fn node_not_sent(
+        &self,
+        db: &Database,
+    ) -> AppResult<()> {
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().await?;
+        let filter = v3::rebase(
+            doc! {
+                "_id": &self.request_id,
+                "execution_proposal.version": self.version as i32,
+                "execution_proposal.v1.claim_id": &self.claim_id,
+                "execution_proposal.v1.grant_id": &self.grant_id,
+                "execution_proposal.v1.delivery_abandoned": {"$ne": true},
+                "execution_proposal.v1.state": "dispatched",
+            },
+            self.version,
+        );
+        let update = v3::rebase(
+            doc! {
+                "$set": {
+                    "execution_proposal.v1.state": "not_sent",
+                    "execution_proposal.v1.failure_code": "operation_not_sent",
+                },
+                "$unset": Slot::Assistant(AssistantVersion::V1).unset(&[Field::Payload])
+            },
+            self.version,
+        );
+        if db
+            .collection::<Document>(REQUESTS)
+            .update_one(filter, update)
+            .session(&mut session)
+            .await?
+            .matched_count
+            == 1
+        {
+            lifecycle::retire_operations(db, &mut session, std::slice::from_ref(&self.request_id))
+                .await?;
+        }
+        session.commit_transaction().await?;
+        Ok(())
+    }
+
     pub(in crate::services::execution_permission_dispatch) async fn fence(
         &self,
         db: &Database,
@@ -118,7 +160,7 @@ pub(crate) async fn resume_turn(
             let mut session = state.db.client().start_session().await?;
             session.start_transaction().and_run((&state.db,id),move |session,(db,id)|Box::pin(async move {
                 let result:AppResult<()>=async {
-                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":{"execution_proposal.v1.payload":""}})).session(&mut *session).await?.matched_count==1 {
+                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).session(&mut *session).await?.matched_count==1 {
                         lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;
                     }
                     Ok(())
@@ -168,13 +210,10 @@ pub(crate) async fn resume_turn(
             );
             continue;
         }
-        let payload = p.payload.as_ref().ok_or_else(conflict)?;
-        let raw = Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt_with_aad(&payload.bytes, aad(id).as_bytes())
-                .await?,
-        );
+        let raw = Field::Payload
+            .open(&state.encryption_keys, &request)
+            .await?
+            .ok_or_else(conflict)?;
         if raw.len() > MAX_PAYLOAD {
             return Err(conflict());
         }
@@ -204,6 +243,12 @@ pub(crate) async fn resume_turn(
             .find_one(version.selector(doc! {"_id":id,"execution_proposal.v1.claim_id":&claim_id}))
             .await?
             .ok_or_else(conflict)?;
+        if proposal(&current)?.state == "not_sent"
+            && proposal(&current)?.failure_code.as_deref() == Some("operation_not_sent")
+        {
+            notes.push("The node was unavailable. Nothing was sent.".into());
+            continue;
+        }
         let sent = proposal(&current)?.state == "dispatched";
         let mut independent_request = None;
         let mut independent_card = None;
@@ -280,17 +325,37 @@ pub(crate) async fn resume_turn(
                 }
             }
         };
-        let result = state
-            .encryption_keys
-            .encrypt_with_aad(
+        let (result, marker) = Slot::Assistant(version)
+            .seal(
+                &state.encryption_keys,
+                id,
+                &request.user_id,
+                Field::Result,
                 private_result.as_deref().unwrap_or(&text).as_bytes(),
-                format!("{}:result", aad(id)).as_bytes(),
             )
             .await?;
-        let mut update = doc! {"$set":{"activity_outcome":activity_outcome,"execution_proposal.v1.state":state_name,"execution_proposal.v1.failure_code":code,"execution_proposal.v1.result":binary(result),"execution_proposal.v1.independent_request_id":independent_request,"execution_proposal.v1.independent_card_id":independent_card}};
-        if state_name != "waiting" {
-            update.insert("$unset", doc! {"execution_proposal.v1.payload":""});
+        let mut unset = if state_name == "waiting" {
+            Document::new()
+        } else {
+            Slot::Assistant(version).unset(&[Field::Payload])
+        };
+        let mut set = doc! {
+            "activity_outcome": activity_outcome,
+            "execution_proposal.v1.state": state_name,
+            "execution_proposal.v1.failure_code": code,
+            "execution_proposal.v1.result": binary(result),
+            "execution_proposal.v1.independent_request_id": independent_request,
+            "execution_proposal.v1.independent_card_id": independent_card,
+        };
+        if let Some(version) = marker {
+            set.insert(
+                "execution_proposal.v1.result_context_version",
+                i32::from(version),
+            );
+        } else {
+            unset.insert("execution_proposal.v1.result_context_version", "");
         }
+        let update = doc! {"$set": set, "$unset": unset};
         let mut session = state.db.client().start_session().await?;
         session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name),move |session,(db,id,claim,update,state_name)|Box::pin(async move {
             let result:AppResult<()>=async {
@@ -325,18 +390,12 @@ pub(crate) async fn result_for_human(
             )
         }));
     }
-    let Ok(p) = proposal(row) else {
+    if proposal(row).is_err() {
+        return Ok(None);
+    }
+    let Some(raw) = Field::Result.open(&state.encryption_keys, row).await? else {
         return Ok(None);
     };
-    let Some(result) = p.result.as_ref() else {
-        return Ok(None);
-    };
-    let raw = Zeroizing::new(
-        state
-            .encryption_keys
-            .decrypt_with_aad(&result.bytes, format!("{}:result", aad(&row.id)).as_bytes())
-            .await?,
-    );
     if raw.len() > MAX_PAYLOAD {
         return Err(conflict());
     }

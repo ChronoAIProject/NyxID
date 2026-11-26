@@ -38,6 +38,8 @@ test("creating a crew replaces its editor from Crews, sidebar and cold-start ori
     ).outputText,
     {
       exports,
+      // Route wrappers subscribe to the app language for re-rendering.
+      useAppLanguage: () => ({ t: (phrase: string) => phrase }),
       GroupEditorScreen: "GroupEditorScreen",
       require: () => ({
         jsx: (type: unknown, props: unknown) => ({ type, props }),

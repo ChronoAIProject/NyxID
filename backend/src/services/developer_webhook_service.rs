@@ -1,12 +1,12 @@
 //! Developer-app connection lifecycle webhook configuration and delivery.
 
+use super::oauth_client_webhook_record as webhook_record;
 use chrono::{DateTime, Utc};
 use mongodb::{Database, bson::doc, options::ReturnDocument};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::generate_random_token;
@@ -22,14 +22,12 @@ const APP_WEBHOOK_MAX_PER_MINUTE: u32 = 120;
 
 #[derive(Clone)]
 pub struct DeveloperWebhookDispatcher {
-    http_client: reqwest::Client,
     encryption_keys: Arc<EncryptionKeys>,
 }
 
 impl std::fmt::Debug for DeveloperWebhookDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeveloperWebhookDispatcher")
-            .field("http_client", &"configured")
             .field("encryption_keys", &"[REDACTED]")
             .finish_non_exhaustive()
     }
@@ -44,11 +42,8 @@ pub struct ConnectionWebhookEnvelope {
 }
 
 impl DeveloperWebhookDispatcher {
-    pub fn new(http_client: reqwest::Client, encryption_keys: Arc<EncryptionKeys>) -> Self {
-        Self {
-            http_client,
-            encryption_keys,
-        }
+    pub fn new(encryption_keys: Arc<EncryptionKeys>) -> Self {
+        Self { encryption_keys }
     }
 
     pub fn dispatch(&self, db: Database, app_id: String, event_type: &str, data: Value) {
@@ -207,8 +202,15 @@ impl DeveloperWebhookDispatcher {
         ) else {
             return Ok(());
         };
-        let secret = match self.encryption_keys.decrypt(encrypted_secret).await {
-            Ok(secret) => Zeroizing::new(secret),
+        let secret = match webhook_record::open(
+            &self.encryption_keys,
+            &client,
+            webhook_record::CONNECTION,
+            encrypted_secret,
+        )
+        .await
+        {
+            Ok(secret) => secret,
             Err(error) => {
                 tracing::warn!(app_id, %error, "failed to decrypt developer webhook secret");
                 return Err(DeliveryFailure {
@@ -243,21 +245,7 @@ impl DeveloperWebhookDispatcher {
             });
         }
 
-        let hardened_client = if occurred_at.is_some() {
-            Some(
-                super::channel_media_service::media_client(url, None, None)
-                    .await
-                    .map_err(|_| DeliveryFailure {
-                        attempts: 0,
-                        reason: "destination_unavailable",
-                        last_status: None,
-                    })?,
-            )
-        } else {
-            None
-        };
         webhook_delivery_service::deliver_signed_body(
-            hardened_client.as_ref().unwrap_or(&self.http_client),
             url,
             secret.as_slice(),
             event_type,
@@ -355,22 +343,37 @@ async fn store_configuration(
         "{CONNECTION_WEBHOOK_SECRET_PREFIX}{}",
         generate_random_token()
     );
-    let encrypted_secret = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
+    let encrypted_secret = webhook_record::encrypt(
+        encryption_keys,
+        client_id,
+        created_by,
+        webhook_record::CONNECTION,
+        &raw_secret,
+    )
+    .await?;
     let key_id = webhook_delivery_service::generate_signing_key_id();
+    let mut set = doc! {
+        "connection_webhook_url": url,
+        "connection_webhook_secret_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: encrypted_secret,
+        },
+        "connection_webhook_key_id": &key_id,
+        "connection_webhook_enabled": true,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+    let mut unset = bson::Document::new();
+    super::credential_record_service::mark_classic_update(
+        &mut set,
+        &mut unset,
+        encryption_keys,
+        webhook_record::CONNECTION,
+    );
     let updated = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one_and_update(
             doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-            doc! { "$set": {
-                "connection_webhook_url": url,
-                "connection_webhook_secret_encrypted": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: encrypted_secret,
-                },
-                "connection_webhook_key_id": &key_id,
-                "connection_webhook_enabled": true,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
+            doc! { "$set": set, "$unset": unset },
         )
         .return_document(ReturnDocument::After)
         .await?
@@ -420,6 +423,7 @@ pub async fn disable(db: &Database, client_id: &str, created_by: &str) -> AppRes
                 },
                 "$unset": {
                     "connection_webhook_secret_encrypted": "",
+                    "secret_context_versions.connection_webhook_secret_encrypted": "",
                     "connection_webhook_key_id": "",
                 },
             },
@@ -454,11 +458,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some(owner.to_string()),
             created_at: now,
@@ -514,7 +520,7 @@ mod tests {
             .await
             .unwrap();
 
-        let failure = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+        let failure = DeveloperWebhookDispatcher::new(keys)
             .deliver_for_app(
                 &db,
                 &client_id,
@@ -560,16 +566,17 @@ mod tests {
             Some(first_key_id.as_str())
         );
         assert!(!format!("{configured:?}").contains(&first_secret));
-        let stored_first = Zeroizing::new(
-            keys.decrypt(
-                configured
-                    .connection_webhook_secret_encrypted
-                    .as_deref()
-                    .expect("encrypted secret"),
-            )
-            .await
-            .expect("decrypt first secret"),
-        );
+        let stored_first = webhook_record::open(
+            &keys,
+            &configured,
+            webhook_record::CONNECTION,
+            configured
+                .connection_webhook_secret_encrypted
+                .as_deref()
+                .expect("encrypted secret"),
+        )
+        .await
+        .expect("decrypt first secret");
         assert_eq!(stored_first.as_slice(), first_secret.as_bytes());
 
         let (rotated, second_secret, second_key_id) = rotate_secret(&db, &keys, &client_id, &owner)
@@ -577,16 +584,17 @@ mod tests {
             .expect("rotate webhook secret");
         assert_ne!(first_secret, second_secret);
         assert_ne!(first_key_id, second_key_id);
-        let stored_second = Zeroizing::new(
-            keys.decrypt(
-                rotated
-                    .connection_webhook_secret_encrypted
-                    .as_deref()
-                    .expect("rotated encrypted secret"),
-            )
-            .await
-            .expect("decrypt rotated secret"),
-        );
+        let stored_second = webhook_record::open(
+            &keys,
+            &rotated,
+            webhook_record::CONNECTION,
+            rotated
+                .connection_webhook_secret_encrypted
+                .as_deref()
+                .expect("rotated encrypted secret"),
+        )
+        .await
+        .expect("decrypt rotated secret");
         assert_eq!(stored_second.as_slice(), second_secret.as_bytes());
 
         let disabled = disable(&db, &client_id, &owner)
@@ -620,6 +628,8 @@ mod tests {
             .await
             .expect("bind receiver");
         let address = listener.local_addr().expect("receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
 
         let owner = uuid::Uuid::new_v4().to_string();
@@ -640,7 +650,7 @@ mod tests {
             .await
             .expect("insert configured client");
 
-        let dispatcher = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys);
+        let dispatcher = DeveloperWebhookDispatcher::new(keys);
         dispatcher
             .deliver_for_app(
                 &db,
@@ -709,6 +719,8 @@ mod tests {
             .await
             .expect("bind failing receiver");
         let address = listener.local_addr().expect("failing receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
 
         let owner = uuid::Uuid::new_v4().to_string();
@@ -729,7 +741,7 @@ mod tests {
             .await
             .expect("insert configured client");
 
-        let failure = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+        let failure = DeveloperWebhookDispatcher::new(keys)
             .deliver_for_app(
                 &db,
                 &client_id,

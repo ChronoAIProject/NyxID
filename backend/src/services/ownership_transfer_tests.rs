@@ -37,7 +37,7 @@ async fn owner_transfer(
 ) -> crate::errors::AppResult<crate::models::ownership_transfer::OwnershipTransfer> {
     transfer_with_keys(
         &f.db,
-        None,
+        Some(&test_utils::test_encryption_keys()),
         TransferCommand {
             actor,
             api_key_id: key,
@@ -475,7 +475,7 @@ async fn move_resource(
 async fn insert_bot(f: &Fixture) -> ChannelBot {
     let id = Uuid::new_v4().to_string();
     let doc = doc! { "_id": id, "user_id": &f.owner, "platform": "telegram", "label": "Team bot",
-    "credential_source": "user", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1,2,3] },
+    "credential_source": "user", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: test_utils::test_encryption_keys().encrypt(b"transfer-token").await.unwrap() },
     "platform_bot_id": "remote-bot", "platform_bot_username": "team_bot", "webhook_registered": true,
     "webhook_secret_hash": "original-secret-hash", "status": "active", "is_active": true,
     "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() };
@@ -1551,7 +1551,15 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
             .unwrap();
     assert_eq!(saved.user_id, f.destination);
     assert_eq!(saved.ownership_version, 1);
-    assert_eq!(saved.bot_token_encrypted, bot.bot_token_encrypted);
+    assert_ne!(saved.bot_token_encrypted, bot.bot_token_encrypted);
+    let keys = test_utils::test_encryption_keys();
+    assert_eq!(
+        &**super::channel_registration::open_secret(&keys, &saved, "bot_token_encrypted")
+            .await
+            .unwrap()
+            .unwrap(),
+        b"transfer-token"
+    );
     assert_eq!(saved.webhook_secret_hash, bot.webhook_secret_hash);
     assert!(require_current_bot(&f.db, &bot).await.is_err());
     assert!(
@@ -2073,10 +2081,11 @@ async fn concurrent_registration_and_transfer_share_destination_capacity() {
     .await
     .unwrap();
     let request = Uuid::new_v4().to_string();
+    let keys = test_utils::test_encryption_keys();
     let (moved, registered) = tokio::join!(
         transfer_with_keys(
             &f.db,
-            None,
+            Some(&keys),
             TransferCommand {
                 actor: &f.admin,
                 api_key_id: None,
@@ -2570,4 +2579,519 @@ async fn catalog_master_transfer_rebinds_staged_and_strict_material() {
         }
         f.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn meta_transfer_fences_admitted_authority_and_requires_the_new_owner_to_reauthorize() {
+    for platform in ["messenger", "instagram"] {
+        let f = fixture("ownership_meta_fence").await;
+        let bot = insert_bot(&f).await;
+        f.db.collection::<Document>(BOTS)
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set": {
+                    "platform":platform, "app_id":"111", "meta_binding": {
+                        "grant_id":Uuid::new_v4().to_string(), "generation":7_i64,
+                        "token_fingerprint":"fingerprint", "grant_actor_id":&f.owner,
+                        "grant_subject_id":"900", "app_id":"111", "exclusive_routing_verified":true,
+                        "subscription":"active", "provider_revoked":false,
+                    },
+                }},
+            )
+            .await
+            .unwrap();
+        let admitted = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+            .await
+            .unwrap();
+        let reviewed = preview(
+            &f.db,
+            &f.owner,
+            ResourceKind::ChannelBot,
+            &bot.id,
+            &f.destination,
+            5,
+        )
+        .await
+        .unwrap();
+        owner_transfer(
+            &f,
+            (&f.owner, None),
+            ResourceKind::ChannelBot,
+            &bot.id,
+            &f.destination,
+            &reviewed.version,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        let live = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(live.user_id, f.destination);
+        assert_eq!(live.meta_binding.as_ref().unwrap().generation, 8);
+        assert_eq!(
+            live.meta_binding.as_ref().unwrap().subscription,
+            "reconnect_required"
+        );
+        assert!(
+            !live
+                .meta_binding
+                .as_ref()
+                .unwrap()
+                .exclusive_routing_verified
+        );
+        assert!(!live.webhook_registered);
+        let state = crate::test_utils::test_app_state(f.db.clone());
+        assert!(matches!(
+            crate::services::channel_meta_service::MetaService::from(&state).verify(&live).await,
+            Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"
+        ));
+        assert!(require_current_bot(&f.db, &admitted).await.is_err());
+        assert!(
+            crate::services::channel_adapters::meta::require_ingress(&f.db, &admitted, "old-chat")
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn marked_channel_transfer_rebinds_credentials_in_staged_and_strict_modes_before_meta_cleanup()
+ {
+    use crate::services::{
+        channel_bot_service as bots, channel_meta_service, channel_registration,
+    };
+    use sha2::Digest;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    for contextual in [false, true] {
+        for platform in ["messenger", "instagram"] {
+            let f = fixture("marked_meta_transfer").await;
+            let mut keys = test_utils::test_encryption_keys();
+            keys.set_contextual_record_writes(true);
+            keys.set_allow_legacy_record_reads(!contextual);
+            let bot = insert_bot(&f).await;
+            let fields = [
+                "bot_token_encrypted",
+                "app_secret_encrypted",
+                "registration_pin_encrypted",
+                "webhook_secret_encrypted",
+                "lark_verification_token_encrypted",
+                "lark_encrypt_key_encrypted",
+            ];
+            let mut set = doc! {"platform": platform, "platform_bot_id": "222", "app_id": "111",
+            "webhook_secret_hash":hex::encode(sha2::Sha256::digest(b"transfer-secret")),
+            "meta_binding": {"grant_id": Uuid::new_v4().to_string(), "generation": 7_i64,
+                "token_fingerprint": crate::services::channel_adapters::meta::token_fingerprint("transfer-token"),
+                "grant_actor_id": &f.owner, "grant_subject_id": "900", "app_id": "111",
+                "exclusive_routing_verified": true, "subscription": "active"}};
+            for field in fields {
+                let path = [field];
+                let context =
+                    crate::crypto::record_field::RecordContext::new(BOTS, &bot.id, &f.owner, &path)
+                        .unwrap();
+                let plaintext: &[u8] = if field == "bot_token_encrypted" {
+                    b"transfer-token"
+                } else {
+                    b"transfer-secret"
+                };
+                set.insert(
+                    field,
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: keys.encrypt_record(plaintext, &context).await.unwrap(),
+                    },
+                );
+                set.insert(format!("secret_context_versions.{field}"), 3);
+            }
+            f.db.collection::<Document>(BOTS)
+                .update_one(doc! {"_id": &bot.id}, doc! {"$set": set})
+                .await
+                .unwrap();
+            keys.set_contextual_record_writes(contextual);
+            let reviewed = preview(
+                &f.db,
+                &f.admin,
+                ResourceKind::ChannelBot,
+                &bot.id,
+                &f.destination,
+                5,
+            )
+            .await
+            .unwrap();
+            let request = Uuid::new_v4().to_string();
+            let command = || TransferCommand {
+                actor: &f.admin,
+                api_key_id: None,
+                first_party_human: true,
+                kind: ResourceKind::ChannelBot,
+                resource_id: &bot.id,
+                destination: &f.destination,
+                request_id: &request,
+                expected_version: &reviewed.version,
+                capacity: 5,
+            };
+            assert!(matches!(
+                transfer_with_keys(&f.db, None, command()).await,
+                Err(AppError::Conflict(_))
+            ));
+            assert_eq!(
+                bots::get_bot(&f.db, &bot.id).await.unwrap().user_id,
+                f.owner
+            );
+            transfer_with_keys(&f.db, Some(&keys), command())
+                .await
+                .unwrap();
+            let moved = bots::get_bot(&f.db, &bot.id).await.unwrap();
+            assert_eq!(moved.user_id, f.destination);
+            assert_eq!(moved.meta_binding.as_ref().unwrap().generation, 8);
+            assert!(
+                moved
+                    .meta_binding
+                    .as_ref()
+                    .unwrap()
+                    .grant_reconnect_required
+            );
+            assert_eq!(
+                moved.meta_binding.as_ref().unwrap().subscription,
+                "reconnect_required"
+            );
+            assert!(
+                !moved
+                    .meta_binding
+                    .as_ref()
+                    .unwrap()
+                    .exclusive_routing_verified
+            );
+            for field in fields {
+                assert_eq!(
+                    moved.secret_context_versions.get(field),
+                    contextual.then_some(&3)
+                );
+                let opened = channel_registration::open_secret(&keys, &moved, field)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let expected: &[u8] = if field == "bot_token_encrypted" {
+                    b"transfer-token"
+                } else {
+                    b"transfer-secret"
+                };
+                assert_eq!(opened.as_slice(), expected);
+            }
+            if contextual {
+                let mut wrong_owner = moved.clone();
+                wrong_owner.user_id = f.owner.clone();
+                assert!(bots::decrypt_bot_token(&keys, &wrong_owner).await.is_err());
+            }
+            let http = MockServer::start().await;
+            Mock::given(method("DELETE"))
+                .and(path("/v25.0/222/subscribed_apps"))
+                .and(header("authorization", "Bearer transfer-token"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"success": true})),
+                )
+                .expect(1)
+                .mount(&http)
+                .await;
+            let mut state = test_utils::test_app_state(f.db.clone());
+            state.encryption_keys = std::sync::Arc::new(keys);
+            let mut service = channel_meta_service::MetaService::from(&state);
+            service.endpoints = channel_meta_service::MetaEndpoints {
+                facebook_graph: http.uri(),
+                instagram_graph: http.uri(),
+                instagram_oauth: http.uri(),
+            };
+            assert!(matches!(service.verify(&moved).await,
+                Err(AppError::ChannelConversationNotReachable(reason)) if reason == "meta:reconnect_required"));
+            let current = bots::get_bot(&f.db, &bot.id).await.unwrap();
+            assert_eq!(current.meta_binding.as_ref().unwrap().generation, 8);
+            assert_eq!(current.error, moved.error);
+            assert_eq!(current.status, moved.status);
+            // A refused Verify preserves the transfer's management snapshot,
+            // so cleanup can still use its correctly rebound credentials.
+            service.disconnect(&moved).await.unwrap();
+            let retired = bots::get_bot(&f.db, &bot.id).await.unwrap();
+            assert!(!retired.is_active);
+            assert_eq!(
+                retired.meta_binding.as_ref().unwrap().subscription,
+                "removed"
+            );
+            assert!(
+                !retired
+                    .secret_context_versions
+                    .contains_key("bot_token_encrypted")
+            );
+            http.verify().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unmarked_channel_transfer_fences_a_first_marker_even_when_the_transaction_has_a_current_preview()
+ {
+    let f = fixture("channel_transfer_first_marker").await;
+    let keys = test_utils::test_encryption_keys();
+    let bot = insert_bot(&f).await;
+    let rows = f.db.collection::<Document>(BOTS);
+    rows.update_one(doc! {"_id":&bot.id},doc! {"$set":{"bot_token_encrypted":bson::Binary {
+        subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(b"first-marker-token").await.unwrap()}}}).await.unwrap();
+    let unmarked = rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+    crate::services::channel_registration::bind_fixture_fields(
+        &f.db,
+        &keys,
+        &bot.id,
+        &["bot_token_encrypted"],
+    )
+    .await;
+    let marked = rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+    let reviewed = preview(
+        &f.db,
+        &f.admin,
+        ResourceKind::ChannelBot,
+        &bot.id,
+        &f.destination,
+        5,
+    )
+    .await
+    .unwrap();
+    rows.replace_one(doc! {"_id":&bot.id}, &unmarked)
+        .await
+        .unwrap();
+    let request = Uuid::new_v4().to_string();
+    let command = || TransferCommand {
+        actor: &f.admin,
+        api_key_id: None,
+        first_party_human: true,
+        kind: ResourceKind::ChannelBot,
+        resource_id: &bot.id,
+        destination: &f.destination,
+        request_id: &request,
+        expected_version: &reviewed.version,
+        capacity: 5,
+    };
+    // The approved marked source is installed before transaction admission.
+    // Rebinding now reads that same current raw snapshot inside the transaction;
+    // no pre-transaction unmarked envelope can overwrite it.
+    crate::services::durable_wake_tests::resume_after(
+        "channel_transfer_after_secret_snapshot",
+        async {
+            transfer_with_keys(&f.db, Some(&keys), command())
+                .await
+                .unwrap();
+        },
+        async {
+            rows.replace_one(doc! {"_id":&bot.id}, &marked)
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    let moved = crate::services::channel_bot_service::get_bot(&f.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(moved.user_id, f.destination);
+    assert_eq!(moved.ownership_version, 1);
+    assert_eq!(
+        moved.secret_context_versions.get("bot_token_encrypted"),
+        Some(&3)
+    );
+    assert_eq!(
+        crate::services::channel_bot_service::decrypt_bot_token(&keys, &moved)
+            .await
+            .unwrap()
+            .as_str(),
+        "first-marker-token"
+    );
+    let before = rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
+    transfer_with_keys(&f.db, Some(&keys), command())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn channel_transfer_rebinds_all_fields_and_aborts_route_retirement_on_a_damaged_secret() {
+    use sha2::{Digest, Sha256};
+    let f = fixture("bot_transfer_fields").await;
+    let bot = insert_bot(&f).await;
+    let keys = test_utils::test_encryption_keys();
+    let rows = f.db.collection::<Document>(BOTS);
+    let lookup = doc! {"_id":&bot.id};
+    let mut set =
+        doc! {"webhook_secret_hash":hex::encode(Sha256::digest(b"webhook_secret_encrypted"))};
+    for &field in super::channel_bot_record::FIELDS {
+        set.insert(
+            field,
+            bson::to_bson(&keys.encrypt(field.as_bytes()).await.unwrap()).unwrap(),
+        );
+    }
+    rows.update_one(lookup.clone(), doc! {"$set":set})
+        .await
+        .unwrap();
+    let route = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    let routes = f.db.collection::<Document>(CONVERSATIONS);
+    routes.insert_one(doc! {"_id":&route,"channel_bot_id":&bot.id,"user_id":&f.owner,"platform":"telegram","platform_conversation_id":"chat","platform_conversation_type":"private","is_active":true,"created_at":now,"updated_at":now}).await.unwrap();
+    let canonical = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+    rows.update_one(
+        lookup.clone(),
+        doc! {"$set":{"lark_encrypt_key_encrypted":[7]}},
+    )
+    .await
+    .unwrap();
+    let broken = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+    let kind = ResourceKind::ChannelBot;
+    let reviewed = preview(&f.db, &f.admin, kind, &bot.id, &f.destination, 5)
+        .await
+        .unwrap();
+    assert!(
+        move_resource(
+            &f,
+            kind,
+            &bot.id,
+            &f.destination,
+            &reviewed.version,
+            &Uuid::new_v4().to_string()
+        )
+        .await
+        .is_err()
+    );
+    assert!(rows.find_one(lookup.clone()).await.unwrap().unwrap() == broken);
+    assert!(
+        routes
+            .find_one(doc! {"_id":&route,"is_active":true})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    rows.replace_one(lookup.clone(), &canonical).await.unwrap();
+    for destination in [&f.destination, &f.owner] {
+        let before = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+        let review = preview(&f.db, &f.admin, kind, &bot.id, destination, 5)
+            .await
+            .unwrap();
+        move_resource(
+            &f,
+            kind,
+            &bot.id,
+            destination,
+            &review.version,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        let after = rows.find_one(lookup.clone()).await.unwrap().unwrap();
+        super::channel_bot_record::verify(&keys, &after)
+            .await
+            .unwrap();
+        let source = super::channel_bot_record::decode(&before).unwrap();
+        let restored = super::channel_bot_record::decode(&after).unwrap();
+        assert_eq!(&restored.user_id, destination);
+        assert!(require_current_bot(&f.db, &source).await.is_err());
+        for &field in super::channel_bot_record::FIELDS {
+            assert_eq!(restored.secret_context_versions.get(field), Some(&3));
+            assert_eq!(
+                &**super::channel_registration::open_secret(&keys, &restored, field)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                field.as_bytes()
+            );
+            let ciphertext = super::channel_registration::stored_secret(&restored, field)
+                .unwrap()
+                .unwrap();
+            assert!(
+                crate::crypto::record_field::decrypt(
+                    &keys,
+                    BOTS,
+                    &source.id,
+                    &source.user_id,
+                    field,
+                    Some(3),
+                    ciphertext
+                )
+                .await
+                .is_err()
+            );
+            if let Some(previous) = &source.credential_continuity {
+                assert_ne!(
+                    restored.credential_continuity.as_ref().unwrap().generations[field],
+                    previous.generations[field]
+                );
+            }
+        }
+        assert!(
+            !super::channel_bot_record::migrate(&f.db, &keys, &before)
+                .await
+                .unwrap()
+        );
+        assert!(rows.find_one(lookup.clone()).await.unwrap().unwrap() == after);
+    }
+}
+
+#[tokio::test]
+async fn whatsapp_transfer_retains_the_enrollment_token_under_its_original_generation() {
+    use super::whatsapp_native as wa;
+    let f = fixture("wa_transfer_token").await;
+    let mut bot = insert_bot(&f).await;
+    let keys = test_utils::test_encryption_keys();
+    bot.platform = "whatsapp".into();
+    bot.platform_bot_id = "333".into();
+    bot.app_secret_encrypted = Some(keys.encrypt(b"fixture-app-secret").await.unwrap());
+    let id = doc! {"_id":&bot.id};
+    let parents = f.db.collection::<ChannelBot>(BOTS);
+    parents.replace_one(id.clone(), &bot).await.unwrap();
+    let empty = wa::configure(&f.db, &bot, "111", "222", true, 0)
+        .await
+        .unwrap();
+    let mut legacy = test_utils::test_app_config();
+    legacy.contextual_record_writes = false;
+    let legacy = crate::crypto::aes::EncryptionKeys::from_config(&legacy);
+    wa::native_verify_token(&f.db, &legacy, &empty)
+        .await
+        .unwrap();
+    let populated = wa::load(&f.db, &bot).await.unwrap().unwrap();
+    let kind = ResourceKind::ChannelBot;
+    let review = preview(&f.db, &f.admin, kind, &bot.id, &f.destination, 5)
+        .await
+        .unwrap();
+    move_resource(
+        &f,
+        kind,
+        &bot.id,
+        &f.destination,
+        &review.version,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap();
+    let rows =
+        f.db.collection::<Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME);
+    assert!(
+        wa::configure(&f.db, &bot, "111", "222", true, populated.revision)
+            .await
+            .is_err()
+    );
+    let retained = rows.find_one(id.clone()).await.unwrap().unwrap();
+    assert!(
+        wa::token_record::migrate(&f.db, &keys, &retained)
+            .await
+            .unwrap()
+    );
+    let current = rows.find_one(id.clone()).await.unwrap().unwrap();
+    wa::token_record::verify(&keys, &current).await.unwrap();
+    for stale in [&empty, &populated] {
+        assert!(wa::native_verify_token(&f.db, &keys, stale).await.is_err());
+    }
+    let destination = parents.find_one(id.clone()).await.unwrap().unwrap();
+    assert!(wa::load(&f.db, &destination).await.unwrap().is_none());
+    assert!(rows.find_one(id).await.unwrap().unwrap() == current);
+    f.db.drop().await.unwrap();
 }

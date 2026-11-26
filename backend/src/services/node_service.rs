@@ -1,3 +1,4 @@
+use crate::crypto::record_field;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -112,17 +113,10 @@ async fn encrypt_signing_secret(
     owner: &str,
     secret: &[u8],
 ) -> AppResult<Vec<u8>> {
-    if keys.contextual_record_writes() {
-        keys.encrypt_record(
-            secret,
-            &RecordContext::new(NODES, node_id, owner, SIGNING_SECRET_FIELD)?,
-        )
-        .await
-    } else {
-        // Preserve the historical encrypted bytes/decoder contract while
-        // compatible readers are staged. No contextual marker is written.
-        keys.encrypt(secret).await
-    }
+    record_field::encrypt_with_context(keys, secret, || {
+        RecordContext::new(NODES, node_id, owner, SIGNING_SECRET_FIELD)
+    })
+    .await
 }
 
 async fn decrypt_signing_secret(
@@ -133,25 +127,17 @@ async fn decrypt_signing_secret(
         .signing_secret_encrypted
         .as_deref()
         .ok_or_else(|| AppError::NodeOffline("Node is missing its signing secret".into()))?;
-    match node.signing_secret_context_version {
-        // Exact legacy decode; random v0 nonces may start with any magic bytes.
-        None if keys.allow_legacy_record_reads() => {
-            keys.decrypt(ciphertext).await.map(Zeroizing::new)
-        }
-        None => Err(AppError::Internal(
-            "Legacy node secret reads are disabled".into(),
-        )),
-        Some(SIGNING_SECRET_CONTEXT_VERSION) => {
-            keys.decrypt_record(
-                ciphertext,
-                &RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD)?,
-            )
-            .await
-        }
-        Some(_) => Err(AppError::Internal(
-            "Unsupported node secret storage version".into(),
-        )),
-    }
+    record_field::decrypt_with_context(
+        keys,
+        ciphertext,
+        node.signing_secret_context_version,
+        || RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD),
+        || match node.signing_secret_context_version {
+            None => AppError::Internal("Legacy node secret reads are disabled".into()),
+            Some(_) => AppError::Internal("Unsupported node secret storage version".into()),
+        },
+    )
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1545,171 +1531,126 @@ fn validate_node_signing_secret(bytes: &[u8], node: &Node) -> AppResult<Zeroizin
 
 // --- Binding operations ---
 
-/// Create a service binding for a node.
-/// Auto-sync `NodeServiceBinding` when `UserService.node_id` changes.
-///
-/// Call this after creating or updating a `UserService` with a node routing change.
-/// Creates a binding when `node_id` is set, deactivates the old one when it changes.
-///
-/// `user_id` is the *binding owner* -- for org-shared services this is the
-/// org's user_id, so that proxy-time routing (which queries bindings by the
-/// effective service owner) finds it. `actor_user_id` is the human (or API
-/// key) that actually owns the node and is performing the operation; it is
-/// used to validate that the actor is allowed to bind this node. Both are
-/// the same value for personal services. For org services they differ:
-/// the actor is an org admin and the node is their personal node.
-pub async fn sync_node_binding_for_user_service(
-    db: &mongodb::Database,
-    user_id: &str,
-    actor_user_id: &str,
-    catalog_service_id: Option<&str>,
-    new_node_id: Option<&str>,
-    old_node_id: Option<&str>,
-) -> AppResult<()> {
-    let Some(service_id) = catalog_service_id else {
-        return Ok(());
-    };
-
-    // Validate the new node before mutating bindings so an invalid update does not
-    // tear down the previous route. The node is owned by the *actor*, not the
-    // binding owner -- a personal node may be referenced by an org-owned service
-    // when the actor is an admin of that org. Use the actor-based access check
-    // so the actor's org admin role on the node owner is honored.
-    if let Some(new_nid) = new_node_id.filter(|nid| !nid.is_empty()) {
-        ensure_node_writable_by_actor(db, actor_user_id, new_nid).await?;
-    }
-
-    // Deactivate old binding if the node changed or was cleared.
-    if let Some(old_nid) = old_node_id {
-        let changed = match new_node_id {
-            Some(new_nid) if !new_nid.is_empty() => new_nid != old_nid,
-            _ => true, // cleared
-        };
-        if changed && !has_active_user_service_for_node(db, user_id, service_id, old_nid).await? {
-            deactivate_binding_by_node_and_service(db, user_id, old_nid, service_id).await?;
-        }
-    }
-
-    // Create binding if new node_id is set.
-    if let Some(new_nid) = new_node_id.filter(|nid| !nid.is_empty()) {
-        ensure_binding_exists(db, user_id, new_nid, service_id).await?;
-    }
-
-    Ok(())
+/// Node identity and ownership checked before a connection mutation.
+pub(crate) struct RouteNode {
+    id: String,
+    owner: String,
 }
 
-async fn has_active_user_service_for_node(
-    db: &mongodb::Database,
-    user_id: &str,
-    service_id: &str,
-    node_id: &str,
-) -> AppResult<bool> {
-    let count =
-        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
-            .count_documents(doc! {
-                "user_id": user_id,
-                "catalog_service_id": service_id,
-                "node_id": node_id,
-                "is_active": true,
-            })
-            .await?;
-
-    Ok(count > 0)
-}
-
-/// Create a `NodeServiceBinding` if one does not already exist for this node + service.
-/// Uses insert-first with duplicate-key handling to avoid race conditions.
-async fn ensure_binding_exists(
-    db: &mongodb::Database,
-    user_id: &str,
-    node_id: &str,
-    service_id: &str,
-) -> AppResult<()> {
-    let existing = db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .find_one(doc! {
-            "node_id": node_id,
-            "service_id": service_id,
-            "user_id": user_id,
-            "is_active": true,
+impl RouteNode {
+    pub(crate) async fn authorize(
+        db: &mongodb::Database,
+        actor: &str,
+        id: &str,
+    ) -> AppResult<Self> {
+        let node = ensure_node_writable_by_actor(db, actor, id).await?;
+        Ok(Self {
+            id: node.id,
+            owner: node.user_id,
         })
-        .await?;
+    }
 
-    if existing.is_some() {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Update only the old and new catalog bindings of this connection. The
+/// caller supplies the transaction's service preimage and the target node
+/// already authorized for the actor (who may differ from the service owner).
+pub(crate) async fn sync_node_binding_for_user_service(
+    db: &mongodb::Database,
+    tx: &mut super::service_history::transaction::Transaction,
+    owner: &str,
+    catalog: Option<&str>,
+    old_node: Option<&str>,
+    target: Option<&RouteNode>,
+) -> AppResult<()> {
+    let Some(catalog) = catalog else {
+        return Ok(());
+    };
+    let bindings = db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS);
+    let active = |node: &str| {
+        doc! {
+            "node_id": node, "service_id": catalog, "user_id": owner, "is_active": true,
+        }
+    };
+    if let Some(old) =
+        old_node.filter(|id| !id.is_empty() && Some(*id) != target.map(RouteNode::id))
+    {
+        let sibling = super::service_history::collection::<bson::Document>(db, USER_SERVICES)
+            .find_one(doc! { "user_id": owner, "catalog_service_id": catalog, "node_id": old, "is_active": true })
+            .projection(doc! { "_id": 1 })
+            .session(&mut *tx)
+            .await?;
+        // Two concurrent siblings can each see the other still pinned. Both
+        // must write the shared binding so the loser retries its sibling read.
+        let change = if sibling.is_some() {
+            doc! { "$inc": { "connection_revision": 1_i64 } }
+        } else {
+            doc! { "$set": { "is_active": false, "updated_at": bson::DateTime::now() } }
+        };
+        bindings
+            .update_many(active(old), change)
+            .session(&mut *tx)
+            .await?;
+    }
+
+    let Some(node) = target else { return Ok(()) };
+    // A transfer or deletion must conflict even when this is the first
+    // catalog binding for the target. Match the owner checked at authorization.
+    let fenced = db
+        .collection::<Node>(NODES)
+        .update_one(
+            doc! { "_id": &node.id, "user_id": &node.owner, "is_active": true },
+            doc! { "$inc": { "route_binding_revision": 1_i64 } },
+        )
+        .session(&mut *tx)
+        .await?;
+    if fenced.matched_count == 0 {
+        return Err(AppError::NodeNotFound("Node not found".into()));
+    }
+    // The active pair is unique across owners. A foreign binding belongs to
+    // its owner; this connection can still route through its explicit primary.
+    let foreign = doc! {
+        "node_id": &node.id, "service_id": catalog, "is_active": true, "user_id": { "$ne": owner },
+    };
+    if bindings
+        .count_documents(foreign)
+        .limit(1)
+        .session(&mut *tx)
+        .await?
+        > 0
+    {
         return Ok(());
     }
 
-    let now = Utc::now();
-    let binding = NodeServiceBinding {
-        id: uuid::Uuid::new_v4().to_string(),
-        node_id: node_id.to_string(),
-        user_id: user_id.to_string(),
-        service_id: service_id.to_string(),
-        is_active: true,
-        priority: 0,
-        created_at: now,
-        updated_at: now,
-    };
-
-    match db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .insert_one(&binding)
-        .await
-    {
-        Ok(_) => {
-            tracing::info!(
-                binding_id = %binding.id,
-                node_id = %node_id,
-                service_id = %service_id,
-                "Auto-created node service binding from UserService.node_id"
-            );
-        }
-        Err(e) => {
-            // Duplicate key error (E11000) means a concurrent request already created the
-            // binding -- treat as success (idempotent).
-            let is_dup = e.kind.as_ref().to_string().contains("E11000");
-            if !is_dup {
-                return Err(e.into());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Deactivate a binding by node + service (not by binding ID).
-async fn deactivate_binding_by_node_and_service(
-    db: &mongodb::Database,
-    user_id: &str,
-    node_id: &str,
-    service_id: &str,
-) -> AppResult<()> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    let result = db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_many(
+    let now = bson::DateTime::now();
+    let result = bindings
+        .update_one(
+            active(&node.id),
             doc! {
-                "node_id": node_id,
-                "service_id": service_id,
-                "user_id": user_id,
-                "is_active": true,
+                "$inc": { "connection_revision": 1_i64 },
+                "$setOnInsert": { "_id": uuid::Uuid::new_v4().to_string(),
+                    "priority": 0, "created_at": now, "updated_at": now },
             },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
         )
-        .await?;
-
-    if result.modified_count > 0 {
-        tracing::info!(
-            node_id = %node_id,
-            service_id = %service_id,
-            count = result.modified_count,
-            "Auto-deactivated node service binding(s) from UserService.node_id change"
-        );
+        .upsert(true)
+        .session(tx)
+        .await;
+    match result {
+        Ok(_) => Ok(()),
+        // An independent binding POST can win the unique insert after our
+        // snapshot. Retry the transaction to inspect the winning owner.
+        Err(error) if super::service_pool_service::is_duplicate_key(&error) => {
+            Err(mongodb::error::Error::custom(BindingCreationRace).into())
+        }
+        Err(error) => Err(error.into()),
     }
-
-    Ok(())
 }
+
+#[derive(Debug)]
+pub(super) struct BindingCreationRace;
 
 pub async fn create_binding(
     db: &mongodb::Database,

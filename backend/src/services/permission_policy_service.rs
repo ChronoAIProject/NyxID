@@ -86,7 +86,7 @@ pub fn validate_target(target: &ProxyTarget) -> AppResult<()> {
         || service.inject_delegation_token
         || service.identity_propagation_mode != "none"
         || service.token_exchange_config.is_some()
-        || !target.catalog_default_headers.is_empty()
+        || !target.catalog_default_headers.configured().is_empty()
         || !target.user_service_default_headers.is_empty()
     {
         return Err(unavailable());

@@ -1,5 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
+import { useCardTranslation } from "@/components/assistant/card-language";
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -36,7 +35,6 @@ const TONE: Record<EventNoticeTone, string> = {
 };
 
 function NoticeIcon({ notice }: { readonly notice: EventNotice }) {
-  useUiTranslation();
   const className = cn("h-3.5 w-3.5 shrink-0", TONE[notice.tone]);
   switch (notice.kind) {
     case "reply":
@@ -73,7 +71,7 @@ function EventRow({
   readonly icon?: ReactNode;
   readonly action?: ReactNode;
 }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   const [open, setOpen] = useState(false);
   const head = (
     <>
@@ -113,7 +111,7 @@ function EventRow({
 
 /** The message an automation run starts with: its name, the instruction on demand. */
 function AutomationNotice({ message }: { readonly message: ChatMessage }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   // A webhook automation records the event payload as its own message.
   const payload = message.id.startsWith("trigger-event:");
   const label = message.automation?.label;
@@ -142,11 +140,11 @@ function AutomationNotice({ message }: { readonly message: ChatMessage }) {
  * rather than a bubble.
  */
 export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   if (message.origin === "trigger" || message.automation) {
     return <AutomationNotice message={message} />;
   }
-  const notices = eventNotices(message.content).map(describeEventNotice);
+  const notices = eventNotices(message.content).map(notice => describeEventNotice(notice, translateUi));
   return (
     <div
       role="group"
@@ -169,7 +167,7 @@ const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 
 /** An instruction NyxBot sent to this specialist: shaped like a user turn, labelled as NyxBot's. */
 export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   return (
     <article aria-label={translateUi("Message from NyxBot")} className="group/message flex flex-col items-end gap-1">
       <div className="flex items-center gap-1.5 text-12 text-text-tertiary">

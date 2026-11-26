@@ -3,7 +3,6 @@ use super::*;
 use crate::{
     models::channel_turn_preparation::Receipt,
     models::{
-        assistant_conversation::AssistantConversation,
         assistant_message::AssistantMessage,
         execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     },
@@ -45,7 +44,7 @@ fn injected_failure(failure: TestProcessFailure) -> bool {
 }
 
 pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
-    let Some(d) = deliveries::lease(&state.db, id).await? else {
+    let Some(mut d) = deliveries::lease(&state.db, id).await? else {
         return Ok(());
     };
     let mut decision = supplemental::Decision::new(supplemental::Purpose::PermissionResult);
@@ -63,7 +62,7 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
         let source=d.task.channel_source.as_ref().ok_or_else(channel::refused)?;
         let mut session=state.db.client().start_session().await?;
         let rows=channel::validate(&state.db,&mut session,source,false).await?;
-        let history=engine::get(&state.db,&d.user_id,&d.conversation_id).await?;
+        engine::get(&state.db,&d.user_id,&d.conversation_id).await?;
         let message=state.db.collection::<AssistantMessage>("assistant_messages").find_one(doc!{
             "_id":&d.message_id,"user_id":&d.user_id,"conversation_id":&d.conversation_id,"turn_id":&d.turn_id,"role":"assistant"
         }).await?.ok_or_else(channel::refused)?;
@@ -85,9 +84,9 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
             if decrypt_agent_key(state, &rows.channel).await?.is_none() { return Err(channel::refused()); }
             Some(anchor)
         } else { None };
-        Ok((rows,history,text,anchor))
+        Ok((rows,text,anchor))
     }.await;
-    let (rows, history, text, anchor) = match preparation {
+    let (rows, text, anchor) = match preparation {
         Ok(p) => p,
         Err(
             AppError::Forbidden(_) | AppError::NotFound(_) | AppError::SecurityReadinessUnavailable,
@@ -165,6 +164,10 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
         }
         Err(error) => return Err(error),
     };
+    decision.require_side_message = d.version == deliveries::SIDE_MESSAGE_VERSION;
+    if prepared.next > 0 && !decision.require_side_message {
+        decision.native_route = Some(native_responses::SupplementalRoute::Replies);
+    }
     for (index, part) in parts.into_iter().enumerate().skip(prepared.next as usize) {
         let index = index as u32;
         let boundary_error = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -192,11 +195,9 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
         } else {
             supplemental::Anchor::EventSource
         };
-        decision.dispatch(if rows.channel.gateway_source.is_some() {
-            supplemental::Egress::GatewayEvent
-        } else {
-            supplemental::Egress::LocalRelay
-        });
+        if rows.channel.gateway_source.is_none() {
+            decision.dispatch(supplemental::Egress::LocalRelay);
+        }
         let result = boundary::with_effect(
             guard,
             crate::services::channel_reply_notice::supplemental(tokio::time::timeout(
@@ -205,10 +206,10 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
                     state,
                     &d,
                     &rows,
-                    &history,
                     anchor.as_deref(),
                     part,
                     index,
+                    &mut decision,
                 )),
             )),
         )
@@ -229,7 +230,13 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
                     "execution_result_accepted_before_receipt",
                 )
                 .await;
-                if !deliveries::accepted(&state.db, &d, index, total, &receipt).await? {
+                let side_message = decision
+                    .native_route
+                    .as_ref()
+                    .is_some_and(native_responses::SupplementalRoute::is_side_message);
+                if !deliveries::accepted(&state.db, &mut d, index, total, &receipt, side_message)
+                    .await?
+                {
                     return Ok(());
                 }
                 #[cfg(test)]
@@ -258,13 +265,18 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
                     if !deliveries::finish_owned(&state.db, &d, "refused").await? {
                         return Ok(());
                     }
+                    decision.skip(supplemental::Reason::AuthorityRefused);
                     "refused"
                 } else {
+                    // The terminal write only matches Dispatching. A validation
+                    // error leaves an owned Preparing part eligible for recovery.
                     return Err(error);
                 }
             }
         };
-        decision.outcome(outcome);
+        if outcome != "refused" {
+            decision.outcome(outcome);
+        }
         decision
             .record_ids(state, &d.user_id, &d.conversation_id, Some(&d.turn_id))
             .await;
@@ -282,11 +294,14 @@ async fn send_part(
     state: &AppState,
     d: &Delivery,
     rows: &channel::SourceRows,
-    history: &AssistantConversation,
     anchor: Option<&str>,
     part: OutboundReply,
     index: u32,
+    decision: &mut supplemental::Decision,
 ) -> AppResult<Receipt> {
+    if decision.require_side_message && rows.channel.gateway_source.is_none() {
+        return Err(channel::refused());
+    }
     let origin = &rows
         .event
         .delivery
@@ -303,9 +318,10 @@ async fn send_part(
             state,
             &rows.channel,
             origin,
-            &history.id,
+            &d.conversation_id,
             part.text.as_deref().unwrap_or_default(),
             &occurrence,
+            decision,
         )
         .await?
         {
@@ -322,7 +338,7 @@ async fn send_part(
             &rows.channel,
             &d.user_id,
             origin,
-            &history.id,
+            &d.conversation_id,
             &part,
         )
         .await?;

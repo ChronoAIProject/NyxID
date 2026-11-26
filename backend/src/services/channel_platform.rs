@@ -296,6 +296,7 @@ pub struct MaterializedAttachment {
 pub struct FetchedMedia {
     pub bytes: bytes::Bytes,
     pub mime_type: Option<String>,
+    /// An original source/provider name, never a synthesized download fallback.
     pub filename: Option<String>,
 }
 
@@ -555,6 +556,28 @@ pub trait PlatformAdapter: Send + Sync {
 
     fn atomic_inbound_admission(&self) -> bool {
         false
+    }
+
+    /// Persist authenticated protocol state before any event is admitted.
+    async fn apply_webhook_state(
+        &self,
+        _db: &mongodb::Database,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _body: &[u8],
+        _snapshot: &super::channel_verification_service::CredentialSnapshot,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn authorize_inbound(
+        &self,
+        _db: &mongodb::Database,
+        _http: &reqwest::Client,
+        _keys: &crate::crypto::aes::EncryptionKeys,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _inbound: &InboundMessage,
+    ) -> AppResult<()> {
+        Ok(())
     }
     async fn send_reply_outcome(
         &self,

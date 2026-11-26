@@ -1,9 +1,17 @@
 use crate::errors::{AppError, AppResult};
 
-/// Keep the social-login scheme contract unchanged. Service OAuth applies
-/// additional URL constraints before persisting a return destination.
-pub(crate) fn is_supported_mobile_redirect_uri(uri: &str) -> bool {
-    uri.starts_with("nyxid://") || uri.starts_with("exp://")
+pub(crate) const SOCIAL_CALLBACK: &str = "nyxid://auth/social/callback";
+
+pub(crate) fn is_supported_mobile_redirect_uri(
+    uri: &str,
+    config: &crate::config::AppConfig,
+) -> bool {
+    uri == SOCIAL_CALLBACK
+        || (config
+            .mobile_social_redirect_uris
+            .iter()
+            .any(|allowed| allowed == uri)
+            && (!uri.starts_with("exp://") || config.is_development()))
 }
 
 pub(crate) fn validate_app_return_uri(uri: &str, configured_schemes: &[String]) -> AppResult<()> {

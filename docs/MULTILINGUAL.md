@@ -26,6 +26,12 @@ Chinese locale tags resolve by script. Explicit `Hans` selects Simplified Chines
 and `Hant` selects Traditional Chinese. Regional defaults include CN/SG as
 Simplified and TW/HK/MO as Traditional. English variants resolve to `en`.
 
+## Approval cards in NyxBot conversations
+
+Open **Working context → Approval card language** in a chat to follow the conversation, use the app language, or pin English, Simplified Chinese, or Traditional Chinese. A pin applies to that chat in the current browser tab, survives reload, and clears on account changes. The main Approvals page uses the app language.
+
+By default, cards use the app language until two human messages give a consistent language signal. Short terms, ambiguous text, code blocks, links, automated messages and tool output are ignored. Two clear messages in a new supported language can switch the cards. Sustained evidence of an unsupported language returns the cards to the app language. The same rule runs on loaded history. The setting covers approval controls, skill publication reviews, acknowledgements and decision receipts. Service names, submitted arguments, user content and provider descriptions keep their original wording.
+
 ## Current translated surfaces
 
 The shared language preference covers first-party web interface copy:
@@ -424,6 +430,41 @@ storage. Component and browser tests cover live switching, shared state, draft
 preservation, navigation, persistence, and narrow mobile layouts. Browser tests
 use the existing HTTP fixture boundary and do not call a live backend or model.
 
+### Web and mobile audit for issue #2722
+
+In the table below each owner is the source/catalog area responsible for new copy.
+The Web copy guard scans Studio source for literal UI strings and checks catalog keys,
+placeholders and script. The mobile guard scans production screens, components,
+accessibility labels and alerts. The table identifies the additional component and
+data checks used for dynamic copy that a source scan cannot see.
+
+| Area and owner | Surfaces checked | Findings and verification |
+| --- | --- | --- |
+| Authentication and services · Web auth / Mobile auth, services | Sign-in, registration, device authorization, OAuth error and provider connection | The OAuth page now translates its generic title and missing-message fallback. Tests check an unknown provider detail and raw error code, device-login states and provider selection. Registration is covered by the source and catalog checks. |
+| First run and Home · Assistant onboarding / Mobile onboarding | Step labels and progress, capability lists, topic choices, replay and Home recommendations | Tests switch an open intro, validate every replay variant and check the server's recommendation text and connected-account follow-ups in both Chinese scripts. Unknown server strings and provider names remain display data. |
+| Chat and approvals · Assistant chat, approvals and agents | Authored skill cards, decision receipts and approval cards | Component tests exercise the app language, a chat-specific card language and authored data. The localized onboarding fixture retains its Markdown, action IDs and example key name. |
+| Connections and automations · Services, dashboard and automations | Trigger creation and rotation, developer-app webhook credentials, automation secrets, managed WhatsApp setup, `/keys` connection ordering | Tests check the one-time credential dialog, copy button, asynchronous feedback, OAuth provider selection and WhatsApp setup states. Ordering tests cover translated drag-and-drop screen-reader instructions, all announcements and sortable handle roles, including language changes. Connection labels and values copied to the clipboard retain their original bytes. |
+| Machines, plugins and teams · Nodes, assistant agents / Mobile machines, plugins, agents | Machine capability labels, plugin/connector lists, specialists and group permissions | Source and catalog checks cover field labels and empty states. Mobile component tests exercise plugin navigation and permission text in the selected language. |
+| Account, security and preferences · Settings / Mobile account, display, notifications | Password review, device sessions, appearance, notifications, accessibility and voice | Tests exercise switching language during password review, notification announcements and Apple Watch session labels. Settings tests exercise display, notification and voice controls. |
+| Billing and usage · Billing / Mobile billing | Usage units, filters, charts, legends, modality details, empty state and admin analytics panel ordering | Tests cover funding chart lane labels and accessible names (including empty funding), plural-aware explorer group counts for every dimension, quantity-chart screen-reader text for unrecorded values, metric labels, image/voice breakdown, date and unit formatting, and mobile usage metric names. Admin analytics tests cover translated drag-and-drop screen-reader instructions, all announcements and sortable handle roles, including language changes; panel titles remain user data. |
+| Credential management · Credentials | Key history action in the confirmation toast | The action label uses the app language. Its target key remains the original identifier. |
+
+Reproduce the source checks from the repository root:
+
+```sh
+node frontend/scripts/check-i18n.mjs
+pnpm --dir mobile exec tsx --test src/i18n/i18nCoverage.test.ts src/i18n/ws2LocaleCompleteness.test.ts
+pnpm --dir mobile exec tsx --test src/features/onboarding/onboardingCopy.test.ts
+```
+
+The shared onboarding catalogs cover fixed first-party phrases from the Rust
+recommendation and topic tables, including prompts submitted by clicking a
+recommendation. Localize the Markdown source before splitting it into animation
+frames. Chat drafts, user names, model output, third-party error details and
+provider identifiers follow the data boundaries above. Production device and
+assistive-technology walkthroughs can use the surface list to record the route,
+app language and visible or spoken phrase.
+
 ## Local sample preview
 
 Start the opt-in Vite preview from the repository root:
@@ -459,14 +500,23 @@ navigator and updates subscribed controls without replacing the navigator or
 chat drafts. Writes are ordered so rapid changes persist the latest selection.
 A failed save leaves the current session usable and exposes a retry in Language.
 
-This native pass translates Settings navigation, account/security controls,
-Display, Privacy, Voice and dictation settings, workspace navigation labels,
-and dictation controls. Other native feature pages and unrecognized error
-messages currently retain English fallback. It does not claim complete native
-translation parity with the web. Messages, names, provider voice labels, URLs,
+Native catalogs cover workspace pages, Settings and its subpages, auth,
+approvals, empty states and app-owned error messages. Persistent messages retain
+a formatter with their source phrase and captured values (`useLocalizedState`);
+queued toasts retain their own formatter, and app-owned Errors expose their
+message through `localizedError`. Rendering subscribes to `useAppLanguage`, so
+changing language updates an existing notice without repeating its action.
+Unknown server diagnostics retain the server text. Messages, names, provider voice labels, URLs,
 credentials and protocol values are preserved. Legal content stays in its
 authored language. App language does not change dictation recognition or the
 model's response language.
+
+iOS permission rationales are also bundled in `zh-Hans` and `zh-Hant`
+`InfoPlist.strings`, configured through Expo `locales` and the committed Xcode
+project. iOS chooses these OS prompts using the device/app language in system
+Settings; the in-app language switch cannot change an OS permission dialog.
+Recognition-language selection remains independent of app language; the
+recognition-language labels use the selected app language.
 
 Native catalogs reuse the web app's matching phrases and include native-specific
 copy. They are small bundled catalogs and import no browser runtime. Mark

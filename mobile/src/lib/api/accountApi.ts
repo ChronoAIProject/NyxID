@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { requestJson } from "./http";
 import type { AccountProfile } from "./types";
@@ -15,7 +16,7 @@ function parseResponse<T>(schema: z.ZodType<T>, payload: unknown): T {
   const result = schema.safeParse(payload);
   // Keep secret-bearing server payloads out of error messages and telemetry.
   if (!result.success)
-    throw new Error("NyxID returned an unexpected response. Please try again.");
+    throw localizedError("NyxID returned an unexpected response. Please try again.");
   return result.data;
 }
 

@@ -1,5 +1,5 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
+import { useCardTranslation } from "@/components/assistant/card-language";
+import type { translateUi as translate } from "@/i18n/use-ui-translation";
 import { useEffect, useId, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import type { z } from "zod";
@@ -12,9 +12,14 @@ import { assistantJson } from "@/lib/assistant/assistant-http";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { authoredSkillPreviewSchema, learningDraftEditable } from "@/schemas/agent-skills";
+import { authoredSkillPreviewQuery } from "@/lib/assistant/authored-skill-preview";
+import { usePinnedDecisionCard } from "./decision-card-presentation";
+import { Link } from "@tanstack/react-router";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { publicationFailureText, publicationRuleText } from "@/lib/assistant/skill-publication-copy";
 import { ProposalDraftEditor } from "./learning-draft-editor";
+import { DecisionCardActions } from "./decision-card-actions";
+import { DecisionReview } from "./decision-review";
 
 // A `publishing` row whose lease expired was interrupted (for example the
 // request was cancelled). The server offers publish, retry, deny and discard
@@ -22,28 +27,30 @@ import { ProposalDraftEditor } from "./learning-draft-editor";
 // read-only check remains.
 const NOTHING_SENT = ["publish", "retry", "deny", "discard"];
 
-function interruptedCopy(actions: readonly string[]): string {
+function interruptedCopy(translateUi: typeof translate, actions: readonly string[]): string {
   if (actions.some((action) => NOTHING_SENT.includes(action))) {
-    return "The last attempt was interrupted before anything was sent to Ornn.";
+    return translateUi("The last attempt was interrupted before anything was sent to Ornn.");
   }
   return actions.includes("check")
-    ? "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version; Check again only reads, it never writes again."
-    : "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.";
+    ? translateUi("The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version; Check again only reads, it never writes again.")
+    : translateUi("The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.");
 }
 
 type AuthoredPreview = z.infer<typeof authoredSkillPreviewSchema>;
 
 function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   if (!data.failure_code) return null;
   return (
     <>
       <p role="alert" className="text-14 text-destructive">
-        {publicationFailureText(data.failure_code, data.status, "authored")}
+        {data.failure_code === "nyxid_refused" && data.failure_stage === "publish" && data.actions.includes("retry")
+          ? translateUi("NyxID stopped the upload before sending it to Ornn. Check that your Ornn connection allows publication, then retry this draft.")
+          : translateUi(publicationFailureText(data.failure_code, data.status, "authored"))}
       </p>
       {data.failure_rules.length ? (
         <ul className="list-disc pl-5 text-13 text-muted-foreground">
-          {data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}
+          {data.failure_rules.map((rule) => <li key={rule}>{translateUi(publicationRuleText(rule))}</li>)}
         </ul>
       ) : data.failure_details_unavailable ? (
         <p className="text-13 text-muted-foreground">{translateUi("Format details unavailable.")}</p>
@@ -58,7 +65,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   readonly accepted: boolean;
   readonly onAccepted: (accepted: boolean) => void;
 }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   if (data.scope_unavailable) {
     return (
       <p role="alert" className="text-13 text-muted-foreground">{translateUi("Scope unavailable. Reload the draft before allowing publication.")}</p>
@@ -80,7 +87,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
             checked={accepted}
             onCheckedChange={(checked) => onAccepted(checked === true)}
           />
-          <Label htmlFor={id}>{translateUi("I accept this reduced scope (")}{omissions.length}{translateUi(" declared omission")}{omissions.length === 1 ? "" : "s"}).
+          <Label htmlFor={id}>{translateUi("I accept this reduced scope ({{count}} declared omissions).", { count: omissions.length })}
           </Label>
         </div>
       ) : (
@@ -90,17 +97,17 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   );
 }
 
-function coverageText(upload: AuthoredPreview["coverage"][number]): string {
-  if (upload.expired) return "expired";
-  if (upload.unknown) return "read coverage unavailable";
-  if (upload.reads === 0) return "not read";
-  if (upload.lower_bound) return `at least ${upload.percent}%`;
-  if (upload.percent === 100) return "read completely";
-  return `read ${upload.percent}%`;
+function coverageText(translateUi: typeof translate, upload: AuthoredPreview["coverage"][number]): string {
+  if (upload.expired) return translateUi("expired");
+  if (upload.unknown) return translateUi("read coverage unavailable");
+  if (upload.reads === 0) return translateUi("not read");
+  if (upload.lower_bound) return translateUi("at least {{percent}}%", { percent: upload.percent });
+  if (upload.percent === 100) return translateUi("read completely");
+  return translateUi("read {{percent}}%", { percent: upload.percent });
 }
 
 function CoverageList({ data }: { readonly data: AuthoredPreview }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   return (
     <>
       {data.coverage.length ? (
@@ -109,10 +116,11 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
           <ul>
             {data.coverage.map((upload) => (
               <li key={upload.id}>
-                {upload.name}: {coverageText(upload)}
+                {upload.name}: {coverageText(translateUi, upload)}
                 {upload.since_reset_percent != null ? (
-                  <>; {upload.lower_bound ? translateUi("at least ") : translateUi("read ")}
-                    {upload.since_reset_percent}{translateUi("% since the last context reset")}</>
+                  <>; {upload.lower_bound
+                    ? translateUi("at least {{percent}}% since the last context reset", { percent: upload.since_reset_percent })
+                    : translateUi("read {{percent}}% since the last context reset", { percent: upload.since_reset_percent })}</>
                 ) : null}
               </li>
             ))}
@@ -121,7 +129,7 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
       ) : null}
       {data.coverage_omitted ? (
         <p className="text-13 text-muted-foreground">
-          {data.coverage_omitted}{translateUi(" earlier uploads are not shown.")}</p>
+          {translateUi("{{uploads}} earlier uploads are not shown.", { uploads: data.coverage_omitted })}</p>
       ) : null}
     </>
   );
@@ -136,7 +144,8 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   readonly deciding: boolean;
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
+  const pinned = usePinnedDecisionCard();
   const reference = card.authored_skill!;
   const owner = useAuthStore((s) => s.user?.id);
   const queryClient = useQueryClient();
@@ -145,17 +154,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   const [acceptReducedScope, setAcceptReducedScope] = useState(false);
   const scopeId = useId();
   const [editing, setEditing] = useState(false);
-  const preview = useQuery({
-    queryKey: ["authored-skill-review", owner, reference.proposal_id, card.id],
-    queryFn: async () => authoredSkillPreviewSchema.parse(await assistantJson(
-      `/assistant/nyxagent/agents/${encodeURIComponent(reference.agent_id)}/learning/proposals/${encodeURIComponent(reference.proposal_id)}?acknowledgement_id=${encodeURIComponent(card.id)}`,
-    )),
-    enabled: Boolean(owner),
-    refetchInterval: (query) => query.state.data?.status === "publishing" && query.state.data?.lease_live
-      ? Math.min(3000 * 2 ** Math.min(query.state.dataUpdateCount, 3), 24000) : false,
-    retry: false,
-    throwOnError: false,
-  });
+  const preview = useQuery(authoredSkillPreviewQuery(owner, card));
   const data = preview.data;
   const actions = data?.actions ?? [];
   useEffect(() => {
@@ -203,9 +202,10 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   }
   const messages = <>
     {error ? <p role="alert" className="text-14 text-destructive">{translateUi(error)}</p> : null}
-    {notice ? <p role="status" className="text-14 text-muted-foreground">{notice}</p> : null}
+    {notice ? <p role="status" className="text-14 text-muted-foreground">{translateUi(notice)}</p> : null}
   </>;
-  const buttons = actions.length > 0 ? <div className="flex justify-end gap-2">
+  const buttons = actions.length > 0 || (preview.isError && card.status === "pending") ? <div className="flex justify-end gap-2">
+    {preview.isError && card.status === "pending" && !actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Deny")}</Button> : null}
     {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Deny")}</Button> : null}
     {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Dismiss confirmation")}</Button> : null}
     {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>{translateUi("Discard")}</Button> : null}
@@ -217,15 +217,21 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>{translateUi("Show updated draft")}</Button> : null}
   </div> : null;
   if (confirmationsBypassed) {
-    return <DecisionReceipt acknowledgement={card} retired={card.status === "pending"}
-      summary={data?.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}` : undefined} />;
+    return <div lang={language} className="space-y-2">
+      <DecisionReceipt acknowledgement={card} retired={card.status === "pending"}
+        summary={data?.state === "pinned" ? translateUi("Skill {{name}} {{version}} published and attached to {{agent}}", { name: data.name, version: data.version, agent: data.agent_name }) : undefined} />
+      {data?.failure_code ? <div className="ml-[30px] space-y-2"><FailureDetails data={data} /></div> : null}
+      {preview.isError ? <p role="alert" className="ml-[30px] text-14 text-destructive">{translateUi("Publication status unavailable. Reload to check whether the skill was published and attached.")}</p> : null}
+    </div>;
   }
   if (data?.state && data.state !== "active") {
-    const stateSummary = data.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}`
-      : data.state === "discarded" ? "Skill draft discarded"
-      : data.state === "invalidated" ? "Skill draft is no longer available"
-      : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available."
-      : "This confirmation no longer matches the draft.";
+    const stateSummary = data.state === "pinned" ? translateUi("Skill {{name}} {{version}} published and attached to {{agent}}", {
+        name: data.name, version: data.version, agent: data.agent_name,
+      })
+      : data.state === "discarded" ? translateUi("Skill draft discarded")
+      : data.state === "invalidated" ? translateUi("Skill draft is no longer available")
+      : data.state === "dismissed" ? translateUi("Confirmation dismissed; the publication remains available.")
+      : translateUi("This confirmation no longer matches the draft.");
     const status = <DecisionReceipt acknowledgement={data.state === "pinned" ? { ...card, status: "allowed", decided_by: "user" } : card}
       summary={stateSummary} />;
     if (!buttons && !error && !notice) return status;
@@ -239,20 +245,24 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
       </div>
     </div>;
   }
-  if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
-  return <section aria-label={translateUi("Review skill draft")} className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
-    <p className="type-card-title">{translateUi("Review skill draft")}{data ? translateUi(": {{name}} · {{version}}", { name: data.name, version: data.version }) : ""}</p>
-    {data ? <p className="text-14">{translateUi("Attach to ")}{data.agent_name}</p> : null}
+  if (!data && card.status !== "pending" && card.status !== "used") return <DecisionReceipt acknowledgement={card} />;
+  const title = data
+    ? translateUi(data.status === "publication_failed" ? "Skill publication failed: {{name}} · {{version}}" : "Review skill draft: {{name}} · {{version}}", { name: data.name, version: data.version })
+    : translateUi(card.status === "used" ? "Skill publication status" : "Review skill draft");
+  const content = <>
+    {!pinned ? <p className="type-card-title">{title}</p> : null}
+    {data ? <p className="text-14">{translateUi("Attach to {{agent}}", { agent: data.agent_name })}</p> : null}
     <p className="text-14 text-muted-foreground">{translateUi("Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.")}</p>
+    <p className="text-13 text-muted-foreground">{translateUi("Publishing also requires your account's Ornn create or update permission. Approving this draft does not change your Ornn role.")}</p>
     {data?.base_scripts_not_copied ? <p className="text-14 text-muted-foreground">{translateUi("Scripts and executable files from the source skill are not copied into this draft.")}</p> : null}
     {data?.files.map((file) => <div key={file.path}>
       <p className="type-row-title">{file.path}</p>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-14">{file.content}</pre>
+      <pre className={`${pinned ? "" : "max-h-80 overflow-auto "}whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-14`}>{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">
-      <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
+      {pinned ? <Button asChild variant="outline" size="sm" disabled={deciding}><Link to="/assistant" search={(previous) => ({ ...previous, agent: reference.agent_id, proposal: reference.proposal_id, details: "skills" })}>{translateUi("Edit before publishing")}</Link></Button> : <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
         {editing ? translateUi("Close the editor") : translateUi("Edit before publishing")}
-      </Button>
+      </Button>}
       {editing ? <>
         <p className="text-14 text-muted-foreground">{translateUi("Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.")}</p>
         <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
@@ -262,12 +272,17 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
         }} />
       </> : null}
     </div> : null}
-    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? translateUi("Publication is in progress.") : interruptedCopy(actions)}</p> : null}
+    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? translateUi("Publication is in progress.") : interruptedCopy(translateUi, actions)}</p> : null}
     {preview.isLoading ? <p role="status">{translateUi("Loading complete draft…")}</p> : null}
-    {preview.isError ? <p role="alert" className="text-14 text-destructive">{translateUi("Draft unavailable or changed. Reload and review it again.")}</p> : null}
+    {preview.isError ? <p role="alert" className="text-14 text-destructive">{translateUi(card.status === "used" ? "Publication status unavailable. Reload to check whether the skill was published and attached." : "Draft unavailable or changed. Reload and review it again.")}</p> : null}
     {data ? (
       <>
         <FailureDetails data={data} />
+        {actions.includes("check") && !data.base_scripts_not_copied ? (
+          <p className="text-13 text-muted-foreground">
+            {translateUi("You can ask NyxBot to start a new skill draft. NyxID will not publish this draft twice.")}
+          </p>
+        ) : null}
         <ScopeSection
           data={data}
           id={scopeId}
@@ -278,6 +293,32 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
       </>
     ) : null}
     {messages}
-    {buttons}
+  </>;
+  if (pinned) {
+    const file = data?.files.find((item) => item.path === "SKILL.md") ?? data?.files[0];
+    const lines = data?.files.reduce((total, item) => total + (item.content ? item.content.split(/\r?\n/).length : 0), 0) ?? 0;
+    return <DecisionReview title={title} busy={deciding} ready={Boolean(data) && !preview.isError}
+      reviewLabel={translateUi("Review full draft")}
+      onDeny={actions.includes("deny") || actions.includes("dismiss_card") || preview.isError ? () => void decide("deny") : undefined}
+      denyLabel={actions.includes("dismiss_card") && !actions.includes("deny") ? translateUi("Dismiss confirmation") : undefined}
+      actions={buttons}
+      summary={<>
+        {data ? <>
+          <p>{translateUi("Publish privately to Ornn and attach to {{agent}}.", { agent: data.agent_name })}</p>
+          <p>{translateUi("{{count}} files · {{lines}} lines", { count: data.files.length, lines })}</p>
+          {data.scope?.status === "reduced" ? <p className="text-warning">{translateUi("Reduced scope · {{count}} declared omissions", { count: data.scope.omissions.length })}</p> : null}
+        </> : <p>{translateUi("Loading complete draft…")}</p>}
+        {preview.isError ? <p role="alert" className="text-destructive">{translateUi("Draft unavailable or changed. Reload and review it again.")}</p> : null}
+        {messages}
+      </>}
+      preview={file ? <div aria-label={translateUi("Draft preview")} className="relative max-h-24 overflow-hidden rounded-lg bg-muted p-3">
+        <pre className="whitespace-pre-wrap break-words font-mono text-12">{file.content.split(/\r?\n/).slice(0, 6).join("\n")}</pre>
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-muted to-transparent" />
+      </div> : undefined}
+    >{content}</DecisionReview>;
+  }
+  return <section lang={language} aria-label={translateUi("Review skill draft")} className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
+    {content}
+    <DecisionCardActions>{buttons}</DecisionCardActions>
   </section>;
 }

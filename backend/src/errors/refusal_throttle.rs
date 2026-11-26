@@ -71,16 +71,22 @@ impl AppError {
             | Self::SkillRead(_)
             | Self::AssistantMissingAccess(_)
             | Self::Conflict(_)
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. }
             | Self::AssistantTurnActive
             | Self::VoiceQueueFull
             | Self::VoiceProviderUnavailable
             | Self::MonitoringUnavailable
             | Self::MonitoringNotConfigured
             | Self::DiagnosticNotReady
+            // Crash reporting is a first-party diagnostics surface, not a proxy refusal.
+            | Self::CrashReportingUnavailable
+            | Self::CrashReportConsentRequired
             | Self::BillingRecoveryWaiting { .. }
             | Self::BillingRecoveryFailed { .. }
             | Self::VoiceStartFailed(_)
             | Self::AssistantTurnRequired
+            | Self::OrgAgentAccessAuthoringUnavailable
             | Self::AssistantModelAuthorityChanged
             | Self::GrantCascadeConfirmationRequired(_)
             | Self::RateLimited
@@ -275,6 +281,8 @@ mod tests {
             AppError::MonitoringUnavailable,
             AppError::MonitoringNotConfigured,
             AppError::DiagnosticNotReady,
+            AppError::CrashReportingUnavailable,
+            AppError::CrashReportConsentRequired,
             AppError::AssistantTurnRequired,
             AppError::AssistantModelAuthorityChanged,
             AppError::RateLimited,

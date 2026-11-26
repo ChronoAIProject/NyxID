@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MOBILE_APP_LINK } from "@/lib/mobile-app-link";
 import {
   useNotificationSettings,
   useUpdateNotificationSettings,
@@ -31,7 +32,6 @@ import {
   usePushDevices,
 } from "@/hooks/use-approvals";
 
-const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 const DISMISSED_KEY = "nyxid:notification-setup-dismissed";
 
 export function NotificationSetupCard() {
@@ -156,7 +156,7 @@ export function NotificationSetupCard() {
                   ? translateUi("Writes and destructive operations require approval; reads and stateless model inference can proceed. ")
                   : translateUi("AI agents must request your approval before accessing services. ")}
                 <Link
-                  to="/approvals/settings"
+                  to="/settings" search={{ tab: "notifications" }}
                   className="text-primary-text hover:underline"
                 >{translateUi("Manage settings")}</Link>
               </p>

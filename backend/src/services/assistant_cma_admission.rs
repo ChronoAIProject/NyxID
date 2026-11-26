@@ -416,6 +416,10 @@ async fn store_creation(
             if let Some(previous) = collection.find_one(doc! {"user_id":&candidate.user_id,"idempotency_key":&candidate.idempotency_key}).session(&mut *tx).await? {
                 same_request(&previous, candidate)?;
                 if previous.submission_state == "confirmed_not_created" {
+                    // Only publish the candidate envelope under the ID used to seal it.
+                    if candidate.id != previous.id {
+                        return Err(drift());
+                    }
                     let mut next = previous.clone();
                     next.sandbox_generation = candidate.sandbox_generation;
                     next.submission_generation = previous.submission_generation.checked_add(1).ok_or_else(drift)?;
@@ -678,6 +682,9 @@ async fn change_creation(
     .await
 }
 
+#[path = "assistant_cma_reservation_admission.rs"]
+pub(super) mod reservation_admin;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn admit(
     db: &Database,
@@ -873,7 +880,7 @@ pub async fn admit(
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let context = RecordContext::new(COLLECTION_NAME, &id, owner, &["request_ciphertext"])?;
         let request_ciphertext =
-            super::record_field_service::encrypt_context(keys, &context, body).await?;
+            crate::crypto::record_field::encrypt_context(keys, &context, body).await?;
         let expected_workspace_id = match &operation {
             Operation::CreateAgent { workspace, .. } => workspace.clone(),
             Operation::WorkspaceAgent { id } => Some(id.clone()),
@@ -1460,10 +1467,16 @@ fn recover_occupied_sandbox<'a>(
                 "operation_id":bson::Bson::Null,"cma_agent_id":bson::Bson::Null,
                 "cma_sandbox_id":bson::Bson::Null},
             )
-            .await
-            .map_err(|_| recovery_slot_occupied())?;
+            .await;
+        let recoverable = match recoverable {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = sandboxes::audit_occupied_slot(db, &parent).await;
+                return Err(recovery_slot_occupied());
+            }
+        };
         if recoverable.is_some() {
-            recover_creation_core(
+            let result = recover_creation_core(
                 db,
                 keys,
                 gateway,
@@ -1472,8 +1485,11 @@ fn recover_occupied_sandbox<'a>(
                 parent.generation,
                 CreationRecoveryAccess::Admission,
             )
-            .await
-            .map_err(|_| recovery_slot_occupied())?;
+            .await;
+            if result.is_err() {
+                let _ = sandboxes::audit_occupied_slot(db, &parent).await;
+                return Err(recovery_slot_occupied());
+            }
         }
         Ok(())
     })
@@ -1565,6 +1581,23 @@ async fn recover_creation_core(
             require_recovery_current(db, &creation).await?;
             let body = sandboxes::recover_creation_request(db, keys, owner, id, generation).await?;
             if sandboxes::prepare_creation_request(&body)?.hash != creation.request_hash {
+                return Err(drift());
+            }
+            let context = RecordContext::new(
+                COLLECTION_NAME,
+                &creation.id,
+                &creation.user_id,
+                &["request_ciphertext"],
+            )?;
+            let retained = super::assistant_cma_request_record::open(
+                keys,
+                &context,
+                creation.request_context_version,
+                creation.request_ciphertext.as_deref(),
+                Some(&creation.request_hash),
+            )
+            .await?;
+            if *body != *retained {
                 return Err(drift());
             }
             if let Err(error) = gateway
@@ -1687,6 +1720,20 @@ mod tests {
         mod legacy_sandboxes {
             use super::*;
             include!("assistant_cma_legacy_tests.rs");
+        }
+
+        mod reservation_recovery {
+            use super::*;
+            include!("assistant_cma_reservation_recovery_tests.rs");
+        }
+
+        mod admin_reservations {
+            use super::*;
+            include!("assistant_cma_reservation_tests.rs");
+        }
+
+        mod mixed_requests {
+            include!("assistant_cma_mixed_requests_tests.rs");
         }
 
         mod writer_cutover {

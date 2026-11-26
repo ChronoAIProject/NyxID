@@ -75,22 +75,23 @@ pub async fn upload(
         .headers()
         .get("x-attachment-name")
         .and_then(|v| v.to_str().ok())
-        .filter(|v| v.len() <= 1024)
-        .unwrap_or("attachment");
-    let name = urlencoding::decode(encoded)
+        .filter(|v| v.len() <= 1024);
+    let name = encoded
+        .map(urlencoding::decode)
+        .transpose()
         .map_err(|_| AppError::BadRequest("Invalid display filename".into()))?
-        .into_owned();
+        .map(|name| name.into_owned());
     let bytes = axum::body::to_bytes(request.into_body(), reservation.payload_limit)
         .await
         .map_err(|_| AppError::BadRequest("Attachment exceeds 20 MiB.".into()))?;
     let payload = bytes.to_vec();
     drop(bytes);
-    let item = Box::pin(uploads::upload_authorized(
+    let item = Box::pin(uploads::upload_named_authorized(
         &state.db,
         &state.encryption_keys,
         &user,
         &scope,
-        &name,
+        name.as_deref(),
         payload,
         access,
     ))
@@ -154,9 +155,27 @@ pub async fn thread_image(
         .as_ref()
         .map(std::sync::Arc::as_ref)
         .ok_or_else(|| AppError::Forbidden("A thread Agent Key is required".into()))?;
+    // Retain the egress byte reservation with the actual HTTP buffer.
+    let reservation =
+        uploads::byte_budget::reserve(crate::services::attachment_extraction::MAX_BYTES).await?;
     let (mime, bytes) =
         uploads::chat_bytes(&state.db, &state.encryption_keys, chat, &id, true).await?;
-    content(mime, bytes)
+    let mut response = content(mime, Vec::new())?;
+    *response.body_mut() = Body::from(bytes::Bytes::from_owner(ReservedContent {
+        bytes,
+        _reservation: reservation,
+    }));
+    Ok(response)
+}
+
+struct ReservedContent {
+    bytes: Vec<u8>,
+    _reservation: uploads::byte_budget::ByteReservation,
+}
+impl AsRef<[u8]> for ReservedContent {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 fn content(mime: String, bytes: Vec<u8>) -> AppResult<Response> {

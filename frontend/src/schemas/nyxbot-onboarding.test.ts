@@ -117,7 +117,9 @@ describe("Nyxbot authorization boundaries", () => {
     ).toEqual({ channel: "telegram" });
     expect(
       nyxbotSearchSchema.parse({ channel: "instagram" }).channel,
-    ).toBeUndefined();
+    ).toBe("instagram");
+    expect(nyxbotSearchSchema.parse({ channel: "messenger" }).channel).toBe("messenger");
+    expect(nyxbotSearchSchema.parse({ channel: "unsupported" }).channel).toBeUndefined();
   });
   it.each(["account", "source", "channel", "success", "link"])(
     "accepts %s as a view without accepting completion claims",

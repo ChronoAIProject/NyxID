@@ -182,6 +182,119 @@ async fn proxy_envelope_allowlists_headers_and_preserves_provider_json() {
 }
 
 #[tokio::test]
+async fn approval_2874_cli_decision_matches_handler_contract() {
+    let server = MockServer::start().await;
+    let contract: Value =
+        serde_json::from_str(include_str!("fixtures/approval-decision.json")).unwrap();
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/approvals/requests/{ID}/decide")))
+        .and(wiremock::matchers::body_json(contract))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"approved"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let out = run(&server, &["approval", "approve", ID]).await;
+    assert!(out.status.success(), "{}", output_text(&out));
+}
+
+#[tokio::test]
+async fn approval_2874_proxy_returns_pending_and_reads_result_without_reposting() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {SENTINEL}").as_str(),
+        ))
+        .and(path("/api/v1/proxy/s/test/append"))
+        .and(wiremock::matchers::header("x-nyxid-approval-mode", "async"))
+        .and(wiremock::matchers::header(
+            "x-nyxid-approval-wait-seconds",
+            "80",
+        ))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error":"approval_required", "error_code":7000, "request_id":ID,
+            "message":"Approval required."
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let out = run(
+        &server,
+        &[
+            "proxy", "request", "test", "append", "-m", "POST", "--output", "json",
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(2), "{}", output_text(&out));
+    assert_eq!(json(&out)["request_id"], ID);
+    assert_eq!(json(&out)["status"], "pending");
+
+    let result =
+        json!({"status":"approved", "execution":{"state":"completed","result":{"status":200}}});
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {SENTINEL}").as_str(),
+        ))
+        .and(path(format!("/api/v1/approvals/requests/{ID}/status")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&result))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let out = run(&server, &["approval", "status", ID, "--output", "json"]).await;
+    assert!(out.status.success(), "{}", output_text(&out));
+    assert_eq!(json(&out), result);
+}
+
+#[tokio::test]
+async fn approval_2874_cli_custom_and_omitted_wait_budget() {
+    for (args, budget) in [
+        (vec!["--approval-wait", "25"], Some("25")),
+        (vec!["--no-approval-wait"], None),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(move |request: &Request| {
+                request
+                    .headers
+                    .get("x-nyxid-approval-wait-seconds")
+                    .and_then(|v| v.to_str().ok())
+                    == budget
+            })
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("created")
+                    .set_delay(std::time::Duration::from_millis(2200)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut command = vec!["proxy", "request", "test", "append", "-m", "POST"];
+        command.extend(args);
+        let out = run(&server, &command).await;
+        assert!(out.status.success(), "{}", output_text(&out));
+        let progress = String::from_utf8_lossy(&out.stderr);
+        assert!(progress.contains("nyxid approval list"), "{progress}");
+        if let Some(seconds) = budget {
+            assert!(progress.contains(seconds));
+        }
+    }
+}
+
+#[tokio::test]
+async fn approval_2874_fast_proxy_response_skips_wait_notice() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ready"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let out = run(&server, &["proxy", "request", "test", "items"]).await;
+    assert!(out.status.success(), "{}", output_text(&out));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("may need approval"));
+}
+
+#[tokio::test]
 async fn proxy_pending_exits_two_and_http_errors_keep_status_path_and_body() {
     for status in [409, 422, 503] {
         let server = MockServer::start().await;

@@ -208,8 +208,16 @@ revocation. Stop outstanding turns and close voice on detected access loss.
   materializing notification settings or creating new requests.
   An operation needing a new decision returns
   `approval_unsupported` before creating a card, proposal, consent request or
-  dispatching the operation. Ordinary text and other MCP clients retain their
-  approval behavior. The option is independent of Voice and available to other
+  dispatching the operation. An enrolled voice task with no outstanding approval
+  requirement continues through normal dispatch, including when ordinary policy
+  allows the operation, an existing grant covers it, or Full access automatically
+  approves it. Explicit policy denials still refuse the operation.
+  Direct voice tool errors identify the called tool and preserve the error content
+  returned by MCP. A failed skill lookup only establishes what happened to that
+  lookup. Transport failures identify the stage and cause alongside
+  `outcome_unknown` and `retry_allowed: false`. The direct voice client accepts
+  up to 256 KiB for the entire MCP response. Ordinary text and other MCP clients
+  retain their approval behavior. The option is independent of Voice and available to other
   noninteractive callers; omitted options keep the existing request flow. No MCP
   protocol extension is needed.
 * Duplicate native events are deduplicated by call ID. An unknown result prohibits

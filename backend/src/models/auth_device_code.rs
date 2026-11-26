@@ -135,6 +135,8 @@ pub struct AuthDeviceCode {
     #[serde(default, with = "bson_datetime::optional")]
     pub purge_at: Option<DateTime<Utc>>,
     pub approver_ip_hmac: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_context_version: Option<u8>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub delivery_access_token_encrypted: Option<Vec<u8>>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -299,6 +301,7 @@ mod tests {
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: Some("33334444".repeat(8)),
+            delivery_context_version: None,
             delivery_access_token_encrypted: Some(vec![0xab, 0xcd, 0xef]),
             delivery_refresh_token_encrypted: Some(vec![0x12, 0x34, 0x56]),
             delivery_access_token_expires_in: Some(900),

@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { useEffect, useRef } from "react";
 import { Animated, StyleSheet, View } from "react-native";
 import type { DimensionValue, StyleProp, ViewStyle } from "react-native";
@@ -12,6 +14,7 @@ import { radius, spacing } from "../theme/designTokens";
  * One soft pulse; static under Reduce Motion. VoiceOver hears one "Loading".
  */
 function usePulse() {
+  useAppLanguage();
   const reduced = useReducedMotionPreference();
   const opacity = useRef(new Animated.Value(1)).current;
   useEffect(() => {
@@ -48,6 +51,7 @@ function Bar({
   height?: number;
   round?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -70,7 +74,7 @@ export function SkeletonRows({
   icon = true,
   detail = true,
   title = false,
-  accessibilityLabel = "Loading",
+  accessibilityLabel = translateApp("Loading"),
   style,
 }: {
   rows?: number;
@@ -81,6 +85,7 @@ export function SkeletonRows({
   accessibilityLabel?: string;
   style?: StyleProp<ViewStyle>;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const opacity = usePulse();
   return (
@@ -132,11 +137,12 @@ export function SkeletonRows({
 /** Card lists (Automations) on first load. */
 export function SkeletonCards({
   count = 3,
-  accessibilityLabel = "Loading",
+  accessibilityLabel = translateApp("Loading"),
 }: {
   count?: number;
   accessibilityLabel?: string;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const opacity = usePulse();
   return (

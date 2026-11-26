@@ -1,12 +1,23 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { MachineReviewRequired } from "./machineContracts";
 
 export const capabilityLabels = {
-  shell: "Shell commands",
-  files: "File tools",
-  browser: "Secure browser",
-  computer: "Full computer control",
-  developer_browser: "Developer browser",
+  get shell() {
+    return translateApp("Shell commands");
+  },
+  get files() {
+    return translateApp("File tools");
+  },
+  get browser() {
+    return translateApp("Secure browser");
+  },
+  get computer() {
+    return translateApp("Full computer control");
+  },
+  get developer_browser() {
+    return translateApp("Developer browser");
+  },
 } as const;
 export const machineCapabilitiesSchema = z
   .object({
@@ -66,8 +77,11 @@ export const machineSelectionSchema = z
       value.capabilities.browser ||
       (!value.capabilities.computer && !value.capabilities.developer_browser),
     {
-      message:
-        "Secure browser is required for computer and developer browser access.",
+      get message() {
+        return translateApp(
+          "Secure browser is required for computer and developer browser access.",
+        );
+      },
       path: ["capabilities", "browser"],
     },
   );
@@ -112,14 +126,18 @@ export function capabilitySelection(
   });
   if (!machine.can_edit || !machine.protocol_v2 || selectionRequired(machine))
     throw new MachineReviewRequired(
-      "This machine needs owner selection, current protocol support and editing authority before capabilities can change.",
+      translateApp(
+        "This machine needs owner selection, current protocol support and editing authority before capabilities can change.",
+      ),
     );
   for (const key of Object.keys(
     capabilityLabels,
   ) as (keyof MachineCapabilities)[]) {
     if (capabilities[key] && !machine.ceiling[key])
       throw new MachineReviewRequired(
-        `${capabilityLabels[key]} is off on the machine.`,
+        translateApp("{{label}} is off on the machine.", {
+          label: capabilityLabels[key],
+        }),
       );
   }
   return selection;
@@ -129,37 +147,53 @@ export function machineAccessState(machine: AgentMachine) {
   if (selectionRequired(machine))
     states.push(
       machine.selection_reason ??
-        "Execution is blocked until the owner approves a supported separation choice or explicitly chooses shared legacy access.",
+        translateApp(
+          "Execution is blocked until the owner approves a supported separation choice or explicitly chooses shared legacy access.",
+        ),
     );
   if (machine.mode === "shared_legacy" || machine.legacy)
     states.push(
-      "Shared legacy access: workspace and browser sessions may be shared with other agents.",
+      translateApp(
+        "Shared legacy access: workspace and browser sessions may be shared with other agents.",
+      ),
     );
   if (machine.mode === "separated" && !separationAvailable(machine))
     states.push(
-      "Separated execution is unavailable and refused. There is no automatic shared fallback.",
+      translateApp(
+        "Separated execution is unavailable and refused. There is no automatic shared fallback.",
+      ),
     );
   if (machine.quarantine_pending)
     states.push(
-      "Browser cleanup is pending. New browser work remains blocked until cleanup finishes.",
+      translateApp(
+        "Browser cleanup is pending. New browser work remains blocked until cleanup finishes.",
+      ),
     );
   if (machine.revocation_initialization_pending)
     states.push(
-      "Checking when earlier commands will stop. Refresh status shortly.",
+      translateApp(
+        "Checking when earlier commands will stop. Refresh status shortly.",
+      ),
     );
   else if (machine.execution_revocation_pending ?? machine.revocation_pending)
     states.push(
-      `Earlier commands are stopping.${machine.revocation_expires_at ? ` Expected deadline: ${machine.revocation_expires_at}.` : " Reconnect and refresh to confirm they have stopped."}`,
+      (machine.revocation_expires_at ? translateApp("Earlier commands are stopping. Expected deadline: {{time}}.", { time: machine.revocation_expires_at}) : translateApp("Earlier commands are stopping. Reconnect and refresh to confirm they have stopped.")),
     );
   else if (machine.delivery_pending)
     states.push(
-      "Earlier commands have stopped. Updated permissions still need machine acknowledgement.",
+      translateApp(
+        "Earlier commands have stopped. Updated permissions still need machine acknowledgement.",
+      ),
     );
   if (machine.revocation_diagnostic)
     states.push(
       machine.revocation_diagnostic === "authority_timing_upgrade_required"
-        ? "Update and reconnect this machine to confirm permission changes."
-        : "Recovery needs administrator attention. Earlier commands are still marked as stopping.",
+        ? translateApp(
+            "Update and reconnect this machine to confirm permission changes.",
+          )
+        : translateApp(
+            "Recovery needs administrator attention. Earlier commands are still marked as stopping.",
+          ),
     );
   return states;
 }

@@ -112,7 +112,7 @@ it.each([
   expect(replace).toHaveBeenCalledWith(`${path}${search}`);
 });
 
-async function showAuthPage(component: typeof LoginPage) {
+async function showAuthPage(component: typeof LoginPage | typeof RegisterPage) {
   const router = createRouter({
     routeTree: createRootRoute({ component }),
     history: createMemoryHistory({ initialEntries: ["/"] }),
@@ -168,8 +168,8 @@ it.each(["/solutions/help-desk", "/zh/solutions/help-desk"])(
       code: "NYX-ABCDEF12",
     });
     useAuthStore.setState({ isAuthenticated: false, isLoading: false });
-    const gate = route.parentRoute!.options.beforeLoad as () => unknown;
-    expect(gate()).toBeUndefined();
+    const gate = route.parentRoute!.options.beforeLoad!;
+    expect(gate({ location: { pathname: "/login", searchStr: destination.search } } as never)).toBeUndefined();
     const loginPage = await showAuthPage(LoginPage);
     await user.click(screen.getByRole("button", { name: "Sign up" }));
     await waitFor(() => expect(window.location.pathname).toBe("/register"));
@@ -249,9 +249,9 @@ it("keeps the authenticated auth-layout handoff on the trusted configured target
   const route = Object.values(appRouter.routesById).find(
     (r) => r.fullPath === "/login",
   )!;
-  const gate = route.parentRoute!.options.beforeLoad as () => unknown;
+  const gate = route.parentRoute!.options.beforeLoad!;
   act(() => {
-    gate();
+    gate({ location: { pathname: "/login", searchStr: window.location.search } } as never);
   });
   expect(assign).toHaveBeenCalledWith(
     new URL(target, window.location.origin).href,

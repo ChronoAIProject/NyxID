@@ -556,7 +556,7 @@ async fn revocation_during_slow_unwrap_aborts_admission_without_changing_history
 #[tokio::test]
 async fn emergency_stop_during_slow_wrap_rolls_back_predecessor_delete_and_successor_adoption() {
     let (mut state, admitted) = super::tests::fixture("personal_kms_stop_replacement").await;
-    let claim = admit(state.clone(), admitted.clone()).await.unwrap();
+    let claim = std::sync::Arc::new(admit(state.clone(), admitted.clone()).await.unwrap());
     let before = state
         .db
         .collection::<AssistantAgentCredential>(CREDENTIALS)
@@ -566,14 +566,13 @@ async fn emergency_stop_during_slow_wrap_rolls_back_predecessor_delete_and_succe
         .unwrap();
     let (provider, mut calls) = delay_keys(&mut state, Duration::from_millis(200));
     let pending_state = state.clone();
-    let row = claim.conversation.clone();
-    let old = claim.credential.api_key_id.clone();
+    let pending_claim = claim.clone();
     let pending = tokio::spawn(async move {
         credentials::replace_for_turn(
             &pending_state.db,
             &pending_state.encryption_keys,
-            &row,
-            &old,
+            &pending_claim.conversation,
+            &pending_claim.credential,
         )
         .await
     });

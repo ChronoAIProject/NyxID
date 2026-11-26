@@ -32,6 +32,33 @@ function schedule(overrides: Partial<CreditSchedule> = {}): CreditSchedule {
 }
 
 describe("SchedulesTable", () => {
+  it("offers catch-up only for active calendar schedules on capable deployments", async () => {
+    const onSeed = vi.fn();
+    render(
+      <SchedulesTable
+        schedules={[
+          schedule(),
+          schedule({ id: "paused", is_active: false }),
+          schedule({ id: "recipient", timing: "recipient" }),
+        ]}
+        canWrite
+        updatePending={false}
+        onEdit={vi.fn()}
+        onToggle={vi.fn()}
+        onSeed={onSeed}
+      />,
+    );
+    expect(
+      screen.getAllByRole("button", { name: "Grant missing credits" }),
+    ).toHaveLength(1);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Grant missing credits" }),
+    );
+    expect(onSeed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "schedule-1" }),
+    );
+  });
+
   it("shows current-period progress and exposes pause as a switch", async () => {
     const onToggle = vi.fn();
     const user = userEvent.setup();

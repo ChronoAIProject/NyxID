@@ -13,8 +13,8 @@ gh cache list --repo ChronoAIProject/NyxID --limit 10000 \
   --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version
 ```
 
-It is a dry run unless `--apply` is supplied. Only the trusted main-branch
-maintenance workflow passes `--apply`; it supplies `CACHE_SOFT_CAP_GB=40`.
+It is a dry run unless `--apply` is supplied. Maintenance checks out trusted `main` code and
+passes `--apply`; it supplies `CACHE_SOFT_CAP_GB=40`.
 The soft cap is an alert, not an eviction target: the script never deletes a
 newest usable entry to reach it. A command-line `--soft-cap-gb` overrides the
 environment value for local reports.
@@ -22,14 +22,12 @@ environment value for local reports.
 ## Retention rules
 
 - **Release dist** (`v0-rust-dist-<target>-<os>-<arch>-<hash>-<hash>`): group by
-  target. Keep the newest main-ref generation for every target. Delete older main
-  generations only when that newer main entry exists. Release saves are expected
-  to be main-only; any non-main dist copy is removable. A sole newest main entry
-  is always protected.
+  target and ref. Keep the newest generation on each of `main` and `dev`.
+  Release pushes warm `main` on dependency changes. After the default branch
+  moves, the nightly warmer creates the `dev` cache visible to tags.
 - **Node caches** (`node-cache-<os>-<arch>-<manager>-<lockhash>`): the lockfile
-  hash identifies the exact job cache, so main entries are never removed. A
-  non-main entry is removable only when an entry with the identical full key
-  exists on main. This preserves separate frontend npm, SDK npm and mobile pnpm
+  hash identifies the exact job cache, so maintenance retains copies on `main` and `dev`.
+  Other refs can drop an identical copy available on the default branch. This preserves separate frontend npm, SDK npm and mobile pnpm
   caches; obsolete main lockfile generations are left to GitHub's seven-day
   unused-cache eviction.
 - **Backend coverage baselines** (`coverage-backend-base-v2-<sha>-<fingerprint>`):
@@ -37,15 +35,15 @@ environment value for local reports.
   every entry created in the last 14 days. This preserves exact-base-SHA lookup
   coverage while bounding old generations.
 - **Known Rust lanes** (`v0-rust-<lane>-<os>-<arch>-<8 hex>-<8 hex>` and
-  `v1-rust-incremental-<lane>-<os>-<arch>-<8 hex>-<8 hex>`) keep the newest main
-  generation and remove older or non-main copies only after that main
-  replacement exists with the same key prefix and cache version. Incremental
+  `v1-rust-incremental-<lane>-<os>-<arch>-<8 hex>-<8 hex>`) keep the newest
+  generation independently on `dev` and `main`, with the same key prefix
+  and cache version. Other refs retain the main-replacement and grace rules. Incremental
   jobs keep the `v1-rust-incremental` Swatinem prefix; a leftover `v0-rust`
   entry cannot replace it because the reader cannot restore that prefix.
   Non-incremental lanes stay on `v0-rust`. Billing and wizard lanes share their
   current backend/CLI replacements as configured in the script.
 - **Incremental Rust caches** (`v1-rust-graph-<lane>-<os>-<arch>-<manifest>-<commit>`,
-  and legacy `v0-rust-incremental-…`) use the same newest-main rule, grouped
+  and legacy `v0-rust-incremental-…`) use the same per-ref rule, grouped
   by prefix, lane, runner OS/architecture, and
   the actions cache `version`. That version is the hash of the exact path list.
   The one-path version `a625e3a14900daf5` and the two-path version
@@ -62,7 +60,7 @@ environment value for local reports.
   temporary cost fits the 100 GB repository limit. The 40 GB soft cap can warn
   during the transition but does not force eviction. Version-aware retention
   still protects new branch caches from incompatible old main entries.
-- **Branch Rust grace period:** both dependency/artifact and incremental
+- **Other branch Rust grace period:** both dependency/artifact and incremental
   entries are protected for 48 hours from creation even when main already has
   a compatible entry. This covers two roughly hour-long cold dispatches plus
   engineer review time across multiple six-hour maintenance cycles. Missing,
@@ -102,13 +100,14 @@ reason.
 Review it before enabling `--apply`; no cache deletion is part of normal code
 review or local testing.
 
-The maintenance workflow runs after main CI or Publish Images completes, every
+Maintenance runs after CI, CI Cache Warm, Release Build Cache or Publish Images
+completes on `main` or `dev`, every
 six hours, when its trusted configuration changes, or manually. Its concurrency
 group prevents overlapping delete passes. A pass is intentionally non-atomic:
 all Docker GHA readers were removed before this cleanup was introduced, so an
 index cannot be restored while its blobs are being retired.
 
-`ci-cache-warm.yml` is the only writer for ordinary main Rust dependency and
+`ci-cache-warm.yml` is the only writer for ordinary Rust dependency and
 incremental caches. `ci.yml` and the reusable `backend-tests.yml` explicitly pass
 `save-if: 'false'` and never save incremental directories. The composite also
 defaults to read-only; warm jobs explicitly opt in. Release caches and backend
@@ -133,9 +132,9 @@ together (version `f98f77cfa579f3b1`). A save of only the first path is version
 paths once; every warm save passes those outputs through
 `ci-rust-incremental-save` and does not restate them.
 
-Push warming writes main only. A manual `workflow_dispatch` also writes the
+Push warming writes to `main` and `dev`. A manual `workflow_dispatch` also writes the
 selected ref. Actions scopes that entry to the branch; the key itself has no
-branch segment, so ordinary readers still restore main with the same key.
+branch segment, so PRs can restore a compatible cache from their base or the default branch.
 Ordinary CI passes `save-if: false` and never writes dependency or incremental
 caches. Warm compiles run under `ci_resources.py`, which logs elapsed time,
 peak RSS, and swap, and each warm job uploads those samples.
@@ -185,7 +184,7 @@ still determine publication time even when Rust checks are reusable.
 Bounded incremental archives use the new `v1-rust-graph` prefix. Old
 `v0-rust-incremental` archives have no size bound and contain accumulated
 obsolete graphs; readers must not restore them under the new disk budget.
-Seven lanes retain graphs: Clippy, three KMS variants, CLI tests, CLI coverage
+Eight lanes retain graphs on dev: full and dev Clippy, three KMS variants, CLI tests, CLI coverage
 and permissions. Their dependency/workspace prefix stays `v1-rust-incremental`: native rustc paths
 and compiler flags are unchanged. Old main maintenance leaves the unknown new
 graph prefix alone but can still remove branch dependency entries until the

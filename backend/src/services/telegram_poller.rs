@@ -151,7 +151,7 @@ async fn handle_callback_query(
         }
     };
 
-    let request = match approval_service::get_request(&state.db, &request_id).await {
+    let decision = match approval_service::read_decision_request(&state.db, &request_id).await {
         Ok(r) => r,
         Err(crate::errors::AppError::NotFound(_)) => {
             answer_callback(state, &callback.id, "Request not found or expired").await;
@@ -174,12 +174,26 @@ async fn handle_callback_query(
         .map(|m| m.chat.id)
         .unwrap_or(callback.from.id);
 
-    if !callback_can_decide(
-        request.telegram_chat_id,
-        chat_id,
-        callback.from.id,
-        request.assistant_group.is_some(),
-    ) {
+    let request = &decision.request;
+    if request.from_org_policy
+        && (callback.message.is_none() || chat_id != callback.from.id || chat_id <= 0)
+    {
+        answer_callback(
+            state,
+            &callback.id,
+            "Review this request in NyxID on web or mobile",
+        )
+        .await;
+        return;
+    }
+    if !request.from_org_policy
+        && !callback_can_decide(
+            request.telegram_chat_id,
+            chat_id,
+            callback.from.id,
+            request.assistant_group.is_some(),
+        )
+    {
         tracing::warn!(
             "Chat ID mismatch: expected {:?}, got {}",
             request.telegram_chat_id,
@@ -194,18 +208,19 @@ async fn handle_callback_query(
     let decision_idempotency_key = format!("tg:{}:{}", callback.id, request_id);
 
     // Process the decision
-    match approval_service::process_decision(
+    match Box::pin(approval_service::process_decision_with_access(
         &state.db,
         &state.config,
         &state.http_client,
         state.fcm_auth.clone(),
         state.apns_auth.clone(),
-        &request_id,
+        decision,
         approved,
         None,
         Some(decision_idempotency_key.as_str()),
-        "telegram",
-    )
+        approval_service::DecisionSource::Telegram(callback.from.id),
+        None,
+    ))
     .await
     {
         Ok(updated) => {
@@ -215,22 +230,6 @@ async fn handle_callback_query(
                 format!("Rejected access to {}", updated.service_name)
             };
             answer_callback(state, &callback.id, &text).await;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(updated.user_id.clone()),
-                "approval_decision".to_string(),
-                Some(serde_json::json!({
-                    "request_id": request_id,
-                    "service_id": updated.service_id,
-                    "approved": approved,
-                    "channel": "telegram",
-                })),
-                None,
-                None,
-                None,
-                None,
-            );
         }
         Err(e) => {
             let callback_message = decision_callback_message(&e);
@@ -319,10 +318,38 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
     };
     let link_outcome = telegram_link_outcome(&channel);
 
-    match collection
-        .update_one(doc! { "_id": &channel.id }, update)
-        .await
-    {
+    // A second NyxID account linking the same chat must conflict with a
+    // decision that is relying on its currently unique account link.
+    let link = crate::services::transaction_service::run_db_only(
+        &state.db,
+        &(&state.db, chat_id, &channel.id, link_code, update),
+        |tx, (db, chat, id, code, update)| {
+            Box::pin(async move {
+                let channels = db.collection::<bson::Document>(CHANNELS);
+                channels
+                    .update_many(
+                        doc! {"telegram_chat_id":chat},
+                        doc! {"$inc":{"approval_decision_fence":1_i64}},
+                    )
+                    .session(&mut *tx)
+                    .await?;
+                let result = channels
+                    .update_one(
+                        doc! {"_id":id.as_str(),"telegram_link_code":*code,
+                        "telegram_link_code_expires_at":{"$gt":bson::DateTime::now()}},
+                        update.clone(),
+                    )
+                    .session(tx)
+                    .await?;
+                if result.matched_count != 1 {
+                    return Err(AppError::Forbidden("Telegram link expired".into()));
+                }
+                Ok(())
+            })
+        },
+    )
+    .await;
+    match link {
         Ok(_) => {
             let _ = telegram_service::send_text_message(
                 &state.http_client,
@@ -419,6 +446,7 @@ async fn answer_callback(state: &AppState, callback_id: &str, text: &str) {
 fn decision_callback_message(error: &AppError) -> &'static str {
     match error {
         AppError::Forbidden(message) if message == "Approval request expired" => "Request expired",
+        AppError::Forbidden(_) => "Review this request in NyxID on web or mobile",
         AppError::Conflict(_) => "Already processed or expired",
         AppError::NotFound(_) => "Request not found or expired",
         _ => "Server error, please try again",

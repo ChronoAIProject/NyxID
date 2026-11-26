@@ -124,6 +124,13 @@ pub async fn create(
         .await?;
     let result = create_in_session(db, &org, actor, &intent, &mut tx).await;
     let membership = org_membership_authority::finish(tx, result).await?;
+    crate::services::billing::schedules::eligibility::after_org_joined(
+        db,
+        &membership.org_user_id,
+        &membership.member_user_id,
+        membership.created_at,
+    )
+    .await;
     tracing::info!(org_user_id=%id,"Org user created");
     Ok((org, membership))
 }

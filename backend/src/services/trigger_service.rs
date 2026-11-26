@@ -125,7 +125,7 @@ pub async fn create(
     input: CreateInput,
 ) -> AppResult<CreatedTrigger> {
     let label = validate_label(&input.label)?;
-    validate_associations(
+    let assistant_target_owner = validate_associations(
         db,
         &input.user_id,
         input.user_service_id.as_deref(),
@@ -204,6 +204,7 @@ pub async fn create(
         }
     }
     let trigger = Trigger {
+        assistant_target_owner,
         secret_context_versions,
         id: id.clone(),
         source: input.source,
@@ -328,6 +329,74 @@ pub async fn list_for_owner(db: &Database, owner_user_id: &str) -> AppResult<Vec
         .map_err(Into::into)
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct ScheduleListQuery {
+    pub cursor: Option<ScheduleCursor>,
+    pub limit: Option<u32>,
+    pub enabled: Option<bool>,
+    pub agent_id: Option<Uuid>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct ScheduleCursor {
+    created_at: chrono::DateTime<Utc>,
+    id: String,
+}
+
+pub(crate) async fn list_schedules_for_owner(
+    db: &Database,
+    owner: &str,
+    query: ScheduleListQuery,
+) -> AppResult<(Vec<Trigger>, Option<ScheduleCursor>)> {
+    let limit = query.limit.unwrap_or(20);
+    if !(1..=50).contains(&limit) {
+        return Err(AppError::ValidationError("Use a limit from 1 to 50".into()));
+    }
+    let mut filter = doc! {
+        "user_id": owner,
+        "$or": [{"source": "schedule"}, {"delivery.type": "assistant"}],
+    };
+    if let Some(enabled) = query.enabled {
+        filter.insert("status", if enabled { "active" } else { "disabled" });
+    }
+    if let Some(agent_id) = query.agent_id {
+        filter.insert("delivery.agent_id", agent_id.to_string());
+    }
+    if let Some(cursor) = query.cursor {
+        if Uuid::parse_str(&cursor.id).is_err() {
+            return Err(AppError::ValidationError(
+                "Invalid schedule cursor ID".into(),
+            ));
+        }
+        let at = bson::DateTime::from_chrono(cursor.created_at);
+        filter.insert(
+            "$and",
+            vec![doc! {"$or": [
+                {"created_at": {"$lt": at}},
+                {"created_at": at, "_id": {"$gt": cursor.id}},
+            ]}],
+        );
+    }
+    let mut rows: Vec<Trigger> = db
+        .collection(TRIGGERS)
+        .find(filter)
+        .sort(doc! {"created_at": -1, "_id": 1})
+        .limit(i64::from(limit) + 1)
+        .await?
+        .try_collect()
+        .await?;
+    let next_cursor = if rows.len() > limit as usize {
+        rows.pop();
+        rows.last().map(|row| ScheduleCursor {
+            created_at: row.created_at,
+            id: row.id.clone(),
+        })
+    } else {
+        None
+    };
+    Ok((rows, next_cursor))
+}
+
 pub async fn get_for_actor(db: &Database, actor_user_id: &str, id: &str) -> AppResult<Trigger> {
     let trigger = db
         .collection::<Trigger>(TRIGGERS)
@@ -388,7 +457,7 @@ pub async fn update(
         .delivery
         .filter(|delivery| *delivery != current.delivery)
     {
-        validate_associations(
+        next.assistant_target_owner = validate_associations(
             db,
             &current.user_id,
             current.user_service_id.as_deref(),
@@ -479,6 +548,7 @@ pub async fn update(
                 let mut set = doc! {
                     "label": &saved.label,
                     "status": bson::to_bson(&saved.status).map_err(serialization_error)?,
+                    "assistant_target_owner":bson::to_bson(&saved.assistant_target_owner).map_err(serialization_error)?,
                     "delivery": bson::to_bson(&saved.delivery).map_err(serialization_error)?,
                     "delivery_secret_encrypted": encrypted,
                     "secret_context_versions":bson::to_bson(&saved.secret_context_versions).map_err(serialization_error)?,
@@ -875,7 +945,6 @@ pub async fn deliver_event(
                 if let WebhookAdmission::Accepted { record, body } = admission {
                     let outcome = deliver_webhook_body(
                         encryption_keys,
-                        http_client,
                         trigger,
                         event_id,
                         &body,
@@ -892,16 +961,9 @@ pub async fn deliver_event(
                         .as_bytes()
                         .to_vec(),
                 );
-                deliver_webhook_body(
-                    encryption_keys,
-                    http_client,
-                    trigger,
-                    event_id,
-                    &body,
-                    max_body_bytes,
-                )
-                .await
-                .map_err(|_| AppError::TriggerDeliveryFailed)?;
+                deliver_webhook_body(encryption_keys, trigger, event_id, &body, max_body_bytes)
+                    .await
+                    .map_err(|_| AppError::TriggerDeliveryFailed)?;
             }
         }
         TriggerDelivery::Agent { conversation_id } => {
@@ -915,7 +977,6 @@ pub async fn deliver_event(
             };
             channel_event_service::forward_trigger_event(
                 db,
-                http_client,
                 config,
                 jwt_keys,
                 channel_limiter,
@@ -1012,6 +1073,7 @@ pub async fn admit_webhook_delivery(
         status: TriggerDeliveryRecordStatus::Pending,
         attempts: 0,
         last_status_code: None,
+        failure_reason: None,
         envelope_encrypted: None,
         created_at: now,
         updated_at: now,
@@ -1070,7 +1132,6 @@ pub async fn admit_webhook_delivery(
 pub fn dispatch_webhook_event(
     db: Database,
     encryption_keys: Arc<EncryptionKeys>,
-    http_client: reqwest::Client,
     trigger: Trigger,
     record: TriggerDeliveryRecord,
     body: Zeroizing<Vec<u8>>,
@@ -1078,15 +1139,9 @@ pub fn dispatch_webhook_event(
 ) {
     crate::services::shutdown::process().spawn(async move {
         let event_id = record.event_id.clone();
-        let outcome = deliver_webhook_body(
-            &encryption_keys,
-            &http_client,
-            &trigger,
-            &event_id,
-            &body,
-            max_body_bytes,
-        )
-        .await;
+        let outcome =
+            deliver_webhook_body(&encryption_keys, &trigger, &event_id, &body, max_body_bytes)
+                .await;
         if let Err(error) = update_delivery_after_attempt(&db, &record, &outcome).await {
             tracing::warn!(
                 trigger_id = %trigger.id,
@@ -1127,6 +1182,7 @@ async fn update_delivery_after_attempt(
     };
     let mut set_doc = doc! {
         "status": status,
+        "failure_reason": outcome.as_ref().err().map(|f| f.reason),
         "last_status_code": bson::to_bson(&last_status_code).map_err(serialization_error)?,
         "updated_at": bson::DateTime::from_chrono(now),
     };
@@ -1147,7 +1203,6 @@ async fn update_delivery_after_attempt(
 
 async fn deliver_webhook_body(
     encryption_keys: &EncryptionKeys,
-    http_client: &reqwest::Client,
     trigger: &Trigger,
     event_id: &str,
     body: &[u8],
@@ -1193,7 +1248,6 @@ async fn deliver_webhook_body(
         last_status: None,
     })?;
     webhook_delivery_service::deliver_signed_body(
-        http_client,
         url,
         secret.as_slice(),
         "trigger.event",
@@ -1266,7 +1320,6 @@ pub async fn list_deliveries(
 pub async fn redeliver(
     db: &Database,
     encryption_keys: &EncryptionKeys,
-    http_client: &reqwest::Client,
     trigger: &Trigger,
     event_id: &str,
     max_body_bytes: usize,
@@ -1295,7 +1348,6 @@ pub async fn redeliver(
         .await?;
     let outcome = deliver_webhook_body(
         encryption_keys,
-        http_client,
         &trigger,
         event_id,
         body.as_slice(),
@@ -1406,7 +1458,7 @@ pub(crate) async fn validate_associations(
     user_id: &str,
     user_service_id: Option<&str>,
     delivery: &TriggerDelivery,
-) -> AppResult<()> {
+) -> AppResult<Option<crate::models::trigger::AssistantTargetOwner>> {
     if let Some(service_id) = user_service_id {
         let exists = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find_one(doc! { "_id": service_id, "user_id": user_id })
@@ -1428,12 +1480,21 @@ pub(crate) async fn validate_associations(
             ));
         }
         let agent = super::assistant_team_service::agent(db, user_id, agent_id).await?;
+        let access = super::org_agent_service::resolve_agent_access(db, user_id, &agent).await?;
         if agent.destroyed_at.is_some() {
             return Err(AppError::ValidationError(
                 "Target agent was destroyed".into(),
             ));
         }
         super::assistant_nyxagent::require_enabled(db, user_id).await?;
+        return Ok(Some(crate::models::trigger::AssistantTargetOwner {
+            agent_id: agent.id,
+            owner_id: if access.is_some_and(|a| a.shared().is_none()) {
+                agent.user_id
+            } else {
+                user_id.to_owned()
+            },
+        }));
     }
     if let TriggerDelivery::Agent { conversation_id } = delivery {
         let exists = db
@@ -1450,7 +1511,7 @@ pub(crate) async fn validate_associations(
             return Err(AppError::TriggerDeliveryUnsupported);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn validate_verification(verification: &TriggerVerification) -> AppResult<()> {
@@ -1522,6 +1583,8 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let change = webhook_delivery_service::with_test_webhook_target(
@@ -1617,6 +1680,8 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut staged = test_encryption_keys();
         staged.set_contextual_record_writes(false);
@@ -1761,16 +1826,9 @@ mod tests {
         verify_ingress(&strict, &live, &headers, None, body)
             .await
             .unwrap();
-        let replayed = redeliver(
-            &db,
-            &strict,
-            &reqwest::Client::new(),
-            &live,
-            "before-cutover",
-            1024 * 1024,
-        )
-        .await
-        .unwrap();
+        let replayed = redeliver(&db, &strict, &live, "before-cutover", 1024 * 1024)
+            .await
+            .unwrap();
         assert_eq!(replayed.status, TriggerDeliveryRecordStatus::Delivered);
         let (wire_headers, wire_body) = received.recv().await.unwrap();
         assert_eq!(wire_body.as_ref(), retained.as_slice());
@@ -1877,6 +1935,7 @@ mod tests {
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
+            assistant_target_owner: None,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,
@@ -2038,7 +2097,6 @@ mod tests {
             redeliver(
                 &db,
                 &keys,
-                &reqwest::Client::new(),
                 &trigger,
                 "event-1",
                 256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
@@ -2068,6 +2126,8 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let keys = test_encryption_keys();
         let trigger = webhook_trigger(&keys, format!("http://{address}/hook")).await;
@@ -2090,7 +2150,6 @@ mod tests {
         let updated = redeliver(
             &db,
             &keys,
-            &reqwest::Client::new(),
             &trigger,
             "event-1",
             256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
@@ -2126,6 +2185,8 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let keys = test_encryption_keys();
         let mut trigger = webhook_trigger(&keys, format!("http://{address}/hook")).await;
@@ -2149,7 +2210,6 @@ mod tests {
         redeliver(
             &db,
             &keys,
-            &reqwest::Client::new(),
             &trigger,
             "event-legacy",
             256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,

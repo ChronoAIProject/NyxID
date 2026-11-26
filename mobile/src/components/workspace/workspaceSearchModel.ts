@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { AssistantConversation } from "../../features/assistant/assistantTypes";
 import type { AssistantAgent } from "../../features/agents/agentContracts";
 import type { Group } from "../../features/groups/groupContracts";
@@ -45,55 +46,75 @@ export function workspaceSearchMatches(
 const pages: WorkspaceSearchEntry[] = [
   {
     key: "page:automations",
-    label: "Automations",
+    get label() {
+      return translateApp("Automations");
+    },
     keywords: ["schedule", "webhook", "trigger"],
     target: { kind: "page", name: "Automations" },
   },
   {
     key: "page:machines",
-    label: "Machines",
+    get label() {
+      return translateApp("Machines");
+    },
     keywords: ["node", "computer"],
     target: { kind: "page", name: "Machines" },
   },
   {
     key: "page:logins",
-    label: "Saved logins",
+    get label() {
+      return translateApp("Saved logins");
+    },
     keywords: ["password", "machine"],
     target: { kind: "page", name: "Machines", params: { tab: "logins" } },
   },
   {
     key: "page:plugins",
-    label: "Plugins",
+    get label() {
+      return translateApp("Plugins");
+    },
     keywords: ["skills", "connections", "connectors"],
     target: { kind: "page", name: "Plugins" },
   },
   {
     key: "page:activity",
-    label: "Activity",
+    get label() {
+      return translateApp("Activity");
+    },
     keywords: ["approvals", "requests", "history"],
     target: { kind: "page", name: "Activity" },
   },
   {
     key: "page:agents",
-    label: "Agents & Crews",
+    get label() {
+      return translateApp("Agents & Crews");
+    },
     keywords: ["manage", "groups"],
     target: { kind: "page", name: "Agents" },
   },
   {
     key: "page:create-agent",
-    label: "Create new agent",
+    get label() {
+      return translateApp("Create new agent");
+    },
     target: { kind: "page", name: "AgentCreate" },
   },
   {
     key: "page:recents",
-    label: "All chats",
+    get label() {
+      return translateApp("All chats");
+    },
     keywords: ["recent", "history", "threads"],
     target: { kind: "page", name: "WorkspaceRecents" },
   },
   {
     key: "quick:scanner",
-    label: "Scan QR code",
-    keywords: ["camera", "quick action"],
+    get label() {
+      return translateApp("Scan QR code");
+    },
+    get keywords() {
+      return ["camera", translateApp("quick action")] as const;
+    },
     target: {
       kind: "settings",
       name: "DeviceLogin",
@@ -102,38 +123,48 @@ const pages: WorkspaceSearchEntry[] = [
   },
   {
     key: "quick:terminal",
-    label: "Terminal login code",
-    keywords: ["device", "quick action"],
+    get label() {
+      return translateApp("Terminal login code");
+    },
+    get keywords() {
+      return ["device", translateApp("quick action")] as const;
+    },
     target: { kind: "settings", name: "AgentKeyLogin", params: { mint: true } },
   },
 ];
 const settings: WorkspaceSearchEntry[] = [
   {
     key: "settings:profile",
-    label: "Settings: Profile",
+    get label() {
+      return translateApp("Settings: Profile");
+    },
     keywords: ["name", "email", "account"],
     target: { kind: "settings", name: "AccountSettings" },
   },
   {
     key: "settings:security",
-    label: "Settings: Account & security",
-    keywords: [
+    get label() {
+      return translateApp("Settings: Account & security");
+    },
+    get keywords() {
+      return [
       "password",
       "mfa",
       "two-factor",
       "passkey",
       "sessions",
       "devices",
-      "sign out",
-    ],
+        translateApp("sign out"),
+    ] as const;
+    },
     target: { kind: "settings", name: "AccountSecurity" },
   },
   ...(["display", "privacy", "notifications"] as const).map((section) => ({
     key: `settings:${section}`,
-    label: `Settings: ${section[0]!.toUpperCase()}${section.slice(1)}`,
+    label: translateApp(section === "notifications" ? "Settings: Notifications" : section === "display" ? "Settings: Display" : section === "privacy" ? "Settings: Privacy" : section === "voice" ? "Settings: Voice" : "Settings: Profile"),
     keywords:
       section === "display"
-        ? ["theme", "appearance", "text size", "motion"]
+        ? ["theme", "appearance", translateApp("text size"), "motion"]
         : section === "privacy"
           ? ["data", "telemetry", "delete"]
           : ["push", "delivery"],
@@ -145,19 +176,25 @@ const settings: WorkspaceSearchEntry[] = [
   })),
   {
     key: "settings:usage",
-    label: "Usage & credits",
+    get label() {
+      return translateApp("Usage & credits");
+    },
     keywords: ["billing", "wallet", "cost", "tokens"],
     target: { kind: "settings", name: "UsageCredits" },
   },
   {
     key: "settings:terms",
-    label: "Terms of Service",
+    get label() {
+      return translateApp("Terms of Service");
+    },
     keywords: ["legal"],
     target: { kind: "settings", name: "TermsOfService" },
   },
   {
     key: "settings:privacy-policy",
-    label: "Privacy Policy",
+    get label() {
+      return translateApp("Privacy Policy");
+    },
     keywords: ["legal"],
     target: { kind: "settings", name: "PrivacyPolicy" },
   },
@@ -171,7 +208,7 @@ export function workspaceSearchSections(
 ): WorkspaceSearchSection[] {
   const typing = !!query.trim();
   const availableAgents = agents.filter(
-    (agent) => agent.status !== "destroyed",
+    (agent) => agent.status !== "destroyed" && agent.can_use !== false,
   );
   const names = new Map(
     availableAgents.map((agent) => [
@@ -180,7 +217,8 @@ export function workspaceSearchSections(
     ]),
   );
   const seen = new Set<string>();
-  const chats = [...conversations]
+  const denied = new Set(agents.filter((agent) => agent.can_use === false).map((agent) => agent.id));
+  const chats = conversations.filter((chat) => !chat.agent || !denied.has(chat.agent.id))
     .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at))
     .filter((chat) => {
       if (seen.has(chat.id)) return false;
@@ -206,25 +244,25 @@ export function workspaceSearchSections(
           },
         },
       }))
-    : workspaceRecents(conversations, crews)
+    : workspaceRecents(chats, crews)
         .slice(0, 8)
         .map((row) => ({
           key: row.key,
           label: row.title,
           hint:
             row.target.kind === "group"
-              ? "Crew"
+              ? translateApp("Crew")
               : row.target.kind === "agent"
                 ? names.get(row.target.agentId ?? "")
                 : undefined,
           target: { kind: "chat", target: row.target },
         }));
   const sections: WorkspaceSearchSection[] = [
-    { title: typing ? "Chats" : "Recent chats", data: recent },
+    { title: typing ? translateApp("Chats") : translateApp("Recent chats"), data: recent },
     ...(typing
       ? [
           {
-            title: "Agents",
+            title: translateApp("Agents"),
             data: availableAgents.map(
               (agent): WorkspaceSearchEntry => ({
                 key: `agent:${agent.id}`,
@@ -239,7 +277,7 @@ export function workspaceSearchSections(
             ),
           },
           {
-            title: "Crews",
+            title: translateApp("Crews"),
             data: crews.map(
               (crew): WorkspaceSearchEntry => ({
                 key: `crew:${crew.id}`,
@@ -254,16 +292,16 @@ export function workspaceSearchSections(
           },
         ]
       : []),
-    { title: "Go to", data: pages },
+    { title: translateApp("Go to"), data: pages },
     ...(typing
       ? [
-          { title: "Settings", data: settings },
+          { title: translateApp("Settings"), data: settings },
           {
-            title: "Appearance",
+            title: translateApp("Appearance"),
             data: (["light", "dark", "system"] as const).map(
               (preference): WorkspaceSearchEntry => ({
                 key: `theme:${preference}`,
-                label: `Theme: ${preference[0]!.toUpperCase()}${preference.slice(1)}`,
+                label: translateApp(preference === "light" ? "Theme: Light" : preference === "dark" ? "Theme: Dark" : "Theme: System"),
                 keywords: [
                   "appearance",
                   "mode",

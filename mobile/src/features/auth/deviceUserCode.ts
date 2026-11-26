@@ -171,3 +171,20 @@ export function extractLoginRequestFromQr(
   );
   return trusted ? { kind, userCode } : null;
 }
+
+
+const stagingQrTrust: AuthDeviceQrTrustPolicy = {
+  appScheme: NYXID_APP_SCHEME,
+  webOrigins: ["https://staging.nyxid.ai", "https://staging-api.nyxid.ai"],
+  allowHttp: false,
+};
+
+export function extractCameraLoginRequest(raw: string) {
+  const local = extractLoginRequestFromQr(raw);
+  if (local) return local;
+  if (!/^https:\/\//i.test(raw.trim())) return null;
+  const staging = extractLoginRequestFromQr(raw, stagingQrTrust);
+  return staging?.kind === "device"
+    ? { kind: "staging-device" as const, userCode: staging.userCode }
+    : null;
+}

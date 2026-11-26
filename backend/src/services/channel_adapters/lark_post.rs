@@ -17,6 +17,7 @@ const MAX_EMOJI_TYPE_BYTES: usize = 64;
 
 /// A flattened post: its text and one placeholder per embedded image or video.
 pub struct PostContent {
+    pub truncated_original_bytes: Option<usize>,
     pub text: String,
     pub attachments: Vec<crate::models::channel_message::StoredAttachment>,
     pub omitted: usize,
@@ -59,6 +60,7 @@ pub fn parse_post(
         bot_id,
         text: String::new(),
         truncated: false,
+        original_bytes: 0,
         attachments: Vec::new(),
         embedded: 0,
         omitted: Omitted::No,
@@ -71,11 +73,14 @@ pub fn parse_post(
         text,
         attachments,
         embedded,
+        truncated,
+        original_bytes,
         ..
     } = writer;
     (!text.is_empty() || !attachments.is_empty()).then(|| {
         let omitted = embedded.saturating_sub(attachments.len());
         PostContent {
+            truncated_original_bytes: truncated.then_some(original_bytes),
             text,
             attachments,
             omitted,
@@ -96,6 +101,7 @@ struct Writer<'a> {
     bot_id: Option<&'a str>,
     text: String,
     truncated: bool,
+    original_bytes: usize,
     attachments: Vec<crate::models::channel_message::StoredAttachment>,
     /// Embedded media elements seen so far, kept or not.
     embedded: usize,
@@ -139,11 +145,15 @@ impl Writer<'_> {
     /// Append `line` as its own line. The first line that does not fit is cut
     /// on a char boundary and the marker ends the text; nothing follows it.
     fn line(&mut self, line: &str) {
-        if self.truncated || line.is_empty() {
+        if line.is_empty() {
             return;
         }
         let line = clean(line);
-        let separator = if self.text.is_empty() { "" } else { "\n" };
+        let separator = if self.original_bytes == 0 { "" } else { "\n" };
+        self.original_bytes += separator.len() + line.len();
+        if self.truncated {
+            return;
+        }
         let room = (MAX_TEXT_BYTES - MARKER.len()).saturating_sub(self.text.len());
         if separator.len() + line.len() <= room {
             self.text.push_str(separator);
@@ -181,7 +191,7 @@ impl Writer<'_> {
                 platform_message_id: None,
                 file_key: (kind == "file").then(|| handle.clone()).flatten(),
                 image_key: (kind == "image").then_some(handle).flatten(),
-                filename: None,
+                filename: super::filename::selector(element),
                 mime_type: None,
                 size_bytes: None,
             });

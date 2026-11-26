@@ -13,6 +13,8 @@ pub struct Member {
     pub group_id: String,
     pub agent_id: String,
     pub upper_seq: i64,
+    pub org_revision: Option<i64>,
+    pub durable: bool,
 }
 
 tokio::task_local! {
@@ -21,6 +23,17 @@ tokio::task_local! {
 
 pub async fn with_member<F: std::future::Future>(member: Member, future: F) -> F::Output {
     MEMBER.scope(member, future).await
+}
+
+pub(crate) fn admitted_member(group: &str, agent: &str, upper_seq: i64) -> bool {
+    MEMBER
+        .try_with(|member| {
+            member.durable
+                && member.group_id == group
+                && member.agent_id == agent
+                && member.upper_seq == upper_seq
+        })
+        .unwrap_or(false)
 }
 
 /// No request-local binding means no database command. The group write and
@@ -33,6 +46,15 @@ pub async fn admit(
     let Ok(member) = MEMBER.try_with(Clone::clone) else {
         return Ok(());
     };
+    if member
+        .org_revision
+        .is_some_and(|revision| revision != row.org_use_revision)
+    {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
+    if !member.durable {
+        return Ok(());
+    }
     if row.group_id.as_ref() != Some(&member.group_id)
         || row.agent_id.as_ref() != Some(&member.agent_id)
         || row.group_seen_seq >= member.upper_seq
@@ -105,10 +127,11 @@ pub async fn followers(
                 .session(&mut *tx)
                 .await?;
             let threads: Vec<_> = cursor.stream(&mut *tx).try_collect().await?;
-            if threads
-                .iter()
-                .any(|row| super::super::assistant_nyxagent::live_turn(row, now).is_some())
-            {
+            if threads.iter().any(|row| {
+                row.active_turn.as_ref().is_some_and(|turn| {
+                    super::super::assistant_turn_restart::awaiting_reply(row, &turn.turn_id)
+                })
+            }) {
                 return Ok(vec![]);
             }
             let mut queued = Vec::new();

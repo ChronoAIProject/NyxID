@@ -92,6 +92,8 @@ without rerunning the Sandbox. See [generated files and rollout](docs/chat/10-up
 
 ## What NyxID Does
 
+- **Continue specialist setup with NyxBot** — [setup handoffs](docs/chat/05-frontend-ui.md#specialist-setup-handoffs) and [in-app setup](docs/chat/05-frontend-ui.md#platform-setup-and-navigation-over-chat) keep supported account setup journeys connected to chat.
+
 - **Track delegated automation work** — optional coordinator completion keeps scheduled and webhook assistant runs waiting for specialist assignments and group handoffs, resumes the coordinator with results, and shows a completion deadline and Cancel action in run history. Enrollment is disabled by default and requires fleet readiness. See [NyxBot schedules](docs/NYXBOT_SCHEDULES.md).
 
 - **Allocate repeatable credits** — admin Credits supports exact one-time or recurring allocations, optional shared-total service ceilings, and reclaim of each allocation's unspent remainder. Existing free-unit allowances stay separate. New policy authoring is off until all billing writers are upgraded; see [credit allocation accounting and rollout](docs/BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim).
@@ -294,6 +296,7 @@ With a NyxID account, pick the workflow that matches what you want to build and 
 | Nyxbot Onboarding | [docs/NYXBOT_ONBOARDING.md](docs/NYXBOT_ONBOARDING.md) | Onboarding entry, existing integrations, and pending backend contracts |
 | NyxBot CLI and API | [docs/chat/09-owner-cli-api.md](docs/chat/09-owner-cli-api.md) | Owner commands, invocation lifecycle, security boundaries, and rollout |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
+| Health / Readiness | [docs/HEALTH_READINESS.md](docs/HEALTH_READINESS.md) | Independent frontend/backend probe contracts and rollout |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
 | Service Monitoring | [docs/SERVICE_MONITORING.md](docs/SERVICE_MONITORING.md) | Scoped chrono-probe status, owner configuration, and explicit checks |

@@ -1,3 +1,4 @@
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 export function utf8Length(value: string): number {
@@ -15,9 +16,11 @@ export const automationReferenceSchema = z
   .min(1)
   .max(256)
   .refine(
-    (value) => !/[\s\u0000-\u001f\u007f]/.test(value),
-    "Enter a valid reference",
-  );
+    (value) => !/[\s\u0000-\u001f\u007f]/.test(value), {
+    get error() {
+      return () => translateApp("Enter a valid reference");
+    },
+  });
 export const automationInstantSchema = z.string().datetime({ offset: true });
 export const automationTimezoneSchema = z
   .string()
@@ -26,12 +29,18 @@ export const automationTimezoneSchema = z
   .max(100)
   .refine((value) => {
     try {
-      new Intl.DateTimeFormat("en", { timeZone: value });
+      new Intl.DateTimeFormat(appLocale(), { timeZone: value });
       return true;
     } catch {
       return false;
     }
-  }, "Enter an IANA timezone");
+  },
+    {
+      get error() {
+        return () => translateApp("Enter an IANA timezone");
+      },
+    },
+  );
 const scheduleOptions = {
   start: automationInstantSchema.nullish(),
   end: automationInstantSchema.nullish(),
@@ -78,13 +87,16 @@ export const automationDeliverySchema = z.discriminatedUnion("type", [
     type: z.literal("assistant"),
     agent_id: automationReferenceSchema,
     thread_policy: z.enum(["home", "dedicated", "new"]).nullish(),
-    instruction: z
+    get instruction() {
+      return z
       .string()
       .min(1)
       .refine(
         (value) => !!value.trim() && utf8Length(value) <= 8192,
-        "Enter an instruction of up to 8 KB",
+          translateApp("Enter an instruction of up to 8 KB",
       ),
+      );
+    },
     confirmation_policy: z.enum(["changes", "destructive"]).optional(),
     deliver_to: deliverToSchema,
   }),

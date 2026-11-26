@@ -1,3 +1,5 @@
+import { setAppTranslationLanguage, translateApp } from "../i18n/appTranslation";
+import { translate } from "../i18n/translate";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -29,7 +31,7 @@ test("ToastOverlay defaults to one line and preserves each queued toast's explic
     },
     "../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
   });
-  const { ToastOverlay } = h.load(fileURLToPath(new URL("./ToastOverlay.tsx", import.meta.url)));
+  const { ToastOverlay, localizedToast } = h.load(fileURLToPath(new URL("./ToastOverlay.tsx", import.meta.url)));
   let toast: ToastState = { message: "Existing caller", kind: "info" };
   try {
     h.mount(() => (ToastOverlay as (props: object) => Element | null)({ toast }));
@@ -41,7 +43,17 @@ test("ToastOverlay defaults to one line and preserves each queued toast's explic
     h.render();
     assert.equal(text(toast.message).props.numberOfLines, 2);
     assert.equal(text("Existing caller").props.numberOfLines, 1);
+    const name = 'Alice / 原样保留 / Save';
+    toast = (localizedToast as (f:()=>ToastState)=>ToastState)(() => ({message:translateApp('Recent: {{name}}',{name}),kind:'info',action:{label:translateApp('Open'),onPress:()=>{}}}));
+    h.render();
+    for (const language of ['zh-CN','zh-TW','en'] as const) {
+      setAppTranslationLanguage(language);h.render();
+      assert.ok(text(translate(language,'Recent: {{name}}',{name})));
+      assert.ok(text(translate(language,'Open')));
+      assert.equal(elements(h.value()!).filter(n=>n.type==='AnimatedView').length,3,'changing language retains the same queued toasts');
+    }
   } finally {
+    setAppTranslationLanguage('en');
     h.unmount();
   }
 });

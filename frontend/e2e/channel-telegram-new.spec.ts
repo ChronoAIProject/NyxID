@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 import { test } from "./production-policy-fixture";
 import {
   managedBot,
@@ -109,14 +109,58 @@ async function selectPlatform(page: Page, current: string, next: string) {
   await page.getByRole("option", { name: next, exact: true }).click();
 }
 
-for (const width of [1440, 390]) {
-  test(`Telegram setup survives reload and a closed browser page at ${width}px`, async ({
+async function tabThroughReview(page: Page, dialog: Locator) {
+  await expect(dialog.getByRole("link", { name: "Open Telegram", exact: true })).toHaveAttribute("href", /^https:\/\/t\.me\//);
+  await expect(dialog.getByRole("button", { name: "Reopen Telegram", exact: true })).toBeEnabled();
+  const controls = dialog.locator("button, a[href], input, select, textarea, [tabindex]");
+  const tabbable = await controls.evaluateAll((elements) => elements.flatMap((element, index) =>
+    element instanceof HTMLElement && element.tabIndex >= 0 &&
+    !element.matches(":disabled") && element.checkVisibility()
+      ? [index] : [],
+  ));
+  const backgroundScroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+  const seen = new Set<number>();
+  const measurements: { label: string; ratio: number }[] = [];
+  await dialog.getByRole("combobox").filter({ hasText: /^Telegram$/ }).focus();
+  for (let tab = 0; tab < tabbable.length; tab++) {
+    const index = await controls.evaluateAll((elements) => elements.indexOf(document.activeElement!));
+    expect(tabbable).toContain(index);
+    expect(seen.has(index), "Tab should reach every control before wrapping").toBe(false);
+    seen.add(index);
+    const focused = controls.nth(index);
+    await expect(focused).toBeFocused();
+    await expect(focused).toBeInViewport({ ratio: 1 });
+    measurements.push(await focused.evaluate((element) => new Promise<{ label: string; ratio: number }>((resolve) => {
+      const observer = new IntersectionObserver(([entry]) => {
+        observer.disconnect();
+        resolve({ label: element.getAttribute("aria-label") ?? element.textContent?.trim() ?? element.tagName, ratio: entry!.intersectionRatio });
+      });
+      observer.observe(element);
+    })));
+    expect(await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }))).toEqual(backgroundScroll);
+    await page.keyboard.press("Tab");
+  }
+  expect([...seen].sort((a, b) => a - b)).toEqual(tabbable);
+  await expect(dialog.getByRole("combobox").filter({ hasText: /^Telegram$/ })).toBeFocused();
+  return measurements;
+}
+
+for (const { width, height, scale } of [
+  { width: 1440, height: 900, scale: 1 },
+  { width: 1440, height: 720, scale: 1 },
+  { width: 390, height: 844, scale: 1 },
+  { width: 1440, height: 900, scale: 2 },
+  { width: 390, height: 844, scale: 2 },
+]) {
+  test(`Telegram setup survives reload and a closed browser page at ${width}px${height === 720 ? " and 720px height" : ""}${scale === 2 ? " with 2x text" : ""}`, async ({
     page,
     context,
   }) => {
-    const height = width === 390 ? 844 : 900;
     await page.setViewportSize({ width, height });
     await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript((scale) => {
+      localStorage.setItem("nyxid.theme", JSON.stringify({ version: 2, state: { mode: "dark", textScale: scale, density: 1, motion: "system" } }));
+    }, scale);
     let request: TelegramNewRequest | null = null;
     const starts: unknown[] = [];
     const launches: string[] = [];
@@ -331,10 +375,8 @@ for (const width of [1440, 390]) {
     );
     expect(scrollOwners).toBeLessThanOrEqual(1);
     const backgroundScroll = await page.evaluate(() => window.scrollY);
-    await dialog
-      .getByRole("combobox")
-      .filter({ hasText: /^Telegram$/ })
-      .focus();
+    const measurements = await tabThroughReview(page, dialog);
+    await test.info().attach("review-focus-intersections", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
     const primary = dialog.getByRole("button", { name: "Reopen Telegram" });
     for (
       let tab = 0;
@@ -943,12 +985,12 @@ for (const width of [390, 1440]) {
     await page.goto(`/channel-bots?connect=telegram-new&request_id=${requestId}`);
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByText(/Telegram rejected the creation message/)).toBeVisible();
-    await page.screenshot({ path: `../.tmp/telegram-ui/rejected-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`rejected-${width}.png`), fullPage: true });
     const button = dialog.getByRole("button", { name: "Open creation form", exact: true });
     await button.focus();
     await expect(button).toBeFocused();
     await expect(button).toBeInViewport({ ratio: 1 });
-    await page.screenshot({ path: `../.tmp/telegram-ui/recovery-focused-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`recovery-focused-${width}.png`), fullPage: true });
     const popup = page.waitForEvent("popup");
     await button.press("Enter");
     const form = await popup;
@@ -959,11 +1001,11 @@ for (const width of [390, 1440]) {
     if (state.request?.prompt_delivery) state.request.prompt_delivery.outcome = "unknown";
     await page.reload();
     await expect(dialog.getByText(/Delivery of the Create bot message is unconfirmed/)).toBeVisible();
-    await page.screenshot({ path: `../.tmp/telegram-ui/unknown-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`unknown-${width}.png`), fullPage: true });
     if (state.request?.prompt_delivery) state.request.prompt_delivery.outcome = "accepted";
     await page.reload();
     await expect(dialog.getByText(/does not confirm the button appeared/)).toBeVisible();
-    await page.screenshot({ path: `../.tmp/telegram-ui/accepted-${width}.png`, fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`accepted-${width}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 }
@@ -1009,7 +1051,7 @@ for (const width of [390, 1440]) {
       const button = page.getByRole("button", { name: "Open creation form", exact: true });
       await button.focus();
       await expect(button).toBeInViewport({ ratio: 1 });
-      await page.screenshot({ path: `../.tmp/telegram-ui/${hosted ? "hosted" : "full-page"}-recovery-${width}.png`, fullPage: true });
+      await page.screenshot({ path: test.info().outputPath(`${hosted ? "hosted" : "full-page"}-recovery-${width}.png`), fullPage: true });
       const popup = page.waitForEvent("popup");
       await button.press("Enter");
       const form = await popup;
@@ -1027,7 +1069,7 @@ for (const width of [390, 1440]) {
         await expect(page.getByText("Saved research specialist is connected.")).toBeVisible();
         await expect(page.getByRole("heading", { name: "Your Telegram channel bot is created", exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "Open creation form", exact: true })).toHaveCount(0);
-        await page.screenshot({ path: `../.tmp/telegram-ui/hosted-source-return-${width}.png`, fullPage: true });
+        await page.screenshot({ path: test.info().outputPath(`hosted-source-return-${width}.png`), fullPage: true });
         await page.getByRole("button", { name: "Continue", exact: true }).click();
       } else {
         await page.getByRole("link", { name: "Back to chat", exact: true }).click();

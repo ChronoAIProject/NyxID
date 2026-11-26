@@ -27,8 +27,7 @@ pub(super) async fn evidence(
         return Ok(result);
     }
     let bot = Box::pin(channel_bot_service::get_bot(&state.db, &row.channel_bot_id)).await?;
-    let token =
-        Zeroizing::new(channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?);
+    let token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
     let chat = activity["conversation"]["id"].as_str().unwrap_or_default();
     let id = activity["event_id"]
         .as_str()

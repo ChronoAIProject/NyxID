@@ -17,6 +17,7 @@ import { formatRelativeTimeFromMs } from "../../lib/time";
 import { lightColors } from "../../theme/mobileTheme";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 import * as listHelpers from "./workspaceChatListModel";
+import type { WorkspaceRecent } from "./workspaceSidebarModel";
 
 type Element = { type: unknown; props: Record<string, any> };
 type QueryOptions = {
@@ -88,7 +89,9 @@ function chatsFor(agentId: string) {
 function elements(root: Element): Element[] {
   if (typeof root.type === "function") {
     // A stateless row part may render nothing (an empty unread pill).
-    const rendered = (root.type as (props: unknown) => Element | null)(root.props);
+    const rendered = (root.type as (props: unknown) => Element | null)(
+      root.props,
+    );
     return rendered ? elements(rendered) : [];
   }
   return [
@@ -116,7 +119,10 @@ function content(root: Element): string {
 }
 
 type SetupOptions = {
+  cornerWindow?: boolean;
   mode?: "drawer" | "picker";
+  recentRows?: WorkspaceRecent[];
+  scrollHeader?: Element;
   history?: "loaded" | "empty" | "pending" | "error";
   agent?: Partial<AssistantAgent>;
   online?: boolean;
@@ -166,6 +172,8 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
   const props = {
     mode: options.mode,
     disabled: false,
+    recentRows: options.recentRows,
+    scrollHeader: options.scrollHeader,
     visible: true,
     current,
     unread: options.unread,
@@ -177,6 +185,9 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     },
   };
   const harness = hookHarness<Element>({
+    "./WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: { value: options.cornerWindow ?? false },
+    },
     "../AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -294,6 +305,12 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     "./workspaceChatListModel": listHelpers,
   });
   type Props = typeof props;
+  harness.mock(
+    "./SidebarSectionHeader",
+    harness.load(
+      fileURLToPath(new URL("./SidebarSectionHeader.tsx", import.meta.url)),
+    ),
+  );
   const { WorkspaceChatList } = harness.load(
     fileURLToPath(new URL("./WorkspaceChatList.tsx", import.meta.url)),
   ) as { WorkspaceChatList: (props: Props) => Element };
@@ -1292,6 +1309,121 @@ test("agent picker reuses the thread hierarchy without crew or creation sections
   env.harness.unmount();
 });
 
+test("Duo agent picker leads with up to three Recent agents above the deduplicated roster", () => {
+  const recent = (
+    agentId: string | undefined,
+    id: number,
+    status?: string,
+  ): WorkspaceRecent => ({
+    key: `chat:${conversationId(id)}`,
+    title: `Thread ${id}`,
+    activityAt: `2026-10-${String(30 - id).padStart(2, "0")}T00:00:00Z`,
+    status,
+    target: { kind: "agent", agentId, conversationId: conversationId(id) },
+  });
+  const env = setup(
+    { kind: "agent", agentId: "agent-3", conversationId: conversationId(303) },
+    {
+      mode: "picker",
+      cornerWindow: true,
+      // AssistantScreen's "This thread" card.
+      scrollHeader: {
+        type: "Text",
+        props: { accessibilityRole: "header", children: "This thread" },
+      },
+      recentRows: [
+        recent("agent-3", 303, "Running"),
+        recent("agent-3", 302),
+        recent("agent-8", 801),
+        recent(undefined, 1),
+        recent("agent-5", 501, "Needs you"),
+        recent("agent-6", 601),
+      ],
+      unread: {
+        conversations: { [conversationId(501)]: 2 },
+        groups: {},
+      },
+    },
+  );
+  const headings = env
+    .all()
+    .filter((row) => row.props.accessibilityRole === "header")
+    .map(content);
+  assert.deepEqual(headings, ["This thread", "Recent", "Agents"]);
+  const recentRows = env
+    .all()
+    .filter((row) => /^Open recent /.test(row.props.accessibilityLabel ?? ""));
+  // View-only agent-8 is skipped; the legacy thread resolves to NyxBot.
+  assert.deepEqual(
+    recentRows.map((row) => row.props.accessibilityLabel),
+    [
+      "Open recent Agent 3, Running",
+      "Open recent NyxBot",
+      "Open recent Agent 5, Needs you, 2 unread",
+    ],
+  );
+  assert.equal(recentRows[0]!.props.accessibilityState.selected, true);
+  const order = env
+    .all()
+    .map((row) =>
+      row.props.accessibilityRole === "header"
+        ? content(row)
+        : (row.props.accessibilityLabel ?? ""),
+    );
+  const at = (pattern: RegExp) =>
+    order.findIndex((label) => pattern.test(label));
+  assert.ok(
+    at(/^This thread$/) < at(/^Recent$/),
+    "the thread card stays on top",
+  );
+  assert.ok(at(/^Recent$/) < at(/^Open recent Agent 3/));
+  assert.ok(at(/^Open recent Agent 5/) < at(/^Agents$/));
+  assert.ok(at(/^Agents$/) < at(/^(Expand|Collapse) chats for /));
+  // Recent agents are not repeated, and the current one is not expanded off-screen.
+  const roster = env.agentRows().map((row) => row.props.accessibilityLabel);
+  for (const name of ["Agent 3", "NyxBot", "Agent 5"])
+    assert.equal(
+      roster.some(
+        (label) =>
+          label.startsWith(`Expand chats for ${name},`) ||
+          label === `Expand chats for ${name}`,
+      ),
+      false,
+      `${name} appears once`,
+    );
+  assert.ok(
+    roster.some((label) => label.startsWith("Expand chats for Agent 1")),
+  );
+  assert.equal(env.chatRows().length, 0);
+  recentRows[1]!.props.onPress();
+  env.harness.flush();
+  assert.deepEqual(env.selections.at(-1), {
+    kind: "agent",
+    agentId: "nyxbot",
+    conversationId: conversationId(1),
+  });
+  env.harness.unmount();
+});
+
+test("agent picker without chat history has no Recent group", () => {
+  const env = setup(
+    { kind: "agent", agentId: "agent-1", conversationId: conversationId(101) },
+    { mode: "picker", recentRows: [] },
+  );
+  assert.equal(
+    env.all().some((row) => content(row) === "Recent"),
+    false,
+  );
+  assert.equal(
+    env.all().some((row) => /^Open recent /.test(row.props.accessibilityLabel ?? "")),
+    false,
+  );
+  assert.ok(
+    env.label("Collapse chats for Agent 1").props.accessibilityState.selected,
+  );
+  env.harness.unmount();
+});
+
 test("sidebar counts distinguish the full roster, owner totals, and truncated preview after deletion", () => {
   const env = setup();
   for (const id of ["agent-3", "agent-4", "agent-5"])
@@ -1478,7 +1610,12 @@ test("thread, crew and channel-bot rows show the unread counts the notification 
       active_turn: null,
       created_at: "2026-10-01T00:00:00Z",
       last_message_at: `2026-10-${String(20 - index).padStart(2, "0")}T00:00:00Z`,
-      agent: { id: "agent-1", name: "helper-1", display_name: "Agent 1", kind: "specialist" },
+      agent: {
+        id: "agent-1",
+        name: "helper-1",
+        display_name: "Agent 1",
+        kind: "specialist",
+      },
       channel: {
         platform: "telegram",
         channel_agent_id: "bot-1",
@@ -1490,41 +1627,99 @@ test("thread, crew and channel-bot rows show the unread counts the notification 
     }),
   );
   const own = chatsFor("agent-1").slice(0, 2);
-  const current = { kind: "agent" as const, agentId: "agent-1", conversationId: own[0]!.id };
+  const current = {
+    kind: "agent" as const,
+    agentId: "agent-1",
+    conversationId: own[0]!.id,
+  };
   const env = setup(current, {
     chats: [...own, ...channels],
     unread: {
-      conversations: { [own[1]!.id]: 2, [channels[0]!.id]: 1, [channels[2]!.id]: 105 },
+      conversations: {
+        [own[1]!.id]: 2,
+        [channels[0]!.id]: 1,
+        [channels[2]!.id]: 105,
+      },
       groups: { [groups[7]!.id]: 3 },
     },
   });
-  const unreadRow = env.label("Open chat Agent 1 chat 2 with Agent 1, 2 unread");
-  const pill = elements(unreadRow).find((row) => row.props.testID === "sidebar-unread-count");
+  const unreadRow = env.label(
+    "Open chat Agent 1 chat 2 with Agent 1, 2 unread",
+  );
+  const pill = elements(unreadRow).find(
+    (row) => row.props.testID === "sidebar-unread-count",
+  );
   assert.ok(pill, "an unread thread carries a count pill");
   assert.equal(content(pill!), "2");
   const titleColor = (row: Element, text: string) =>
-    Object.assign({}, ...[elements(row).find((node) => node.type === "Text" && content(node) === text)!.props.style].flat()).color;
-  assert.equal(titleColor(unreadRow, "Agent 1 chat 2"), lightColors.textPrimary, "unread titles read like the current thread");
-  const readRow = env.label("Open chat Agent 1 chat 1 with Agent 1, current thread");
-  assert.equal(elements(readRow).some((row) => row.props.testID === "sidebar-unread-count"), false, "a read thread has no pill");
-  const bot = env.label("Expand chats for Support bot, Telegram · 3 chats, 106 unread");
-  assert.equal(content(elements(bot).find((row) => row.props.testID === "sidebar-unread-count")!), "99+", "a bot folds its chats' counts, capped");
+    Object.assign(
+      {},
+      ...[
+        elements(row).find(
+          (node) => node.type === "Text" && content(node) === text,
+        )!.props.style,
+      ].flat(),
+    ).color;
+  assert.equal(
+    titleColor(unreadRow, "Agent 1 chat 2"),
+    lightColors.textPrimary,
+    "unread titles read like the current thread",
+  );
+  const readRow = env.label(
+    "Open chat Agent 1 chat 1 with Agent 1, current thread",
+  );
+  assert.equal(
+    elements(readRow).some(
+      (row) => row.props.testID === "sidebar-unread-count",
+    ),
+    false,
+    "a read thread has no pill",
+  );
+  const bot = env.label(
+    "Expand chats for Support bot, Telegram · 3 chats, 106 unread",
+  );
+  assert.equal(
+    content(
+      elements(bot).find((row) => row.props.testID === "sidebar-unread-count")!,
+    ),
+    "99+",
+    "a bot folds its chats' counts, capped",
+  );
   env.press("Expand chats for Support bot, Telegram · 3 chats, 106 unread");
   assert.ok(env.label("Open chat Customer 3 with Agent 1, 105 unread"));
   const plainChild = env.label("Open chat Customer 2 with Agent 1");
   assert.ok(plainChild, "a chat without unread keeps its plain label");
-  assert.equal(titleColor(plainChild, "Customer 2"), lightColors.textSecondary, "read titles stay secondary");
+  assert.equal(
+    titleColor(plainChild, "Customer 2"),
+    lightColors.textSecondary,
+    "read titles stay secondary",
+  );
   env.press("Expand crews");
   assert.ok(env.groupRows().length > 0, "the crew preview is open");
   const crew = env.label("Open crew Group 8, 3 unread");
-  assert.equal(content(elements(crew).find((row) => row.props.testID === "sidebar-unread-count")!), "3");
-  assert.equal(elements(env.label("Open crew Group 7")).some((row) => row.props.testID === "sidebar-unread-count"), false);
+  assert.equal(
+    content(
+      elements(crew).find(
+        (row) => row.props.testID === "sidebar-unread-count",
+      )!,
+    ),
+    "3",
+  );
+  assert.equal(
+    elements(env.label("Open crew Group 7")).some(
+      (row) => row.props.testID === "sidebar-unread-count",
+    ),
+    false,
+  );
   env.harness.unmount();
   const plain = setup(current, { chats: [...own, ...channels] });
-  assert.equal(plain.all().some((row) => row.props.testID === "sidebar-unread-count"), false, "without markers no row shows a pill");
+  assert.equal(
+    plain.all().some((row) => row.props.testID === "sidebar-unread-count"),
+    false,
+    "without markers no row shows a pill",
+  );
   plain.harness.unmount();
 });
-
 
 test("critical writes disable chat, crew, agent and create rows with muted text and restore them in place", () => {
   const env = setup({
@@ -1600,5 +1795,35 @@ test("an already open chat browser disables its selectable rows and New chat whi
   assert.equal(browser.primaryAction.disabled, true);
   browser.onClose();
   env.harness.flush();
+  env.harness.unmount();
+});
+
+test("P9 ordinary picker keeps the full base roster even with recent rows", () => {
+  const env = setup(undefined, {
+    mode: "picker",
+    recentRows: [
+      {
+        key: "recent",
+        title: "A recent",
+        activityAt: "2026-11-18T00:00:00Z",
+        target: { kind: "agent", agentId: "agent-3" },
+      },
+    ],
+  });
+  assert.equal(
+    env
+      .all()
+      .some((row) => /^Open recent /.test(row.props.accessibilityLabel ?? "")),
+    false,
+  );
+  assert.equal(
+    env
+      .all()
+      .some(
+        (row) =>
+          row.props.accessibilityRole === "header" && content(row) === "Recent",
+      ),
+    false,
+  );
   env.harness.unmount();
 });

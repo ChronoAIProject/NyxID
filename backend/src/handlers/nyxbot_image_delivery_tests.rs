@@ -165,6 +165,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         });
     }
@@ -374,8 +375,8 @@ async fn attachment_normal_send_command_counts() {
 #[tokio::test]
 async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
     let (f, server) = image_fixture("telegram", "direct").await;
-    let attachments = [None, Some(true), Some(false)]
-        .into_iter()
+    let attachments = (0..16)
+        .map(|index| [None, Some(true), Some(false)][index % 3])
         .map(|delivery| TurnAttachment {
             image_input_reason: None,
             artifact: Default::default(),
@@ -386,6 +387,7 @@ async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
             size: 100,
             pages: None,
             chat_delivery: delivery,
+            pdf: None,
             image_input: None,
             image_inspection: None,
         })
@@ -1242,9 +1244,19 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
             .await
             .unwrap();
         f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&f.event.conversation_id},doc! {"$set":{
-            "channel":bson::Bson::Null,"reply_channel":bson::to_bson(&primary).unwrap(),"deliver_also":[bson::to_bson(&extra).unwrap()],
+            "channel":bson::Bson::Null,"reply_channel":bson::to_bson(&primary).unwrap(),
             "active_turn":{"turn_id":&f.event.turn_id,"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false},
         }}).await.unwrap();
+        f.state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"conversation_id":&f.event.conversation_id,"turn_id":&f.event.turn_id,"role":"assistant"},
+                doc! {"$set":{
+                    "post_turn_deliver_also":[bson::to_bson(&extra).unwrap()],
+                    "status":if failed {"failed"} else {"completed"},
+                }},
+            )
+            .await
+            .unwrap();
         let row = engine::get(
             &f.state.db,
             OWNER,
@@ -1252,12 +1264,11 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
         )
         .await
         .unwrap();
-        let error = engine::TurnError::internal("upstream_failed", "upstream");
         crate::handlers::assistant_team::after_turn_boxed(
             f.state.clone(),
             row.clone(),
-            "Useful answer".into(),
-            failed.then_some(error),
+            "Uncommitted answer".into(),
+            None,
         )
         .await;
         let requests = server.received_requests().await.unwrap();
@@ -1275,6 +1286,13 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
                     "/bottoken/sendMessage"
                 ]
             );
+            for request in requests
+                .iter()
+                .filter(|r| r.url.path().ends_with("sendMessage"))
+            {
+                let body: Value = request.body_json().unwrap();
+                assert_eq!(body["text"], "Useful answer");
+            }
             let count = f
                 .state
                 .db
@@ -1286,12 +1304,6 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
                 .unwrap();
             assert_eq!(count, 2);
         }
-        assert!(
-            engine::take_deliveries(&f.state.db, OWNER, &row.id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
         f.state.db.drop().await.unwrap();
     }
 }
@@ -2492,6 +2504,7 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
         &f.state,
         ImageSendContext {
             source: crate::models::image_preparation::Source::Post {
+                key_version: chat.key_version,
                 api_key_id: chat.api_key_id.clone(),
             },
             owner: OWNER,
@@ -2663,7 +2676,7 @@ async fn nyxbot_queued_direct_source_admission_preserves_original_anchor_for_tex
         work.source_event_ids = vec![f.event.id.clone()];
         work.reply_to = vec![f.event.delivery.as_ref().unwrap().origin.clone()];
         assert!(
-            delivery::enqueue(&f.state.db, OWNER, &conversation, work, None)
+            delivery::enqueue(&f.state.db, OWNER, &conversation, work, None, false)
                 .await
                 .unwrap()
         );
@@ -2802,7 +2815,8 @@ async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_so
                 OWNER,
                 conversation,
                 super::source_queue_tests::work(&source, &format!("question {i}")),
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -3905,8 +3919,10 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
         request_hash: "images".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: false,
+        answer_delivery: None,
         revision: 0,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_context_version: None,
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };

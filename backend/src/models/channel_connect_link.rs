@@ -44,6 +44,8 @@ pub struct ChannelConnectLink {
     pub flow: Option<String>,
     pub bot_id: Option<String>,
     pub connection_id: Option<String>,
+    #[serde(default)]
+    pub meta_grant: Option<super::channel_meta::GrantRef>,
     pub telegram_request_id: Option<String>,
     pub claim_id: Option<String>,
     #[serde(default, with = "super::bson_datetime::optional")]
@@ -58,6 +60,8 @@ pub struct ChannelConnectLink {
     pub event_id: Option<String>,
     pub event_data: Option<bson::Document>,
     pub delivery_status: Option<String>,
+    #[serde(default)]
+    pub delivery_failure_reason: Option<String>,
     pub delivery_attempts: u32,
     #[serde(default, with = "super::bson_datetime::optional")]
     pub delivery_after: Option<DateTime<Utc>>,

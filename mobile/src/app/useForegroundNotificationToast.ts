@@ -1,3 +1,5 @@
+import { localizedToast } from "../i18n/localizedToast";
+import { translateApp } from "../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import type { ToastState } from "../components/ToastOverlay";
 import {
@@ -31,12 +33,13 @@ export function useForegroundNotificationToast(
         : notification.url
           ? () => open(notification.url!, notification.notificationId)
           : undefined;
-      setToast({
+      setToast(localizedToast(() => ({
         message,
         kind: "info",
         action: action
           ? {
-              label: notification.challengeId ? "Review" : "Open",
+              label: notification.challengeId ? translateApp("Review")
+                : translateApp("Open"),
               onPress: () => {
                 if (
                   mounted &&
@@ -47,7 +50,7 @@ export function useForegroundNotificationToast(
               },
             }
           : undefined,
-      });
+      })));
     });
     return () => {
       mounted = false;

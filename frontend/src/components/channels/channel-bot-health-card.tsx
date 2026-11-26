@@ -1,3 +1,4 @@
+import { nyxBotChannelError } from "@/lib/assistant/nyxbot-channel-errors";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { toast } from "sonner";
@@ -23,6 +24,22 @@ function errorLine(
   return `${error.reason ?? `error ${error.code}`} at ${when(error.at)}`;
 }
 
+function answerLabel(answer: NonNullable<ChannelBotHealth["answer_delivery"]>): string {
+  switch (answer.state) {
+    case "prepared": return translateUi("Answer prepared");
+    case "confirmed": return translateUi("Delivery confirmed");
+    case "rejected": return translateUi("Delivery rejected");
+    case "unconfirmed":
+      switch (answer.reason) {
+        case "gateway_does_not_confirm": return translateUi("Delivery not confirmed by the gateway");
+        case "delivery_sending": return translateUi("Sending answer");
+        case "gateway_receipt_pending": return translateUi("Awaiting delivery confirmation");
+        case "delivery_stalled": return translateUi("Delivery stalled");
+        default: return translateUi("Delivery unconfirmed");
+      }
+  }
+}
+
 function Row({
   label,
   value,
@@ -40,6 +57,15 @@ function Row({
 }
 
 /** Delivery diagnostics and the server's recovery recommendation. */
+// A server-selected current setup recommendation. Other bot faults keep their
+// own recommendation even when the last failed setup remains in diagnostics.
+function setupAdvice(data: ChannelBotHealth): string | null {
+  const code = data.recommendation_cause;
+  if (!code) return null;
+  const guidance = translateUi(nyxBotChannelError(code));
+  return translateUi("Last connection attempt: {{guidance}} Retry after correcting the issue; health does not probe the gateway.", { guidance });
+}
+
 export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
   useUiTranslation();
   const health = useChannelBotHealth(botId);
@@ -56,7 +82,12 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
   const d = data.diagnostics;
   const outbound = errorLine(d.last_outbound_error);
   const webhook = errorLine(d.last_webhook_error);
-  const healthy = data.recommended_action === "none";
+  const answer = data.answer_delivery;
+  const answerNeedsAttention = answer?.state === "rejected" || (
+    answer?.state === "unconfirmed"
+    && !["gateway_does_not_confirm", "delivery_sending", "gateway_receipt_pending"].includes(answer.reason)
+  );
+  const healthy = data.recommended_action === "none" && !answerNeedsAttention;
   const healthyLabel = data.platform === "x"
     ? d.last_inbound_outcome?.code === "x_reply_sent"
       ? translateUi("Reply accepted")
@@ -117,6 +148,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
             : "No local connection recorded. Relay chat requires channel:discord-gateway and Discord Message Content Intent. Gateway-hosted bots use the Agent Event Gateway connection."}
         />
       )}
+      {answer && <Row label={translateUi("Latest answer delivery")} value={answerLabel(answer)} />}
       <Row label={translateUi("Last outbound attempt")} value={when(d.last_outbound_at)} />
       {d.last_inbound_outcome && (
         <Row
@@ -127,6 +159,10 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
           })}
         />
       )}
+      {["messenger", "instagram"].includes(data.platform) && <>
+        <Row label={translateUi("Last successful agent callback")} value={when(d.inbound_outcomes?.callback_accepted?.at ?? null)} />
+        <Row label={translateUi("Failed agent callbacks")} value={String(d.inbound_outcomes?.callback_failed?.count ?? 0)} />
+      </>}
       {inboundOutcomes.length > 0 && (
         <details>
           <summary className="cursor-pointer type-secondary text-muted-foreground">
@@ -172,7 +208,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
           healthy ? "text-14 text-muted-foreground" : "text-14 text-warning"
         }
       >
-        {data.recommended_action_text}
+        {setupAdvice(data) ?? translateUi(data.recommended_action_text)}
       </p>
       {action && (
         <Button

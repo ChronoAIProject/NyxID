@@ -7,10 +7,10 @@ async fn manager_file_failures_and_disabled_media_preserve_the_owner_text_turn()
     fn journey() -> futures::future::BoxFuture<'static, Journey> {
         Box::pin(Journey::new())
     }
-    for case in ["disabled", "oversize", "partial"] {
+    for case in ["disabled", "oversize", "partial", "uncaptioned"] {
         let j = journey().await;
         j.link().await;
-        if case != "disabled" {
+        if matches!(case, "oversize" | "partial") {
             flags::set_platform_override(
                 &j.state.db,
                 flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
@@ -21,11 +21,12 @@ async fn manager_file_failures_and_disabled_media_preserve_the_owner_text_turn()
             .await
             .unwrap();
         }
-        let mut update = j.update(
-            9200,
-            "Keep this forwarded question even if its file fails",
-            true,
-        );
+        let question = "Keep this forwarded question even if its file fails";
+        let mut update = if case == "uncaptioned" {
+            j.update(9200, "", false)
+        } else {
+            j.update(9200, question, true)
+        };
         update["message"]["document"] = json!({"file_id":"failed", "file_name":"failed.txt", "file_size": if case == "oversize" { 64 * 1024 * 1024 } else { 12 }});
         if case == "partial" {
             update["message"]["external_reply"] =
@@ -51,14 +52,13 @@ async fn manager_file_failures_and_disabled_media_preserve_the_owner_text_turn()
                 .await
                 .unwrap();
         let message = messages.iter().find(|m| m.role == "user").unwrap();
-        assert!(
-            message
-                .text
-                .contains("Keep this forwarded question even if its file fails"),
-            "{case}"
-        );
+        if case == "uncaptioned" {
+            assert_eq!(message.text.lines().next(), Some("📎"));
+        } else {
+            assert!(message.text.contains(question), "{case}");
+        }
         let expected_notes: &[&str] = match case {
-            "disabled" => &[
+            "disabled" | "uncaptioned" => &[
                 "1 attachment is not shared",
                 "not enabled for this owner",
                 "Ask a NyxID platform administrator to review the assistant:channel-media rollout for this owner.",

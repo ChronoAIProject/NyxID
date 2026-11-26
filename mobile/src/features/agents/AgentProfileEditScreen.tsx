@@ -1,5 +1,10 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIsFocused } from "@react-navigation/native";
+import { isAgentAccessRefusal } from "./agentAccess";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ZodError } from "zod";
 import type { ContentScreenProps } from "../../app/navigationTypes";
@@ -22,7 +27,7 @@ import {
 } from "./agentContracts";
 
 export type AgentProfileField =
-  "name" | "display_name" | "description" | "persona";
+  | "name" | "display_name" | "description" | "persona";
 
 const ROOT = ["workspace", "agents"] as const;
 const COPY: Record<
@@ -35,33 +40,67 @@ const COPY: Record<
     footer: string;
   }
 > = {
-  name: {
-    title: "Handle",
-    placeholder: "researcher",
+  get name() {
+    return {
+      get title() {
+        return translateApp("Handle");
+      },
+      get placeholder() {
+        return translateApp("researcher");
+      },
     maxLength: 32,
-    footer:
-      "Use 1–32 lowercase letters, digits or hyphens. People and agents @mention this handle.",
+      get footer() {
+        return translateApp(
+          "Use 1–32 lowercase letters, digits or hyphens. People and agents @mention this handle.",
+        );
+      },
+    };
   },
-  display_name: {
-    title: "Display name",
-    placeholder: "Optional friendly name",
+  get display_name() {
+    return {
+      get title() {
+        return translateApp("Display name");
+      },
+      get placeholder() {
+        return translateApp("Optional friendly name");
+      },
     maxLength: 40,
-    footer: "Shown instead of the handle in chats and crews.",
+      get footer() {
+        return translateApp("Shown instead of the handle in chats and crews.");
+      },
+  };
   },
-  description: {
-    title: "Purpose",
-    placeholder: "What should this agent do?",
+  get description() {
+    return {
+      get title() {
+        return translateApp("Purpose");
+      },
+      get placeholder() {
+        return translateApp("What should this agent do?");
+      },
     maxLength: 2048,
     multiline: true,
-    footer:
-      "What this agent is for. Its granted services still decide what it can do.",
+      get footer() {
+        return translateApp(
+          "What this agent is for. Its granted services still decide what it can do.",
+        );
+      },
+    };
   },
-  persona: {
-    title: "Personality and tone",
-    placeholder: "Warm, concise, explains its decisions",
+  get persona() {
+    return {
+      get title() {
+        return translateApp("Personality and tone");
+      },
+      get placeholder() {
+        return translateApp("Warm, concise, explains its decisions");
+      },
     maxLength: 2000,
     multiline: true,
-    footer: "Personality changes its tone, not its authority.",
+      get footer() {
+        return translateApp("Personality changes its tone, not its authority.");
+      },
+    };
   },
 };
 
@@ -70,15 +109,16 @@ export function agentProfileFieldTitle(
   field: AgentProfileField,
   nyxbot = false,
 ) {
-  return field === "description" && nyxbot ? "Notes" : COPY[field].title;
+  return field === "description" && nyxbot ? translateApp("Notes")
+    : COPY[field].title;
 }
 
 const errorMessage = (cause: unknown) =>
   cause instanceof ZodError
-    ? (cause.issues[0]?.message ?? "Check this value.")
+    ? (cause.issues[0]?.message ?? translateApp("Check this value."))
     : cause instanceof Error
       ? cause.message
-      : "Could not complete this action. Try again.";
+      : translateApp("Could not complete this action. Try again.");
 
 /**
  * Agent › one profile value on its own page, Save in the header. The value
@@ -89,6 +129,7 @@ export function AgentProfileEditScreen({
   navigation,
   route,
 }: ContentScreenProps<"AgentProfileEdit">) {
+  useAppLanguage();
   const { agentId, field } = route.params;
   const copy = COPY[field];
   const queryClient = useQueryClient();
@@ -104,7 +145,7 @@ export function AgentProfileEditScreen({
   const [value, setValue] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -122,8 +163,9 @@ export function AgentProfileEditScreen({
   const draft = value ?? saved;
   const editable =
     !!baseline &&
-    baseline.can_maintain === true &&
-    baseline.status !== "destroyed" &&
+    !isAgentAccessRefusal(detail.error) &&
+    detail.data?.agent.can_maintain === true &&
+    detail.data.agent.status !== "destroyed" &&
     !(field === "name" && nyxbot);
   const dirty = !done && value !== undefined && value !== saved;
   const canSave = editable && dirty && isConnected && !busy;
@@ -139,20 +181,20 @@ export function AgentProfileEditScreen({
       });
       if (Object.keys(patch).length) {
         const latest = (await agentsApi.detail(agentId)).agent;
-        if (latest.can_maintain !== true || latest.status === "destroyed")
-          throw new Error(
-            "This agent can no longer be changed. Reload to review its current state.",
-          );
+        if (latest.can_maintain !== true || latest.status === "destroyed") {
+          await queryClient.invalidateQueries({ queryKey: ROOT });
+          if (mounted.current) setDone(true);
+          throw localizedError("This agent can no longer be changed. Reload to review its current state.");
+        }
         if (profileHasConflict(baseline, latest, patch))
-          throw new Error(
-            "This profile changed elsewhere. Go back and review those changes before saving.",
-          );
+          throw localizedError("This profile changed elsewhere. Go back and review those changes before saving.");
         await agentsApi.update(agentId, patch);
       }
       await queryClient.invalidateQueries({ queryKey: ROOT });
       if (mounted.current) setDone(true);
     } catch (cause) {
-      if (mounted.current) setError(errorMessage(cause));
+      if (isAgentAccessRefusal(cause)) await queryClient.invalidateQueries({ queryKey: ROOT });
+      if (mounted.current) setError(() => (errorMessage(cause)));
     } finally {
       lock.current = false;
       if (mounted.current) setBusy(false);
@@ -179,25 +221,27 @@ export function AgentProfileEditScreen({
     options,
     discardOnClose: dirty
       ? {
-          title: "Discard changes?",
-          message: "Your unsaved profile change will be lost.",
+          title: translateApp("Discard changes?"),
+          message: translateApp("Your unsaved profile change will be lost."),
         }
       : undefined,
   });
   useEffect(() => {
-    if (done && !busy) navigation.goBack();
-  }, [done, busy, navigation]);
+    const lostAccess = baseline?.can_maintain === true && (detail.data?.agent.can_maintain === false || isAgentAccessRefusal(detail.error));
+    if ((done || lostAccess) && !busy) navigation.goBack();
+  }, [done, busy, baseline, detail.data, detail.error, navigation]);
   return (
     <SettingsPage>
       {!isConnected && (
-        <Notice message="You're offline. Connect to save changes." />
+        <Notice message={translateApp("You're offline. Connect to save changes.")}
+        />
       )}
       {detail.isPending && (
         <SkeletonRows
           rows={2}
           icon={false}
           title
-          accessibilityLabel="Loading agent"
+          accessibilityLabel={translateApp("Loading agent")}
         />
       )}
       {detail.isError && !baseline && (
@@ -207,8 +251,8 @@ export function AgentProfileEditScreen({
         <Notice
           message={
             field === "name" && nyxbot
-              ? "NyxBot's handle cannot be changed."
-              : "This agent can no longer be changed here."
+              ? translateApp("NyxBot's handle cannot be changed.")
+              : translateApp("This agent can no longer be changed here.")
           }
         />
       )}

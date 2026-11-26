@@ -168,6 +168,320 @@ impl MachineConsentFixture {
 }
 
 #[tokio::test]
+async fn machine_oauth_management_status_follows_signed_client_journey() {
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    async fn request(
+        app: &Router,
+        auth: &str,
+        method: &str,
+        uri: &str,
+        content_type: &str,
+        body: String,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        0,
+                    ))))
+                    .header(header::AUTHORIZATION, format!("Bearer {auth}"))
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn read(app: &Router, token: &str, path: &str) -> Value {
+        let response = request(app, token, "GET", path, "application/json", String::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 256 * 1024).await.unwrap()).unwrap()
+    }
+
+    fn redirect(response: Response) -> url::Url {
+        assert_eq!(response.status(), StatusCode::FOUND);
+        url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap()
+    }
+
+    let f = MachineConsentFixture::new().await;
+    let outsider = Uuid::new_v4().to_string();
+    insert_person_user(&f.state.db, &outsider).await;
+    let token = |user: &str| {
+        jwt::generate_access_token(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &Uuid::parse_str(user).unwrap(),
+            "read write",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let owner = token(&f.user);
+    let other_owner = token(&outsider);
+    let (public, private) = crate::routes::build_router_with_state(f.state.clone());
+    let app = public.merge(private).with_state(f.state.clone());
+    let path = format!("/api/v1/users/me/consents/{}/machine-grant", f.client);
+    let control_client = Uuid::new_v4().to_string();
+    insert_public_client(&f.state.db, &control_client, "openid proxy").await;
+    let control_service = Uuid::new_v4().to_string();
+    let control = consent_service::grant_consent_with_services(
+        &f.state.db,
+        &f.user,
+        &control_client,
+        "openid proxy",
+        Some(vec![control_service]),
+    )
+    .await
+    .unwrap();
+    let clients = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>("oauth_clients");
+    let consents = f.state.db.collection::<Consent>("consents");
+    let control = consents
+        .find_one(doc! {"_id": &control.id})
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut authorize = url::form_urlencoded::Serializer::new(String::new());
+    authorize.extend_pairs([
+        ("response_type", "code"),
+        ("client_id", &f.client),
+        ("redirect_uri", "https://app.example/callback"),
+        ("scope", "openid proxy machine offline_access"),
+        (
+            "code_challenge",
+            f.params.code_challenge.as_deref().unwrap(),
+        ),
+        ("code_challenge_method", "S256"),
+        ("prompt", "consent"),
+        ("state", "fixture-client-state"),
+    ]);
+    let authorize_path = format!("/oauth/authorize?{}", authorize.finish());
+    let authorize = async || {
+        redirect(
+            request(
+                &app,
+                &owner,
+                "GET",
+                &authorize_path,
+                "text/html",
+                String::new(),
+            )
+            .await,
+        )
+        .query_pairs()
+        .find(|(key, _)| key == "consent_request")
+        .unwrap()
+        .1
+        .into_owned()
+    };
+    let prepare = async |signed: &str| {
+        let response = request(
+            &app,
+            &owner,
+            "POST",
+            "/api/v1/users/me/oauth-machine-consent-requests",
+            "application/json",
+            json!({"consent_request": signed, "selection": f.selection()}).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 256 * 1024).await.unwrap())
+                .unwrap();
+        response["token"].as_str().unwrap().to_owned()
+    };
+    let decide = async |decision: &str, signed: &str| {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.extend_pairs([
+            ("response_type", "code"),
+            ("client_id", &f.client),
+            ("redirect_uri", "https://app.example/callback"),
+            ("decision", decision),
+            ("consent_request", signed),
+        ]);
+        let form = form.finish();
+        redirect(
+            request(
+                &app,
+                &owner,
+                "POST",
+                "/oauth/authorize/decision",
+                "application/x-www-form-urlencoded",
+                form,
+            )
+            .await,
+        )
+    };
+
+    let base_callback = decide("allow", &authorize().await).await;
+    let base_code = base_callback
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .unwrap()
+        .1;
+    let base = f.token_response(&base_code).await;
+    assert_eq!(base.scope.as_deref(), Some("openid proxy offline_access"));
+    let before = read(&app, &owner, &path).await;
+    assert_eq!(
+        before["oauth_machine_status"],
+        "consent_machine_scope_missing"
+    );
+    assert_eq!(before["source_validity_reason"], "ineligible");
+    assert_eq!(before["grant_validity_reason"], "missing");
+
+    // Old client registration and old consent records remain distinct.
+    clients
+        .update_one(
+            doc! {"_id": &f.client},
+            doc! {"$set": {"allowed_scopes": "openid proxy offline_access"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&app, &owner, &path).await["oauth_machine_status"],
+        "client_machine_scope_missing"
+    );
+    let foreign = read(&app, &other_owner, &path).await;
+    let absent_path = format!("/api/v1/users/me/consents/{}/machine-grant", Uuid::new_v4());
+    let absent = read(&app, &other_owner, &absent_path).await;
+    assert_eq!(foreign["source_validity_reason"], "ineligible");
+    assert_eq!(absent["source_validity_reason"], "missing");
+    for result in [foreign, absent] {
+        assert!(result.get("oauth_machine_status").is_none());
+        assert!(result.get("oauth_machine_services").is_none());
+        assert!(result["grant"].is_null());
+        assert_eq!(result["source_and_grant_valid"], false);
+    }
+    clients
+        .update_one(
+            doc! {"_id": &f.client},
+            doc! {"$set": {"allowed_scopes": "openid proxy machine offline_access"}},
+        )
+        .await
+        .unwrap();
+    let saved = consents
+        .find_one(doc! {"user_id": &f.user, "client_id": &f.client})
+        .await
+        .unwrap()
+        .unwrap();
+    consents
+        .update_one(doc! {"_id": &saved.id}, doc! {"$unset": {"revision": ""}})
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&app, &owner, &path).await["oauth_machine_status"],
+        "consent_revision_missing"
+    );
+    consents
+        .replace_one(doc! {"_id": &saved.id}, &saved)
+        .await
+        .unwrap();
+
+    let abandoned = prepare(&authorize().await).await;
+    assert_eq!(read(&app, &owner, &path).await, before);
+    drop(abandoned);
+    let denied = decide("deny", &prepare(&authorize().await).await).await;
+    assert_eq!(denied.host_str(), Some("app.example"));
+    assert!(
+        denied
+            .query_pairs()
+            .any(|(key, value)| key == "error" && value == "access_denied")
+    );
+    assert!(
+        denied
+            .query_pairs()
+            .any(|(key, value)| key == "state" && value == "fixture-client-state")
+    );
+    assert!(!denied.query_pairs().any(|(key, _)| key == "code"));
+    assert_eq!(read(&app, &owner, &path).await, before);
+    assert_eq!(
+        consents.find_one(doc! {"_id": &saved.id}).await.unwrap(),
+        Some(saved)
+    );
+
+    let allowed = decide("allow", &prepare(&authorize().await).await).await;
+    assert_eq!(allowed.host_str(), Some("app.example"));
+    assert!(
+        allowed
+            .query_pairs()
+            .any(|(key, value)| key == "state" && value == "fixture-client-state")
+    );
+    let code = allowed
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .unwrap()
+        .1;
+    let selected = f.token_response(&code).await;
+    assert!(
+        selected
+            .scope
+            .as_deref()
+            .unwrap()
+            .split_whitespace()
+            .any(|scope| scope == "machine")
+    );
+    let after = read(&app, &owner, &path).await;
+    assert_eq!(after["oauth_machine_status"], "valid");
+    assert_eq!(after["source_and_grant_valid"], true);
+    assert!(after["grant"]["id"].is_string());
+    let foreign = read(&app, &other_owner, &path).await;
+    assert!(foreign.get("oauth_machine_status").is_none());
+    assert!(foreign.get("oauth_machine_services").is_none());
+    assert!(foreign["grant"].is_null());
+    assert_eq!(
+        consents.find_one(doc! {"_id": &control.id}).await.unwrap(),
+        Some(control)
+    );
+
+    // The older consent revision fails authentication before management access
+    // is checked. The current OAuth token authenticates but lacks owner access.
+    for (token, usable, management_status) in [
+        (base.access_token, false, StatusCode::UNAUTHORIZED),
+        (selected.access_token, true, StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(
+            crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
+                &f.state, &token
+            )
+            .await
+            .is_ok(),
+            usable
+        );
+        assert_eq!(
+            request(
+                &app,
+                &token,
+                "GET",
+                &path,
+                "application/json",
+                String::new()
+            )
+            .await
+            .status(),
+            management_status
+        );
+    }
+}
+
+#[tokio::test]
 async fn machine_oauth_signed_selection_is_one_time_and_atomic_under_race() {
     let f = MachineConsentFixture::new().await;
     let signed = f.prepare().await;
@@ -232,13 +546,14 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
         .unwrap()
         .unwrap();
     assert_eq!(row.protected_consent, Some(reference.clone()));
-    let refreshed = crate::services::token_service::refresh_tokens(
+    let refreshed = crate::services::token_service::refresh_tokens_for_client(
         &f.state.db,
         &f.state.config,
         &f.state.jwt_keys,
         &issued.refresh_token,
         None,
         None,
+        crate::services::token_service::RefreshClient::Identified(&f.client, None),
     )
     .await
     .unwrap();
@@ -259,13 +574,14 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
     let again = f.prepare().await;
     f.code(&again).await;
     assert!(
-        crate::services::token_service::refresh_tokens(
+        crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &refreshed.refresh_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .is_err()
@@ -343,13 +659,14 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
         .await
         .unwrap();
     assert!(
-        crate::services::token_service::refresh_tokens(
+        crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &legacy_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .is_err()
@@ -574,13 +891,14 @@ async fn machine_oauth_consent_revoke_reconsent_never_adopts_old_tokens() {
         .is_err()
     );
     assert!(
-        crate::services::token_service::refresh_tokens(
+        crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &original.refresh_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .is_err()
@@ -1106,13 +1424,14 @@ async fn machine_oauth_optional_without_selection_narrows_tokens_and_keeps_mcp()
             }
         }
         let refresh = issued.refresh_token.unwrap();
-        let refreshed = crate::services::token_service::refresh_tokens(
+        let refreshed = crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &refresh,
             None,
             None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .unwrap();

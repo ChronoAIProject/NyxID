@@ -1,4 +1,3 @@
-use chrono::Utc;
 use mongodb::bson::doc;
 use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
@@ -170,7 +169,7 @@ pub async fn exchange_token_with_authority(
             "Catalog delegation requires a client-bound subject token".to_string(),
         ));
     }
-    let (mut restrictions, authority) = if catalog_scope {
+    let mut restrictions = if catalog_scope {
         catalog_delegation_service::ensure_client_can_delegate_catalog(
             db,
             actor_client_id.expect("catalog source client checked above"),
@@ -190,7 +189,7 @@ pub async fn exchange_token_with_authority(
             requested_node_ids,
         )
         .await?;
-        (authority.restriction_claims(), Some(authority))
+        authority.restriction_claims()
     } else {
         let mut restrictions = jwt::TokenRestrictionClaims::from_claims(&subject_claims);
         // Newly issued ordinary delegated tokens always carry their node
@@ -199,7 +198,7 @@ pub async fn exchange_token_with_authority(
         // in the new token rather than inferred again by its consumer.
         restrictions.allowed_node_ids.get_or_insert_with(Vec::new);
         restrictions.allow_all_nodes.get_or_insert(true);
-        (restrictions, None)
+        restrictions
     };
     restrictions.oauth_lineage = Some(
         crate::models::oauth_delegation_authority::OauthAuthorityLineage {
@@ -208,7 +207,7 @@ pub async fn exchange_token_with_authority(
             source_session_id: subject_claims.sid.clone(),
         },
     );
-    let (delegated_token, jti) = if catalog_scope {
+    let (delegated_token, _) = if catalog_scope {
         jwt::generate_delegated_access_token_for_client(
             jwt_keys,
             config,
@@ -231,20 +230,6 @@ pub async fn exchange_token_with_authority(
             Some(&restrictions),
         )?
     };
-
-    if let Some(authority) = authority {
-        catalog_delegation_service::persist_grant(
-            db,
-            &jti,
-            user_id_str,
-            actor_client_id.unwrap_or(client_id),
-            client_id,
-            &scope,
-            &authority,
-            Utc::now().timestamp() + DELEGATED_TOKEN_TTL_SECS,
-        )
-        .await?;
-    }
 
     let claims = jwt::verify_token(jwt_keys, config, &delegated_token)?;
     super::oauth_token_authority_service::persist(
@@ -415,7 +400,7 @@ pub async fn refresh_delegation_token(
     // scopes. The source client does not acquire the receiver's authority.
     let validated_scope = validate_delegation_scope(scope, &scope_client.delegation_scopes)?;
 
-    let authority = if catalog_scope {
+    if catalog_scope {
         catalog_delegation_service::ensure_client_can_delegate_catalog(db, acting_client_id)
             .await?;
         let authority =
@@ -429,51 +414,21 @@ pub async fn refresh_delegation_token(
             &authority,
         )
         .await?;
-        Some(authority)
-    } else {
-        None
-    };
+    }
 
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
-    let (new_token, jti) = if catalog_scope {
-        jwt::generate_delegated_access_token_for_client(
-            jwt_keys,
-            config,
-            &user_uuid,
-            &validated_scope,
-            acting_client_id,
-            receiving_client_id,
-            DELEGATED_TOKEN_TTL_SECS,
-            Some(restrictions),
-        )?
-    } else {
-        jwt::generate_delegated_access_token_for_client(
-            jwt_keys,
-            config,
-            &user_uuid,
-            &validated_scope,
-            acting_client_id,
-            None,
-            DELEGATED_TOKEN_TTL_SECS,
-            Some(restrictions),
-        )?
-    };
-
-    if let Some(authority) = authority {
-        catalog_delegation_service::persist_grant(
-            db,
-            &jti,
-            user_id,
-            acting_client_id,
-            receiving_client_id.expect("catalog receiver checked above"),
-            &validated_scope,
-            &authority,
-            Utc::now().timestamp() + DELEGATED_TOKEN_TTL_SECS,
-        )
-        .await?;
-    }
+    let (new_token, _) = jwt::generate_delegated_access_token_for_client(
+        jwt_keys,
+        config,
+        &user_uuid,
+        &validated_scope,
+        acting_client_id,
+        receiving_client_id,
+        DELEGATED_TOKEN_TTL_SECS,
+        Some(restrictions),
+    )?;
 
     let claims = jwt::verify_token(jwt_keys, config, &new_token)?;
     super::oauth_token_authority_service::persist(
@@ -984,11 +939,13 @@ mod tests {
                 delegation_scopes: catalog_delegation_service::MCP_CATALOG_READ_SCOPE.to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -1207,11 +1164,13 @@ mod tests {
                 delegation_scopes: ACCOUNT_READ_SCOPE.to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -1328,11 +1287,13 @@ mod tests {
                 delegation_scopes: "llm:proxy proxy".to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,

@@ -47,11 +47,13 @@ impl Fixture {
                 delegation_scopes: "proxy:* mcp:catalog:read".into(),
                 default_service_catalog_slugs: vec![],
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -606,13 +608,17 @@ async fn revocation_and_client_soft_deletion_fail_tokens_on_another_app_state() 
         StatusCode::UNAUTHORIZED
     );
     assert!(
-        super::super::token_service::refresh_tokens(
+        super::super::token_service::refresh_tokens_for_client(
             &replica.state.db,
             &replica.state.config,
             &replica.state.jwt_keys,
             &refresh.refresh_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(
+                &fixture.client,
+                Some("fixture-client-secret")
+            )
         )
         .await
         .is_err()
@@ -1134,3 +1140,5 @@ async fn delegation_fingerprint_mismatch_is_definitive_and_positive_reads_are_op
     assert_eq!(denied.into_response().status(), StatusCode::UNAUTHORIZED);
     fixture.state.db.drop().await.unwrap();
 }
+
+pub(super) mod catalog_issuance;

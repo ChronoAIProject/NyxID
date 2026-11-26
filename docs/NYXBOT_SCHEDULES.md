@@ -28,7 +28,7 @@ bots or billing.
 
 - **Triggers:** `backend/src/models/trigger.rs`,
   `backend/src/services/trigger_service.rs`, `backend/src/handlers/` trigger
-  routes, CLAUDE.md "Connection Webhooks and Triggers". Today a trigger is an
+  routes, `AGENTS.md` Critical Rule 14 "Connection Webhooks and Triggers". Today a trigger is an
   inbound webhook (token or HMAC verified) delivered to a webhook URL, a device
   agent conversation, or a notification.
 - **NyxBot event turns:**
@@ -184,6 +184,11 @@ execute the task again. A transport error, timeout or uncertain crash does not
 authorize retry. Expiry/exhaustion is a visible actionable failure. Delivery waits
 retain ordinary overlap behavior; they do not clear live executions.
 
+When Skip suppresses an occurrence, run history can include `blocking_run_id`
+for the run that occupied the same automation at the overlap check. In
+Automations, open that run to see its current status and any available
+thread or Cancel action. A legacy skip can have no recorded blocking run.
+
 Fields are additive and old unclaimed rows can use this settlement. Legacy
 claimed sends remain non-replayable and receive an uncertainty notice on new
 workers. Old workers retain the `result_claimed` guard, preventing duplicate
@@ -234,7 +239,12 @@ enabling the flag; old servers reject the additive notification settings.
     plain words ("every weekday at 8:00 Singapore time, starting tomorrow").
   - `nyxid__list_schedules`, `nyxid__update_schedule` (including pause and
     resume) and `nyxid__delete_schedule`. Listing and updating also expose
-    assistant webhook automations and their confirmation policy.
+    assistant webhook automations and their confirmation policy. The list returns
+    full records newest first, 20 per page by default (1–50). Use `enabled` or
+    `agent_id` to filter. If a page has a `ref`, concatenate its `content` with
+    each part from `nyxid__read_tool_result(ref, part=next_part)` in the same
+    turn. Pass the assembled page's `next_cursor` as `cursor` with the same
+    filters until `next_cursor` is null.
   - `nyxid__run_schedule_now`: run once now, to test.
 - **Webhook triggers to agents.** Creating one needs its inbound secret shown
   exactly once. Secrets never pass through chat, so NyxBot hands out a
@@ -265,7 +275,7 @@ enabling the flag; old servers reject the additive notification settings.
 - **Run history per trigger,** linking to the thread of each run.
 - **Agent pages** show that agent's schedules.
 - **Owner-only.** Human routes for creating, editing and deleting from the web;
-  agent keys keep today's trigger API rules (CLAUDE.md).
+  agent keys keep today's trigger API rules (`AGENTS.md` Critical Rule 14).
 
 ### S7. Performance (applies to everything here, and is measured)
 
@@ -299,8 +309,8 @@ assume, that schedules and triggers do not slow NyxID or NyxBot down:
   resume, and each run's outcome. No instruction text or payloads in audit or
   logs.
 - **Errors.** Reuse the trigger error block (11600–11606). Add codes there, or
-  in a new reserved block, and update CLAUDE.md's table.
-- **Docs.** Update CLAUDE.md (Triggers rule, NyxAgent paragraph, key routes),
+  in a new reserved block, and update the error-code table in `AGENTS.md` (Critical Rule 3).
+- **Docs.** Update `AGENTS.md` (Triggers rule, NyxAgent paragraph, key routes),
   `docs/chat/09-nyxbot-orchestrator.md`, and this document.
 
 ## Acceptance
@@ -428,14 +438,14 @@ contains prompts, payloads or upstream error prose. The complete answer lives in
 the assistant transcript.
 `deliver_to` is `{"type":"thread"}`, `{"type":"notification"}` (push only), or
 `{"type":"chat","chat_id":"..."}`. Chat access is checked both at configuration
-and delivery, through the existing post-to-chat path. Long replies respect the
-destination platform limit and explicitly say they were shortened, with a full
-thread link. Push has a concise preview and thread ID.
+and delivery, through the existing post-to-chat path. Replies longer than one
+platform message are split under the shared 64-part rule in
+[Full saved reply delivery](TELEGRAM_NEW.md#full-saved-reply-delivery). Push has a concise preview and thread ID.
 A run whose saved `deliver_to` targets a chat receives that platform’s one-message
 length guidance in turn-only context, including confirmation continuations and
 specialist reports. Telegram prefers one 4,096-character message; an explicit
 request for long or complete output permits multiple parts. The delivery planner
-keeps all content and splits longer replies. Thread-only runs receive no channel
+splits longer replies under the same 64-part rule. Thread-only runs receive no channel
 length guidance. `list_channel_chats` supplies the same per-destination guidance
 for explicit `post_to_chat` calls.
 
@@ -544,7 +554,7 @@ Webhook setup links are `/assistant/automations?setup=<watch-id>`. The owner-aut
 an owned, pending, unexpired, unused watch. Creation validates and consumes the
 watch in the trigger-insert transaction, so concurrent submissions cannot reuse
 it. No instruction or label enters the URL. The Triggers developer page remains
-available for inbound secrets and replay; Automations sits next to Assistant.
+available for inbound secrets and replay.
 
 ## Performance measurements
 
@@ -577,9 +587,9 @@ it excludes HTTP socket/TLS and authentication middleware overhead:
 | Confirmation decision → completed continuation | 177.912 ms | persisted owner decision, scheduler tick, fake NyxAgent |
 | Three-day outage, five-minute cadence | 85.262 ms | 864 missed occurrences; one execution, one summary, one summary audit |
 
-The 27 scheduler tests passed in 64.28 seconds; the five cron-computation tests
-passed in 0.73 seconds. The scheduler suite includes admission-deadline and
-failure-notification regressions in addition to these measurements.
+Historical record (2026-10-15 run): 27 scheduler tests passed in 64.28 seconds
+and five cron-computation tests in 0.73 seconds. The scheduler suite includes admission-deadline and failure-notification regressions
+in addition to these measurements.
 
 The explain test asserts `PROJECTION_COVERED → IXSCAN`, index
 `trigger_work_due {at:1,_id:1}`, `totalDocsExamined = 0`, and
@@ -764,6 +774,21 @@ cancel enrolled runs, and require no nonterminal runs, bound queued events,
 active children, pending receipts, group followers, cards or async watches in the
 diagnostic. Observation cannot discover writers predating the observation protocol. A disabled option alone does not make a downgrade safe.
 
-Completion records the coordinator's settled result; verifying external business
-outcomes such as published post IDs remains the coordinator agent's job and is
-outside this change (the remaining part of issue #2040).
+### Verify a scheduled group run
+
+1. Use an admin or operator session to read
+   `GET /api/v1/admin/automation-continuations/readiness`. Check `configured`,
+   `readiness.serving_ready`, and any `readiness.serving_blockers`. This
+   describes current readiness for new admissions.
+2. Use the automation owner's session to read
+   `GET /api/v1/triggers/{id}/runs`. Identify the run by `id` and
+   `scheduled_at`. A populated `coordinator_deadline` identifies an enrolled
+   run even after readiness or configuration changes. While the run awaits
+   tracked group results, expect `outcome: waiting`, `wait_kind: coordinator`,
+   `reason: coordinator_pending`, and an empty `finished_at`.
+3. Follow the same run to its terminal `outcome`, `reason`, and
+   `finished_at`. For Thread delivery, open its `thread_id` to read the
+   coordinator's retained result. Correlate the run ID with
+   `trigger_run_waiting` and `trigger_run_outcome` audit metadata. Check
+   any business evidence required by the workflow in the retained reply
+   and its source, such as publication IDs and reply-chain readback.

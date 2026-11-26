@@ -344,7 +344,7 @@ async fn accept_claimed(
             return Err(AppError::Conflict("Reconcile the interrupted skill publication or wait for its active attempt before deleting your account; your account and provider credentials remain available for recovery".into()));
         }
         super::oracle_pool_service::accept_personal_erasure_in_session(db,&mut tx,user,actor).await?;
-        super::admin_user_service::apply_user_security_state_in_session(db,&mut tx,user,false,true,owner_policy,Some(live.is_active)).await?;
+        super::admin_user_service::apply_user_security_state_in_session(db,&mut tx,user,false,Some(actor),owner_policy,Some(live.is_active)).await?;
         super::session_authority::revoke_all_in_transaction(db,user,&mut tx).await?;
         db.collection::<Document>(USERS).update_one(doc! {"_id":user},doc! {"$set":{"channel_adapter_admission_closed":true},"$inc":{"channel_adapter_admission_fence":1_i64}}).session(&mut tx).await?;
         super::telemetry_erasure_service::enqueue_in_session(db,user,&mut tx).await?;
@@ -769,3 +769,5 @@ mod independent_credential_tests {
 
 #[cfg(test)]
 mod integration_tests;
+
+pub(crate) use channel::erase_provider_inbox;

@@ -219,6 +219,11 @@ pub(crate) async fn key_authority(
             grants,
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
+            if b.authority.lane == model::Lane::OrgMember {
+                b.authority.revision
+            } else {
+                0
+            },
         )
     };
     Ok(KeyAuthority::Collaboration(
@@ -391,7 +396,7 @@ pub(super) async fn begin_ready(
             start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. {} Handoffs retain that requester. Agents: {roster}. Address people and agents only by the exact @handle shown above, never by account or agent IDs. For handoffs, copy the agent handle exactly. Recheck requested consent and action-card decisions before resuming an interrupted operation.",people::context(&participants,actor)));
             let ids = engine::OwnerTurnIds {
  artifact_budget: Default::default(),conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
-            let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None).await?.into_started()?;
+            let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None, None).await?.into_started()?;
             row=claim.conversation.clone();
             bind_key(db,&row,session).await?;
             let input = engine::turn_input(&row, &start);

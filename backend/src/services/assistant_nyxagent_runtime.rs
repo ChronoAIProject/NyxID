@@ -32,6 +32,10 @@ use tokio::sync::oneshot;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
+#[path = "assistant_nyxagent_subscriber.rs"]
+mod subscriber;
+pub(crate) use subscriber::{cancel_background, record as window_record};
+
 /// HTTP composition supplies existing reporting and queue wake-up behavior.
 /// Called only with a confirmed durable reply, never a candidate stream result.
 #[async_trait::async_trait]
@@ -84,6 +88,7 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
                 user_id,
                 turn,
                 platform_origin: Some(origin),
+                ..
             } => (user_id, turn, origin),
             // Ordinary HTTP wrappers retain their real-auth egress adapter.
             contract::NyxAgentExecutionContext::Owner {
@@ -98,6 +103,7 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
             .filter(|active| {
                 active.turn_id == turn.turn_id
                     && !active.stop_requested
+                    && !active.execution_started
                     && active.platform_origin.as_ref() == Some(&expected)
             })
             .ok_or(AppError::AssistantTurnRequired)?;
@@ -189,13 +195,26 @@ pub(crate) struct Events {
     pub(crate) reset_notified: bool,
 }
 impl Events {
-    pub(crate) fn emit(&mut self, event: &str, mut data: Value) {
+    pub(crate) fn emit(&mut self, event: &str, data: Value) {
+        self.emit_with_checkpoint(event, data, None);
+    }
+
+    fn emit_with_checkpoint(
+        &mut self,
+        event: &str,
+        mut data: Value,
+        upstream: Option<crate::models::assistant_conversation::SubscriberCheckpoint>,
+    ) {
         self.cursor += 1;
         data["event"] = json!(event);
         data["cursor"] = json!(self.cursor);
         if let Some(checkpoint) = &self.checkpoint {
-            checkpoint
-                .send_modify(|reply| super::assistant_stream_checkpoint::observe(reply, &data));
+            checkpoint.send_modify(|reply| {
+                super::assistant_stream_checkpoint::observe(reply, &data);
+                if upstream.is_some() {
+                    reply.upstream = upstream;
+                }
+            });
         }
         let _ = self.sender.send(data);
     }
@@ -218,6 +237,7 @@ pub(crate) enum SettledExecution {
         error: Option<TurnError>,
     },
     Deleted,
+    Relinquished,
     Unconfirmed,
 }
 
@@ -253,6 +273,13 @@ where
             // A forced stop or orphan reclaim may already have saved this turn.
             // Database errors remain retryable, never evidence of deletion.
             Ok(Err(AppError::NotFound(_))) => {
+                if row
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.execution_attempt.is_some())
+                {
+                    return SettledExecution::Relinquished;
+                }
                 let messages = db.collection::<AssistantMessage>(
                     crate::models::assistant_message::COLLECTION_NAME,
                 );
@@ -290,7 +317,9 @@ where
             tracing::error!(conversation_id = %row.id, turn_id, "Assistant settlement deadline exceeded");
             Some(TurnError::internal("assistant_unavailable", "settlement"))
         }
-        SettledExecution::Deleted => unreachable!("deletion returns without terminal events"),
+        SettledExecution::Deleted | SettledExecution::Relinquished => {
+            unreachable!("only the settling worker emits terminal events")
+        }
     };
     events.emit(
         "block.completed",
@@ -370,15 +399,36 @@ pub(crate) async fn continue_turn(
         return Ok(false);
     }
     let lease = chrono::Utc::now() + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS);
-    let update = doc! {"$set":{"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}};
+    let mut fields = doc! {"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)};
+    if active
+        .restart_admission
+        .as_ref()
+        .is_some_and(|admission| admission.window.is_some())
+    {
+        fields.insert(
+            "active_turn.restart_admission.window.next_continuation",
+            mongodb::bson::to_bson(continuations)
+                .map_err(|_| TurnError::internal("assistant_unavailable", "continuation"))?,
+        );
+    }
+    let update = doc! {"$set":fields};
     if active.platform_origin.is_some() {
         super::platform_personal_turn_service::update_platform_turn(&state.db, row, update)
             .await
             .map_err(|_| TurnError::internal("cancelled", "continuation"))?;
     } else {
-        let updated=state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-            .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&active.turn_id,"active_turn.stop_requested":false},update)
-            .await.map_err(|_|TurnError::internal("assistant_unavailable", "continuation"))?;
+        let mut filter = engine::WorkerFence::capture(row)
+            .map_err(|_| TurnError::internal("cancelled", "continuation"))?
+            .filter();
+        filter.insert("active_turn.stop_requested", false);
+        let updated = state
+            .db
+            .collection::<AssistantConversation>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .update_one(filter, update)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "continuation"))?;
         if updated.matched_count != 1 {
             return Err(TurnError::internal("cancelled", "stop"));
         }
@@ -508,6 +558,7 @@ pub(crate) async fn turn_notes(
     previous_user_message: Option<DateTime<Utc>>,
 ) -> String {
     let mut notes = engine::channel_note(row);
+    notes.push_str(engine::specialist_handoff_capability(row));
     notes.push_str(
         &engine::additional_channel_length_note(&state.db, row)
             .await
@@ -526,7 +577,7 @@ pub(crate) async fn turn_notes(
         }
         if let Some(note) = turn.note.as_deref() {
             notes.push_str("\n\n");
-            notes.push_str(note);
+            notes.push_str(&note.replace(engine::HANDOFF_UI_NOTE, ""));
         }
     }
     // Someone other than the owner is talking: nothing private to the owner
@@ -674,6 +725,10 @@ pub(crate) fn owner_context(
     row: &AssistantConversation,
 ) -> AppResult<contract::NyxAgentExecutionContext> {
     Ok(contract::NyxAgentExecutionContext::Owner {
+        attempt: row
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.execution_attempt.clone()),
         user_id: row.user_id.clone(),
         turn: contract::TurnRef {
             conversation_id: row.id.clone(),
@@ -702,6 +757,7 @@ async fn request(
     path: &str,
     mut body: Option<Value>,
     request_id: Option<&str>,
+    destination: Option<contract::NyxAgentDestination>,
     policy: Option<BillingRoutePolicy>,
 ) -> AppResult<axum::response::Response> {
     if let Some(body) = body
@@ -739,6 +795,7 @@ async fn request(
                 method,
                 relative_path: path.to_owned(),
                 body,
+                destination,
                 idempotency_key: request_id
                     .map(str::to_owned)
                     .unwrap_or_else(|| match authority {
@@ -760,6 +817,244 @@ pub(crate) async fn run_owner_turn(
     egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
     mut row: AssistantConversation,
     text: String,
+    credential: AssistantCredential,
+    policy: Option<BillingRoutePolicy>,
+    permit: DirectChatPermit,
+    events: Events,
+) -> Option<OwnerTurnSettlement> {
+    if !super::assistant_turn_restart::owns_subscriber(
+        &row,
+        &super::assistant_engine_worker::instance().id,
+    ) {
+        return None;
+    }
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.platform_origin.is_some() && turn.restart_offer.is_none())
+    {
+        Box::pin(prepare_manager_worker(
+            &state,
+            egress.as_ref(),
+            &mut row,
+            &credential,
+            policy,
+            &permit,
+        ))
+        .await
+        .ok()?;
+    }
+    let handoff = row
+        .active_turn
+        .as_ref()
+        .filter(|turn| turn.restart_admission.is_some())
+        .map(|_| (state.shutdown.clone(), state.db.clone(), row.clone()));
+    let mut driver = Box::pin(drive_owner_turn(
+        state, egress, row, text, credential, policy, permit, events,
+    ));
+    let Some((shutdown, db, admitted)) = handoff else {
+        return driver.await;
+    };
+    tokio::select! {
+        biased;
+        () = shutdown.turn_offer_due() => {},
+        result = &mut driver => return result,
+    }
+    let worker = super::assistant_engine_worker::instance();
+    let offer = super::assistant_turn_restart::yield_on_shutdown(&db, &admitted, &worker.id);
+    match tokio::time::timeout(super::shutdown::drain::TURN_OFFER_MARGIN, offer).await {
+        Ok(Ok(true)) => None,
+        Ok(Ok(false)) => driver.await,
+        _ => {
+            tracing::warn!(conversation_id = %admitted.id, "Assistant shutdown offer unconfirmed");
+            None
+        }
+    }
+}
+
+async fn prepare_manager_worker(
+    state: &AppState,
+    egress: &dyn contract::NyxAgentEgress,
+    row: &mut AssistantConversation,
+    credential: &AssistantCredential,
+    policy: Option<BillingRoutePolicy>,
+    permit: &DirectChatPermit,
+) -> AppResult<()> {
+    use super::assistant_nyxagent_model_cache::{self as profiles, InferenceCredential};
+    use crate::models::assistant_conversation::{ChatRestartSource, RestartSource, TurnOrigin};
+    let active = row
+        .active_turn
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let origin = active
+        .platform_origin
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let eligible = super::security_readiness_service::chat_restart_enrollment_ready()
+        && engine::restart_enabled(&state.db, &row.user_id)
+        && !row.is_subagent()
+        && row.platform_thread.as_ref() == Some(&origin.thread)
+        && origin.thread.user_id == row.user_id
+        && !row.guest_turn
+        && !row.guest_model_setup
+        && row.channel.is_none()
+        && row.group_id.is_none()
+        && !row.invocation_controlled
+        && !row.platform_cleanup_pending
+        && !row.shared_agent_thread
+        && row.collaboration.is_none()
+        && row.voice_parent_conversation_id.is_none()
+        && active.invocation_id.is_none()
+        && active.trigger_run_id.is_none()
+        && active.automation_work.is_none()
+        && active.voice_request_id.is_none()
+        && active.channel_context.is_none()
+        && active.channel_adapter_origin.is_none()
+        && active.channel_event_id.is_none()
+        && active.events.iter().all(|event| {
+            event.invocation_id.is_none()
+                && event.source_event_ids.is_empty()
+                && event.channel_contexts.is_empty()
+                && event.automation_work.is_none()
+        })
+        && matches!(active.origin, TurnOrigin::User | TurnOrigin::Event);
+    if !eligible {
+        super::platform_personal_turn_service::claim_platform_worker(
+            &state.db,
+            row,
+            &credential.api_key_id,
+        )
+        .await?;
+        row.active_turn
+            .as_mut()
+            .expect("claimed turn")
+            .worker_instance = Some(super::assistant_engine_worker::instance().clone());
+        return Ok(());
+    }
+    let original = row.clone();
+    let origin = origin.clone();
+    let authority = owner_context(row)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deployment = tokio::time::timeout_at(deadline, async {
+        let (destination, value) =
+            fetch_capabilities(state, CapabilityLookup::Admission, |destination| {
+                request(
+                    state,
+                    egress,
+                    &authority,
+                    credential,
+                    "GET",
+                    "v1/capabilities",
+                    None,
+                    None,
+                    Some(destination),
+                    policy,
+                )
+            })
+            .await?;
+        reattach_deployment(destination, &value)
+    })
+    .await
+    .ok()
+    .flatten();
+    let mut fields = mongodb::bson::Document::new();
+    let reason = if let Some(deployment) = deployment {
+        let models = tokio::time::timeout_at(
+            deadline,
+            profiles::load(
+                &state.db,
+                &row.user_id,
+                request(
+                    state,
+                    egress,
+                    &authority,
+                    credential,
+                    "GET",
+                    "v1/models?include_capabilities=true",
+                    None,
+                    None,
+                    Some(contract::NyxAgentDestination(
+                        deployment.destination_hash.clone(),
+                    )),
+                    policy,
+                ),
+            ),
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        let metadata = engine::RestartMetadata {
+            deployment: None,
+            models,
+        };
+        match metadata.profile(&row.model) {
+            Some(InferenceCredential::Thread) => {
+                let message = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+                    .find_one(doc! {"user_id":&row.user_id,"conversation_id":&row.id,"turn_id":&active.turn_id,"seq":active.initiating_message_seq,"role":if active.origin == TurnOrigin::Event {"event"} else {"user"}})
+                    .projection(doc! {"_id":1}).await?.ok_or(AppError::AssistantTurnRequired)?;
+                row.active_turn
+                    .as_mut()
+                    .expect("claimed turn")
+                    .worker_instance = Some(super::assistant_engine_worker::instance().clone());
+                engine::install_restart(
+                    row,
+                    message
+                        .get_str("_id")
+                        .map_err(|_| AppError::AssistantTurnRequired)?,
+                    deployment,
+                    false,
+                    permit.token().cloned(),
+                    RestartSource::FirstPartyOwner,
+                    None,
+                    Some(ChatRestartSource::PersonalManager {
+                        origin: Box::new(origin),
+                    }),
+                );
+                let turn = row
+                    .active_turn
+                    .as_ref()
+                    .ok_or(AppError::AssistantTurnRequired)?;
+                let encode = |_| AppError::AssistantTurnRequired;
+                fields.insert(
+                    "active_turn.restart_admission",
+                    mongodb::bson::to_bson(&turn.restart_admission).map_err(encode)?,
+                );
+                fields.insert(
+                    "active_turn.execution_attempt",
+                    mongodb::bson::to_bson(&turn.execution_attempt).map_err(encode)?,
+                );
+                "watched_thread_credential"
+            }
+            Some(InferenceCredential::Platform) => "platform_credential",
+            None => "profile_unknown",
+        }
+    } else {
+        "capability_unavailable"
+    };
+    fields.insert("active_turn.restart_eligibility", reason);
+    super::platform_personal_turn_service::claim_worker_with_restart(
+        &state.db,
+        &original,
+        &credential.api_key_id,
+        &fields,
+    )
+    .await?;
+    let active = row
+        .active_turn
+        .as_mut()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    active.restart_eligibility = Some(reason.to_owned());
+    active.worker_instance = Some(super::assistant_engine_worker::instance().clone());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_owner_turn(
+    state: AppState,
+    egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
+    mut row: AssistantConversation,
+    text: String,
     mut credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
     mut permit: DirectChatPermit,
@@ -770,64 +1065,50 @@ pub(crate) async fn run_owner_turn(
         .active_turn
         .as_ref()
         .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
-    crate::turn_trace::scope(trace, async move {
+    crate::turn_trace::scope(trace, Box::pin(async move {
     let _typing = egress.channel_typing(&row).map(AbortOnDropHandle::new);
-    if row
-        .active_turn
-        .as_ref()
-        .is_some_and(|turn| turn.platform_origin.is_some())
-        && super::platform_personal_turn_service::claim_platform_worker(
-            &state.db,
-            &row,
-            &credential.api_key_id,
-        )
-        .await
-        .is_err()
-    {
-        return None;
-    }
-    // Platform recovery claims the worker in the existing transaction. Keep
-    // the local settlement snapshot on that same process fence.
-    if let Some(turn) = row.active_turn.as_mut() {
-        turn.worker_instance = Some(super::assistant_engine_worker::instance().clone());
-    }
     let turn_id = row
         .active_turn
         .as_ref()
         .expect("claimed turn")
         .turn_id
         .clone();
-    let message_id = Uuid::new_v4().to_string();
+    let message_id = row.active_turn.as_ref().and_then(|turn| turn.restart_admission.as_ref())
+        .map(|admission| admission.reply_id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
     let block_id = format!("{message_id}-text");
+    let worker_fence = engine::WorkerFence::capture(&row).ok()?;
     let (checkpoint, _checkpoint_task) = super::assistant_stream_checkpoint::start(
         state.db.clone(),
-        &row.id,
-        &row.user_id,
-        &turn_id,
+        worker_fence.filter(),
         message_id.clone(),
         block_id.clone(),
     );
     events.checkpoint = Some(checkpoint);
+    if let Some(active) = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()) {
+        if let Some(reply) = &active.reply && let Some(sender) = &events.checkpoint {
+            events.cursor = events.cursor.max(reply.cursor.max(0) as u64);
+            sender.send_replace(reply.clone());
+        }
+        if active.execution_attempt.as_ref().is_some_and(|attempt|attempt.epoch <= 1) {
+            events.emit("turn.notice",json!({"code":"continued_after_restart","message":"Continued after a restart."}));
+        }
+    }
     tracing::info!(turn_id = %turn_id,
         worker_instance = %super::assistant_engine_worker::instance().id,
         worker_hostname = super::assistant_engine_worker::instance().hostname.as_deref(),
         "Assistant turn started");
     let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
     let heartbeat_db = state.db.clone();
-    let heartbeat_user = row.user_id.clone();
-    let heartbeat_conversation = row.id.clone();
-    let heartbeat_turn = turn_id.clone();
     // AbortOnDropHandle ties the child to this worker: a panic or task abort
     // cannot leave a fresh heartbeat behind to hide an orphaned turn.
     let heartbeat_task = AbortOnDropHandle::new(crate::services::shutdown::process().spawn_worker(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS));
-        interval.tick().await;
+        let period = Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             tokio::select! {
                 _ = &mut heartbeat_stop_rx => break,
                 _ = interval.tick() => {
-                    match engine::heartbeat(&heartbeat_db, &heartbeat_user, &heartbeat_conversation, &heartbeat_turn).await {
+                    match engine::heartbeat(&heartbeat_db, &worker_fence).await {
                         Ok(true) => {}
                         // The turn was fenced (stopped, reclaimed or deleted).
                         Ok(false) => break,
@@ -841,10 +1122,11 @@ pub(crate) async fn run_owner_turn(
         }
     }));
     let started_at = row.active_turn.as_ref().expect("claimed turn").started_at;
+    let active = row.active_turn.as_ref().expect("claimed turn");
     let queue_deadline = permit.is_queued().then(|| {
-        let since = Utc::now();
+        let since = active.queued_at.unwrap_or(started_at);
         let wait = chrono::Duration::seconds(engine::TURN_QUEUE_WAIT_SECS as i64);
-        (since, since + wait)
+        (since, active.queue_deadline.unwrap_or(since + wait))
     });
     if let Some((since, deadline)) = queue_deadline {
         // `waiting` with the capacity fields keeps older clients' waiting display.
@@ -874,13 +1156,16 @@ pub(crate) async fn run_owner_turn(
             "block": {"type": "text", "block_id": block_id, "text": ""},
         }),
     );
-    let queued = match queue_deadline {
-        Some((since, deadline)) => {
+    let queued = if let Some(error) = expired_handoff(&row) {
+        Err(error)
+    } else if !permit.can_execute() {
+        Err(TurnError::internal("assistant_unavailable", "permit"))
+    } else if let Some((since, deadline)) = queue_deadline {
             let queued =
                 tokio::select! {
                     biased;
                     () = state.shutdown.interrupted() => Err(TurnError::internal("turn_lost", "shutdown")),
-                    result = wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline) => result,
+                    result = wait_for_running_slot(&state, &mut row, &turn_id, &mut permit, since, deadline) => result,
                 };
             if queued.is_ok() {
                 events.emit(
@@ -890,14 +1175,15 @@ pub(crate) async fn run_owner_turn(
                 );
             }
             queued
-        }
-        None => Ok(()),
+    } else {
+        Ok(())
     };
-    let mut partial = String::new();
+    let mut partial = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()).and_then(|turn|turn.reply.as_ref()).map(|reply|reply.text.clone()).unwrap_or_default();
     let mut instruction_context = None;
+    let mut recovered_binding = None;
     let mut result = match queued {
         Err(error) => TurnResult {
-            text: String::new(),
+            text: partial.clone(),
             session_id: None,
             response_id: None,
             error: Some(error),
@@ -908,6 +1194,16 @@ pub(crate) async fn run_owner_turn(
         let mut execution = Box::pin(async {
             let authority = owner_context(&row)
                 .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            if let Some(active) = row.active_turn.as_ref().filter(|turn| turn.restart_offer.is_some())
+                && let Some(admission) = active.restart_admission.as_deref()
+                && let Some(window) = &admission.window {
+                let outcome = Box::pin(subscriber::recover(&state, egress.as_ref(), &authority, &row, &credential, policy,
+                    admission, window, &mut events, &block_id, &mut partial, &mut recovered_binding)).await;
+                if let Some(fallback) = model_card_fallback(&state, &admission.reply_id, &row, &outcome, &mut partial).await? {
+                    return Ok(fallback);
+                }
+                return outcome;
+            }
             let setup_deadline = super::assistant_guest_model_setup::guest_deadline(&state.db, &row).await
                 .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
             let setup_generation = if row.guest_turn && let Some(agent)=row.agent_id.as_deref() {
@@ -919,10 +1215,10 @@ pub(crate) async fn run_owner_turn(
                 && !super::assistant_guest_model_setup::valid_thread_route(&state,&row).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))? {
                 let now = Utc::now();
-                engine::mark_queued(&state.db,&row,&turn_id,now,now+chrono::Duration::seconds(60)).await
+                engine::mark_queued(&state.db,&row,now,now+chrono::Duration::seconds(60)).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
                 let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline,super::org_channel_service::origin(&row))).await;
-                engine::mark_dequeued(&state.db,&row,&turn_id).await
+                engine::mark_dequeued(&state.db,&row).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
                 if !ready.unwrap_or(false) {return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);}
             }
@@ -938,26 +1234,51 @@ pub(crate) async fn run_owner_turn(
                 &block_id,
                 &mut partial,
                 &mut instruction_context,
+                None,
             )
             .await;
             let failure=match &outcome {Err(error)=>Some(error),Ok(result)=>result.error.as_ref()};
-            let route_failed=if row.guest_turn && !row.shared_agent_thread && let Some(error)=failure {
-                let current=if row.collaboration.is_some() {super::collaboration_group_service::runtime::refresh(&state.db,&row).await.ok()}else{engine::get(&state.db,&row.user_id,&row.id).await.ok()};
-                current.as_ref().and_then(|r|r.active_turn.as_ref()).is_some_and(|turn|
-                    super::assistant_model_observer::attribute(error,turn,Utc::now()).code=="guest_model_route_required"
-                    && turn.model_route_diagnostic.as_ref().is_some_and(|d|super::assistant_service_execution::model_diagnostic::Reason::needs_owner_setup(&d.reason)))
-            }else{false};
-            if route_failed && row.guest_turn && !row.shared_agent_thread && let Some(agent)=row.agent_id.as_deref() {
-                let current=super::assistant_guest_model_setup::record(&state.db,&row.user_id,agent,&row.model).await.ok().flatten()
-                    .and_then(|r|r.get_str("claim").ok().map(str::to_owned));
-                // Another request may already have replaced the rejected generation.
-                let force = current==setup_generation;
-                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline,super::org_channel_service::origin(&row))).await.unwrap_or(false) {
-                    partial.clear();
-                    instruction_context = None;
-                    return execute_owner_turn(&state,egress.as_ref(),&authority,&row,&text,&mut credential,policy,&mut events,&block_id,&mut partial,&mut instruction_context).await;
+            if row.guest_turn && !row.shared_agent_thread
+                && let (Some(error), Some(agent)) = (failure, row.agent_id.as_deref())
+            {
+                let current = if row.collaboration.is_some() {
+                    super::collaboration_group_service::runtime::refresh(&state.db, &row).await.ok()
+                } else {
+                    engine::get(&state.db, &row.user_id, &row.id).await.ok()
+                };
+                if let Some(turn) = current.as_ref().and_then(|r| r.active_turn.as_ref())
+                    && turn.turn_id == turn_id
+                    && super::assistant_model_observer::attribute(error, turn, Utc::now()).code == "guest_model_route_required"
+                    && let Some(diagnostic) = turn.model_route_diagnostic.as_ref()
+                    && diagnostic.attempt_id.is_some() && diagnostic.attempt_id == turn.model_attempt_id
+                    && super::assistant_service_execution::model_diagnostic::Reason::needs_owner_setup(&diagnostic.reason)
+                {
+                    if diagnostic.reason == "route_mismatch" {
+                        Box::pin(super::channel_inbound_diagnostics::org_guest_turn(&state.db, turn, "guest_model_route_mismatch")).await;
+                    }
+                    let generation = super::assistant_guest_model_setup::record(&state.db, &row.user_id, agent, &row.model)
+                        .await.ok().flatten().and_then(|r| r.get_str("claim").ok().map(str::to_owned));
+                    let ready = Box::pin(super::assistant_guest_model_setup::ensure(
+                        &state, &row.user_id, agent, &row.model, generation == setup_generation,
+                        setup_deadline, super::org_channel_service::origin(&row),
+                    )).await.unwrap_or(false);
+                    if !ready {
+                        return Err(super::assistant_guest_model_setup::failure(&state.db, &row).await);
+                    }
+                    // A new request key can execute the input again. Require a terminal
+                    // response and the live turn's complete, empty tool history.
+                    if outcome.as_ref().is_ok_and(|result| result.text.is_empty()) && partial.is_empty()
+                        && turn.timing.first_output_ms.is_none() && turn.activity_count == Some(0)
+                        && !turn.business_system_success && turn.timing.tool_calls == 0
+                    {
+                        instruction_context = None;
+                        let key = format!("{turn_id}:guest-route");
+                        return execute_owner_turn(
+                            &state, egress.as_ref(), &authority, &row, &text, &mut credential, policy,
+                            &mut events, &block_id, &mut partial, &mut instruction_context, Some(&key),
+                        ).await;
+                    }
                 }
-                return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);
             }
             outcome
         });
@@ -966,7 +1287,7 @@ pub(crate) async fn run_owner_turn(
             result = &mut execution => result,
             () = permit.cancelled() => Err(TurnError::internal("assistant_unavailable", "permit")),
             error = watch_stop(&state, &row, &turn_id) => Err(error),
-            () = tokio::time::sleep(stream_bounds().turn_cap) => {
+            () = tokio::time::sleep(turn_remaining(&row)) => {
                 Err(TurnError::internal("turn_timeout", "turn_deadline"))
             }
         }
@@ -979,6 +1300,15 @@ pub(crate) async fn run_owner_turn(
         error: Some(error),
     }),
     };
+    if row.active_turn.as_ref().is_some_and(|turn|turn.restart_admission.is_some()) && (result.response_id.is_none() || executor_lost(&result)) {
+        let current = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME).find_one(engine::WorkerFence::capture(&row).ok()?.filter()).await.ok()?;
+        let current = current?;
+        let confirmation = cancel_background(&state,egress.as_ref(),&current,&credential,policy).await;
+        if result.error.is_some() && !executor_lost(&result) && let Some(mut terminal) = confirmation.and_then(|confirmed| confirmed.terminal) {
+            if let Some(prepared) = &instruction_context { terminal.text = prepared.redact(&terminal.text); }
+            if terminal.error.is_none() || result.text.is_empty() { result = terminal; }
+        }
+    }
     if result
         .error
         .as_ref()
@@ -1000,8 +1330,7 @@ pub(crate) async fn run_owner_turn(
         }
     }
     // Never echo the system-managed credential, even if an upstream reflects it.
-    result.text = result
-        .text
+    result.text = super::assistant_citation_markers::sanitize(&result.text)
         .replace(credential.raw_key.as_str(), "[redacted]");
     // A voice task's model-authored reply cannot reconstruct private URLs.
     // Sanitize before checkpoint/settlement as well as at visible publication.
@@ -1022,13 +1351,14 @@ pub(crate) async fn run_owner_turn(
         events,
         Duration::from_secs(engine::SETTLEMENT_GRACE_SECS),
         || {
-            engine::finish_turn_with_instructions(
+            engine::finish_turn_inner(
                 &state.db,
                 &row,
                 &credential.api_key_id,
                 &message_id,
                 &result,
-                instruction_context.as_ref().map(|context| &context.binding),
+                instruction_context.as_ref().map(|context| &context.binding).or(recovered_binding.as_ref()),
+                engine::SettlementCondition::Worker,
             )
         },
     )
@@ -1044,14 +1374,48 @@ pub(crate) async fn run_owner_turn(
             error,
             text: result.text,
         }),
-        SettledExecution::Deleted | SettledExecution::Unconfirmed => None,
+        SettledExecution::Deleted | SettledExecution::Relinquished | SettledExecution::Unconfirmed => None,
     }
 
-    }).await
+    })).await
 }
 
 /// Bound on the queue's own writes: a stalled write must not hold capacity.
 const QUEUE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) fn turn_remaining(row: &AssistantConversation) -> Duration {
+    let cap = stream_bounds().turn_cap;
+    let Some(active) = row
+        .active_turn
+        .as_ref()
+        .filter(|active| active.restart_admission.is_some())
+    else {
+        return cap;
+    };
+    cap.saturating_sub(
+        (Utc::now() - active.started_at)
+            .to_std()
+            .unwrap_or_default()
+            .saturating_sub(Duration::from_millis(active.timing.queue_wait_ms)),
+    )
+}
+
+pub(crate) fn expired_handoff(row: &AssistantConversation) -> Option<TurnError> {
+    let active = row
+        .active_turn
+        .as_ref()
+        .filter(|active| active.restart_offer.is_some())?;
+    if active
+        .queue_deadline
+        .is_some_and(|deadline| deadline <= Utc::now())
+    {
+        Some(TurnError::internal("queue_timeout", "queue"))
+    } else if turn_remaining(row).is_zero() {
+        Some(TurnError::internal("turn_timeout", "turn_deadline"))
+    } else {
+        None
+    }
+}
 
 /// A turn admitted while its owner's running replies were at their limit
 /// waits here, inside its claimed turn, so Stop, deletion and orphan
@@ -1059,26 +1423,37 @@ const QUEUE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// permit's capacity is given back at once, before the turn settles.
 pub(crate) async fn wait_for_running_slot(
     state: &AppState,
-    row: &AssistantConversation,
+    row: &mut AssistantConversation,
     turn_id: &str,
     permit: &mut DirectChatPermit,
     since: DateTime<Utc>,
     deadline: DateTime<Utc>,
 ) -> Result<(), TurnError> {
-    let marked = engine::mark_queued(&state.db, row, turn_id, since, deadline);
+    let marked = engine::mark_queued(&state.db, row, since, deadline);
     if let Err(error) = wait_queued(state, row, turn_id, permit, deadline, marked).await {
         permit.release();
         return Err(error);
     }
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.restart_admission.is_some())
+        && let Some(token) = permit.token()
+    {
+        let wait = engine::mark_dequeued_with_capacity(&state.db, row, Some(token))
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "queue"))?;
+        let turn = row.active_turn.as_mut().expect("claimed turn");
+        turn.timing.queue_wait_ms = wait;
+        turn.queued_at = None;
+        turn.queue_deadline = None;
+        return Ok(());
+    }
     // Display only, for the moments before the engine request starts, which
     // clears the markers durably; the lease set on queuing covers execution.
-    let (db, row, turn_id) = (state.db.clone(), row.clone(), turn_id.to_owned());
+    let (db, row) = (state.db.clone(), row.clone());
     state.shutdown.spawn(async move {
-        let _ = tokio::time::timeout(
-            QUEUE_WRITE_TIMEOUT,
-            engine::mark_dequeued(&db, &row, &turn_id),
-        )
-        .await;
+        let _ = tokio::time::timeout(QUEUE_WRITE_TIMEOUT, engine::mark_dequeued(&db, &row)).await;
     });
     Ok(())
 }
@@ -1156,8 +1531,22 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
                     .await
             }
         } else {
-            match engine::get(&state.db, &row.user_id, &row.id).await {
+            let read = engine::get(&state.db, &row.user_id, &row.id);
+            #[cfg(test)]
+            let read = engine::STOP_POLL.scope((), read);
+            match read.await {
                 Ok(current) => {
+                    if let Some(original) = row
+                        .active_turn
+                        .as_ref()
+                        .filter(|original| original.execution_attempt.is_some())
+                        && current.active_turn.as_ref().is_some_and(|active| {
+                            active.turn_id == original.turn_id
+                                && active.execution_attempt != original.execution_attempt
+                        })
+                    {
+                        return TurnError::internal("turn_lost", "subscriber_relinquished");
+                    }
                     let turn = engine::live_turn(&current, Utc::now());
                     if let Some(turn) = turn.filter(|t| t.turn_id == turn_id && !t.stop_requested)
                         && let Some(mut error) =
@@ -1209,6 +1598,21 @@ pub(crate) fn upstream_error_code(status: u16, envelope: &Value) -> &str {
     ""
 }
 
+fn post_refusal(status: u16, code: &str, request_id: Option<String>) -> TurnError {
+    let category = if engine::admission_refusal(status, code) {
+        "capacity_exceeded"
+    } else if matches!(status, 401 | 403) && code != "model_unavailable" {
+        "agent_key_required"
+    } else {
+        code
+    };
+    let mut error = TurnError::new(category).at_stage("upstream_response");
+    error.upstream_code = TurnError::new(code).upstream_code;
+    error.http_status = Some(status);
+    error.upstream_request_id = request_id.map(String::into_boxed_str);
+    error
+}
+
 async fn clear_session(
     state: &AppState,
     row: &AssistantConversation,
@@ -1224,17 +1628,7 @@ async fn clear_session(
             "nyxagent_last_response_id":mongodb::bson::Bson::Null,"context_reset_at":mongodb::bson::DateTime::now(),"context_reset_reason":reason,
         }}).await
     } else {
-        engine::clear_binding(
-            &state.db,
-            &row.user_id,
-            &row.id,
-            &row.active_turn
-                .as_ref()
-                .ok_or(AppError::AssistantTurnRequired)?
-                .turn_id,
-            reason,
-        )
-        .await
+        engine::clear_binding(&state.db, row, reason).await
     }
 }
 
@@ -1251,11 +1645,13 @@ pub(crate) async fn execute_owner_turn(
     block_id: &str,
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
+    request_key_base: Option<&str>,
 ) -> Result<TurnResult, TurnError> {
     let contract::NyxAgentExecutionContext::Owner {
         user_id,
         turn,
         platform_origin,
+        ..
     } = authority
     else {
         return Err(TurnError::internal("assistant_unavailable", "prepare"));
@@ -1305,7 +1701,7 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let mut tool_images = images::ToolImages::default();
-    let mut outcome = Box::pin(execute_turn_inner(
+    let outcome = Box::pin(execute_turn_inner(
         state,
         egress,
         authority,
@@ -1318,47 +1714,25 @@ pub(crate) async fn execute_owner_turn(
         partial,
         instruction_context,
         &mut tool_images,
+        request_key_base,
     ))
     .await;
-    let model_refusal =
-        super::assistant_service_execution::finish_model_attempt(&state.db, &attempt)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+    if let Some(fallback) = model_card_fallback(state, &attempt, row, &outcome, partial).await? {
+        return Ok(fallback);
+    }
     // A current callback refusal can precede any reply. Cancellation in either
     // result shape wins, and an unrelated pending action cannot mask a failure.
-    let cancelled = outcome
-        .as_ref()
-        .is_err_and(|error| error.code == "cancelled")
-        || outcome.as_ref().is_ok_and(|result| {
-            result
-                .error
-                .as_ref()
-                .is_some_and(|error| error.code == "cancelled")
-        });
-    if !cancelled
-        && (outcome.is_err() || outcome.as_ref().is_ok_and(|result| result.error.is_some()))
-        && let Some(summary) = model_refusal
-    {
-        let text = format!(
-            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
-        );
-        *partial = text.clone();
-        outcome = Ok(TurnResult {
-            text,
-            session_id: None,
-            response_id: None,
-            error: None,
-        });
+    let fallback_allowed = match &outcome {
+        Err(error) => Some(error),
+        Ok(result) => result.error.as_ref(),
     }
+    .is_some_and(allows_fallback);
     if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
         tool_images.failed(state, row).await;
     }
     if tool_images.rounds > 0
         && let Some(mut fallback) = tool_images.fallback.take()
-        && (outcome.as_ref().is_err_and(|e| e.code != "cancelled")
-            || outcome
-                .as_ref()
-                .is_ok_and(|r| r.error.as_ref().is_some_and(|e| e.code != "cancelled")))
+        && fallback_allowed
     {
         events.emit("turn.notice", json!({"code":"image_input_unavailable", "message":"Tool images could not be viewed; the completed answer was preserved."}));
         clear_session(state, row, "image_input_unavailable")
@@ -1371,6 +1745,48 @@ pub(crate) async fn execute_owner_turn(
         return Ok(fallback);
     }
     outcome
+}
+
+fn allows_fallback(error: &TurnError) -> bool {
+    error.code != "cancelled" && error.upstream_code.as_deref() != Some("executor_lost")
+}
+
+async fn model_card_fallback(
+    state: &AppState,
+    attempt: &str,
+    row: &AssistantConversation,
+    outcome: &Result<TurnResult, TurnError>,
+    partial: &mut String,
+) -> Result<Option<TurnResult>, TurnError> {
+    let refusal = super::assistant_service_execution::finish_model_attempt(&state.db, attempt, row)
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+    let failure = match outcome {
+        Err(error) => Some(error),
+        Ok(result) => result.error.as_ref(),
+    };
+    if failure.is_some_and(allows_fallback)
+        && let Some(summary) = refusal
+    {
+        let text = format!(
+            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
+        );
+        partial.clone_from(&text);
+        return Ok(Some(TurnResult {
+            text,
+            session_id: None,
+            response_id: None,
+            error: None,
+        }));
+    }
+    Ok(None)
+}
+
+fn executor_lost(result: &TurnResult) -> bool {
+    result
+        .error
+        .as_ref()
+        .is_some_and(|error| error.upstream_code.as_deref() == Some("executor_lost"))
 }
 
 struct EngineAttempt<'a> {
@@ -1391,6 +1807,7 @@ impl EngineAttempt<'_> {
             turn_id = %turn.turn_id, origin = crate::services::assistant_turn_observability::origin(turn),
             worker_instance = %crate::services::assistant_engine_worker::instance().id,
             worker_hostname = crate::services::assistant_engine_worker::instance().hostname.as_deref(),
+            automation_run_id = turn.automation_work.as_ref().map(|work| work.run_id.as_str()).or(turn.trigger_run_id.as_deref()),
             attempt = self.number, http_status = self.http_status, upstream_code = self.upstream_code.as_deref(),
             decision, waited_ms = self.accrued_wait_ms.saturating_add(self.wait_started.map_or(0, |at| (self.wait_ended.unwrap_or_else(Utc::now) - at).num_milliseconds().max(0) as u64)),
             remaining_deadline_ms = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64,
@@ -1509,6 +1926,7 @@ async fn execute_turn_inner(
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
+    request_key_base: Option<&str>,
 ) -> Result<TurnResult, TurnError> {
     let platform_plan = if row.model.starts_with("nyxid/") {
         if row.guest_turn {
@@ -1559,12 +1977,6 @@ async fn execute_turn_inner(
     } else {
         String::new()
     };
-    let current_input = if media_context.is_empty() {
-        text.to_owned()
-    } else {
-        format!("{text}\n\n{media_context}")
-    };
-    let text = current_input.as_str();
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let run_deadline = if let Some(run_id) = turn
         .trigger_run_id
@@ -1685,13 +2097,9 @@ async fn execute_turn_inner(
             .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
     );
     decisions.push_str(
-        &crate::services::async_service_operation::input_context(
-            &state.db,
-            &state.encryption_keys,
-            row,
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
+        &crate::services::async_service_operation::input_context(state, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
     );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
@@ -1864,9 +2272,14 @@ async fn execute_turn_inner(
             attachments.retain(|a| !expired.contains(&a.id));
         }
     }
-    let has_images = attachments
-        .iter()
-        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
+    let has_images = attachments.iter().any(|a| {
+        a.origin == "user_upload"
+            && (a.content_type.starts_with("image/")
+                || (a.content_type == "application/pdf"
+                    && a.pdf
+                        .as_ref()
+                        .is_none_or(|pdf| !pdf.unread_pages.is_empty())))
+    });
     let model_text_only = has_images
         && match platform_plan.as_ref() {
             Some(plan) => plan.image_limits().is_none(),
@@ -1901,17 +2314,37 @@ async fn execute_turn_inner(
     } else {
         crate::services::assistant_upload_service::IMAGE_FALLBACK
     };
+    let mut pdf_input = Box::pin(
+        crate::services::assistant_upload_service::pdf_vision::prepare(
+            state,
+            row,
+            &attachments,
+            &capabilities,
+            model_text_only,
+        ),
+    )
+    .await
+    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    let mut image_attachments = attachments.clone();
+    image_attachments.extend(pdf_input.images.clone());
     let (mut image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
-        &attachments,
+        &image_attachments,
         &capabilities,
         &state.config.base_url,
     );
+    pdf_input.finalize(&omitted, "image_limit");
+    let mut pdf_delivery = pdf_input.delivery();
+    images::record_pdf_outcomes(state, row, &pdf_delivery.reports).await?;
     if !omitted.is_empty() {
         let notice = image_notice;
         listing.push_str(&format!(
             "\n{notice} Unviewable attachment IDs: {}",
             json!(omitted)
         ));
+    }
+    if !media_context.is_empty() {
+        decisions.push('\n');
+        decisions.push_str(&media_context);
     }
     let media_decision_offset = decisions.len();
     decisions.push_str(&listing);
@@ -1957,22 +2390,31 @@ async fn execute_turn_inner(
     let mut completed = String::new();
     let mut emitted = String::new();
     let mut first_output_recorded = false;
-    let mut input = if text.trim().is_empty() {
-        "Please discuss the attachments in this message."
-    } else {
-        text
-    };
+    let mut input = text;
     let mut recovery = engine::Recovery::default();
     let start_retry_deadline = tokio::time::Instant::now() + super::assistant_start_retry::BUDGET;
     let mut start_retries = 0;
     let mut admission: Option<(String, tokio::time::Instant, DateTime<Utc>)> = None;
     let mut capacity_error: Option<TurnError> = None;
+    let channel_source = turn.channel_event_id.as_deref().filter(|_| {
+        turn.origin == crate::models::assistant_conversation::TurnOrigin::Channel
+            && turn.trigger_run_id.is_none()
+            && turn.restart_admission.as_deref().is_none_or(|admission| matches!(admission.chat_source.as_deref(), Some(crate::models::assistant_conversation::ChatRestartSource::PrivateChannel { .. })))
+    });
+    let mut channel_retry_body: Option<Value> = None;
+    let mut guest_input_ids = Vec::new();
+    let mut foreground = None;
     loop {
+        let row = foreground.as_ref().unwrap_or(row);
         // History and upload preparation can outlive the initial admission
         // check. Recheck every bound source before model execution, including
         // continuations; stop/expiry alone preserve already admitted work.
         let turn = row.active_turn.as_ref().expect("claimed turn");
-        if row.guest_turn && row.collaboration.is_none() && !listed_attachments.is_empty() {
+        if channel_retry_body.is_none()
+            && row.guest_turn
+            && row.collaboration.is_none()
+            && !listed_attachments.is_empty()
+        {
             // Capabilities, admission waits and continuations can outlive the
             // initial check. Rebuild only this guest message's input from live
             // authority before every request; the image GET rechecks again.
@@ -1983,6 +2425,12 @@ async fn execute_turn_inner(
             )
             .await
             .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            if channel_source.is_some() {
+                guest_input_ids = current
+                    .iter()
+                    .map(|attachment| attachment.id.clone())
+                    .collect();
+            }
             let (parts, unavailable) = crate::services::assistant_upload_service::image_plan(
                 &current,
                 &capabilities,
@@ -2056,32 +2504,43 @@ async fn execute_turn_inner(
         {
             return Err(TurnError::internal("cancelled", "stop"));
         }
+        let base = request_key_base.unwrap_or(turn_id);
         let request_key = if tool_images.fallback.is_some() {
-            format!("{turn_id}:images:{}", tool_images.rounds)
+            format!("{base}:images:{}", tool_images.rounds)
         } else if continuations.count == 0 {
-            turn_id.clone()
+            base.to_owned()
         } else {
-            format!("{turn_id}:continuation:{}", continuations.count)
+            format!("{base}:continuation:{}", continuations.count)
         };
         tool_images.attempted(state, row).await;
-        let request_body = {
+        let first_input = continuations.count == 0 && tool_images.fallback.is_none();
+        let parts: &[Value] = if !tool_images.parts.is_empty() {
+            &tool_images.parts
+        } else if first_input {
+            &image_parts
+        } else {
+            &[]
+        };
+        // Select page coverage with the exact image URLs in this request.
+        // Channel capacity retries reuse the sealed request body below.
+        let mut content = vec![json!({"type":"input_text","text":""})];
+        content.extend(pdf_input.with_page_labels(parts));
+        pdf_delivery.requested = pdf_input.requested(parts);
+        let mut request_body = if let Some(original) = &channel_retry_body {
+            original.clone()
+        } else {
             let request_input = if tool_images.note.is_empty() {
                 input.to_owned()
             } else {
                 format!("{input}\n\n{}", tool_images.note)
             };
+            let notes = if first_input || binding.is_none() {
+                &decisions
+            } else {
+                &listing
+            };
             let input = context.input_with_memory(
-                if (continuations.count == 0 && tool_images.fallback.is_none()) || binding.is_none()
-                {
-                    // Recovery into a fresh session must restore the
-                    // turn facts that its discarded session had seen.
-                    &decisions
-                } else {
-                    // Documents have no image part. Keep their listing
-                    // and availability notices visible on continuations
-                    // too, once per request, without repeating events.
-                    &listing
-                },
+                &format!("{notes}{}", pdf_delivery.notice()),
                 &request_input,
                 continuations.count == 0 || binding.is_none(),
             );
@@ -2090,20 +2549,29 @@ async fn execute_turn_inner(
                 body["input"] = json!(super::assistant_guest_model_setup::INSTRUCTION);
                 body["instructions"] = json!(super::assistant_guest_model_setup::INSTRUCTION);
             }
-            let parts = if !tool_images.parts.is_empty() {
-                &tool_images.parts
-            } else if continuations.count == 0 && tool_images.fallback.is_none() {
-                &image_parts
-            } else {
-                &Vec::new()
-            };
             if !parts.is_empty() {
-                let mut content = vec![json!({"type":"input_text", "text":input})];
-                content.extend(parts.clone());
-                body["input"] = json!([{"role":"user", "content":content}]);
+                content[0]["text"] = json!(input);
+                body["input"] = json!([{"role":"user","content":content}]);
             }
             body
         };
+        if let Some(parts) = request_body["input"][0]["content"].as_array() {
+            pdf_delivery.requested = pdf_input.requested(parts);
+        } else {
+            pdf_delivery.requested.clear();
+        }
+        let request_user_images: Vec<_> = attachments
+            .iter()
+            .filter(|item| {
+                item.origin == "user_upload"
+                    && item.content_type.starts_with("image/")
+                    && crate::services::assistant_upload_service::pdf_vision::includes_image(
+                        &request_body,
+                        &item.id,
+                    )
+            })
+            .map(|item| item.id.clone())
+            .collect();
         // Refusal retries share one request window. Explicit continuations
         // are new requests; credential/session recovery flags stay turn-scoped.
         if admission
@@ -2132,6 +2600,17 @@ async fn execute_turn_inner(
             capacity_error = None;
             recovery.retries = 0;
         }
+        if let Some(source) = channel_source.filter(|_| channel_retry_body.is_some()) {
+            let expiry = egress
+                .channel_retry_expiry(row, source)
+                .await
+                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            let (_, deadline, at) = admission.as_mut().expect("channel request window");
+            *at = (*at).min(expiry);
+            *deadline = (*deadline).min(
+                tokio::time::Instant::now() + (expiry - Utc::now()).to_std().unwrap_or_default(),
+            );
+        }
         let (_, capacity_deadline, capacity_deadline_at) =
             admission.as_ref().expect("request window");
         let (capacity_deadline, capacity_deadline_at) = (*capacity_deadline, *capacity_deadline_at);
@@ -2140,9 +2619,49 @@ async fn execute_turn_inner(
         {
             return Err(error);
         }
-        let number = crate::services::assistant_turn_observability::attempt(&state.db, row)
+        if channel_retry_body.is_some() && !guest_input_ids.is_empty() {
+            super::assistant_channel_media::guest::recheck_retry_inputs(
+                &state.db,
+                row,
+                &guest_input_ids,
+            )
             .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            .map_err(|_| TurnError::internal("channel_retry_attachment_unavailable", "prepare"))?;
+        }
+        let saved_input = if turn.restart_admission.is_some() {
+            request_body["background"] = json!(true);
+            Some(
+                subscriber::seal(
+                    state,
+                    row,
+                    &request_key,
+                    &request_body,
+                    &completed,
+                    &context.binding,
+                    Some(subscriber::FollowUp::capture(
+                        &continuations,
+                        tool_images,
+                        context,
+                        &listing,
+                        request_user_images.clone(),
+                        pdf_delivery.clone(),
+                    )),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let number = crate::services::assistant_turn_observability::attempt(
+            &state.db,
+            row,
+            &request_key,
+            capacity_deadline_at,
+            saved_input,
+            channel_retry_body.as_ref().map(|_| &binding),
+        )
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
         let mut attempt = EngineAttempt {
             row,
             number,
@@ -2173,6 +2692,10 @@ async fn execute_turn_inner(
             deadline.saturating_duration_since(tokio::time::Instant::now()),
             bounds.no_progress,
         );
+        let first_channel_body =
+            (number == 1 && channel_source.is_some()).then(|| request_body.clone());
+        let dispatched = tokio::time::Instant::now();
+        let dispatched_at = Utc::now();
         let response = acknowledgement
             .wait(
                 first_byte.wait(
@@ -2187,6 +2710,12 @@ async fn execute_turn_inner(
                         "v1/responses",
                         Some(request_body),
                         Some(&request_key),
+                        turn.restart_admission
+                            .as_deref()
+                            .and_then(|admission| admission.reattach.as_ref())
+                            .map(|deployment| {
+                                contract::NyxAgentDestination(deployment.destination_hash.clone())
+                            }),
                         policy,
                     ),
                 ),
@@ -2200,7 +2729,8 @@ async fn execute_turn_inner(
             Ok(response) => response,
             Err(AppError::PoolAttemptTransport(
                 crate::errors::PoolAttemptTransportKind::Connect,
-            )) if partial.is_empty()
+            )) if channel_retry_body.is_none()
+                && partial.is_empty()
                 && super::assistant_start_retry::untouched(&state.db, row)
                     .await
                     .unwrap_or(false) =>
@@ -2242,6 +2772,83 @@ async fn execute_turn_inner(
             let envelope: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             let code = upstream_error_code(status, &envelope);
             attempt.upstream_code = TurnError::new(code).upstream_code;
+            let exact_capacity = status == 503 && code == "capacity_exceeded";
+            if code == "image_input_unsupported" {
+                images::settle_pdf_request(
+                    state,
+                    row,
+                    &mut pdf_delivery,
+                    Some("image_input_unsupported"),
+                    false,
+                )
+                .await?;
+            }
+            if channel_retry_body.is_some() && !engine::admission_refusal(status, code) {
+                return Err(post_refusal(status, code, upstream_request_id));
+            }
+            let (capacity_deadline, capacity_deadline_at) = if exact_capacity
+                && let (Some(original), Some(source)) = (first_channel_body, channel_source)
+            {
+                let expiry = egress
+                    .channel_retry_expiry(row, source)
+                    .await
+                    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+                let budget = (expiry - dispatched_at)
+                    .to_std()
+                    .unwrap_or_default()
+                    .min(super::assistant_engine_policy::CHANNEL_CAPACITY_BUDGET);
+                let until = dispatched + budget;
+                let until_at = dispatched_at
+                    + chrono::Duration::from_std(budget).expect("bounded capacity wait");
+                admission = Some((request_key.clone(), until, until_at));
+                channel_retry_body = Some(original);
+                acknowledgement.enabled = false;
+                attempt.deadline = until;
+                (until, until_at)
+            } else {
+                (capacity_deadline, capacity_deadline_at)
+            };
+            if turn.restart_admission.is_some()
+                && number == 1
+                && status == 400
+                && matches!(code, "background_disabled" | "idempotency_key_required")
+            {
+                let filter = engine::WorkerFence::matching(
+                    row,
+                    doc! {
+                        "active_turn.restart_admission.window.key": &request_key,
+                        "active_turn.restart_admission.credential_ended": {"$ne":true},
+                        "active_turn.stop_requested":false,
+                    },
+                )
+                .map_err(|_| TurnError::new("cancelled"))?;
+                let mut fields =
+                    doc! {"active_turn.restart_eligibility":"upstream_refused_background"};
+                if let Some(source) = super::channel_supplemental_delivery::managed_source(turn) {
+                    fields.insert(
+                        "active_turn.execution_attempt.foreground_delivery",
+                        mongodb::bson::to_bson(source)
+                            .map_err(|_| TurnError::new("outcome_unknown"))?,
+                    );
+                }
+                let saved = state
+                    .db
+                    .collection::<AssistantConversation>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .find_one_and_update(
+                        filter,
+                        doc! {"$unset":{"active_turn.restart_admission":""},
+                        "$set":fields},
+                    )
+                    .return_document(mongodb::options::ReturnDocument::After)
+                    .write_concern(mongodb::options::WriteConcern::majority())
+                    .await
+                    .map_err(|_| TurnError::new("outcome_unknown"))?;
+                drop(attempt);
+                foreground = Some(saved.ok_or_else(|| TurnError::new("cancelled"))?);
+                continue;
+            }
             if super::assistant_start_retry::refused(status, code)
                 && partial.is_empty()
                 && super::assistant_start_retry::untouched(&state.db, row)
@@ -2267,8 +2874,34 @@ async fn execute_turn_inner(
             if tool_images.fallback.is_none()
                 && matches!(code, "tool_budget_exhausted" | "turn_timeout")
             {
-                let mut error = TurnError::new(code).at_stage("upstream_response");
-                error.http_status = Some(status);
+                let error = post_refusal(status, code, upstream_request_id);
+                if turn.restart_admission.is_some() {
+                    subscriber::save_refusal(
+                        state,
+                        row,
+                        &request_key,
+                        &error,
+                        None,
+                        capacity_deadline_at,
+                        channel_retry_body.is_some(),
+                    )
+                    .await?;
+                }
+                if turn.restart_admission.is_some()
+                    && binding.is_some()
+                    && continuations.count < continuations.maximum
+                {
+                    subscriber::resolve_budget_window(
+                        state,
+                        egress,
+                        authority,
+                        row,
+                        credential,
+                        policy,
+                        &request_key,
+                    )
+                    .await?;
+                }
                 match continue_turn(
                     state,
                     row,
@@ -2330,10 +2963,33 @@ async fn execute_turn_inner(
                         &state.db,
                         &state.encryption_keys,
                         row,
-                        &credential.api_key_id,
+                        credential,
                     )
                     .await
                     .map_err(|_| TurnError::internal("agent_key_required", "recovery"))?;
+                    if !pdf_delivery.requested.is_empty()
+                        && engine::get(&state.db, &row.user_id, &row.id)
+                            .await
+                            .is_ok_and(|current| {
+                                current.credential_api_key_id != credential.api_key_id
+                            })
+                    {
+                        // A successor bound only at settlement cannot fetch this
+                        // turn's page URLs. Keep the exact text fallback.
+                        image_parts.retain(|part| {
+                            !pdf_delivery.requested.iter().any(|(id, _, _)| {
+                                crate::services::assistant_upload_service::pdf_vision::is_image_part(part, id)
+                            })
+                        });
+                        images::settle_pdf_request(
+                            state,
+                            row,
+                            &mut pdf_delivery,
+                            Some("credential_replaced"),
+                            false,
+                        )
+                        .await?;
+                    }
                     binding = None;
                     context.fresh_session();
                     prompt = context
@@ -2343,11 +2999,21 @@ async fn execute_turn_inner(
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
-                    let mut error =
-                        TurnError::new("capacity_exceeded").at_stage("upstream_response");
-                    error.upstream_code = TurnError::new(code).upstream_code;
-                    error.http_status = Some(status);
-                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
+                    let error = post_refusal(status, code, upstream_request_id);
+                    let delay =
+                        engine::capacity_delay(recovery.retries, retry_after, rand::random());
+                    if turn.restart_admission.is_some() {
+                        subscriber::save_refusal(
+                            state,
+                            row,
+                            &request_key,
+                            &error,
+                            Some(delay),
+                            capacity_deadline_at,
+                            channel_retry_body.is_some(),
+                        )
+                        .await?;
+                    }
                     capacity_error = Some(error);
                     let started = *wait_started.get_or_insert_with(Utc::now);
                     engine::waiting_for_capacity(&state.db, row, started, capacity_deadline_at)
@@ -2362,8 +3028,6 @@ async fn execute_turn_inner(
                         "capacity_wait_started_at": started, "capacity_wait_deadline": capacity_deadline_at}),
                     );
                     attempt.log("backoff");
-                    let delay =
-                        engine::capacity_delay(recovery.retries, retry_after, rand::random());
                     acknowledgement
                         .wait(
                             tokio::time::sleep_until(
@@ -2377,16 +3041,19 @@ async fn execute_turn_inner(
                         .await;
                 }
                 RecoveryAction::Fail => {
-                    let mut error = TurnError::new(if status == 401 || status == 403 {
-                        "agent_key_required"
-                    } else {
-                        code
-                    })
-                    .at_stage("upstream_response");
-                    // Keep the upstream's own (sanitized) code, never NyxID's mapping.
-                    error.upstream_code = TurnError::new(code).upstream_code;
-                    error.http_status = Some(status);
-                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
+                    let error = post_refusal(status, code, upstream_request_id);
+                    if turn.restart_admission.is_some() {
+                        subscriber::save_refusal(
+                            state,
+                            row,
+                            &request_key,
+                            &error,
+                            None,
+                            capacity_deadline_at,
+                            channel_retry_body.is_some(),
+                        )
+                        .await?;
+                    }
                     return Err(error);
                 }
             }
@@ -2395,6 +3062,7 @@ async fn execute_turn_inner(
         // The short deadline belongs only to startup refusal retries. Accepted
         // work and its later continuations retain the normal response budget.
         start_retries = 0;
+        channel_retry_body = None;
         attempt.wait_ended = Some(Utc::now());
         attempt.log("accepted");
         acknowledgement.accepted();
@@ -2418,8 +3086,10 @@ async fn execute_turn_inner(
             error.http_status = Some(response.status().as_u16());
             return Err(error);
         }
+        let background = turn.restart_admission.is_some();
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
+        decoder.replay = background;
         // Any transport bytes, keepalive comments included, satisfy the
         // first-byte bound. After that a transport-idle bound and a separate
         // no-progress bound apply: keepalives keep the connection open but
@@ -2459,17 +3129,14 @@ async fn execute_turn_inner(
                 if decoder.data_events != before {
                     last_semantic_progress = tokio::time::Instant::now();
                 }
+                let raw = decoder.text();
                 *partial = completed.clone()
-                    + &context.redact(
-                        &decoder
-                            .text
-                            .replace(credential.raw_key.as_str(), "[redacted]"),
-                    );
+                    + &context.redact(&raw.replace(credential.raw_key.as_str(), "[redacted]"));
                 if partial.len() > engine::MAX_OUTPUT_BYTES {
                     return Err(TurnError::internal("output_too_large", "stream"));
                 }
                 decoded?;
-                if !first_output_recorded && !decoder.text.is_empty() {
+                if !first_output_recorded && !raw.is_empty() {
                     first_output_recorded = true;
                     let _ = super::assistant_turn_observability::first_output(&state.db, row).await;
                 }
@@ -2498,47 +3165,112 @@ async fn execute_turn_inner(
                     ],
                 );
                 let safe_end = partial.len() - held.len();
-                emit_text_suffix(events, block_id, &mut emitted, &partial[..safe_end]);
+                let visible = &partial[..safe_end];
+                let cursor = running_response_id.as_deref().zip(decoder.sequence);
+                if visible != emitted
+                    && (!background || cursor.is_some())
+                    && (!background || held.is_empty() || !visible.starts_with(&emitted))
+                {
+                    let upstream = cursor.filter(|_| background).map(|(id, sequence)| {
+                        subscriber::checkpoint(
+                            &request_key, id, sequence, visible.strip_prefix(&completed).unwrap_or(""),
+                            &decoder.output, &raw,
+                        )
+                    });
+                    if let Some(suffix) = visible.strip_prefix(&emitted) {
+                        events.emit_with_checkpoint(
+                            "block.delta", json!({"block_id":block_id,"text":suffix}), upstream,
+                        );
+                    } else {
+                        events.emit_with_checkpoint(
+                            "block.completed",
+                            json!({"block_id":block_id,"block":{"type":"text","block_id":block_id,"text":visible}}),
+                            upstream,
+                        );
+                    }
+                    emitted = visible.to_owned();
+                }
+                if decoder.reader_error.is_some() {
+                    break;
+                }
             }
             Ok(())
         }
         .await;
+        if background && (streamed.is_err() || decoder.terminal.is_none()) {
+            return subscriber::reconnect(
+                state, egress, authority, row, credential, policy, events, block_id, partial,
+            )
+            .await;
+        }
         if let Err(mut error) = streamed {
             if error.response_id.is_none() {
                 error.response_id = running_response_id.map(String::into_boxed_str);
             }
             return Err(error);
         }
-        crate::services::assistant_steering::set_running_response(&state.db, row, None)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "stream"))?;
-        if decoder.image_input_unsupported {
-            for item in attachments.iter().filter(|a| {
-                a.origin == "user_upload"
-                    && a.content_type.starts_with("image/")
-                    && !omitted.contains(&a.id)
-            }) {
-                if images::record_upload_outcome(
-                    state,
-                    row,
-                    &item.id,
-                    "unavailable",
-                    Some("image_input_unsupported"),
-                )
-                .await
-                .is_err()
-                {
-                    tracing::warn!("Image delivery notice could not be saved");
-                }
-            }
-            tool_images.unsupported(state, row).await;
-            events.emit("turn.notice", json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
+        let cleared = if background && decoder.terminal.as_ref().is_some_and(executor_lost) {
+            Ok(true)
+        } else if background {
+            super::assistant_turn_restart::confirm_window(&state.db, row, &request_key).await
+        } else {
+            super::assistant_steering::set_running_response(&state.db, row, None).await
+        };
+        if !cleared.map_err(|_| TurnError::internal("assistant_unavailable", "stream"))? {
+            return Err(TurnError::new("cancelled"));
         }
         let mut result = decoder.terminal.ok_or_else(|| {
             let mut error = TurnError::internal("invalid_stream", "stream");
             error.response_id = running_response_id.map(String::into_boxed_str);
             error
         })?;
+        let rejected = decoder.image_input_unsupported
+            || result.error.as_ref().is_some_and(images::image_rejected);
+        let rejected_pdf_ids = if rejected {
+            pdf_delivery.requested.clone()
+        } else {
+            Vec::new()
+        };
+        images::settle_pdf_request(
+            state,
+            row,
+            &mut pdf_delivery,
+            rejected.then_some("image_input_unsupported"),
+            result.error.is_none(),
+        )
+        .await?;
+        if rejected {
+            // Only the current request can reject its image parts.
+            if !request_user_images.is_empty() {
+                for id in &request_user_images {
+                    if images::record_upload_outcome(
+                        state,
+                        row,
+                        id,
+                        "unavailable",
+                        Some("image_input_unsupported"),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!("Image delivery notice could not be saved");
+                    }
+                }
+            }
+            image_parts.retain(|part| {
+                !request_user_images
+                    .iter()
+                    .map(String::as_str)
+                    .chain(rejected_pdf_ids.iter().map(|(id, _, _)| id.as_str()))
+                    .any(|id| {
+                        crate::services::assistant_upload_service::pdf_vision::is_image_part(
+                            part, id,
+                        )
+                    })
+            });
+            tool_images.unsupported(state, row).await;
+            events.emit("turn.notice", json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
+        }
         result.text = context.redact(
             &result
                 .text
@@ -2589,7 +3321,7 @@ async fn execute_turn_inner(
                 } else {
                     format!("{}\n\n", result.text)
                 };
-                input = "Continue after viewing the tool images.";
+                input = "Continue answering the user.";
                 continue;
             }
             tool_images.fallback = None;
@@ -2631,9 +3363,57 @@ async fn execute_turn_inner(
     }
 }
 
-type CapabilityCache = HashMap<String, (Instant, Value)>;
+type CapabilityKey = (String, String, String);
+type CapabilityCache = HashMap<CapabilityKey, (Instant, Value)>;
 static CAPABILITIES: LazyLock<Mutex<CapabilityCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+const CAPABILITY_TTL: Duration = Duration::from_secs(60);
+
+pub(crate) enum CapabilityLookup {
+    Admission,
+    CurrentCatalog,
+}
+
+fn unique_cached_destination(
+    cache: &CapabilityCache,
+    db: &mongodb::Database,
+) -> Option<(contract::NyxAgentDestination, Value)> {
+    let mut fresh = cache.iter().filter(|((database, _, _), (seen, _))| {
+        database == db.name() && seen.elapsed() < CAPABILITY_TTL
+    });
+    let ((_, service, url), (_, value)) = fresh.next()?;
+    if fresh.next().is_some() {
+        return None;
+    }
+    Some((
+        contract::NyxAgentDestination::for_service(service, url),
+        value.clone(),
+    ))
+}
+
+pub(crate) fn reattach_deployment(
+    destination: contract::NyxAgentDestination,
+    value: &Value,
+) -> Option<crate::models::assistant_conversation::ReattachDeployment> {
+    use crate::models::assistant_conversation::{ReattachDeployment, ReattachLimits};
+    let limits: ReattachLimits = serde_json::from_value(value.get("reattach")?.clone()).ok()?;
+    (limits.protocol == "nyxagent-reattach-v1"
+        && limits.credential_watch.as_ref().is_some_and(|watch| {
+            (1..=30).contains(&watch.interval_seconds)
+                && (1..=15).contains(&watch.model_request_max_age_seconds)
+        })
+        && limits.recent_events > 0
+        && limits.max_events >= limits.recent_events
+        && limits.max_event_bytes > 0
+        && limits.retention_seconds > 0
+        && limits.absence_retention_seconds > 0
+        && limits.max_subscribers_per_response > 0
+        && limits.max_subscribers_per_owner >= limits.max_subscribers_per_response)
+        .then_some(ReattachDeployment {
+            destination_hash: destination.0,
+            limits,
+        })
+}
 
 /// Cache successful deployment metadata for image input and steering, never
 /// authority or credentials. A turn's failed authentication must not disable
@@ -2645,6 +3425,39 @@ pub(crate) async fn upstream_capabilities(
     credential: &AssistantCredential,
     policy: Option<BillingRoutePolicy>,
 ) -> Value {
+    fetch_capabilities(
+        state,
+        CapabilityLookup::CurrentCatalog,
+        |destination| async move {
+            Box::pin(request(
+                state,
+                egress,
+                authority,
+                credential,
+                "GET",
+                "v1/capabilities",
+                None,
+                None,
+                Some(destination),
+                policy,
+            ))
+            .await
+        },
+    )
+    .await
+    .map_or(Value::Null, |(_, value)| value)
+}
+
+pub(crate) async fn fetch_capabilities<F: Future<Output = AppResult<axum::response::Response>>>(
+    state: &AppState,
+    lookup: CapabilityLookup,
+    fetch: impl FnOnce(contract::NyxAgentDestination) -> F,
+) -> Option<(contract::NyxAgentDestination, Value)> {
+    if matches!(lookup, CapabilityLookup::Admission)
+        && let Some(cached) = unique_cached_destination(&*CAPABILITIES.lock().await, &state.db)
+    {
+        return Some(cached);
+    }
     let service =
         match assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG)
             .await
@@ -2656,34 +3469,26 @@ pub(crate) async fn upstream_capabilities(
                     http_status = error.status_code().as_u16(),
                     "NyxAgent capability lookup failed"
                 );
-                return Value::Null;
+                return None;
             }
         };
-    let key = format!("{}:{}:{}", state.db.name(), service.id, service.base_url);
+    let key = (
+        state.db.name().to_owned(),
+        service.id.clone(),
+        service.base_url.clone(),
+    );
+    let destination = contract::NyxAgentDestination::for_service(&service.id, &service.base_url);
+    if let Some((at, value)) = CAPABILITIES.lock().await.get(&key)
+        && at.elapsed() < CAPABILITY_TTL
     {
-        let cache = CAPABILITIES.lock().await;
-        if let Some((at, value)) = cache.get(&key)
-            && at.elapsed() < Duration::from_secs(60)
-        {
-            return value.clone();
-        }
+        return Some((destination, value.clone()));
     }
     // Concurrent misses may fetch in parallel. Do not hold the cache lock over
     // network/body reads, or one slow credential would block every image turn.
     let lookup = async {
-        let response = Box::pin(request(
-            state,
-            egress,
-            authority,
-            credential,
-            "GET",
-            "v1/capabilities",
-            None,
-            None,
-            policy,
-        ))
-        .await
-        .map_err(|error| ("request", Some(error.status_code().as_u16())))?;
+        let response = fetch(destination.clone())
+            .await
+            .map_err(|error| ("request", Some(error.status_code().as_u16())))?;
         let status = response.status();
         if !status.is_success() {
             return Err(("http_status", Some(status.as_u16())));
@@ -2710,7 +3515,7 @@ pub(crate) async fn upstream_capabilities(
                 http_status,
                 "NyxAgent capability lookup failed"
             );
-            return Value::Null;
+            return None;
         }
     };
     let mut cache = CAPABILITIES.lock().await;
@@ -2718,7 +3523,7 @@ pub(crate) async fn upstream_capabilities(
         cache.clear();
     }
     cache.insert(key, (Instant::now(), value.clone()));
-    value
+    Some((destination, value))
 }
 
 #[path = "assistant_nyxagent_runtime_images.rs"]

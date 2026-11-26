@@ -649,3 +649,191 @@ async fn supplemental_local_reply_preserves_token_final_parts_and_edit_authority
         }
     }).await;
 }
+
+#[tokio::test]
+async fn gateway_commonmark_platform_reply_edit_and_thread_wire() {
+    use crate::handlers::channel_relay_request as routes;
+    use crate::models::channel_thread::{
+        ChannelThreadFacts, ThreadAddress, ThreadKind, ThreadSenderKind,
+    };
+    use crate::services::channel_adapters::{discord::DiscordAdapter, lark::LarkFamilyAdapter};
+    use crate::services::channel_platform::PlatformAdapter;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    let source = "([chrono-ai.fun](https://chrono-ai.fun/zh/?utm_source=openai))\nhttps://booking.example/test-link?a=b#share=_yNR5\nLiteral _ * [ ] C:\\qa\\menu_01.txt __bold__";
+    let mut failures = Vec::new();
+    for platform in ["lark", "feishu", "discord"] {
+        let f = Box::pin(setup_platform_reply_fixture("relay_format", platform))
+            .await
+            .unwrap();
+        let db = &f.state.db;
+        let server = MockServer::start().await;
+        let adapter: Arc<dyn PlatformAdapter> = if platform == "discord" {
+            Arc::new(DiscordAdapter::media_test_adapter(&server.uri()))
+        } else {
+            Arc::new(LarkFamilyAdapter::media_test_adapter(
+                &server.uri(),
+                platform,
+            ))
+        };
+        TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .insert(f.bot.id.clone(), adapter);
+        let facts = ChannelThreadFacts {
+            version: 1,
+            kind: ThreadKind::Native,
+            chat_id: f.conversation.platform_conversation_id.clone(),
+            message_id: f.message.platform_message_id.clone().unwrap(),
+            root_id: Some("om_root".into()),
+            sender_kind: ThreadSenderKind::Human,
+            address: ThreadAddress::Mention,
+            ..Default::default()
+        };
+        db.collection::<bson::Document>("channel_messages")
+            .update_one(
+                doc! {"_id":&f.message.id},
+                doc! {"$set":{"thread_context":bson::to_bson(&facts).unwrap()}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc!{
+            "_id":"channel","user_id":&f.bot.user_id,"channel_bot_id":&f.bot.id,"platform":platform,
+            "bot_label":"Test","transport":"gateway","status":"active","route_api_key_id":&f.api_key.id,
+            "route_id":&f.conversation.id,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            "gateway_threads":{"supported":true,"enabled":true,"version":1},
+        }).await.unwrap();
+        db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc!{
+            "_id":"follow","org_user_id":bson::Bson::Null,"flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+            "target_kind":"user","target_key":&f.bot.user_id,"enabled":true,"updated_by":"admin",
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        }).await.unwrap();
+
+        Mock::given(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"tenant_access_token":"test","expire":7200})),
+            )
+            .mount(&server)
+            .await;
+        let router = axum::Router::new()
+            .route(
+                "/reply/commonmark",
+                axum::routing::post(routes::commonmark_reply),
+            )
+            .route(
+                "/thread-reply/commonmark",
+                axum::routing::post(routes::commonmark_thread_reply),
+            )
+            .route(
+                "/reply/update/commonmark",
+                axum::routing::post(routes::commonmark_update),
+            )
+            .with_state(f.state.clone());
+        for endpoint in [
+            "/reply/commonmark",
+            "/reply/update/commonmark",
+            "/thread-reply/commonmark",
+        ] {
+            let is_edit = endpoint == "/reply/update/commonmark";
+            let is_thread = endpoint == "/thread-reply/commonmark";
+            let mut body = json!({"message_id":f.message.id,"reply":{"text":source}});
+            let claims = valid_reply_claims(&f);
+            if is_edit {
+                insert_reply_token_use(&f, &claims).await;
+                body["message_id"] = json!(f.outbound_message.platform_message_id);
+                body["outbound_message_id"] = json!(f.outbound_message.id);
+            }
+            let wire_path = match (platform, is_edit, is_thread) {
+                ("discord", true, _) => "/channels/chat_123/messages/platform_reply_123",
+                ("discord", false, _) => "/channels/chat_123/messages",
+                (_, true, _) => "/open-apis/im/v1/messages/platform_reply_123",
+                (_, _, true) => "/open-apis/im/v1/messages/om_root/reply",
+                _ => "/open-apis/im/v1/messages",
+            };
+            let refuses_thread = platform == "discord" && is_thread;
+            let wire_method = if is_edit {
+                if platform == "discord" {
+                    "PATCH"
+                } else {
+                    "PUT"
+                }
+            } else {
+                "POST"
+            };
+            if !refuses_thread {
+                Mock::given(path(wire_path))
+                    .and(wiremock::matchers::method(wire_method))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(json!({"id":"42","code":0,"data":{"message_id":"42"}})),
+                    )
+                    .mount(&server)
+                    .await;
+            }
+            let seen = server.received_requests().await.unwrap().len();
+            let request = |body: &Value| {
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", encode_reply_claims(&f.state, &claims)),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            };
+            let response = router.clone().oneshot(request(&body)).await.unwrap();
+            let expected = if refuses_thread {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::OK
+            };
+            if response.status() != expected {
+                let status = response.status();
+                let reason = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                failures.push(format!(
+                    "{platform} {endpoint}: expected {expected}, got {status}: {}",
+                    String::from_utf8_lossy(&reason)
+                ));
+                continue;
+            }
+            let requests = server.received_requests().await.unwrap();
+            if refuses_thread {
+                assert_eq!(requests.len(), seen);
+                continue;
+            }
+            let sent: Vec<_> = requests[seen..]
+                .iter()
+                .filter(|r| r.url.path() == wire_path && r.method == wire_method)
+                .collect();
+            assert_eq!(sent.len(), 1, "{platform} {endpoint}");
+            if is_edit {
+                body["reply"]["text"] = json!("x".repeat(32_000));
+                let overflow = router.clone().oneshot(request(&body)).await.unwrap();
+                assert_eq!(overflow.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    server.received_requests().await.unwrap().len(),
+                    requests.len()
+                );
+            }
+            let body: Value = sent[0].body_json().unwrap();
+            if platform == "discord" {
+                assert_eq!(body["content"], source.replace("__bold__", "**bold**"));
+            } else {
+                assert_eq!(body["msg_type"], "text");
+                let inner: Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+                assert_eq!(inner["text"], source);
+                if is_thread {
+                    assert_eq!(body["reply_in_thread"], true);
+                }
+            }
+        }
+        cleanup(f).await;
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

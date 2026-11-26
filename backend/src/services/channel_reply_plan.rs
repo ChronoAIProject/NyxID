@@ -14,7 +14,8 @@ pub(crate) mod format_tests;
 /// Fully plan before the first provider effect. Routing metadata is copied;
 /// interactive content cannot be duplicated across multiple messages.
 pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundReply>> {
-    if commonmark(reply.metadata.as_ref()) && matches!(platform, "telegram" | "telegram-new") {
+    if commonmark(reply.metadata.as_ref()) && supports_commonmark(platform) {
+        let telegram = matches!(platform, "telegram" | "telegram-new");
         if reply
             .metadata
             .as_ref()
@@ -34,26 +35,46 @@ pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<Outbou
                 "Reply exceeds the 64-part limit".into(),
             ));
         }
-        if parts.len() > 1
-            && (!reply.attachments.is_empty()
-                || reply
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|m| m.get("reply_markup").is_some()))
-        {
+        let interactive = if telegram {
+            reply
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.get("reply_markup").is_some())
+        } else {
+            has_structured_content(reply)
+        };
+        if parts.len() > 1 && (!reply.attachments.is_empty() || interactive) {
             return Err(AppError::ValidationError(
                 "Long interactive replies require a separate complete text reply".into(),
             ));
         }
+        if !telegram && parts.is_empty() {
+            if reply.attachments.is_empty() && !interactive {
+                return Err(AppError::ValidationError(
+                    "CommonMark produced no display text".into(),
+                ));
+            }
+            parts.push(OutboundReply {
+                text: None,
+                attachments: vec![],
+                metadata: None,
+                reply_to_platform_message_id: None,
+            });
+        }
         for part in &mut parts {
-            let entities = part.metadata.take().unwrap_or_default()["entities"].clone();
+            // The opt-in was consumed. Keep routing and controls, and let the
+            // planner own the renderer version and native formatting fields.
             let mut metadata = reply
                 .metadata
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({}));
-            metadata["text_format"] = "telegram_entities".into();
-            metadata["entities"] = entities;
-            part.metadata = Some(metadata);
+                .as_ref()
+                .and_then(|m| m.as_object())
+                .cloned()
+                .unwrap_or_default();
+            metadata.remove("text_format");
+            if let Some(serde_json::Value::Object(format)) = part.metadata.take() {
+                metadata.extend(format);
+            }
+            part.metadata = (!metadata.is_empty()).then_some(serde_json::Value::Object(metadata));
             part.attachments = reply.attachments.clone();
             part.reply_to_platform_message_id = reply.reply_to_platform_message_id.clone();
         }
@@ -97,6 +118,30 @@ pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<Outbou
 /// Explicit opt-in: public relay callers retain their existing syntax otherwise.
 pub fn commonmark(metadata: Option<&serde_json::Value>) -> bool {
     metadata.is_some_and(|m| m["text_format"] == "commonmark")
+}
+
+fn relay_renderer(platform: &str) -> bool {
+    matches!(platform, "lark" | "feishu" | "discord")
+}
+
+pub fn supports_commonmark(platform: &str) -> bool {
+    matches!(platform, "telegram" | "telegram-new") || relay_renderer(platform)
+}
+
+pub fn uses_relay_renderer(platform: &str, metadata: Option<&serde_json::Value>) -> bool {
+    relay_renderer(platform) && commonmark(metadata)
+}
+
+/// Edits address one provider message. Rich sends also need a single text
+/// component so their adapter can keep the controls and attachments together.
+pub fn single_text_part(reply: &OutboundReply, platform: &str) -> AppResult<OutboundReply> {
+    let mut parts = text_parts(reply, platform)?;
+    if parts.len() != 1 {
+        return Err(AppError::ValidationError(
+            "The text must fit one platform message".into(),
+        ));
+    }
+    Ok(parts.remove(0))
 }
 
 pub fn assistant_metadata(platform: &str) -> Option<serde_json::Value> {

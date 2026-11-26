@@ -63,7 +63,23 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
   let device: () => Promise<ReturnType<typeof preview>> = async () => preview();
   let agent: () => Promise<ReturnType<typeof preview>> = async () => preview();
   let decision: () => Promise<void> = async () => {};
+  const stagingBinding = {
+    request_id: "11111111-1111-4111-8111-111111111111",
+    production_user: "22222222-2222-4222-8222-222222222222",
+    staging_user: "33333333-3333-4333-8333-333333333333",
+  };
   const api = {
+    previewStagingDevice: async (code: string, binding?: typeof stagingBinding) => {
+      calls.push(binding ? "staging-refresh" : "staging-preview");
+      if (binding) assert.deepEqual(binding, stagingBinding);
+      return { ...authDevicePreviewSchema.parse(await device()), stagingBinding };
+    },
+    decideStagingDevice: async (action: string, code: string, binding: typeof stagingBinding) => {
+      calls.push("staging-" + action);
+      assert.deepEqual(binding, stagingBinding);
+      decisionCodes.push(code);
+      return decision();
+    },
     previewAuthDevice: async () => {
       calls.push("device");
       return authDevicePreviewSchema.parse(await device());
@@ -164,6 +180,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
         },
       },
       "react-native-safe-area-context": {
+        SafeAreaProvider: "SafeAreaProvider",
         useSafeAreaInsets: () => ({ bottom: 0, top: 0 }),
       },
       "lucide-react-native": Object.fromEntries(
@@ -179,6 +196,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
         ].map((n) => [n, n]),
       ),
       "../../app/WorkspaceHeader": {
+        WorkspaceSheetContext: { Provider: "WorkspaceSheetProvider" },
         useWorkspaceSheet: () => ({}),
         useWorkspaceBack: (input: { disabled: boolean }) => {
           navigationDisabled = input.disabled;
@@ -190,6 +208,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
       "../../components/ScreenContainer": {
         ScreenContainer: "ScreenContainer",
       },
+      "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
       "../../lib/accessibility/useReducedMotion": {
         useReducedMotion: () => true,
       },
@@ -556,7 +575,7 @@ test("manual device and scanner entries route Agent Key codes with a one-shot pr
   }
 });
 
-test("Agent Key manual entry resolves device codes and deep links in either screen only prefill", async () => {
+test("Agent Key manual entry resolves device codes; device links preview and Agent Key links prefill", async () => {
   const env = setup();
   env.setAgent(async () => {
     throw missing("agent-key");
@@ -569,7 +588,8 @@ test("Agent Key manual entry resolves device codes and deep links in either scre
   for (const kind of ["device", "agent-key"]) {
     const linked = setup();
     linked.mount(kind, { user_code: "ABCDEFGH" });
-    assert.deepEqual(linked.calls, []);
+    await linked.harness.settle();
+    assert.deepEqual(linked.calls, kind === "device" ? ["device"] : []);
     linked.harness.unmount();
   }
 });
@@ -603,7 +623,8 @@ for (const kind of ["device", "agent-key"] as const) {
       env.setDevice(async () => preview(status));
       env.setAgent(async () => preview(status));
       env.mount(kind, { user_code: "ABCDEFGH" });
-      await env.press("Continue");
+      if (kind === "device") await env.harness.settle();
+      else await env.press("Continue");
       assert.equal(env.harness.value().type, "Terminal");
       assert.equal(
         env.harness.value().props.state,
@@ -1081,6 +1102,8 @@ test("Device Login pending foreground refresh preserves the expanded raw user ag
   env.mount();
   env.field("ABCDEFGH");
   await env.press("Continue");
+  (env.nodes().find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress as () => void)();
+  env.harness.flush();
   (
     env
       .nodes()
@@ -1091,6 +1114,7 @@ test("Device Login pending foreground refresh preserves the expanded raw user ag
   env.advance(750);
   await env.app("background");
   await env.app("active");
+  assert.ok(env.nodes().some((node) => node.props.accessibilityLabel === "Hide more details"));
   assert.ok(
     env
       .nodes()
@@ -1164,7 +1188,8 @@ for (const kind of ["device", "agent-key"] as const) {
       const env = setup();
       env.synchronousParams();
       env.mount(kind, { user_code: "ABCDEFGH" });
-      await env.press("Continue");
+      if (kind === "device") await env.harness.settle();
+      else await env.press("Continue");
       if (kind === "agent-key") {
         env.advance(750);
         await env.press("Choose an Agent Key");
@@ -1224,7 +1249,8 @@ for (const kind of ["device", "agent-key"] as const) {
     ]) {
       const env = setup();
       env.mount(kind, { user_code: "ABCDEFGH" });
-      await env.press("Continue");
+      if (kind === "device") await env.harness.settle();
+      else await env.press("Continue");
       env.advance(750);
       const refresh = deferred<ReturnType<typeof preview>>();
       env.setDevice(() => refresh.promise);
@@ -1338,7 +1364,8 @@ for (const kind of ["device", "agent-key"] as const) {
   test(`${kind} stale terminal Done and restart callbacks cannot discard a newer in-flight decision`, async () => {
     const env = setup();
     env.mount(kind, { user_code: "ABCDEFGH" });
-    await env.press("Continue");
+    if (kind === "device") await env.harness.settle();
+    else await env.press("Continue");
     env.advance(60_000);
     const terminal = env.harness.value();
     assert.equal(terminal.type, "Terminal");
@@ -1433,7 +1460,8 @@ for (const kind of ["device", "agent-key"] as const) {
     const env = setup();
     env.synchronousParams();
     env.mount(kind, { user_code: "ABCDEFGH" });
-    await env.press("Continue");
+    if (kind === "device") await env.harness.settle();
+    else await env.press("Continue");
     env.advance(750);
     const result = deferred<void>();
     env.setDecision(() => result.promise);
@@ -1505,11 +1533,12 @@ for (const kind of ["device", "agent-key"] as const) {
     "step-up",
   ] as const) {
     for (const exit of ["onDone", "onRestart"] as const)
-    test(`${kind} newest deferred link prefills after ${outcome} commits and ${exit}, without preview or decision for the new code`, async () => {
+    test(`${kind} newest deferred link waits for ${outcome} and ${exit} before its own review, without inheriting a decision`, async () => {
       const env = setup();
       env.synchronousParams();
       env.mount(kind, { user_code: "ABCDEFGH" });
-      await env.press("Continue");
+      if (kind === "device") await env.harness.settle();
+      else await env.press("Continue");
       if (kind === "agent-key") {
         env.advance(750);
         await env.press("Choose an Agent Key");
@@ -1577,24 +1606,19 @@ for (const kind of ["device", "agent-key"] as const) {
         await env.press(exit === "onDone" ? "Done" : "Scan or enter another code");
       }
       assert.equal(env.params().user_code, "EFGHABCD");
-      assert.equal(
-        env.nodes().find((node) => node.type === "TextInput")?.props.value,
-        "EFGH-ABCD",
-      );
-      assert.equal(
-        env.nodes().find((node) => node.props.label === "Continue")?.props
-          .loading,
-        false,
-      );
-      assert.deepEqual(env.calls, [kind, "approve"]);
-      assert.deepEqual(
-        env.decisionCodes.map(codes.normalizeAuthDeviceUserCode),
-        ["ABCDEFGH"],
-      );
+      assert.deepEqual(env.decisionCodes.map(codes.normalizeAuthDeviceUserCode), ["ABCDEFGH"]);
       assert.equal(env.navigationDisabled(), false);
-      // Explicitly review B, restart, and open the identical link again.
+      if (kind === "device") {
+        await env.harness.settle();
+        assert.deepEqual(env.calls, [kind, "approve", kind], "only a public preview follows release");
+        assert.ok(env.nodes().some(node => node.props.value === "EFGH-ABCD"));
+      } else {
+        assert.equal(env.nodes().find(node => node.type === "TextInput")?.props.value, "EFGH-ABCD");
+        assert.deepEqual(env.calls, [kind, "approve"]);
+        await env.press("Continue");
+      }
+      // Review B, restart, and open the identical link again.
       env.setDecision(async () => {});
-      await env.press("Continue");
       env.advance(750);
       await env.press("Reject");
       assert.equal(env.harness.value().props.state, "denied");
@@ -1607,7 +1631,14 @@ for (const kind of ["device", "agent-key"] as const) {
         env.nodes().find((node) => node.type === "TextInput")?.props.value,
         "EFGH-ABCD",
       );
-      assert.deepEqual(env.calls, [kind, "approve", kind, "deny"]);
+      if (kind === "device") {
+        assert.deepEqual(env.calls, [kind, "approve", kind, "deny"], "replacement waits for the shared action throttle");
+        await env.advanceAsync(750);
+      }
+      await env.harness.settle();
+      assert.deepEqual(env.calls, kind === "device"
+        ? [kind, "approve", kind, "deny", kind] : [kind, "approve", kind, "deny"]);
+      assert.deepEqual(env.decisionCodes.map(codes.normalizeAuthDeviceUserCode), ["ABCDEFGH", "EFGHABCD"]);
       env.harness.unmount();
     });
   }
@@ -1616,7 +1647,8 @@ for (const kind of ["device", "agent-key"] as const) {
       const env = setup();
       env.synchronousParams();
       env.mount(kind, { user_code: "ABCDEFGH" });
-      await env.press("Continue");
+      if (kind === "device") await env.harness.settle();
+      else await env.press("Continue");
       env.advance(750);
       const result = deferred<void>();
       env.setDecision(() => result.promise);
@@ -1685,7 +1717,8 @@ async function startReviewedDecision(
 ) {
   env.synchronousParams();
   env.mount(kind, { user_code: "ABCDEFGH" });
-  await env.press("Continue");
+  if (kind === "device") await env.harness.settle();
+  else await env.press("Continue");
   if (kind === "agent-key" && action === "approve") {
     env.advance(750);
     await env.press("Choose an Agent Key");
@@ -1928,8 +1961,8 @@ for (const kind of ["device", "agent-key"] as const) {
         await env.advanceAsync(60_000);
         assert.deepEqual(
           env.calls,
-          [kind, "approve", kind],
-          "resolution ends automatic polling",
+          kind === "device" ? [kind, "approve", kind, kind] : [kind, "approve", kind],
+          "resolution ends uncertainty polling; a released device link gets one public preview",
         );
         env.harness.unmount();
       });
@@ -2468,4 +2501,77 @@ for (const kind of ["device", "agent-key"] as const) {
       env.harness.unmount();
     });
   }
+}
+
+
+test("a linked device request waits for the shared cooldown even when both timers fire before a render", async () => {
+  const env = setup();
+  env.resolver.recordLoginPreviewFailure({ statusCode: 429, retryAfterMs: 5000 });
+  env.mount("device", { user_code: "ABCDEFGH" });
+  assert.deepEqual(env.calls, []);
+  env.advance(4999);
+  assert.deepEqual(env.calls, []);
+  // advance() invokes all due callbacks before flushing React state, so the
+  // preview callback must consult the live resolver deadline, not old UI state.
+  env.advance(1);
+  await env.harness.settle();
+  assert.deepEqual(env.calls, ["device"]);
+  assert.ok(env.nodes().some(node => node.props.value === "ABCD-EFGH"));
+  await env.app("active");
+  await env.harness.settle();
+  assert.deepEqual(env.calls, ["device"]);
+  assert.deepEqual(env.decisionCodes, []);
+  env.harness.unmount();
+});
+
+test("a cooldown extended while a linked preview waits is respected and a replacement gets the only read", async () => {
+  const env = setup();
+  env.resolver.recordLoginPreviewFailure({ statusCode: 429, retryAfterMs: 5000 });
+  env.mount("device", { user_code: "ABCDEFGH" });
+  env.advance(4000);
+  env.resolver.recordLoginPreviewFailure({ statusCode: 429, retryAfterMs: 5000 });
+  env.params().user_code = "EFGHABCD";
+  env.harness.render();
+  await env.advanceAsync(4999);
+  assert.deepEqual(env.calls, []);
+  await env.advanceAsync(1);
+  assert.deepEqual(env.calls, ["device"]);
+  assert.ok(env.nodes().some(node => node.props.value === "EFGH-ABCD"));
+  assert.deepEqual(env.decisionCodes, []);
+  env.harness.unmount();
+});
+
+
+test("removing a delayed linked code or editing it cancels its automatic preview", async () => {
+  for (const action of ["remove", "edit", "unmount"] as const) {
+    const env = setup();
+    env.resolver.recordLoginPreviewFailure({ statusCode: 429, retryAfterMs: 5000 });
+    env.mount("device", { user_code: "ABCDEFGH" });
+    assert.deepEqual(env.calls, []);
+    if (action === "remove") {
+      env.params().user_code = undefined;
+      env.harness.render();
+    } else if (action === "edit") {
+      env.field("EFGHABCD");
+    } else env.harness.unmount();
+    await env.advanceAsync(6000);
+    assert.deepEqual(env.calls, []);
+    assert.deepEqual(env.decisionCodes, []);
+    if (action !== "unmount") env.harness.unmount();
+  }
+});
+
+for (const [button, action] of [["Approve staging account session", "approve"], ["Reject", "deny"]]) {
+  test(`a staging device scan keeps the reviewed request bound through ${action}`, async () => {
+    const env = setup();
+    env.mount("device", { start_scanner: true });
+    const scanner = env.nodes().find((node) => node.type === "DeviceCodeScanner")!;
+    (scanner.props.onCode as (code: string, kind: string) => void)("ABCDEFGH", "staging-device");
+    await env.harness.settle();
+    assert.deepEqual(env.calls, ["staging-preview"]);
+    env.advance(750);
+    await env.press(button!);
+    assert.deepEqual(env.calls, ["staging-preview", "staging-" + action]);
+    assert.deepEqual(env.decisionCodes, ["ABCDEFGH"]);
+  });
 }

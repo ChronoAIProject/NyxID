@@ -229,11 +229,12 @@ pub async fn mutate(
             security_readiness_service::require_flag_enable(db, key).await?;
         }
     }
+    let crash_cache_db = (key == flags::CRASH_REPORTS_FLAG_KEY).then(|| db.clone());
     let db = db.clone();
     let key = key.to_owned();
     let actor = actor.clone();
     let mut session = db.client().start_session().await?;
-    session
+    let result = session
         .start_transaction()
         .write_concern(WriteConcern::majority())
         .and_run2(async move |session| {
@@ -251,7 +252,13 @@ pub async fn mutate(
             )
         })
         .await
-        .map_err(key_mutations::map_transaction_error)
+        .map_err(key_mutations::map_transaction_error);
+    if result.is_ok()
+        && let Some(db) = crash_cache_db
+    {
+        super::crash_report_service::invalidate_rollout_cache(&db).await;
+    }
+    result
 }
 
 async fn mutate_in_session(
@@ -263,6 +270,9 @@ async fn mutate_in_session(
     actor: &AuditActor,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<WriteResult> {
+    if let Some(platform) = key.strip_prefix("channels:") {
+        flags::fence_meta_enrollment_in_session(db, platform, session).await?;
+    }
     let now = bson::DateTime::now();
     let mut output = WriteResult {
         definition: definition.clone(),
@@ -416,6 +426,22 @@ async fn mutate_in_session(
                     .session(&mut *session)
                     .await?
             };
+            if matches!(
+                key,
+                flags::ORG_AGENT_ACCESS_FLAG_KEY | super::org_service_approvers::FLAG
+            ) && enabled.is_none()
+                && before.as_ref().is_some_and(|row| !row.enabled)
+                && flags::clear_enables_inherited_override(
+                    db,
+                    session,
+                    key,
+                    *kind,
+                    target_id.as_deref(),
+                )
+                .await?
+            {
+                security_readiness_service::require_flag_enable(db, key).await?;
+            }
             if key == enrollment::FLAG {
                 // A clear restores inheritance. Gate potential widening, while a
                 // disable stays available even if readiness or scope reads fail.

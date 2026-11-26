@@ -327,8 +327,9 @@ per-message entities, so emphasis, links and code do not depend on parsing an
 unfinished Markdown fragment. Native manager and proactive posts use the same
 platform-specific limits (including Slack scalar and Lark JSON-byte accounting).
 
-Authored post requests retain their 4,000-character input limit; Unicode can
-still require multiple provider messages. Saved manager replies and automation
+Authored post requests accept at most 32,768 characters of input. This input
+limit is separate from the platform's single-message limit, so a post can still
+require multiple provider messages. Saved manager replies and automation
 results use the larger delivery bound below, with their saved thread as the
 source for any overflow link.
 
@@ -350,7 +351,9 @@ reporting still applies. Never reset a journal to change its renderer.
 
 Each text delivery is bounded to 64 messages, matching ordinary channel relay's
 amplification bound. An oversized result sends 63 content messages and a final
-plain notice linking the exact saved thread for the remainder. Ordinary replies
+plain notice linking the exact saved thread for the remainder. (Agent replies
+through `/channel-relay/reply` follow a different rule: more than 64 parts fails
+before sending; see [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md#bounds-and-splitting).) Ordinary replies
 contain their content without an automatic NyxID link. Chat-decidable action
 requests retain their chat instructions; a pending action requiring web review
 adds a link. Native attachment failures also explain where to find the item.

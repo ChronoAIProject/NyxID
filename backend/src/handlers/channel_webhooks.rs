@@ -208,7 +208,6 @@ pub(crate) async fn channel_webhook_with_producers(
                 config: &state.config,
                 jwt_keys: &state.jwt_keys,
                 encryption_keys: &state.encryption_keys,
-                http: &state.http_client,
                 rate_limiter: &state.per_channel_event_limiter,
             };
             match tokio::time::timeout(
@@ -378,6 +377,67 @@ pub(super) async fn dispatch_platform_webhook(
     dispatch_platform_webhook_with_producers(state, platform, headers, body, None).await
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct SharedDispatchPauseHandle {
+    pub(crate) bot_id: String,
+    pub(crate) reached: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static SHARED_DISPATCH_PAUSE: SharedDispatchPauseHandle;
+}
+
+#[cfg(test)]
+pub(crate) fn new_shared_dispatch_pause(bot_id: &str) -> SharedDispatchPauseHandle {
+    SharedDispatchPauseHandle {
+        bot_id: bot_id.to_owned(),
+        reached: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_platform_webhook_with_pause(
+    state: &AppState,
+    platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    pause: SharedDispatchPauseHandle,
+) -> crate::errors::AppResult<()> {
+    SHARED_DISPATCH_PAUSE
+        .scope(
+            pause,
+            dispatch_platform_webhook_with_producers(state, platform, headers, body, None),
+        )
+        .await
+}
+
+#[cfg(test)]
+async fn pause_shared_dispatch_after_lookup(bot_id: &str) {
+    let handle = SHARED_DISPATCH_PAUSE.try_with(Clone::clone).ok();
+    let Some(handle) = handle.filter(|handle| handle.bot_id == bot_id) else {
+        return;
+    };
+    handle.reached.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle.release.notified(),
+    )
+    .await
+    .expect("the test must release dispatch after resuming the inbox");
+}
+
+fn meta_delivery_hold_observed(bot: &crate::models::channel_bot::ChannelBot) -> bool {
+    crate::services::channel_adapters::meta::is_meta(&bot.platform)
+        && (bot.status == "suspended"
+            || bot.meta_binding.as_ref().is_some_and(|binding| {
+                binding.operator_suspended || binding.subscription == "suspended"
+            }))
+}
+
 pub(crate) async fn dispatch_platform_webhook_with_producers(
     state: &AppState,
     platform: &str,
@@ -480,18 +540,33 @@ pub(crate) async fn dispatch_platform_webhook_with_producers(
             );
             continue;
         };
-        // Reuse per-bot verification and phone filtering for managed credentials.
-        if handle_webhook_inner_with_producers(
-            state,
-            &bot.id,
-            platform,
-            headers,
-            body,
-            producers.clone(),
-        )
-        .await
-        .is_err()
-        {
+        #[cfg(test)]
+        pause_shared_dispatch_after_lookup(&bot.id).await;
+        let observed_meta_hold = meta_delivery_hold_observed(&bot);
+        // Keep a hold seen at lookup so a concurrent resume cannot admit DMs from this batch.
+        let result = if observed_meta_hold {
+            handle_webhook_inner_with_producers_and_bot(
+                state,
+                &bot.id,
+                platform,
+                headers,
+                body,
+                producers.clone(),
+                Some(bot.clone()),
+            )
+            .await
+        } else {
+            handle_webhook_inner_with_producers(
+                state,
+                &bot.id,
+                platform,
+                headers,
+                body,
+                producers.clone(),
+            )
+            .await
+        };
+        if result.is_err() {
             tracing::warn!(platform, bot_id = %bot.id, "platform webhook bot processing failed");
         }
     }
@@ -578,6 +653,27 @@ pub(crate) async fn handle_webhook_inner_with_producers(
     body: &[u8],
     producers: Option<ManagerProducers>,
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    handle_webhook_inner_with_producers_and_bot(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+        None,
+    )
+    .await
+}
+
+async fn handle_webhook_inner_with_producers_and_bot(
+    state: &AppState,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
+    looked_up_bot: Option<crate::models::channel_bot::ChannelBot>,
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
     let intercepted = crate::services::platform_entry_ingress_service::intercept(
         state,
         bot_id,
@@ -611,12 +707,13 @@ pub(crate) async fn handle_webhook_inner_with_producers(
             return Ok(response);
         }
     }
-    handle_webhook_inner_with_deps(
+    handle_webhook_inner_with_deps_and_bot(
         WebhookHandlerDeps::from(state),
         bot_id,
         expected_platform,
         headers,
         body,
+        looked_up_bot,
     )
     .await
 }
@@ -654,12 +751,24 @@ async fn diagnose_x_refusal(
 
 type WebhookResult = Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>;
 
+#[cfg(test)]
 fn handle_webhook_inner_with_deps<'a>(
     state: WebhookHandlerDeps<'a>,
     bot_id: &'a str,
     expected_platform: &'a str,
     headers: &'a HeaderMap,
     body: &'a [u8],
+) -> futures::future::BoxFuture<'a, WebhookResult> {
+    handle_webhook_inner_with_deps_and_bot(state, bot_id, expected_platform, headers, body, None)
+}
+
+fn handle_webhook_inner_with_deps_and_bot<'a>(
+    state: WebhookHandlerDeps<'a>,
+    bot_id: &'a str,
+    expected_platform: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+    looked_up_bot: Option<crate::models::channel_bot::ChannelBot>,
 ) -> futures::future::BoxFuture<'a, WebhookResult> {
     // Construct the large dispatch future outside caller poll frames, including
     // concurrent deliveries. Signature verification and admission stay inside.
@@ -669,6 +778,7 @@ fn handle_webhook_inner_with_deps<'a>(
         expected_platform,
         headers,
         body,
+        looked_up_bot,
     ))
 }
 
@@ -678,14 +788,18 @@ async fn handle_webhook_inner_impl(
     expected_platform: &str,
     headers: &HeaderMap,
     body: &[u8],
+    looked_up_bot: Option<crate::models::channel_bot::ChannelBot>,
 ) -> WebhookResult {
     // Look up the bot
-    let bot = match channel_bot_service::get_bot(state.db, bot_id).await {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::debug!(bot_id = %bot_id, "webhook for unknown bot");
-            return Ok(None);
-        }
+    let bot = match looked_up_bot {
+        Some(bot) => bot,
+        None => match channel_bot_service::get_bot(state.db, bot_id).await {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::debug!(bot_id = %bot_id, "webhook for unknown bot");
+                return Ok(None);
+            }
+        },
     };
 
     // Verify the bot platform matches the webhook route
@@ -721,7 +835,8 @@ async fn handle_webhook_inner_impl(
     // Allow pending_webhook bots through to verification -- they'll be promoted
     // after signature verification succeeds (not before).
     let is_pending_webhook = bot.status == "pending_webhook";
-    if !is_pending_webhook && bot.status != "active" {
+    let meta_control_hold = meta_delivery_hold_observed(&bot);
+    if !is_pending_webhook && bot.status != "active" && !meta_control_hold {
         diagnose_x_refusal(state, &bot, headers, body, Outcome::BotInactive).await;
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for non-active bot");
         return Ok(None);
@@ -733,7 +848,17 @@ async fn handle_webhook_inner_impl(
         },
     )?;
 
-    let snapshot = if adapter.records_verification_result() {
+    #[cfg(test)]
+    let adapter = crate::services::assistant_channel_media::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(bot_id)
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::from(adapter));
+
+    let snapshot_required = adapter.records_verification_result()
+        || crate::services::channel_adapters::meta::is_meta(&bot.platform);
+    let snapshot = if snapshot_required {
         crate::services::channel_verification_service::CredentialSnapshot::load(
             state.db,
             adapter.as_ref(),
@@ -743,7 +868,7 @@ async fn handle_webhook_inner_impl(
     } else {
         crate::services::channel_verification_service::CredentialSnapshot::local(&bot)
     };
-    let verify_secrets = if adapter.records_verification_result() {
+    let verify_secrets = if snapshot_required {
         snapshot
             .secrets(state.encryption_keys, adapter.as_ref())
             .await
@@ -789,6 +914,15 @@ async fn handle_webhook_inner_impl(
         }
     };
 
+    adapter
+        .apply_webhook_state(state.db, &bot, &prepared.body, &snapshot)
+        .await?;
+    // Held Meta installations still project authenticated control evidence,
+    // but their ordinary DMs must never enter relay admission. This check is
+    // deliberately after signature, app, asset and control-state processing.
+    if meta_control_hold {
+        return Ok(None);
+    }
     if let Some(challenge_response) = prepared.challenge_response {
         // This proves only callback reachability with the current verification
         // secrets. It is not a message, a route check, or member verification.
@@ -900,39 +1034,21 @@ async fn handle_webhook_inner_impl(
                         .await;
                 }
             }
-            crate::models::channel_whatsapp_native::CallbackPhase::Gateway => {
-                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config)
-                    && payload.as_ref().is_some_and(|payload| {
+            phase
+                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config) =>
+            {
+                if phase == crate::models::channel_whatsapp_native::CallbackPhase::Gateway
+                    && payload.as_ref().is_some_and(|body| {
                         crate::services::whatsapp_native::callback::relay_message_evidence(
-                            &config, &bot, payload,
+                            &config, &bot, body,
                         )
                     })
                 {
-                    crate::services::channel_bot_service::record_webhook_error(
-                        state.db,
-                        &bot.id,
-                        crate::services::channel_bot_health::codes::NATIVE_RELAY_CONFLICT,
+                    crate::services::channel_bot_health::record_native_relay_conflict(
+                        state.db, &bot,
                     )
                     .await?;
-                    let mut facts = crate::services::channel_bot_health::HealthFacts::for_bot(
-                        &bot,
-                        chrono::Utc::now(),
-                        true,
-                    );
-                    facts.failure_reason =
-                        Some(crate::services::channel_bot_health::codes::NATIVE_RELAY_CONFLICT);
-                    let recommendation = crate::services::channel_bot_health::recommend(&facts);
-                    crate::services::channel_bot_health::notify_failure(
-                        state.db,
-                        &bot,
-                        &recommendation,
-                    );
-                    return Ok(None);
                 }
-            }
-            crate::models::channel_whatsapp_native::CallbackPhase::Unknown
-                if crate::services::whatsapp_native::callback::suppress_relay_messages(&config) =>
-            {
                 return Ok(None);
             }
             _ => {}
@@ -947,6 +1063,9 @@ async fn handle_webhook_inner_impl(
             return Err(Box::new(error));
         }
     };
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) && messages.is_empty() {
+        inbound_diagnostics::record(state.db, &bot, Outcome::EmptyBatch).await;
+    }
     if bot.platform == "x" {
         let outcomes = crate::services::channel_adapters::x::filtered_webhook_outcomes(
             &prepared.body,
@@ -1454,6 +1573,14 @@ mod tests {
                 callback_status
             };
             assert_eq!(row.get_str("callback_status").unwrap(), expected);
+            if expected == "failed" {
+                let bot = channel_bot_service::get_bot(&db, &bot_id).await.unwrap();
+                let health = crate::handlers::channel_bots::health_for(&bot, false, true);
+                assert_eq!(
+                    health.diagnostics.last_inbound_outcome.unwrap().code,
+                    "whatsapp_callback_failed"
+                );
+            }
         }
         if reject_receipts {
             assert_eq!(
@@ -1685,6 +1812,7 @@ mod tests {
         encryption_key: &str,
     ) -> crate::config::AppConfig {
         crate::config::AppConfig {
+            crash_reporting: Default::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
@@ -1765,6 +1893,7 @@ mod tests {
             android_app_package: None,
             android_app_sha256_cert_fingerprints: Vec::new(),
             mobile_app_return_schemes: Vec::new(),
+            mobile_social_redirect_uris: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -1933,6 +2062,10 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
+            let _origin = crate::services::resource_adapter::register_test_origin(&format!(
+                "http://{}",
+                listener.local_addr().unwrap()
+            ));
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
@@ -2037,6 +2170,7 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -2055,6 +2189,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -2651,8 +2787,7 @@ mod whatsapp_activation_tests {
     use serde_json::json;
     use sha2::Sha256;
 
-    #[tokio::test]
-    async fn signed_unrelated_or_empty_payloads_do_not_activate_a_phone() {
+    async fn whatsapp_phone() -> (AppState, String, serde_json::Value) {
         let db = crate::test_utils::connect_transaction_test_database("wa_activation_shapes").await;
         let state = crate::test_utils::test_app_state(db.clone());
         let secret = state
@@ -2673,6 +2808,13 @@ mod whatsapp_activation_tests {
             "messaging_product":"whatsapp","metadata":{"phone_number_id":"123"},
             "messages":[{"id":"wamid.1","from":"789","type":"text","text":{"body":"hello"}}]
         }}]}]});
+        (state, id, valid)
+    }
+
+    #[tokio::test]
+    async fn signed_unrelated_or_empty_payloads_do_not_activate_a_phone() {
+        let (state, id, valid) = whatsapp_phone().await;
+        let db = &state.db;
         for (pointer, value) in [
             ("/object", json!("other")),
             ("/entry/0/id", json!("other")),
@@ -2690,7 +2832,7 @@ mod whatsapp_activation_tests {
             let mut invalid = valid.clone();
             *invalid.pointer_mut(pointer).unwrap() = value;
             deliver(&state, &id, &invalid).await;
-            let bot = channel_bot_service::get_bot(&db, &id).await.unwrap();
+            let bot = channel_bot_service::get_bot(db, &id).await.unwrap();
             assert_eq!(
                 bot.status, "pending_webhook",
                 "activated for invalid {pointer}"
@@ -2716,7 +2858,7 @@ mod whatsapp_activation_tests {
             value["statuses"] = json!([status]);
             deliver(&state, &id, &payload).await;
             assert_eq!(
-                channel_bot_service::get_bot(&db, &id).await.unwrap().status,
+                channel_bot_service::get_bot(db, &id).await.unwrap().status,
                 "pending_webhook",
                 "invalid status {field}"
             );
@@ -2734,7 +2876,7 @@ mod whatsapp_activation_tests {
         status_payload["entry"][0]["changes"][0]["value"]["statuses"] = json!([valid_status]);
         deliver(&state, &id, &status_payload).await;
         assert_eq!(
-            channel_bot_service::get_bot(&db, &id).await.unwrap().status,
+            channel_bot_service::get_bot(db, &id).await.unwrap().status,
             "active"
         );
         let receipt = db
@@ -2782,6 +2924,37 @@ mod whatsapp_activation_tests {
             1
         );
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn whatsapp_gateway_owned_relay_messages_report_conflict_in_health() {
+        let (state, id, mut payload) = whatsapp_phone().await;
+        let bot = channel_bot_service::get_bot(&state.db, &id).await.unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME)
+            .insert_one(
+                doc! {"_id":&id,"owner_id":&bot.user_id,"ownership_version":bot.ownership_version,
+                "meta_app_id":"111","waba_id":"456","phone_number_id":"123","dedicated_app":true,
+                "updated_at":bson::DateTime::now(),"callback":{"phase":"gateway"}},
+            )
+            .await
+            .unwrap();
+        let message = &mut payload["entry"][0]["changes"][0]["value"]["messages"][0];
+        *message = json!({"id":"wamid.image","from":"789","timestamp":"1794558120",
+            "type":"image","image":{"id":"555","mime_type":"image/jpeg"}});
+        deliver(&state, &id, &payload).await;
+        let bot = channel_bot_service::get_bot(&state.db, &id).await.unwrap();
+        let health = crate::handlers::channel_bots::health_for(&bot, true, true);
+        assert_eq!(
+            health.diagnostics.failure_reason.as_deref(),
+            Some("native_gateway_relay_conflict")
+        );
+        assert!(health.diagnostics.last_webhook_at.is_some());
+        assert!(health.diagnostics.last_route_at.is_none());
+        assert!(health.diagnostics.last_inbound_at.is_none());
+        assert_eq!(health.recommended_action, "verify");
+        state.db.drop().await.unwrap();
     }
 
     async fn deliver(state: &AppState, id: &str, payload: &serde_json::Value) {

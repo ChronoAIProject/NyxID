@@ -47,13 +47,12 @@ async fn execute_public_proxy(
                 .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
                 .copied(),
         )?;
-    let request_path = request.uri().path().to_string();
     let client_ip = crate::mw::rate_limit::enforce_public_ip_rate_limit(
         &state.public_proxy_limiter,
         request.headers(),
         peer,
         &state.config.trusted_proxy_ips,
-        &request_path,
+        crate::mw::request_trace::route_label(request.extensions()),
     )
     .await?;
 
@@ -107,7 +106,7 @@ async fn execute_public_proxy(
 
     let target = public_proxy_target(matched.service.clone());
     let response = proxy_service::forward_request(
-        &state.http_client,
+        proxy_service::Redirects::SameOrigin,
         &target,
         reqwest::Method::from_bytes(method.as_str().as_bytes()).map_err(|_| {
             AppError::BadRequest(format!("Unsupported HTTP method: {}", method.as_str()))
@@ -179,7 +178,7 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
         credential: Default::default(),
-        catalog_default_headers: Vec::new(),
+        catalog_default_headers: Default::default(),
         user_service_default_headers: Vec::new(),
         ws_frame_injections: Vec::new(),
         connection_id: None,
@@ -332,6 +331,8 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "admin".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -386,7 +387,7 @@ mod tests {
         assert_eq!(target.auth_method, "none");
         assert_eq!(target.auth_key_name, "");
         assert_eq!(target.credential.as_str(), "");
-        assert!(target.catalog_default_headers.is_empty());
+        assert!(target.catalog_headers().is_empty());
         assert_eq!(target.service.identity_propagation_mode, "none");
         assert!(!target.service.forward_access_token);
         assert!(!target.service.inject_delegation_token);
@@ -484,6 +485,8 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,

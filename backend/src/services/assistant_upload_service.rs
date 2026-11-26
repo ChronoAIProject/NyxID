@@ -1,5 +1,7 @@
 //! Message-bound, envelope-encrypted uploads. Every read rechecks live scope.
 pub mod byte_budget;
+mod pdf_renderer;
+pub(crate) mod pdf_vision;
 use super::{
     assistant_acknowledgement_service::ChatAuthority,
     assistant_nyxagent as engine,
@@ -23,24 +25,15 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 pub const MAX_FILES: usize = 10;
+pub(crate) const MAX_FILENAME_CHARS: usize = 120;
 const CHUNK: usize = 4 * 1024 * 1024;
 fn missing() -> AppError {
     AppError::NotFound("Attachment not found or expired".into())
 }
 
 pub fn safe_name(input: &str) -> String {
-    let leaf = input.rsplit(['/', '\\']).next().unwrap_or("");
-    let name: String = leaf
-        .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')'))
-        .take(120)
-        .collect();
-    let name = name.trim().trim_matches('.').trim();
-    if name.is_empty() {
-        "attachment".into()
-    } else {
-        name.into()
-    }
+    super::attachment_filename::sanitize_name(input, MAX_FILENAME_CHARS)
+        .unwrap_or_else(|| "attachment".into())
 }
 
 pub fn validate_ids(ids: &[String]) -> AppResult<()> {
@@ -61,6 +54,7 @@ pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
         chat_delivery: None,
         image_input: None,
         image_input_reason: None,
+        pdf: row.pdf.clone(),
         image_inspection: None,
         id: row.id.clone(),
         label: row.label.clone(),
@@ -130,6 +124,7 @@ pub async fn upload(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_authorized(
     db: &Database,
@@ -140,7 +135,34 @@ pub(crate) async fn upload_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
 ) -> AppResult<TurnAttachment> {
-    store_authorized(db, keys, user, scope, name, bytes, access, None, None).await
+    upload_named_authorized(db, keys, user, scope, Some(name), bytes, access).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_named_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: Option<&str>,
+    bytes: Vec<u8>,
+    access: Option<super::org_group_service::Access>,
+) -> AppResult<TurnAttachment> {
+    let original =
+        name.and_then(|name| super::attachment_filename::sanitize_name(name, MAX_FILENAME_CHARS));
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name.unwrap_or("attachment"),
+        bytes,
+        access,
+        None,
+        None,
+        Some(original.is_some()),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -154,7 +176,19 @@ pub(crate) async fn upload_channel_authorized(
     source: crate::models::assistant_channel_media::UploadSource,
 ) -> AppResult<TurnAttachment> {
     owner_scope(db, user, scope).await?;
-    store_authorized(db, keys, user, scope, name, bytes, None, Some(source), None).await
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name,
+        bytes,
+        None,
+        Some(source),
+        None,
+        None,
+    )
+    .await
 }
 
 /// Relay v2 retains an opaque original just like Telegram preparation. This
@@ -181,6 +215,37 @@ pub(crate) async fn upload_channel_original_authorized(
         None,
         Some(source),
         Some(mime_hint.unwrap_or("application/octet-stream")),
+        None,
+    )
+    .await
+}
+
+/// Lark fetch distinguishes original names from unverified download fallbacks.
+/// Only this path records provenance and names missing originals after parsing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_lark_channel_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: Option<&str>,
+    bytes: Vec<u8>,
+    source: crate::models::assistant_channel_media::UploadSource,
+    original_mime: Option<&str>,
+) -> AppResult<TurnAttachment> {
+    owner_scope(db, user, scope).await?;
+    let original = super::attachment_filename::original_name(name, MAX_FILENAME_CHARS);
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name.unwrap_or("attachment"),
+        bytes,
+        None,
+        Some(source),
+        original_mime,
+        Some(original.is_some()),
     )
     .await
 }
@@ -196,6 +261,7 @@ async fn store_authorized(
     access: Option<super::org_group_service::Access>,
     source: Option<crate::models::assistant_channel_media::UploadSource>,
     original_mime: Option<&str>,
+    filename_is_original: Option<bool>,
 ) -> AppResult<TurnAttachment> {
     use sha2::{Digest, Sha256};
     // Legacy rows may lack a digest; attachment-write egress can hash their
@@ -213,7 +279,14 @@ async fn store_authorized(
     } else {
         attachment_extraction::extract(bytes.clone(), extension).await?
     };
+    let label = if filename_is_original == Some(false) {
+        super::attachment_filename::default_name(None, &extracted.content_type, MAX_FILENAME_CHARS)
+    } else {
+        label
+    };
     let mut row = AssistantUpload {
+        filename_is_original,
+        pdf: extracted.pdf.clone(),
         source,
         content_sha256,
         secret_context_versions: Default::default(),
@@ -242,7 +315,7 @@ async fn store_authorized(
     };
     let encoded =
         crate::crypto::secret_json::to_secret_string(&extracted).map_err(|_| missing())?;
-    row.text_encrypted = super::record_field_service::encrypt(
+    row.text_encrypted = crate::crypto::record_field::encrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -368,6 +441,7 @@ async fn extract_channel_original(
             // Preserve the original encrypted file even when this parser cannot
             // interpret it. Unvalidated images never enter image-model input.
             Err(AppError::BadRequest(_)) => Extracted {
+                pdf: None,
                 content_type: mime_hint
                     .filter(|m| {
                         m.len() <= 100
@@ -400,6 +474,8 @@ pub(crate) async fn prepare_channel_upload(
     let extracted = extract_channel_original(bytes.clone(), extension, mime_hint).await?;
     use sha2::{Digest, Sha256};
     let mut row = AssistantUpload {
+        filename_is_original: None,
+        pdf: extracted.pdf.clone(),
         source: None,
         content_sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
         secret_context_versions: Default::default(),
@@ -424,7 +500,7 @@ pub(crate) async fn prepare_channel_upload(
     };
     let encoded =
         crate::crypto::secret_json::to_secret_string(&extracted).map_err(|_| missing())?;
-    row.text_encrypted = super::record_field_service::encrypt(
+    row.text_encrypted = crate::crypto::record_field::encrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -613,7 +689,15 @@ async fn payload(
         row.group_id.as_deref().unwrap_or(&row.conversation_id),
     );
     filter.insert("_id", &row.id);
-    let mut bytes = Vec::new();
+    let size = usize::try_from(row.size)
+        .ok()
+        .filter(|n| *n > 0 && *n <= attachment_extraction::MAX_BYTES)
+        .ok_or_else(missing)?;
+    // Bound database work while retaining older uploads split into smaller chunks.
+    if row.chunks == 0 || row.chunks > attachment_extraction::MAX_BYTES.div_ceil(CHUNK) {
+        return Err(missing());
+    }
+    let mut bytes = Vec::with_capacity(size);
     for index in 0..row.chunks {
         let chunk = db
             .collection::<bson::Document>(COLLECTION_NAME)
@@ -637,21 +721,20 @@ async fn payload(
         )?;
         let chunk_id = chunk.get_str("_id").map_err(|_| missing())?;
         let versions = super::record_field_service::stored_versions(&chunk)?;
-        bytes.extend_from_slice(
-            &super::assistant_record_service::decrypt_chunk(
-                keys,
-                chunk_id,
-                &row.user_id,
-                &row.id,
-                index as i64,
-                versions.get("data_encrypted").copied(),
-                &encrypted,
-            )
-            .await?,
-        );
-        if bytes.len() > attachment_extraction::MAX_BYTES {
+        let chunk = super::assistant_record_service::decrypt_chunk(
+            keys,
+            chunk_id,
+            &row.user_id,
+            &row.id,
+            index as i64,
+            versions.get("data_encrypted").copied(),
+            &encrypted,
+        )
+        .await?;
+        if chunk.len() > size.saturating_sub(bytes.len()) {
             return Err(missing());
         }
+        bytes.extend_from_slice(&chunk);
     }
     if bytes.len() as i64 != row.size {
         return Err(missing());
@@ -830,6 +913,16 @@ pub async fn chat_bytes(
     if image_only && let Some(image) = tool_image_bytes(db, keys, chat, id).await? {
         return Ok(image);
     }
+    if image_only {
+        let origin = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":id,"origin":pdf_vision::ORIGIN})
+            .projection(doc! {"_id":1})
+            .await?;
+        if origin.is_some() {
+            return pdf_vision::bytes(db, keys, chat, id).await;
+        }
+    }
     let channel_guest = image_only && chat.guest && !chat.collaboration_thread;
     let row = if channel_guest {
         super::assistant_channel_media::guest::for_chat(db, chat, id).await?
@@ -860,6 +953,16 @@ pub async fn chat_bytes(
     Ok(bytes)
 }
 
+async fn reserve_tool_read(size: usize) -> Option<byte_budget::ByteReservation> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        byte_budget::reserve(size),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
 async fn read_tool_file(
     db: &Database,
     keys: &EncryptionKeys,
@@ -873,8 +976,33 @@ async fn read_tool_file(
     }
     let attachment = for_file_egress(db, chat, id).await?;
     let size = usize::try_from(row.size).map_err(|_| missing())?;
-    let _reservation = byte_budget::reserve(size).await?;
+    let Some(_reservation) = reserve_tool_read(size).await else {
+        return Ok(json!({
+            "error": "attachment_busy",
+            "retryable": true,
+            "instructions": "Attachment reading is temporarily busy; retry nyx__attachment_read shortly.",
+        }));
+    };
     let bytes = zeroize::Zeroizing::new(file_egress_bytes(db, keys, chat, &attachment).await?);
+    if !attachment_extraction::is_pdf(&bytes)
+        && let Ok(text) = std::str::from_utf8(&bytes)
+    {
+        let extracted = Extracted {
+            pdf: None,
+            content_type: row.content_type.clone(),
+            text: text.to_owned(),
+            sections: vec![crate::services::attachment_extraction::Section {
+                offset: 0,
+                label: "Document".into(),
+            }],
+        };
+        for_file_egress(db, chat, id).await?;
+        return Ok(page(
+            &extracted,
+            args["offset"].as_u64().unwrap_or(0) as usize,
+            (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000),
+        ));
+    }
     let extension = attachment
         .label()
         .rsplit_once('.')
@@ -903,8 +1031,30 @@ pub async fn read(
     let id = args["attachment_id"].as_str().ok_or_else(missing)?;
     let row = match for_chat(db, chat, id).await {
         Ok(row) => row,
-        Err(AppError::NotFound(_)) if !chat.guest => {
-            return read_tool_file(db, keys, chat, id, args).await;
+        Err(original @ AppError::NotFound(_))
+            if !chat.guest
+                && !chat.turn_stopped
+                && chat.turn_id.is_some()
+                && Uuid::parse_str(id).is_ok() =>
+        {
+            // Preserve the ordinary upload miss exactly. Only a single indexed
+            // attachment lookup decides whether this is the explicit tool-file
+            // path; a miss does not load the conversation/thread again.
+            let tool = db
+                .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .find_one(doc! {
+                    "_id": id,
+                    "user_id": &chat.user_id,
+                    "conversation_id": &chat.conversation_id,
+                    "turn_id": chat.turn_id.as_deref().unwrap_or_default(),
+                    "origin": "tool",
+                })
+                .projection(doc! {"_id": 1})
+                .await?;
+            if tool.is_some() {
+                return read_tool_file(db, keys, chat, id, args).await;
+            }
+            return Err(original);
         }
         Err(error) => return Err(error),
     };
@@ -914,7 +1064,7 @@ pub async fn read(
             "instructions": "Use the image input or nyx__machine_save_attachment; never assume OCR text.",
         }));
     }
-    let bytes = super::record_field_service::decrypt(
+    let bytes = crate::crypto::record_field::decrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -925,10 +1075,37 @@ pub async fn read(
     )
     .await?;
     let extracted: Extracted = serde_json::from_slice(&bytes).map_err(|_| missing())?;
-    if extracted.text.is_empty() && extracted.sections.is_empty() {
+    let pdf = if row.content_type == "application/pdf" {
+        let current = turn_attachments(
+            db,
+            &chat.user_id,
+            &chat.conversation_id,
+            chat.turn_id.as_deref().ok_or_else(missing)?,
+        )
+        .await?;
+        Some(
+            current
+                .into_iter()
+                .find(|a| a.id == row.id)
+                .and_then(|a| a.pdf)
+                .map(|mut pdf| {
+                    pdf_vision::discard_unconfirmed_images(&mut pdf, "image_delivery_unconfirmed");
+                    pdf
+                })
+                .unwrap_or_else(|| pdf_vision::coverage(&extracted)),
+        )
+    } else {
+        None
+    };
+    if !extracted.text.chars().any(|c| !c.is_whitespace()) {
+        let instructions = if pdf.is_some() {
+            "No nonblank extracted text is available. Analyze only PDF page images delivered in this live turn, following the per-page coverage; do not infer unread pages. If no images were delivered, ask for an image-capable model or use nyx__machine_save_attachment on an authorized machine."
+        } else {
+            "No nonblank extracted text is available. Do not claim to have read this attachment. Use nyx__machine_save_attachment on an authorized machine to inspect the original, or ask the owner for readable content."
+        };
         return Ok(
-            json!({"error":"attachment_has_no_extracted_text", "content_type":row.content_type,
-            "instructions":"The complete original file is attached. Use nyx__machine_save_attachment with an authorized machine to inspect it. Do not claim to have read or transcribed its contents."}),
+            json!({"error":"attachment_has_no_extracted_text", "content_type":row.content_type, "pdf":pdf,
+            "instructions":instructions}),
         );
     }
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -944,7 +1121,14 @@ pub async fn read(
         filter.clone(),
     ))
     .await?;
-    let value = page(&extracted, offset, limit);
+    let mut value = page(&extracted, offset, limit);
+    if let Some(pdf) = &pdf {
+        value["pdf"] = json!(pdf);
+        value["text_complete"] = value["complete"].clone();
+        value["instructions"] = json!(
+            "Text availability does not prove every page was read. Pages without text require this turn’s delivered PDF images; never infer unread page contents."
+        );
+    }
     let end = value
         .get("next_offset")
         .and_then(Value::as_u64)
@@ -1309,7 +1493,7 @@ pub async fn review_coverage(
                     legacy.get("text_encrypted").ok_or_else(missing)?,
                 )?;
                 let extracted: Extracted = serde_json::from_slice(
-                    &super::record_field_service::decrypt(
+                    &crate::crypto::record_field::decrypt(
                         keys,
                         COLLECTION_NAME,
                         id,
@@ -1390,7 +1574,14 @@ fn page(extracted: &Extracted, offset: usize, limit: usize) -> Value {
         // Leave room for the surrounding MCP JSON-RPC envelope and its second
         // round of JSON escaping. Coverage and next_offset are derived from
         // this final page, so bytes trimmed here are never reported as read.
-        if mcp_envelope_size(&result) < 9_000 || text.is_empty() {
+        if mcp_envelope_size(&result)
+            < (if extracted.content_type == "application/pdf" {
+                7_400
+            } else {
+                9_000
+            })
+            || text.is_empty()
+        {
             return result;
         }
         text.truncate(
@@ -1475,6 +1666,7 @@ pub async fn group_attachments(
 /// failed origin lookup against the other attachment model.
 pub enum EgressAttachment {
     User(Box<AssistantUpload>),
+    Pdf(Box<crate::models::assistant_upload::PdfPage>),
     Tool(
         Box<crate::models::assistant_attachment::AssistantAttachment>,
         String,
@@ -1484,18 +1676,21 @@ impl EgressAttachment {
     pub fn id(&self) -> &str {
         match self {
             Self::User(row) => &row.id,
+            Self::Pdf(row) => &row.id,
             Self::Tool(row, _) => &row.id,
         }
     }
     pub fn size(&self) -> i64 {
         match self {
             Self::User(row) => row.size,
+            Self::Pdf(row) => row.size,
             Self::Tool(row, _) => row.size,
         }
     }
     pub fn label(&self) -> &str {
         match self {
             Self::User(row) => &row.label,
+            Self::Pdf(_) => "pdf-page.jpg",
             Self::Tool(row, label) => match row.content_type.as_str() {
                 "image/jpeg" => "tool-image.jpg",
                 "image/gif" => "tool-image.gif",
@@ -1508,8 +1703,31 @@ impl EgressAttachment {
     pub fn content_type(&self) -> &str {
         match self {
             Self::User(row) => &row.content_type,
+            Self::Pdf(row) => &row.content_type,
             Self::Tool(row, _) => &row.content_type,
         }
+    }
+    /// Keep named originals; repair missing or legacy generic upload names.
+    /// Explicit tool file_name overrides remain the multipart caller's input.
+    pub(crate) fn filename(&self) -> String {
+        if let Self::User(row) = self {
+            match row.filename_is_original {
+                Some(true) => return safe_name(&row.label),
+                Some(false) => {
+                    return super::attachment_filename::default_name(
+                        None,
+                        self.content_type(),
+                        MAX_FILENAME_CHARS,
+                    );
+                }
+                None => {}
+            }
+        }
+        super::attachment_filename::default_name(
+            Some(self.label()),
+            self.content_type(),
+            MAX_FILENAME_CHARS,
+        )
     }
 }
 
@@ -1550,6 +1768,9 @@ async fn for_egress_inner(
         .await?
         .ok_or_else(missing)?;
     match row.get_str("origin").ok() {
+        Some(pdf_vision::ORIGIN) => Ok(EgressAttachment::Pdf(Box::new(
+            pdf_vision::for_chat(db, chat, id).await?,
+        ))),
         Some("user_upload") => Ok(EgressAttachment::User(Box::new(
             for_chat(db, chat, id).await?,
         ))),
@@ -1631,6 +1852,7 @@ async fn egress_bytes_inner(
     let current = for_egress_inner(db, chat, attachment.id(), files).await?;
     if current.size() != attachment.size()
         || current.label() != attachment.label()
+        || current.filename() != attachment.filename()
         || current.content_type() != attachment.content_type()
         || std::mem::discriminant(&current) != std::mem::discriminant(attachment)
     {
@@ -1638,6 +1860,7 @@ async fn egress_bytes_inner(
     }
     let bytes = match current {
         EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
+        EgressAttachment::Pdf(row) => pdf_vision::bytes(db, keys, chat, &row.id).await?.1,
         EgressAttachment::Tool(row, _) => {
             let mut protected = super::assistant_tool_files::payload(db, keys, &row).await?;
             std::mem::take(&mut *protected)
@@ -1799,6 +2022,7 @@ mod tests {
     fn escaped_read_pages_fit_final_envelope_and_reconstruct_exact_text() {
         let original = "\"\\\n\r\t\u{1}界".repeat(4000);
         let extracted = Extracted {
+            pdf: None,
             content_type: "text/plain".into(),
             text: original.clone(),
             sections: vec![],
@@ -1854,6 +2078,7 @@ mod tests {
         assert_eq!(safe_name(".."), "attachment");
         assert!(validate_ids(&["bad".into()]).is_err());
         let data = Extracted {
+            pdf: None,
             content_type: "text/plain".into(),
             text: "a\n😀".repeat(4000),
             sections: vec![],
@@ -1915,29 +2140,14 @@ fn image_plan_for_origin(
     base: &str,
     origin: &str,
 ) -> (Vec<Value>, Vec<String>) {
-    let cap = &capabilities["input_image"];
-    let enabled = capabilities["protocol"] == "nyxagent-input-image-v1"
-        && cap["version"] == 1
-        && cap["sources"]
-            .as_array()
-            .is_some_and(|s| s.iter().any(|v| v == "nyxid_attachment_url"));
+    let mut budget = ImageBudget::new(capabilities, base);
     let mut parts = Vec::new();
     let mut omitted = Vec::new();
-    let mut total = 0u64;
-    for item in items
-        .iter()
-        .filter(|a| a.origin == origin && a.content_type.starts_with("image/"))
-    {
-        let bytes = item.size.max(0) as u64;
-        if enabled
-            && parts.len() < (cap["max_images"].as_u64().unwrap_or(0).min(10) as usize)
-            && bytes <= cap["max_image_bytes"].as_u64().unwrap_or(0)
-            && total.saturating_add(bytes) <= cap["max_total_bytes"].as_u64().unwrap_or(0)
-            && cap["content_types"]
-                .as_array()
-                .is_some_and(|s| s.iter().any(|v| v == &item.content_type))
-        {
-            total += bytes;
+    for item in items.iter().filter(|a| {
+        (a.origin == origin || (origin == "user_upload" && a.origin == pdf_vision::ORIGIN))
+            && a.content_type.starts_with("image/")
+    }) {
+        if budget.take(&item.content_type, item.size.max(0) as u64) {
             parts.push(json!({
                 "type": "input_image",
                 "image_url": format!(
@@ -1952,6 +2162,60 @@ fn image_plan_for_origin(
     (parts, omitted)
 }
 
+struct ImageBudget<'a> {
+    types: &'a [Value],
+    remaining_images: u64,
+    max_image_bytes: u64,
+    remaining_bytes: u64,
+}
+
+impl<'a> ImageBudget<'a> {
+    fn new(capabilities: &'a Value, base: &str) -> Self {
+        let cap = &capabilities["input_image"];
+        let enabled = capabilities["protocol"] == "nyxagent-input-image-v1"
+            && cap["version"] == 1
+            && cap["sources"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|v| v == "nyxid_attachment_url"))
+            && url::Url::parse(base).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.path() == "/"
+            });
+        Self {
+            types: if enabled {
+                cap["content_types"].as_array().map_or(&[], Vec::as_slice)
+            } else {
+                &[]
+            },
+            remaining_images: cap["max_images"].as_u64().unwrap_or(0).min(10),
+            max_image_bytes: cap["max_image_bytes"].as_u64().unwrap_or(0),
+            remaining_bytes: cap["max_total_bytes"].as_u64().unwrap_or(0),
+        }
+    }
+
+    fn supports(&self, content_type: &str) -> bool {
+        self.types.iter().any(|value| value == content_type)
+    }
+
+    fn fits(&self, bytes: u64) -> bool {
+        self.remaining_images > 0 && bytes <= self.max_image_bytes && bytes <= self.remaining_bytes
+    }
+
+    fn take(&mut self, content_type: &str, bytes: u64) -> bool {
+        if !self.supports(content_type) || !self.fits(bytes) {
+            return false;
+        }
+        self.remaining_images -= 1;
+        self.remaining_bytes -= bytes;
+        true
+    }
+}
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;
@@ -1963,8 +2227,12 @@ mod integration_tests {
         services::{assistant_acknowledgement_service as acks, assistant_team_service as team},
         test_utils::{connect_transaction_test_database, test_app_state, test_user},
     };
-    async fn fixture() -> (crate::AppState, String, String) {
+    pub(super) async fn fixture() -> (crate::AppState, String, String) {
         let db = connect_transaction_test_database("uploads").await;
+        fixture_with_database(db).await
+    }
+    pub(super) async fn fixture_with_database(db: Database) -> (crate::AppState, String, String) {
+        pdf_vision::ensure_indexes(&db).await.unwrap();
         let user = Uuid::new_v4().to_string();
         db.collection(USERS)
             .insert_one(test_user(&user, UserType::Person))
@@ -1987,7 +2255,7 @@ mod integration_tests {
         session.commit_transaction().await.unwrap();
         (state, user, row.id)
     }
-    fn request(id: &str, attachments: Vec<String>) -> engine::TurnRequest {
+    pub(super) fn request(id: &str, attachments: Vec<String>) -> engine::TurnRequest {
         engine::TurnRequest {
             acknowledgement_id: None,
             retry_of: None,
@@ -2813,6 +3081,23 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn tool_attachment_read_budget_wait_is_bounded_and_retryable() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
+        let full = byte_budget::reserve(byte_budget::CAPACITY / 2)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), reserve_tool_read(1))
+                .await
+                .expect("budget wait must end")
+                .is_none()
+        );
+        drop(full);
+        assert_eq!(byte_budget::available_for_tests(), byte_budget::CAPACITY);
+    }
+
+    #[tokio::test]
     async fn assistant_uploads_full_router_enforces_exact_twenty_mib_for_threads_and_groups() {
         let _budget_guard =
             crate::services::assistant_upload_service::byte_budget::test_guard().await;
@@ -3299,6 +3584,7 @@ mod integration_tests {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         };
         assert_eq!(
@@ -3510,6 +3796,7 @@ mod integration_tests {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         };
         let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});
@@ -3562,6 +3849,22 @@ mod integration_tests {
 mod channel_upload_tests {
     use super::*;
     #[tokio::test]
+    async fn image_download_signature_does_not_validate_an_opaque_channel_original() {
+        let bytes = b"\x89PNG\r\n\x1a\ntruncated raster".to_vec();
+        assert_eq!(
+            super::super::attachment_filename::image_content_type(&bytes),
+            Some("image/png")
+        );
+        let keys = crate::test_utils::test_encryption_keys();
+        let original =
+            prepare_channel_upload(&keys, "owner", "attachment", Some("image/png"), bytes)
+                .await
+                .unwrap();
+        assert_eq!(original.row.content_type, "application/octet-stream");
+        assert_eq!(original.row.label, "attachment");
+    }
+
+    #[tokio::test]
     async fn opaque_channel_media_retains_encrypted_bytes_without_fabricated_text() {
         let mut keys = crate::test_utils::test_encryption_keys();
         keys.set_allow_legacy_record_reads(false);
@@ -3609,7 +3912,7 @@ mod channel_upload_tests {
                 .is_err()
             );
         }
-        let text = super::super::record_field_service::decrypt(
+        let text = crate::crypto::record_field::decrypt(
             &keys,
             COLLECTION_NAME,
             &upload.row.id,
@@ -3635,3 +3938,8 @@ mod channel_upload_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pdf_review_tests;
+#[cfg(test)]
+mod pdf_tests;

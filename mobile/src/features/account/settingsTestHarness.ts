@@ -74,13 +74,30 @@ export function setupSettingsScreen(
     connectedTelegram = false,
     pushDevices = 0,
     voiceEnabled = false,
+    watchAvailable = false,
+    watchLink,
+    loginCodes,
     nyxbotNotifications,
     params,
     language = "en",
+    diagnosticsOffered = false,
+    diagnosticsAvailable = false,
+    accountPolicy,
+    devicePolicy,
+    deviceEnabled = false,
+    railWindow = false,
+    signOut = async () => {},
   }: {
+    signOut?: () => Promise<void>;
     connectedTelegram?: boolean;
     pushDevices?: number;
     voiceEnabled?: boolean;
+    /** iOS build with the Apple Watch companion module. */
+    watchAvailable?: boolean;
+    /** The native Apple Watch link the screen talks to. */
+    watchLink?: Record<string, unknown>;
+    /** `/auth/login-code` calls made by Apple Watch setup. */
+    loginCodes?: Record<string, unknown>;
     /** NyxBot notification flag and its saved push switches. */
     nyxbotNotifications?: {
       enabled: boolean;
@@ -89,17 +106,30 @@ export function setupSettingsScreen(
     };
     params?: Record<string, unknown>;
     language?: Language;
+    diagnosticsOffered?: boolean;
+    diagnosticsAvailable?: boolean;
+    accountPolicy?: string;
+    devicePolicy?: 1|2;
+    deviceEnabled?: boolean;
+    /** The window behind the Settings sheet shows the Duo's quick rail. */
+    railWindow?: boolean;
   } = {},
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
   let pending = false;
   const mutations: unknown[] = [];
   const mutationOptions: Record<string, any>[] = [];
+  const analyticsSaves:unknown[][]=[];
   const deviceChoices: boolean[] = [];
   const pushes: unknown[][] = [];
   const preferences: unknown[] = [];
   const sheets: Array<{ options: string[]; pick: (index: number) => void }> =
     [];
+  const alerts: Array<{
+    title: string;
+    message?: string;
+    buttons?: Array<{ text: string; style?: string; onPress?: () => void }>;
+  }> = [];
   const jsx = (type: unknown, props: Element["props"], key?: number) => ({
     type,
     props,
@@ -124,6 +154,9 @@ export function setupSettingsScreen(
   );
   const pushPreferenceMutations: unknown[] = [];
   const harness = hookHarness<Element>({
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceRailWindowContext: { value: railWindow },
+    },
     "../../i18n/LanguageProvider": {
       useAppLanguage: () => ({
         language,
@@ -174,6 +207,13 @@ export function setupSettingsScreen(
         hairlineWidth: 0.5,
       },
       Platform: { OS: "ios" },
+      Alert: {
+        alert: (
+          title: string,
+          message?: string,
+          buttons?: Array<{ text: string; style?: string; onPress?: () => void }>,
+        ) => alerts.push({ title, message, buttons }),
+      },
       ActionSheetIOS: {
         showActionSheetWithOptions: (
           config: { options: string[] },
@@ -189,7 +229,7 @@ export function setupSettingsScreen(
       Path: "Path",
     },
     "@tanstack/react-query": {
-      useQueryClient: () => ({}),
+      useQueryClient: () => ({ clear() {} }),
       useQuery: ({ queryKey }: { queryKey: string[] }) => ({
         isFetching: false,
         isError: false,
@@ -215,7 +255,7 @@ export function setupSettingsScreen(
                   ? voiceEnabled
                     ? ["assistant:voice"]
                     : []
-                  : { enabled: true },
+                  : { enabled: true, policy_version: accountPolicy, diagnostics_offered: diagnosticsOffered, diagnostics_available: diagnosticsAvailable, current_policy_version: diagnosticsOffered ? "2" : "1" },
       }),
       useMutation: (options: Record<string, any>) => {
         mutationOptions.push(options);
@@ -249,16 +289,16 @@ export function setupSettingsScreen(
       TelegramLinkModal: "TelegramLinkModal",
     },
     "../../components/ToastOverlay": { ToastOverlay: "ToastOverlay" },
-    "../auth/AuthSessionContext": { useAuthSession: () => ({ signOut() {} }) },
+    "../auth/AuthSessionContext": { useAuthSession: () => ({ signOut }) },
     "../../lib/consent": {
       useMobileConsent: () => ({
         accountId: "account",
-        enabled: false,
+        enabled: deviceEnabled, policy:devicePolicy,
         setConsent: (value: boolean) => deviceChoices.push(value),
       }),
     },
-    "../../lib/analyticsConsentState": {},
-    "../../lib/analyticsRelay": {},
+    "../../lib/analyticsConsentState": {analyticsConsentState:{getSnapshot:()=>({accountId:"account",enabled:false})}},
+    "../../lib/analyticsRelay": {saveAnalyticsPermission:(...args:unknown[])=>{analyticsSaves.push(args);}},
     "../../lib/api/http": {
       requestJson: async () => ({ enabled: true }),
       requestBoundAuthenticatedResponse: async () => ({ response: { body: null }, assertOwner: async () => {} }),
@@ -305,6 +345,23 @@ export function setupSettingsScreen(
       assistantVoiceFeatures: async () => [],
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
+    "../../lib/watch/watchLink": {
+      nativeWatchLink: () => watchLink ?? (watchAvailable ? {} : null),
+    },
+    "../../lib/api/loginCodeApi": { loginCodeApi: loginCodes ?? {} },
+    "../../lib/api/baseUrl": {
+      getApiBaseUrl: () => "https://auth.example.test/api/v1",
+    },
+    "../../lib/env": { getFrontendUrl: () => "https://app.example.test" },
+    "../../lib/auth/authAccount": { getAuthAccountId: () => "account" },
+    "../auth/useMfaStepUp": {
+      useMfaStepUp: () => ({
+        handle: async () => false,
+        prompt: null,
+        busy: false,
+        reset() {},
+      }),
+    },
     "../../lib/notifications/pushNotifications": {},
     "../../theme/ThemeContext": theme,
     "../../theme/flowStyles": { createFlowStyles: () => ({}) },
@@ -342,21 +399,32 @@ export function setupSettingsScreen(
     all().find((node) => [node.props.children].flat(Infinity).includes(child))!;
   /** The pressable or plain container of a settings row, found by its label. */
   const row = (label: string) => {
-    let node: Element = text(label);
-    for (let depth = 0; depth < 6; depth += 1) {
-      node = parent(node);
-      if (style(node).minHeight === 52) return node;
+    // A group may share its row's label ("Crash diagnostics"): use the first
+    // label that sits inside a row.
+    text(label);
+    const labels = all().filter(
+      (item) =>
+        item.type === "Text" &&
+        [item.props.children].flat(Infinity).join("") === label,
+    );
+    for (const found of labels) {
+      let node: Element | undefined = found;
+      for (let depth = 0; depth < 6 && node; depth += 1) {
+        node = parent(node);
+        if (node && style(node).minHeight === 52) return node;
+      }
     }
     assert.fail(`no settings row for ${label}`);
   };
   return {
     module,
+    alerts,
     all,
     text,
     parent,
     row,
     mutations,
-    mutationOptions,
+    mutationOptions, analyticsSaves,
     pushPreferenceMutations,
     deviceChoices,
     sheets,

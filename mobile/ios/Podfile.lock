@@ -201,6 +201,8 @@ PODS:
     - ExpoModulesCore
   - ExpoFont (55.0.6):
     - ExpoModulesCore
+  - ExpoGlassEffect (55.0.11):
+    - ExpoModulesCore
   - ExpoImageManipulator (55.0.21):
     - ExpoModulesCore
     - SDWebImageWebPCoder
@@ -303,6 +305,14 @@ PODS:
   - libwebp/sharpyuv (1.6.0)
   - libwebp/webp (1.6.0):
     - libwebp/sharpyuv
+  - NyxCrashReporter (1.0.0):
+    - ExpoModulesCore
+    - PLCrashReporter (= 1.12.0)
+  - NyxPdfThumbnail (1.0.0):
+    - ExpoModulesCore
+  - NyxWatch (1.0.0):
+    - ExpoModulesCore
+  - PLCrashReporter (1.12.0)
   - RCTDeprecation (0.83.4)
   - RCTRequired (0.83.4)
   - RCTSwiftUI (0.83.4)
@@ -2509,6 +2519,7 @@ DEPENDENCIES:
   - "ExpoDomWebView (from `../node_modules/@expo/dom-webview/ios`)"
   - ExpoFileSystem (from `../node_modules/expo-file-system/ios`)
   - ExpoFont (from `../node_modules/expo-font/ios`)
+  - ExpoGlassEffect (from `../node_modules/expo-glass-effect/ios`)
   - ExpoImageManipulator (from `../node_modules/expo-image-manipulator/ios`)
   - ExpoImagePicker (from `../node_modules/expo-image-picker/ios`)
   - ExpoKeepAwake (from `../node_modules/expo-keep-awake/ios`)
@@ -2529,6 +2540,9 @@ DEPENDENCIES:
   - EXUpdatesInterface (from `../node_modules/expo-updates-interface/ios`)
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
+  - NyxCrashReporter (from `../modules/nyx-crash-reporter/ios`)
+  - NyxPdfThumbnail (from `../modules/nyx-pdf-thumbnail/ios`)
+  - NyxWatch (from `../modules/nyx-watch/ios`)
   - RCTDeprecation (from `../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../node_modules/react-native/Libraries/Required`)
   - RCTSwiftUI (from `../node_modules/react-native/ReactApple/RCTSwiftUI`)
@@ -2619,6 +2633,7 @@ SPEC REPOS:
   trunk:
     - JitsiWebRTC
     - libwebp
+    - PLCrashReporter
     - SDWebImage
     - SDWebImageWebPCoder
     - ZXingObjC
@@ -2662,6 +2677,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/expo-file-system/ios"
   ExpoFont:
     :path: "../node_modules/expo-font/ios"
+  ExpoGlassEffect:
+    :path: "../node_modules/expo-glass-effect/ios"
   ExpoImageManipulator:
     :path: "../node_modules/expo-image-manipulator/ios"
   ExpoImagePicker:
@@ -2703,6 +2720,12 @@ EXTERNAL SOURCES:
   hermes-engine:
     :podspec: "../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec"
     :tag: hermes-v0.14.1
+  NyxCrashReporter:
+    :path: "../modules/nyx-crash-reporter/ios"
+  NyxPdfThumbnail:
+    :path: "../modules/nyx-pdf-thumbnail/ios"
+  NyxWatch:
+    :path: "../modules/nyx-watch/ios"
   RCTDeprecation:
     :path: "../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation"
   RCTRequired:
@@ -2888,6 +2911,7 @@ SPEC CHECKSUMS:
   ExpoDomWebView: 2b2fbd9a07de8790569257cbf9dfdaa31cf95c70
   ExpoFileSystem: bdb067c7739d9f7405227154a7280e2d6653bbc8
   ExpoFont: cdd7a1d574a376fa003c713eff49e0a4df8672c7
+  ExpoGlassEffect: 2dedac2fe817f9b02d0dad29ce0aef7afebc5cd4
   ExpoImageManipulator: 6ee60a0202c350d82d99fd48773d7c2e770f80ea
   ExpoImagePicker: 7dd57ad3d0922e30efa9b52b3ce83099c2bf4352
   ExpoKeepAwake: a1baf9810a2dee1905aa9bdd336852598f7220e9
@@ -2910,6 +2934,10 @@ SPEC CHECKSUMS:
   hermes-engine: 9d1bd13e0c2d31a7047edcdb9b00d801780a4f84
   JitsiWebRTC: a8ac2b2b54c523fb156016de4ab86b6666dc99d9
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
+  NyxCrashReporter: 779adad086b3772feaf9a134b7006d680de23574
+  NyxPdfThumbnail: 9b38ca88c7b611ea73789c991e2db1fa43bf8b96
+  NyxWatch: 0ed4c96aa7b2158879824be3f48c19b397291b23
+  PLCrashReporter: db59ef96fa3d25f3650040d02ec2798cffee75f2
   RCTDeprecation: 5045f20b2cc1239bf422764004338c720684a22f
   RCTRequired: b6b9724225dd780ac2989d2e575d5513c50fe04b
   RCTSwiftUI: 395b65655229fa2006415207adcfcb6e35dc78ed

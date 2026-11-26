@@ -1,3 +1,5 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -7,7 +9,7 @@ import { ApiError } from "../../lib/api/ApiError";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mergeGroupPage, mergeGroupMessages } from "./groupState";
-import { restoreRefusedAssistantSend } from "../assistant/assistantTurnRequest";
+import { isAttachmentBindRefusal, restoreRefusedAssistantSend } from "../assistant/assistantTurnRequest";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
 import { groupKeys } from "./groupLiveRefresh";
 import { useGroupsLive } from "./useGroupsLive";
@@ -22,7 +24,7 @@ export { groupKeys } from "./groupLiveRefresh";
 export const groupError = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
-    : "Could not complete this action. Try again.";
+    : translateApp("Could not complete this action. Try again.");
 
 /** Every group read and local callback belongs to one signed-in foreground view. */
 export function useGroupAvailability() {
@@ -77,7 +79,7 @@ export function useGroupChat(groupId: string) {
   const [sending, setSending] = useState(false);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const alive = () =>
     mounted.current &&
     currentScope.current === scope &&
@@ -127,7 +129,7 @@ export function useGroupChat(groupId: string) {
           mergeGroupPage(latest, page, "older"),
         );
     } catch (cause) {
-      if (alive() && available()) setError(groupError(cause));
+      if (alive() && available()) setError(() => (groupError(cause)));
     } finally {
       olderLock.current = false;
       if (alive()) setLoadingOlder(false);
@@ -142,7 +144,7 @@ export function useGroupChat(groupId: string) {
     try {
       return await action();
     } catch (cause) {
-      if (alive() && available()) setError(groupError(cause));
+      if (alive() && available()) setError(() => (groupError(cause)));
       throw cause;
     } finally {
       lock.current = false;
@@ -163,15 +165,19 @@ export function useGroupChat(groupId: string) {
           const refused =
             cause instanceof ApiError &&
             restoreRefusedAssistantSend(cause, false);
+          if (refused && payload.attachment_ids?.length && isAttachmentBindRefusal(cause))
+            throw cause;
           if (alive()) {
             if (!refused) {
               recovery.current = true;
               setRecoveryRequired(true);
             }
             setError(
-              refused
+              () => (refused
                 ? groupError(cause)
-                : "Connection interrupted. This message may have been delivered. Refresh the crew and check its history before sending again.",
+                : translateApp(
+                    "Connection interrupted. This message may have been delivered. Refresh the crew and check its history before sending again.",
+                  )),
             );
           }
           // Unknown delivery consumes uploads: the server may have claimed them.

@@ -138,6 +138,7 @@
         crate::handlers::user_tokens::disconnect_provider,
         // User Services
         crate::handlers::user_services_handler::list_user_services,
+        crate::handlers::oauth_consent_disclosure::read,
         crate::handlers::user_services_handler::update_user_service,
         crate::handlers::user_services_handler::delete_user_service,
         // NyxID API Keys
@@ -182,6 +183,7 @@
         crate::handlers::billing_credit_schedules::create_schedule,
         crate::handlers::billing_credit_schedules::list_schedules,
         crate::handlers::billing_credit_schedules::update_schedule,
+        crate::handlers::billing_credit_schedules::seed_schedule,
         // Demo
         crate::handlers::demo::get_demo
     ),
@@ -371,12 +373,15 @@
             crate::handlers::billing_credit_schedules::CreditScheduleRecipientResponse,
             crate::handlers::billing_credit_schedules::CreditScheduleResponse,
             crate::handlers::billing_credit_schedules::CreditScheduleListResponse,
+            crate::handlers::billing_credit_schedules::SeedCreditScheduleRequest,
+            crate::handlers::billing_credit_schedules::SeedCreditScheduleResponse,
             crate::models::billing_target::BillingTargetKind,
             crate::models::billing_target::BillingServiceScope,
             crate::models::credit_grant::CreditGrantStatus,
             crate::models::credit_schedule::CreditExpiryPolicy,
             crate::models::credit_schedule::SchedulePeriod,
             crate::models::credit_schedule::ScheduleRecurrence,
+            crate::models::credit_schedule::ScheduleTiming,
             crate::models::credit_schedule_period::SchedulePeriodStatus,
             crate::models::usage_allowance::AllowanceRecurrence,
             // Demo

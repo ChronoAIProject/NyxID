@@ -1,6 +1,7 @@
 import { bareAutolinkTarget, splitBareAutolinks } from "./autolinkPunctuation";
+import { translateApp } from "../../i18n/appTranslation";
 import type MarkdownIt from "markdown-it";
-import imageRule from "markdown-it/lib/rules_inline/image";
+import imageRule from "markdown-it/lib/rules_inline/image.mjs";
 import footnote from "markdown-it-footnote";
 import { firstPartyFrontendUrls } from "../../lib/env";
 import { assistantLinkTarget } from "./assistantLinkTarget";
@@ -38,6 +39,8 @@ export function safeAssistantLinkUrl(
 export function configureAssistantMarkdown(parser: MarkdownIt): MarkdownIt {
   parser.validateLink = (url) => safeAssistantLinkUrl(url) !== null;
   parser.use(footnote);
+  // Resolve bare URLs after inline Markdown delimiters have been parsed.
+  parser.inline.ruler.disable("linkify");
   parser.core.ruler.after("linkify", "cjk_autolink_punctuation", (state) => {
     for (const token of state.tokens) {
       const children = token.children;
@@ -159,7 +162,7 @@ export function configureAssistantMarkdown(parser: MarkdownIt): MarkdownIt {
             child.children
               ?.map((part) => part.content)
               .join("")
-              .trim() || "Image";
+              .trim() || translateApp("Image");
           child.children = null;
         }
         footnoteLink(child);

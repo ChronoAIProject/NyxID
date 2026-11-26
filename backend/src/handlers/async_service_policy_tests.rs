@@ -353,6 +353,80 @@ async fn org_owned_specialist_executes_exact_granted_ordinary_mcp_and_proxy_conn
     );
 }
 
+#[tokio::test]
+async fn org_specialist_uses_the_authenticated_subject_for_bearer_forwarding() {
+    use tower::ServiceExt;
+
+    let mut a = AsyncFixture::new().await;
+    org_watch(&mut a, true).await;
+    set_access_mode(&a.f, AccessMode::Autopilot).await;
+    a.f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id": &a.service},
+            doc! {"$set": {"forward_access_token": true}},
+        )
+        .await
+        .unwrap();
+    let credential = credentials::load_for_conversation(
+        &a.f.state.db,
+        &a.f.state.encryption_keys,
+        &a.f.owner,
+        &a.f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", credential.raw_key.as_str())
+            .parse()
+            .unwrap(),
+    );
+    let mut auth = authenticate(&a.f).await;
+    auth.caller_token =
+        crate::services::proxy_service::caller_bearer_token_for_downstream(&headers, false);
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__get_execution_handler",
+        json!({"operation_id":"subject-mcp"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 16384)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["result"]["isError"], true);
+    assert!(
+        body["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("This destination cannot receive the caller's access token")
+    );
+
+    let (_, router) = crate::routes::build_router_with_state(a.f.state.clone());
+    let mut request = axum::http::Request::builder()
+        .uri("/api/v1/proxy/s/sandbox/executions/subject-proxy")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    *request.headers_mut() = headers;
+    let response = router
+        .with_state(a.f.state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    let calls = a.calls.lock().unwrap();
+    assert!(
+        !calls
+            .iter()
+            .any(|p| p.ends_with("/subject-mcp") || p.ends_with("/subject-proxy"))
+    );
+}
+
 async fn revoke_service_scope(a: &AsyncFixture, key: &str) {
     a.f.state
         .db

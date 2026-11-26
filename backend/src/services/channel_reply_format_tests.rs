@@ -137,6 +137,26 @@ fn channel_format_incident_strings_are_exact_on_each_platform() {
 }
 
 #[test]
+fn proactive_posts_preserve_gateway_incident_links() {
+    let source = "([chrono-ai.fun](https://chrono-ai.fun/zh/?utm_source=openai))\nhttps://booking.example/test-link?a=b#share=_yNR5\nLiteral _ * [ ]";
+    for platform in ["lark", "feishu"] {
+        assert_eq!(wire(source, platform), source);
+    }
+    let display = discord_read(&wire(source, "discord"));
+    assert_eq!(
+        display.urls,
+        [
+            "https://chrono-ai.fun/zh/?utm_source=openai",
+            "https://booking.example/test-link?a=b#share=_yNR5",
+        ]
+    );
+    assert_eq!(
+        display.text,
+        "(chrono-ai.fun)\nhttps://booking.example/test-link?a=b#share=_yNR5\nLiteral _ * [ ]"
+    );
+}
+
+#[test]
 fn channel_format_exact_literals_styles_and_code() {
     let fixtures = [
         (
@@ -486,4 +506,43 @@ fn channel_format_recorded_v1_is_frozen_and_v2_is_distinct_even_without_syntax()
         assert_eq!(old[0].text, new[0].text);
         assert_ne!(fingerprint(&old), fingerprint(&new));
     }
+}
+
+#[test]
+fn gateway_commonmark_multipart_preserves_routing_and_renderer() {
+    use crate::services::channel_platform::{MaterializedAttachment, MediaKind};
+
+    let mut reply = OutboundReply {
+        text: Some("a".repeat(2000 * 64)),
+        metadata: Some(
+            serde_json::json!({"text_format":"commonmark","interaction_thread_id":"route","nyxid_text_renderer":1}),
+        ),
+        reply_to_platform_message_id: Some("42".into()),
+        attachments: vec![],
+    };
+    let parts = text_parts(&reply, "discord").unwrap();
+    assert_eq!(parts.len(), 64);
+    for part in parts {
+        let metadata = part.metadata.unwrap();
+        assert_eq!(metadata["nyxid_text_renderer"], 2);
+        assert_eq!(metadata["interaction_thread_id"], "route");
+        assert!(metadata.get("text_format").is_none());
+        assert_eq!(part.reply_to_platform_message_id.as_deref(), Some("42"));
+        assert_eq!(part.text.unwrap().len(), 2000);
+    }
+    reply.text.as_mut().unwrap().push('b');
+    assert!(text_parts(&reply, "discord").is_err());
+    reply.text = Some("x".repeat(2001));
+    reply.attachments.push(MaterializedAttachment {
+        kind: MediaKind::Image,
+        bytes: Default::default(),
+        filename: None,
+        mime_type: None,
+        caption: None,
+    });
+    assert!(text_parts(&reply, "discord").is_err());
+    reply.attachments.clear();
+    reply.metadata.as_mut().unwrap()["card"] = serde_json::json!({});
+    reply.text = Some("x".repeat(32000));
+    assert!(text_parts(&reply, "feishu").is_err());
 }

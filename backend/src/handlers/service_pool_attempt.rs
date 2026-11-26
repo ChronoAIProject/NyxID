@@ -16,6 +16,8 @@ pub(super) struct AttemptContext {
     /// Set before completion settles; a renew failing after this is expected.
     pub settling: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+    /// A pool deadline or lost response cannot authorize a second use.
+    pub single_node_dispatch: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub node_dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub retry_after: std::sync::Arc<std::sync::Mutex<Option<std::time::Duration>>>,
 }
@@ -561,7 +563,7 @@ pub(super) async fn direct_response(
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers() {
         if let Some(value) =
-            forwarded_response_header_value(name.as_str(), value.as_bytes(), sse, location)
+            forwarded_response_header_value(status, name.as_str(), value.as_bytes(), sse, location)
         {
             builder = builder.header(name, value);
         }
@@ -857,10 +859,13 @@ pub(super) async fn node_response(
             (status, headers, Body::from_stream(stream))
         }
     };
+    let http_status =
+        StatusCode::from_u16(status).map_err(|error| AppError::Internal(error.to_string()))?;
     let is_sse = node_is_sse_headers(&headers);
-    let mut builder = Response::builder().status(status);
+    let mut builder = Response::builder().status(http_status);
     for (name, value) in headers {
         if let Some(value) = forwarded_response_header_value(
+            http_status,
             &name.to_ascii_lowercase(),
             value.as_bytes(),
             is_sse,
@@ -969,6 +974,7 @@ mod tests {
             settling: Default::default(),
             timed_out: Default::default(),
             status: Default::default(),
+            single_node_dispatch: Default::default(),
             node_dispatched: Default::default(),
             retry_after: Default::default(),
         };

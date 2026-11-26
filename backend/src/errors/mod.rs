@@ -3,6 +3,7 @@ pub mod memory_write;
 pub mod refresh;
 mod refusal_throttle;
 pub mod skill_draft;
+pub mod skill_publication;
 pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -101,6 +102,7 @@ pub struct PoolAttemptSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolAttemptTransportKind {
     Connect,
+    ResolutionUnavailable,
     Timeout,
     AfterDispatch,
     NodeUnsent,
@@ -154,6 +156,12 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error(transparent)]
+    SkillPublication(#[from] skill_publication::SkillPublicationFailure),
+
+    #[error("Conflict: trigger_overlap_skip")]
+    TriggerOverlapSkip { blocking_run_id: String },
+
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
     #[error("The voice request queue is full")]
@@ -183,6 +191,10 @@ pub enum AppError {
         #[source]
         source: Box<AppError>,
     },
+    #[error("Crash reporting is unavailable")]
+    CrashReportingUnavailable,
+    #[error("Crash report consent is required")]
+    CrashReportConsentRequired,
     /// Response metadata, preserving the underlying error through handler layers.
     #[error("{source}")]
     InvocationDiagnostic {
@@ -209,6 +221,9 @@ pub enum AppError {
         "Your access settings or model connection changed during this task; review the completed actions and try again"
     )]
     AssistantModelAuthorityChanged,
+
+    #[error("Organization specialist access authoring is unavailable")]
+    OrgAgentAccessAuthoringUnavailable,
 
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
@@ -927,8 +942,13 @@ impl AppError {
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
+            Self::CrashReportingUnavailable => StatusCode::NOT_FOUND,
+            Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
-            Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::Conflict(_)
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. }
+            | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
                 StatusCode::CONFLICT
             }
@@ -942,6 +962,7 @@ impl AppError {
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
+            Self::OrgAgentAccessAuthoringUnavailable => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1145,6 +1166,9 @@ impl AppError {
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
+            Self::PoolAttemptTransport(PoolAttemptTransportKind::ResolutionUnavailable) => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -1169,7 +1193,7 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) => 1004,
+            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1178,6 +1202,8 @@ impl AppError {
             Self::MonitoringUnavailable => 13300,
             Self::MonitoringNotConfigured => 13301,
             Self::DiagnosticNotReady => 13302,
+            Self::CrashReportingUnavailable => 13400,
+            Self::CrashReportConsentRequired => 13401,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
@@ -1185,6 +1211,7 @@ impl AppError {
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantModelAuthorityChanged => 12104,
+            Self::OrgAgentAccessAuthoringUnavailable => 12105,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
@@ -1462,7 +1489,9 @@ impl AppError {
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "conflict",
+            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => {
+                "conflict"
+            }
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1472,10 +1501,13 @@ impl AppError {
             Self::MonitoringUnavailable => "monitoring_unavailable",
             Self::MonitoringNotConfigured => "monitoring_not_configured",
             Self::DiagnosticNotReady => "diagnostic_not_ready",
+            Self::CrashReportingUnavailable => "crash_reporting_unavailable",
+            Self::CrashReportConsentRequired => "crash_report_consent_required",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
             Self::AssistantModelAuthorityChanged => "model_authority_changed",
+            Self::OrgAgentAccessAuthoringUnavailable => "org_agent_access_authoring_unavailable",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -1772,6 +1804,16 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ApprovalFailed {
+                reason,
+                request_id,
+                approve_url,
+            } => Some(crate::services::approval_service::wait_failure_details(
+                reason,
+                request_id,
+                approve_url,
+            )),
+            AppError::SkillPublication(failure) => Some(serde_json::json!(failure)),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }
@@ -3591,4 +3633,30 @@ fn error_debug_redacts_challenges_and_untrusted_message_details() {
         serde_json::to_value(response).unwrap()["session_token"],
         secret
     );
+}
+
+#[cfg(test)]
+mod crash_error_contract_tests {
+    use super::*;
+    #[test]
+    fn crash_error_codes_statuses_and_keys_are_stable() {
+        for (error, status, code, key) in [
+            (
+                AppError::CrashReportingUnavailable,
+                StatusCode::NOT_FOUND,
+                13400,
+                "crash_reporting_unavailable",
+            ),
+            (
+                AppError::CrashReportConsentRequired,
+                StatusCode::FORBIDDEN,
+                13401,
+                "crash_report_consent_required",
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_code(), code);
+            assert_eq!(error.error_key(), key);
+        }
+    }
 }

@@ -2,6 +2,8 @@ import { ApiError } from "./ApiError";
 import { buildApiUrl } from "./baseUrl";
 import {
   approveAuthDeviceRequest,
+  previewStagingDevice,
+  decideStagingDevice,
   denyAuthDeviceRequest,
   previewAuthDeviceRequest,
 } from "./authDeviceApi";
@@ -68,6 +70,8 @@ type SocialProvider = "google" | "github" | "apple";
 
 export const mobileApi = {
   previewAuthDevice: previewAuthDeviceRequest,
+  previewStagingDevice,
+  decideStagingDevice,
   approveAuthDevice: approveAuthDeviceRequest,
   denyAuthDevice: denyAuthDeviceRequest,
   async verifyMfa(body: { code: string; mfa_token: string }): Promise<LoginWithPasswordResponse> {
@@ -186,8 +190,8 @@ export const mobileApi = {
   ): Promise<PushTokenRegisterResponse> {
     return rotatePushTokenRequest(payload);
   },
-  async unregisterPushToken(payload: PushTokenRegisterRequest): Promise<void> {
-    await unregisterPushTokenRequest(payload);
+  async unregisterPushToken(payload: PushTokenRegisterRequest, capturedAccessToken?: string): Promise<void> {
+    await unregisterPushTokenRequest(payload, capturedAccessToken);
   },
   async getAccountProfile(): Promise<AccountProfile> {
     return getCurrentUserProfileRequest();

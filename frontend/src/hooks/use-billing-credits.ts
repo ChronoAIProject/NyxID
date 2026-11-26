@@ -10,6 +10,7 @@ import {
 } from "@/schemas/billing-credits";
 import { normalizedBillingTargets } from "@/lib/billing-targets";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { api } from "@/lib/api-client";
 import {
   allowanceFormSchema,
@@ -21,6 +22,7 @@ import {
   issueGrantFormSchema,
   issueGrantResponseSchema,
   scheduleFormSchema,
+  seedScheduleResponseSchema,
   usageAllowanceListSchema,
   usageAllowanceSchema,
   userAllowanceListSchema,
@@ -118,7 +120,7 @@ export function useCreateCreditSchedule() {
 }
 
 export type UpdateCreditScheduleBody = Partial<
-  Omit<ScheduleForm, "recurrence">
+  Omit<ScheduleForm, "recurrence" | "timing">
 > & { readonly is_active?: boolean };
 
 export function useUpdateCreditSchedule() {
@@ -139,6 +141,74 @@ export function useUpdateCreditSchedule() {
       ),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+  });
+}
+
+export function useSeedCreditSchedule() {
+  const queryClient = useQueryClient();
+  const progress = useRef<{
+    key: string;
+    periodStart?: string;
+    cursor: string | null;
+    totals: { created: number; existing: number; pending: number };
+  } | null>(null);
+  return useMutation({
+    mutationFn: async ({
+      id,
+      updatedAt,
+      periodStart: initialPeriod,
+    }: {
+      id: string;
+      updatedAt: string;
+      periodStart?: string;
+    }) => {
+      const key = JSON.stringify([id, updatedAt, initialPeriod]);
+      if (progress.current?.key !== key)
+        progress.current = {
+          key,
+          periodStart: initialPeriod,
+          cursor: null,
+          totals: { created: 0, existing: 0, pending: 0 },
+        };
+      const scan = progress.current;
+      do {
+        const page = seedScheduleResponseSchema.parse(
+          await api.post<unknown>(
+            `/admin/credits/schedules/${encodeURIComponent(id)}/seed`,
+            {
+              expected_updated_at: updatedAt,
+              ...(scan.periodStart ? { period_start: scan.periodStart } : {}),
+              ...(scan.cursor ? { after_user_id: scan.cursor } : {}),
+            },
+          ),
+        );
+        scan.periodStart ??= page.period_start;
+        if (
+          page.period_start !== scan.periodStart ||
+          (page.next_user_id !== null &&
+            scan.cursor !== null &&
+            page.next_user_id <= scan.cursor)
+        ) {
+          throw new Error(
+            "The grant scan did not advance. Retry the operation.",
+          );
+        }
+        scan.totals.created += page.created_count;
+        scan.totals.existing += page.existing_count;
+        scan.totals.pending += page.pending_activation_count;
+        scan.cursor = page.next_user_id;
+      } while (scan.cursor !== null);
+      progress.current = null;
+      return scan.totals;
+    },
+    // Partial success is durable too. Refresh balances after an interrupted scan;
+    // a retry safely starts again and skips deterministic grant identities.
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+        queryClient.invalidateQueries({ queryKey: USER_CREDITS_KEY }),
+      ]);
+    },
   });
 }
 
@@ -298,7 +368,7 @@ export function useAllocateCredits() {
       requestId: string;
     }) => {
       const value = allocationFormSchema.parse(form);
-      const { recurrence, expires_at, expiry, ...policy } = value;
+      const { recurrence, timing, expires_at, expiry, ...policy } = value;
       const body = {
         ...policy,
         ...normalizedBillingTargets(value),
@@ -325,6 +395,7 @@ export function useAllocateCredits() {
               await api.post<unknown>("/admin/credits/allocations/schedules", {
                 ...body,
                 recurrence,
+                ...(timing ? { timing } : {}),
                 expiry,
               }),
             ),

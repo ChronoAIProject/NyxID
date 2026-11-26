@@ -94,6 +94,7 @@ function toolCalls(
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
+      ...(activity.memory_recovery ? { memoryRecovery: activity.memory_recovery } : {}),
       decision: activity.decision,
     })),
   };
@@ -111,6 +112,7 @@ function images(
   return {
     images: attachments.map((attachment) => ({
       id: attachment.id,
+      ...(attachment.pdf ? { pdf: attachment.pdf } : {}),
       expired: attachment.expired,
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
@@ -145,6 +147,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null,
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
+  if (code === "credential_revoked") return translateUi("NyxID rejected the assistant credential during this turn. Review completed actions before retrying.");
   if (code === "model_not_configured") return "This assistant profile is unavailable. Choose another model in the model selector.";
   if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
   if (code === "model_policy_denied") return translateUi("An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.");
@@ -318,11 +321,14 @@ export class NyxAgentTransport {
     return this.live.get(id)?.conversation ?? this.histories.get(id)?.conversation ?? this.index.get(id);
   }
 
-  /** Drop every cached thread of an agent that was deleted permanently. */
+  /** Drop locally held conversations when an agent is removed or access ends. */
   forgetAgent(agentId: string) {
     this.mutationRevision += 1;
     for (const row of this.getConversations(agentId)) {
       this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
+      this.live.get(row.id)?.controller.abort();
+      this.live.delete(row.id);
+      this.decisionViews.delete(row.id);
       this.index.delete(row.id);
       this.histories.delete(row.id);
       this.consumedRetries.delete(row.id);
@@ -398,7 +404,7 @@ export class NyxAgentTransport {
     } while (cursor);
     if (mutationRevision !== this.mutationRevision) return this.getConversations(agentId);
     for (const [id, turn] of this.live) {
-      if (id !== "draft" && (!agentId || turn.conversation.agent?.id === agentId)) {
+      if (isNyxAgentConversationId(id) && (!agentId || turn.conversation.agent?.id === agentId)) {
         const current = rows.get(id);
         if (current) {
           turn.conversation = { ...turn.conversation, title: current.title, title_source: current.title_source };
@@ -683,6 +689,7 @@ export class NyxAgentTransport {
         voice: message.voice,
         via: message.via ?? (message.platform_origin ? "telegram" : null),
         activityTotal: message.activity_total,
+        continuedAfterRestart: message.continued_after_restart,
         steering: message.steering,
         continuation_of: message.continuation_of,
         origin: message.origin,
@@ -699,7 +706,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
+        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total, continuedAfterRestart: polledTurn.continued_after_restart }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
@@ -852,17 +859,25 @@ export class NyxAgentTransport {
         return { ...message, decisions };
       });
     }
-    // Proxy approvals block the running tool call until decided; show them
-    // at the tail while the turn waits.
+    // Only pending proxy approvals belong at the tail while a tool waits.
+    // Settled requests keep their creation position when newer turns arrive.
+    const pendingApprovals: ChatMessage[] = [];
     for (const approval of history?.approvals ?? []) {
-      messages.push({
+      const receipt: ChatMessage = {
         id: `nyxagent-approval:${approval.id}`,
         role: "system",
         content: approval.summary,
         timestamp: Date.parse(approval.created_at),
         status: "complete",
-      });
+      };
+      if (!approval.status || approval.status === "pending") {
+        pendingApprovals.push(receipt);
+      } else {
+        const position = messages.findIndex((message) => message.timestamp > receipt.timestamp);
+        messages.splice(position < 0 ? messages.length : position, 0, receipt);
+      }
     }
+    messages.push(...pendingApprovals);
     // Rows rebuilt above with identical fields keep their previous object.
     const previousViews = this.views.get(id ?? "draft");
     const views = new Map<string, ChatMessage>();
@@ -905,16 +920,18 @@ export class NyxAgentTransport {
       readonly adoptExisting?: boolean;
       readonly retryOf?: string;
       readonly acknowledgementId?: string;
+      /** Isolate a handoff's optimistic state from the composer's draft. */
+      readonly clientDraftKey?: `handoff:${string}`;
     } = {},
   ) {
     const generation = this.identity();
-    if (this.isRunning(id)) throw new Error("A turn is already active.");
+    if (!id && options.clientDraftKey ? this.live.has(options.clientDraftKey) : this.isRunning(id)) throw new Error("A turn is already active.");
     if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length && !options.retryOf) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
     this.requests.add(controller);
-    let key = id ?? "draft";
+    let key = id ?? options.clientDraftKey ?? "draft";
     const now = new Date().toISOString();
     const model = (!id ? options.model : undefined) ?? this.getModel(id);
     const userMessageId = crypto.randomUUID();
@@ -1016,7 +1033,7 @@ export class NyxAgentTransport {
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
-          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
+          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage(), "X-NyxID-Chat-Capabilities": "nyxbot-handoff-v1" },
           signal: controller.signal,
           creditsDenial: {
             key: `assistant:nyxagent:${key}:${userMessageId}`,

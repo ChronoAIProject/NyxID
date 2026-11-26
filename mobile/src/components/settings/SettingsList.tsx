@@ -1,8 +1,8 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode, Ref } from "react";
 import {
-  ActivityIndicator,
   Modal,
   Pressable,
   RefreshControl,
@@ -24,6 +24,7 @@ import {
 } from "lucide-react-native";
 import { DynamicTypeText as Text } from "../DynamicTypeText";
 import { ScreenContainer } from "../ScreenContainer";
+import { SettingsHeaderButton } from "./SettingsHeaderButton";
 import { PageScrollView } from "../workspace/ScrollEdgeFades";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
@@ -33,6 +34,7 @@ const ICON_TILE = 30;
 
 /** Rows wrap to stacked label/value when scaled text leaves too little width. */
 export function useSettingsStacked(availableWidth?: number) {
+  useAppLanguage();
   const { width, fontScale } = useWindowDimensions();
   return (availableWidth ?? width) / fontScale < 340;
 }
@@ -50,6 +52,7 @@ export function SettingsPage({
   refreshing?: boolean;
   onRefresh?: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <ScreenContainer>
@@ -89,6 +92,7 @@ export function SettingsGroup({
   onLayout?: (event: LayoutChangeEvent) => void;
   children: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const rows = [children]
     .flat(Infinity as 1)
@@ -372,6 +376,7 @@ export function SettingsRow({
  * own. Used on the single-purpose edit pages that rows open.
  */
 export function SettingsTextField(props: TextInputProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.row}>
@@ -401,6 +406,7 @@ export function SettingsCheckRow({
   onPress: () => void;
   disabled?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <SettingsRow
@@ -412,7 +418,7 @@ export function SettingsCheckRow({
       chevron={false}
       accessibilityRole="radio"
       accessibilityState={{ selected, checked: selected }}
-      accessibilityHint={selected ? "Selected" : undefined}
+      accessibilityHint={selected ? translateApp("Selected") : undefined}
       accessory={
         selected ? (
           <Check size={18} color={colors.primary} strokeWidth={2.5} />
@@ -680,7 +686,7 @@ export function SettingsMenuRow<Value extends string>({
         value={current?.label ?? value}
         disabled={disabled}
         accessibilityHint={t("Opens a menu to choose {{label}}", {
-          label: label.toLowerCase(),
+          label: label,
         })}
         accessory={
           <ChevronsUpDown
@@ -696,13 +702,14 @@ export function SettingsMenuRow<Value extends string>({
 }
 
 /**
- * Edit pages put their commit action where iOS does: top right of the bar.
- * It replaces the sheet's close button while the page is shown.
+ * Edit pages put their commit action where iOS does: top right of the bar, as
+ * the bar's floating glass pill (SettingsHeaderButton). It replaces the
+ * sheet's close button while the page is shown.
  */
 export function useSettingsHeaderAction(
   navigation: { setOptions: (options: object) => void },
   {
-    label = "Save",
+    label = translateApp("Save"),
     enabled,
     busy = false,
     onPress,
@@ -710,44 +717,23 @@ export function useSettingsHeaderAction(
 ) {
   const { t } = useAppLanguage();
   label = t(label);
-  const { colors } = useTheme();
   useLayoutEffect(() => {
     navigation.setOptions({
-      headerRight: () =>
-        busy ? (
-          <ActivityIndicator color={colors.primary} />
-        ) : (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={label}
-            accessibilityState={{ disabled: !enabled }}
-            disabled={!enabled}
-            hitSlop={12}
-            onPress={onPress}
-            style={styles.headerAction}
-          >
-            <Text
-              style={[
-                styles.headerActionLabel,
-                { color: enabled ? colors.primary : colors.textMuted },
-              ]}
-            >
-              {label}
-            </Text>
-          </Pressable>
-        ),
+      headerRight: () => (
+        <SettingsHeaderButton
+          label={label}
+          enabled={enabled}
+          busy={busy}
+          onPress={onPress}
+        />
+      ),
     });
-  }, [navigation, label, enabled, busy, onPress, colors]);
+  }, [navigation, label, enabled, busy, onPress]);
 }
 
 const styles = StyleSheet.create({
   page: { flex: 1 },
   field: { flex: 1, minHeight: 28, ...typeScale.label },
-  headerAction: {
-    minHeight: 44,
-    justifyContent: "center",
-    paddingHorizontal: 4,
-  },
   menuBackdrop: { ...StyleSheet.absoluteFillObject },
   menu: {
     position: "absolute",
@@ -773,11 +759,6 @@ const styles = StyleSheet.create({
   menuCheck: { width: 18, alignItems: "center" },
   menuText: { flex: 1, minWidth: 0, gap: 2 },
   menuSelected: { fontFamily: fonts.bodySemi, fontWeight: "600" },
-  headerActionLabel: {
-    ...typeScale.label,
-    fontFamily: fonts.bodySemi,
-    fontWeight: "600",
-  },
   pageContent: {
     width: "100%",
     maxWidth: 720,

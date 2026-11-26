@@ -16,6 +16,18 @@ import {
 } from "./router";
 import { isPublicPath } from "./lib/public-paths";
 
+it.each(["/cli-auth?port=1e2", "/CLI-AUTH?port=%2080"])(
+  "validates the original CLI port in %s before search coercion",
+  (entry) => {
+    const isolated = createRouter({
+      routeTree: router.routeTree,
+      rewrite: router.options.rewrite,
+      history: createMemoryHistory({ initialEntries: [entry] }),
+    });
+    expect(isolated.latestLocation.search).not.toHaveProperty("port");
+  },
+);
+
 it("captures a caught assistant route-loading error and deduplicates its rendering fallback", async () => {
   const route = Object.values(router.routesById).find((r) => r.fullPath === "/assistant");
   if (!route) throw new Error("assistant route is not registered");
@@ -341,7 +353,7 @@ it("keeps the existing authenticated homepage redirect and leaves public visitor
   if (!home?.options.beforeLoad) throw new Error("Homepage guard missing");
   useAuthStore.setState({ isAuthenticated: true, isLoading: false });
   expect(() => home.options.beforeLoad!({} as never)).toThrowError(
-    expect.objectContaining({ options: expect.objectContaining({ to: "/dashboard" }) }),
+    expect.objectContaining({ options: expect.objectContaining({ to: "/assistant" }) }),
   );
   useAuthStore.setState({ isAuthenticated: false, isLoading: false });
   expect(home.options.beforeLoad({} as never)).toBeUndefined();

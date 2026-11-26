@@ -1,3 +1,5 @@
+import { appLocale, setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
+import { translate } from "../../i18n/translate";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -10,7 +12,6 @@ import * as emailLogin from "./emailLogin";
 import * as publicAuthConfig from "./publicAuthConfig";
 import * as socialCallback from "./socialCallback";
 import { loadTestModule } from "../../lib/api/apiUrlTestHarness";
-import { spacing } from "../../theme/designTokens";
 
 type Element = { type: unknown; props: Record<string, any> };
 type LoginInput = ReturnType<typeof emailLogin.passwordLoginInput>;
@@ -66,6 +67,8 @@ function setup({
     emailAuthEnabled: emailEnabled,
     socialProviders: providers,
   };
+  let keyboardVisible = false;
+  const announcements: string[] = [];
   const calls: LoginInput[] = [];
   const sessions: Session[] = [];
   const socialUrls: string[] = [];
@@ -79,9 +82,8 @@ function setup({
   let currentConfig = config;
   let configRefetches = 0;
   const appStateListeners: Array<(state: string) => void> = [];
-  let keyboardVisible = false;
   const colors = new Proxy(
-    { dangerTone: { bg: "#fee", border: "#f00" } },
+    { danger: "#f00", dangerTone: { bg: "#fee", border: "#f00" } },
     { get: (target, key) => Reflect.get(target, key) ?? "#111" },
   );
   const jsx = (type: unknown, props: Record<string, unknown>) => ({
@@ -90,6 +92,7 @@ function setup({
   });
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ language: appLocale(), t: translateApp }) },
     "expo-web-browser": {
       openBrowserAsync: async (url: string) => {
         registrationUrls.push(url);
@@ -130,6 +133,7 @@ function setup({
         ].map((name) => [name, name]),
       ),
       Platform: { OS: platform },
+      AccessibilityInfo: {announceForAccessibility: (message: string) => announcements.push(message)},
       Keyboard: { metrics: () => keyboardVisible ? { screenY: 500 } : undefined },
       StyleSheet: { create: (styles: unknown) => styles },
       AppState: {
@@ -217,6 +221,9 @@ function setup({
       Mail: "Mail",
     },
     "../../components/brand/PortalMark": { PortalMarkLogo: "PortalMarkLogo" },
+    "../../components/workspace/KeyboardScrollView": {
+      KeyboardScrollView: "KeyboardScrollView",
+    },
   });
   const { AuthHomeScreen } = harness.load(
     fileURLToPath(new URL("./AuthHomeScreen.tsx", import.meta.url)),
@@ -259,13 +266,13 @@ function setup({
     social,
     change,
     calls,
+    announcements,
+    showKeyboard: () => { keyboardVisible = true; },
     sessions,
     socialUrls,
     registrationUrls,
     waitlistUrls,
     navigations,
-    showKeyboard: () => { keyboardVisible = true; },
-    hideKeyboard: () => { keyboardVisible = false; },
     configRefetches: () => configRefetches,
     setLogin: (handler: typeof login) => {
       login = handler;
@@ -296,21 +303,18 @@ for (const platform of ["ios", "android"] as const) {
     });
     t.after(screen.harness.unmount);
     const scroller = elements(screen.harness.value()).find(
-      (element) => element.type === "ScrollView",
+      (element) => element.type === "KeyboardScrollView",
     );
     assert.ok(scroller);
     assert.equal(
-      scroller.props.automaticallyAdjustKeyboardInsets,
-      platform === "ios",
-    );
-    assert.equal(
       scroller.props.keyboardDismissMode,
-      platform === "ios" ? "interactive" : "on-drag",
+      platform === "ios" ? "interactive" : "none",
+      "dragging the Android form must keep the IME open",
     );
     assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
     assert.ok(
       elements(scroller).includes(screen.submit()),
-      "submit remains inside the keyboard-adjusted scroll content",
+      "submit remains inside the keyboard-aware scroll content",
     );
     assert.equal(
       elements(screen.harness.value()).some(
@@ -320,48 +324,6 @@ for (const platform of ["ios", "android"] as const) {
       "keyboard space is reserved only once",
     );
 
-    const scrolls: unknown[] = [];
-    scroller.props.ref.current = {
-      getNativeScrollRef: () => ({
-        measureInWindow: (callback: (...args: number[]) => void) =>
-          callback(0, 120, 390, 700),
-      }),
-      scrollTo: (position: unknown) => scrolls.push(plain(position)),
-    };
-    const inputGeometry = (label: string, top: number) => {
-      screen.input(label).props.ref.current = {
-        measureInWindow: (callback: (...args: number[]) => void) =>
-          callback(40, top, 300, 28),
-      };
-    };
-    inputGeometry("Email", 200);
-    inputGeometry("Password", 480);
-    screen.input("Email").props.onFocus();
-    assert.equal(
-      scrolls.length,
-      0,
-      "initial keyboard animation is owned by the native scroll view",
-    );
-    screen.showKeyboard();
-    scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 350 } } });
-    screen.input("Password").props.onFocus();
-    screen.input("Email").props.onFocus();
-    assert.deepEqual(
-      scrolls,
-      platform === "ios"
-        ? [{ y: 350 + 480 + 28 + spacing.xl - 500, animated: true }]
-        : [],
-      "measure real window coordinates so native header and safe-area offsets are respected; leave an already-visible field in place",
-    );
-    inputGeometry("Email", 110);
-    screen.input("Email").props.onFocus();
-    if (platform === "ios")
-      assert.deepEqual(
-        scrolls.at(-1),
-        { y: 350 + 110 - 120 - spacing.xl, animated: true },
-        "a field above the visible viewport also becomes reachable",
-      );
-
     screen.setLogin(async () => {
       throw new Error("Invalid email or password");
     });
@@ -370,164 +332,13 @@ for (const platform of ["ios", "android"] as const) {
     screen.submit().props.onPress();
     await screen.harness.settle();
     const nextScroller = elements(screen.harness.value()).find(
-      (element) => element.type === "ScrollView",
+      (element) => element.type === "KeyboardScrollView",
     );
     assert.ok(nextScroller);
     assert.match(textContent(nextScroller), /Invalid email or password/);
     assert.ok(elements(nextScroller).includes(screen.submit()));
   });
 }
-
-test("focus reveal waits for a mounted native scroll viewport", (t) => {
-  const screen = setup();
-  t.after(screen.harness.unmount);
-  const scroller = elements(screen.harness.value()).find(
-    (element) => element.type === "ScrollView",
-  );
-  assert.ok(scroller);
-  const scrolls: unknown[] = [];
-  let mounted = false;
-  let inputMeasurements = 0;
-  scroller.props.ref.current = {
-    getNativeScrollRef: () =>
-      mounted
-        ? {
-            measureInWindow: (callback: (...args: number[]) => void) =>
-              callback(0, 120, 390, 700),
-          }
-        : null,
-    scrollTo: (position: unknown) => scrolls.push(plain(position)),
-  };
-  screen.input("Password").props.ref.current = {
-    measureInWindow: (callback: (...args: number[]) => void) => {
-      inputMeasurements++;
-      callback(40, 480, 300, 28);
-    },
-  };
-  screen.showKeyboard();
-  assert.doesNotThrow(() => screen.input("Password").props.onFocus());
-  assert.equal(inputMeasurements, 0);
-  assert.deepEqual(scrolls, []);
-
-  mounted = true;
-  screen.input("Password").props.onFocus();
-  assert.equal(inputMeasurements, 1);
-  assert.deepEqual(scrolls, [
-    { y: 480 + 28 + spacing.xl - 500, animated: true },
-  ]);
-});
-
-test("MFA focus is revealed while the software keyboard is already open", async (t) => {
-  const screen = setup();
-  t.after(screen.harness.unmount);
-  screen.setLogin(async () => {
-    throw new MfaChallengeError("test-mfa-token");
-  });
-  screen.change("Email", "reviewer@example.test");
-  screen.change("Password", "password");
-  screen.submit().props.onPress();
-  await screen.harness.settle();
-  const scrolls: unknown[] = [];
-  const scroller = elements(screen.harness.value()).find(
-    (element) => element.type === "ScrollView",
-  );
-  assert.ok(scroller);
-  scroller.props.ref.current = {
-    getNativeScrollRef: () => ({
-      measureInWindow: (callback: (...args: number[]) => void) =>
-        callback(0, 120, 390, 700),
-    }),
-    scrollTo: (position: unknown) => scrolls.push(plain(position)),
-  };
-  screen.input("Authenticator code").props.ref.current = {
-    measureInWindow: (callback: (...args: number[]) => void) =>
-      callback(40, 490, 300, 28),
-  };
-  screen.showKeyboard();
-  screen.input("Authenticator code").props.onFocus();
-  assert.deepEqual(scrolls, [
-    { y: 490 + 28 + spacing.xl - 500, animated: true },
-  ]);
-});
-
-test("late field measurements do not scroll after focus changes or the keyboard closes", (t) => {
-  const screen = setup();
-  t.after(screen.harness.unmount);
-  const scroller = elements(screen.harness.value()).find(
-    (element) => element.type === "ScrollView",
-  );
-  assert.ok(scroller);
-  const scrolls: unknown[] = [];
-  scroller.props.ref.current = {
-    getNativeScrollRef: () => ({
-      measureInWindow: (callback: (...args: number[]) => void) =>
-        callback(0, 120, 390, 700),
-    }),
-    scrollTo: (position: unknown) => scrolls.push(plain(position)),
-  };
-  let emailMeasurement: ((...args: number[]) => void) | undefined;
-  screen.input("Email").props.ref.current = {
-    measureInWindow: (callback: typeof emailMeasurement) => {
-      emailMeasurement = callback;
-    },
-  };
-  screen.input("Password").props.ref.current = {
-    measureInWindow: (callback: (...args: number[]) => void) =>
-      callback(40, 480, 300, 28),
-  };
-  screen.showKeyboard();
-  screen.input("Email").props.onFocus();
-  screen.input("Password").props.onFocus();
-  assert.equal(scrolls.length, 1);
-  assert.ok(emailMeasurement);
-  emailMeasurement(40, 600, 300, 28);
-  assert.equal(
-    scrolls.length,
-    1,
-    "ignore the old field after a newer field has focused",
-  );
-  screen.input("Email").props.onFocus();
-  screen.hideKeyboard();
-  emailMeasurement(40, 600, 300, 28);
-  assert.equal(
-    scrolls.length,
-    1,
-    "keyboard dismissal invalidates a pending reveal",
-  );
-});
-
-test("a native scroll between field and viewport measurements invalidates the old geometry", (t) => {
-  const screen = setup();
-  t.after(screen.harness.unmount);
-  const scroller = elements(screen.harness.value()).find(
-    (element) => element.type === "ScrollView",
-  );
-  assert.ok(scroller);
-  const scrolls: unknown[] = [];
-  let viewportMeasurement: ((...args: number[]) => void) | undefined;
-  scroller.props.ref.current = {
-    getNativeScrollRef: () => ({
-      measureInWindow: (callback: typeof viewportMeasurement) => {
-        viewportMeasurement = callback;
-      },
-    }),
-    scrollTo: (position: unknown) => scrolls.push(plain(position)),
-  };
-  screen.input("Email").props.ref.current = {
-    measureInWindow: (callback: (...args: number[]) => void) =>
-      callback(40, 800, 300, 28),
-  };
-  screen.showKeyboard();
-  screen.input("Email").props.onFocus();
-  assert.ok(viewportMeasurement);
-  scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 600 } } });
-  viewportMeasurement(0, 120, 390, 700);
-  assert.deepEqual(
-    scrolls,
-    [],
-    "native keyboard adjustment already moved the field; stale screen coordinates must not add a second scroll",
-  );
-});
 
 for (const emailEnabled of [false, true]) {
   test(`email login adopts the session when registration is ${emailEnabled ? "enabled" : "disabled"}`, async (t) => {
@@ -817,15 +628,15 @@ test("registration-disabled email authentication handles the actual MFA challeng
   assert.equal(screen.sessions.length, 1);
 });
 
-test("failed credentials show feedback and permit retry without a false MFA prompt", async (t) => {
+for (const validationError of [false, true]) test(`${validationError ? "invalid email" : "failed credentials"} marks only the password field and permits retry without a false MFA prompt`, async (t) => {
   const screen = setup({ emailEnabled: false });
   t.after(screen.harness.unmount);
   screen.setLogin(async () => {
     throw new ApiError({
-      errorKey: "authentication_failed",
-      errorCode: 2000,
-      statusCode: 401,
-      message: "Invalid email or password",
+      errorKey: validationError ? "validation_error" : "authentication_failed",
+      errorCode: validationError ? 1008 : 2000,
+      statusCode: validationError ? 400 : 401,
+      message: validationError ? "Validation error: email: Invalid email address" : "Invalid email or password",
     });
   });
   screen.change("Email", "reviewer@example.test");
@@ -834,7 +645,23 @@ test("failed credentials show feedback and permit retry without a false MFA prom
   await screen.harness.settle();
   assert.match(
     textContent(screen.harness.value()),
-    /Invalid email or password/,
+    /Incorrect login details\./,
+  );
+  assert.equal(screen.input("Email").props.invalid, undefined);
+  assert.equal(screen.input("Email").props.frameStyle.borderColor, "#111");
+  assert.equal(screen.input("Password").props.invalid, true);
+  assert.equal(Object.assign({}, ...screen.input("Password").props.frameStyle).borderColor, "#f00");
+  const alert = elements(screen.harness.value()).find(
+    (element) => element.props.accessibilityRole === "alert",
+  )!;
+  assert.equal(textContent(alert), "Incorrect login details.");
+  assert.equal(alert.props.style.borderWidth, undefined);
+  assert.equal(alert.props.style.backgroundColor, undefined);
+  const alertText = elements(alert).find((element) => element.type === "Text")!;
+  assert.equal(
+    alertText.props.numberOfLines,
+    undefined,
+    "credential errors can wrap on narrow screens and at larger text sizes",
   );
   assert.equal(screen.sessions.length, 0);
   assert.equal(
@@ -845,6 +672,8 @@ test("failed credentials show feedback and permit retry without a false MFA prom
   );
   screen.setLogin(async () => signedIn);
   screen.change("Password", "correct-password");
+  assert.equal(screen.input("Password").props.invalid, false);
+  assert.doesNotMatch(textContent(screen.harness.value()), /Incorrect login details\./);
   screen.submit().props.onPress();
   await screen.harness.settle();
   assert.equal(screen.calls.length, 2);
@@ -1112,4 +941,39 @@ test("sign-in delegates idle, ready, pending and MFA submits to the shared prima
   assert.equal(screen.submit().props.disabled, true);
   screen.change("Authenticator code", "012345");
   assert.equal(screen.submit().props.disabled, false);
+});
+
+for (const platform of ["ios", "android"] as const) test(`P11 wrong password is inline, announced and reachable with keyboard open (${platform})`, async (t) => {
+  const screen = setup({platform}); t.after(screen.harness.unmount);
+  const scroller=elements(screen.harness.value()).find(e=>e.type==="KeyboardScrollView")!;
+  const scrolls: unknown[]=[];
+  scroller.props.revealController.current={reveal:(view:unknown)=>scrolls.push(view)};
+  screen.showKeyboard(); screen.change("Email","reviewer@example.test"); screen.change("Password","wrong");
+  screen.setLogin(async()=>{throw new ApiError({statusCode:401,errorCode:2000,errorKey:"authentication_failed",message:"Invalid email or password"});});
+  screen.submit().props.onPress(); await screen.harness.settle();
+  const all=elements(screen.harness.value()); const alert=all.find(e=>e.props.accessibilityRole==="alert" && textContent(e).includes("Incorrect login details."));
+  assert.ok(alert,"login failure must be an accessible alert"); assert.equal(alert.props.accessibilityLiveRegion,"assertive");
+  assert.ok(all.indexOf(alert)<all.indexOf(screen.submit()),"error sits immediately above the sign-in action");
+  assert.ok(all.indexOf(alert)>all.indexOf(screen.input("Password")));
+  alert.props.ref.current={measureInWindow:(cb:any)=>cb(20,650,350,48)};
+  alert.props.onLayout();
+  assert.deepEqual(scrolls,[alert.props.ref.current],"banner delegates to the shared measured keyboard viewport");
+  assert.deepEqual(screen.announcements,platform==="ios"?["Incorrect login details."]:[]);
+  screen.harness.render(); assert.match(textContent(screen.harness.value()),/Incorrect login details\./);
+  screen.change("Password","changed"); assert.doesNotMatch(textContent(screen.harness.value()),/Incorrect login details\./);
+});
+
+
+test("P1-6 retained login error follows language changes without resubmitting or changing input", async (t) => {
+  const screen = setup(); t.after(() => {screen.harness.unmount();setAppTranslationLanguage('en');});
+  screen.change("Email", "reviewer@example.test");screen.change("Password", "wrong");
+  screen.setLogin(async()=>{throw new ApiError({statusCode:401,errorCode:2000,errorKey:'authentication_failed',message:'Authentication failed: Invalid email or password'});});
+  screen.submit().props.onPress();await screen.harness.settle();
+  for (const language of ['zh-CN','zh-TW','en'] as const) {
+    setAppTranslationLanguage(language);screen.harness.render();
+    const alert=elements(screen.harness.value()).find(e=>e.props.accessibilityRole==='alert');
+    assert.ok(alert);assert.equal(textContent(alert).trim(),translate(language,'Incorrect login details.'));
+    assert.equal(screen.input(translate(language,'Password')).props.invalid,true);
+    assert.equal(screen.calls.length,1);assert.equal(screen.input(translate(language,'Email')).props.value,'reviewer@example.test');
+  }
 });

@@ -31,17 +31,19 @@ function load(newSet = true) {
     EXPO_PUBLIC_NEW_LEGAL_BASE_URL: newSet ? "https://nyxid.ai" : "",
   };
   const domains = loadModule<DomainsModule>("./domains.ts", { process: { env } });
+  const hints: unknown[] = [];
   const bootstrap = loadModule<BootstrapModule>("./domainBootstrap.ts", {
     require: (name: string) => {
+      if (name === "./publicConfigHints") return { cachePublicConfigHints: (value: unknown) => { hints.push(value); } };
       if (name === "./domains") return domains;
       if (name === "expo-secure-store") return {};
       throw new Error(`Unexpected dependency: ${name}`);
     },
   });
-  return { domains, bootstrap };
+  return { domains, bootstrap, hints };
 }
 
-type Reply = { flag?: unknown; status?: number; delayMs?: number; fail?: boolean } | "hang";
+type Reply = { flag?: unknown; crashHint?: unknown; status?: number; delayMs?: number; fail?: boolean } | "hang";
 
 function fakeFetch(replies: Record<string, Reply>, calls: string[]): typeof fetch {
   return ((input: string, init?: RequestInit) => {
@@ -53,7 +55,10 @@ function fakeFetch(replies: Record<string, Reply>, calls: string[]): typeof fetc
       if (!reply || reply === "hang") return;
       setTimeout(() => {
         if (reply.fail) return reject(new Error("network"));
-        const body = reply.flag === undefined ? {} : { mobile_new_domains: reply.flag };
+        const body = {
+          ...(reply.flag === undefined ? {} : { mobile_new_domains: reply.flag }),
+          ...(reply.crashHint === undefined ? {} : { crash_diagnostics_offered: reply.crashHint }),
+        };
         resolve(new Response(JSON.stringify(body), { status: reply.status ?? 200 }));
       }, reply.delayMs ?? 0);
     });
@@ -135,6 +140,23 @@ test("builds without a second domain set skip the network entirely", async () =>
   await bootstrap.initializeDomains({ fetch: fakeFetch({}, calls), ...store("true") });
   assert.deepEqual(calls, []);
   assert.equal(domains.activeDomains().apiBaseUrl, LEGACY_API);
+});
+
+test("domain bootstrap caches only the selected host's public hint without another request", async () => {
+  for (const enabled of [false, true]) {
+    const { bootstrap, hints } = load();
+    const calls: string[] = [];
+    await bootstrap.initializeDomains({
+      fetch: fakeFetch({
+        [LEGACY_API]: { flag: enabled, crashHint: false },
+        [NEW_API]: { flag: enabled, crashHint: true },
+      }, calls),
+      ...store(),
+    });
+    assert.equal(calls.length, 2, "reuses the existing domain survey");
+    assert.equal(hints.length, 1);
+    assert.equal((hints[0] as { crash_diagnostics_offered: boolean }).crash_diagnostics_offered, enabled);
+  }
 });
 
 test("a flag that selects an unreachable host falls back to the host that answered for this launch", async () => {

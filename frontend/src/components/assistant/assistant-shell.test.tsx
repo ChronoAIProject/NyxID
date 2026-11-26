@@ -78,6 +78,7 @@ it.each(["sidebar", "mobile", "drawer"])("keeps the %s header actions in one non
     // on a wrapped line the negative margin aligns the first glyph with the brand.
     expect(actions).not.toHaveClass("justify-end", "self-end");
     for (const button of header.querySelectorAll("button")) expect(actions).toContainElement(button);
+    expect(within(actions as HTMLElement).getByRole("button", { name: "Notifications" })).toBeInTheDocument();
     expect(within(actions as HTMLElement).getByRole("button", { name: "Search" })).toBeInTheDocument();
     expect(actions.parentElement).toBe(header);
   } finally {
@@ -231,6 +232,46 @@ it("keeps execution access and elapsed request notices when a live card replaces
   expect(within(card).getByRole("button", { name: "Pin CMA session" })).toBeVisible();
   expect(within(card).getByText("Recent actions")).toBeVisible();
   expect(screen.queryByRole("region", { name: "CMA submission: CMA task" })).not.toBeInTheDocument();
+});
+
+it("uses the authorized live Agent detail for the source receipt's initial task", () => {
+  setOwner();
+  const operation: CmaOperation = {
+    ...receipt,
+    agent_id: cmaSession.agentId,
+    operation_id: "original-lifecycle",
+    status: "succeeded",
+    state: "delivered",
+    reason: "completed",
+  };
+  render(
+    <TooltipProvider>
+      <CmaSessionContext value={[{
+        session: {
+          ...cmaSession,
+          initialTask: { status: "working", first_message: { purpose: "task", state: "completed" } },
+          origin: {
+            service_id: cmaSession.connection.id,
+            agent_id: cmaSession.agentId,
+            conversation_id: "source",
+            turn_id: operation.turn_id,
+            specialist_id: "agent",
+            cma_url: null,
+          },
+        },
+        state: initialCmaSession(cmaSession),
+        reconnect: () => undefined,
+      }]}>
+        <AssistantShell title="Chat" sidebar={null} cmaOperations={[operation]} cmaConversationId="source">
+          <section aria-label="Transcript">Assistant reply</section>
+        </AssistantShell>
+      </CmaSessionContext>
+    </TooltipProvider>,
+  );
+  const card = screen.getByRole("region", { name: `CMA session: ${cmaSession.title}` });
+  fireEvent.click(within(card).getByRole("button", { name: "Submission details" }));
+  const requests = within(card).getByRole("region", { name: "CMA requests" });
+  expect(within(requests).getByRole("status")).toHaveTextContent("Completed");
 });
 
 function renderCmaOperations(operations: readonly CmaOperation[]) {

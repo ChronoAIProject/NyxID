@@ -410,11 +410,13 @@ async fn global_slots_enforce_cap_and_fence_release() {
     let first = SlotStore::acquire(&db, "ssh", "user-1", 2, &owner, ttl)
         .await
         .expect("first slot")
-        .expect("slot available");
+        .expect("slot available")
+        .token;
     let second = SlotStore::acquire(&db, "ssh", "user-1", 2, &owner, ttl)
         .await
         .expect("second slot")
-        .expect("slot available");
+        .expect("slot available")
+        .token;
     assert_ne!(first.slot, second.slot);
     assert_eq!(first.namespace, "ssh");
     assert!(!first.scope_hash.is_empty());
@@ -448,6 +450,138 @@ async fn global_slots_enforce_cap_and_fence_release() {
             .expect("replacement slot")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn renewable_slot_survives_rejected_renewal_and_recovers() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    let rejected = Arc::new(tokio::sync::Notify::new());
+    let observed = rejected.clone();
+    let db = crate::test_utils::connect_test_database_with_command_handler(
+        "slot_transient_renewal",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Succeeded(event) = event
+                && event.command_name == "update"
+                && event.reply.contains_key("writeErrors")
+            {
+                observed.notify_one();
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    // Permit acquisition but reject renewals until the validator is lifted.
+    db.run_command(doc! {"create": SLOT_COLLECTION_NAME,
+    "validator": {"$expr": {"$eq": ["$acquired_at", "$updated_at"]}}})
+        .await
+        .unwrap();
+    let ttl = Duration::from_secs(3);
+    let manager = RenewableSlotManager::new(
+        db.clone(),
+        holder("pod-a", "generation-a"),
+        ttl,
+        Duration::from_millis(50),
+    );
+    let guard = manager.acquire("test", "owner", 1).await.unwrap().unwrap();
+    tokio::time::timeout(ttl, rejected.notified())
+        .await
+        .expect("renewal was rejected");
+    db.run_command(doc! {"collMod": SLOT_COLLECTION_NAME, "validator": {}})
+        .await
+        .unwrap();
+    tokio::select! {
+        () = guard.cancelled() => panic!("transient write rejection cancelled a live slot"),
+        () = tokio::time::sleep(ttl) => {}
+    }
+    assert!(manager.acquire("test", "owner", 1).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn capacity_slot_keeps_a_matched_renewal_across_its_previous_deadline() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use tokio::time::{Instant, advance, pause, resume};
+
+    let dispatched = Arc::new(tokio::sync::Notify::new());
+    let observed = dispatched.clone();
+    let db = crate::test_utils::connect_test_database_with_command_handler(
+        "slot_late_reply",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("update") == Ok(SLOT_COLLECTION_NAME)
+                && !event.command.contains_key("autocommit")
+            {
+                observed.notify_one();
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let ttl = Duration::from_secs(60);
+    let interval = Duration::from_secs(20);
+    let manager =
+        RenewableSlotManager::new(db.clone(), holder("pod-a", "generation-a"), ttl, interval);
+    let guard = manager
+        .acquire("capacity", "owner", 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let acquired = Instant::now();
+    let mut transaction = db.client().start_session().await.unwrap();
+    transaction.start_transaction().await.unwrap();
+    db.collection::<mongodb::bson::Document>(SLOT_COLLECTION_NAME)
+        .update_one(doc! {}, doc! {"$set": {"test_lock": true}})
+        .session(&mut transaction)
+        .await
+        .unwrap();
+
+    // Advance only the client's clock. MongoDB still has a live fence when the
+    // transaction releases its lock and the outstanding renewal can match.
+    pause();
+    advance(interval).await;
+    resume();
+    tokio::time::timeout(interval, dispatched.notified())
+        .await
+        .expect("first renewal dispatched");
+    pause();
+    advance((acquired + ttl).saturating_duration_since(Instant::now())).await;
+    resume();
+    transaction.abort_transaction().await.unwrap();
+    tokio::select! {
+        biased;
+        () = guard.cancelled() => panic!("capacity lost before the matching write returned"),
+        result = tokio::time::timeout(interval, dispatched.notified()) => {
+            result.expect("confirmed renewal must schedule the next one");
+        }
+    }
+}
+
+#[tokio::test]
+async fn renewable_slot_expires_while_a_renewal_write_is_blocked() {
+    let db = crate::test_utils::connect_transaction_test_database("slot_blocked_renewal").await;
+    let ttl = Duration::from_secs(2);
+    let manager = RenewableSlotManager::new(
+        db.clone(),
+        holder("pod-a", "generation-a"),
+        ttl,
+        Duration::from_millis(400),
+    );
+    let start = tokio::time::Instant::now();
+    let guard = manager
+        .acquire_exclusive("exclusive", "owner")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut transaction = db.client().start_session().await.unwrap();
+    transaction.start_transaction().await.unwrap();
+    let rows = db.collection::<mongodb::bson::Document>(SLOT_COLLECTION_NAME);
+    rows.update_one(doc! {}, doc! {"$set": {"test_lock": true}})
+        .session(&mut transaction)
+        .await
+        .unwrap();
+    let expired = tokio::time::timeout(ttl * 2, guard.cancelled()).await;
+    transaction.abort_transaction().await.unwrap();
+    expired.expect("expiry must interrupt work even with a renewal outstanding");
+    assert!(start.elapsed() >= ttl);
 }
 
 #[tokio::test]

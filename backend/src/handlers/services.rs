@@ -501,6 +501,11 @@ impl std::ops::DerefMut for BillingUpdate {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceRequest {
+    /// Platform administrator approval for the exact destination selected by this request.
+    pub approve_caller_token_destination:
+        Option<crate::services::caller_token_approval::ApprovalRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approve_private_destination: Option<bool>,
     /// Trusted, authenticated read-only verification operation. Null disables it.
     #[serde(
         default,
@@ -633,6 +638,7 @@ impl UpdateServiceRequest {
     /// billing editor shares this handler's write path and audit.
     pub(crate) fn billing_only(billing: BillingUpdate) -> Self {
         Self {
+            approve_private_destination: None,
             credential_verification: None,
             auth_scheme: None,
             service_category: None,
@@ -641,6 +647,7 @@ impl UpdateServiceRequest {
             supplier: None,
             import_source: None,
             destination_targets: None,
+            approve_caller_token_destination: None,
             name: None,
             description: None,
             base_url: None,
@@ -1952,6 +1959,8 @@ async fn create_service_inner(
                 .credential
                 .as_ref()
                 .is_some_and(|v| !v.trim().is_empty()),
+        caller_token_approved_destinations: Default::default(),
+        approved_private_base_url: None,
         catalog_manager_created: authority
             == super::catalog_authority::CatalogAuthority::CatalogManager,
         identity_propagation_mode: "none".to_string(),
@@ -3384,6 +3393,36 @@ pub(crate) async fn update_service_at_revision(
         next_resale_billable,
     )?;
 
+    crate::services::caller_token_approval::prepare_update(
+        &service,
+        &mut set_doc,
+        body.approve_caller_token_destination.as_ref(),
+    )?;
+    let effective_base = set_doc
+        .get_str("base_url")
+        .unwrap_or(&service.base_url)
+        .to_owned();
+    if let Some(approve) = body.approve_private_destination {
+        if approve
+            && (service.owner_user_id.is_some()
+                || !crate::services::catalog_endpoint_service::catalog_owns_url(
+                    &state.db, &service,
+                )
+                .await?
+                || !crate::services::proxy_destination::approvable_url(&effective_base))
+        {
+            return Err(AppError::ValidationError(
+                "Private destination approval requires a catalog-owned HTTP base URL".into(),
+            ));
+        }
+        set_doc.insert(
+            "approved_private_base_url",
+            approve.then_some(effective_base),
+        );
+    } else if service.approved_private_base_url.is_some() && effective_base != service.base_url {
+        set_doc.insert("approved_private_base_url", bson::Bson::Null);
+    }
+
     if set_doc.is_empty() && !skill_update.is_present() {
         if body
             .credential
@@ -3516,6 +3555,7 @@ pub(crate) async fn update_service_at_revision(
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
         admin_required: ingress_admin
+            || body.approve_caller_token_destination.is_some()
             || (!tools_manager
                 && (service.offering_kind
                     == crate::models::downstream_service::OfferingKind::Tool
@@ -4233,6 +4273,59 @@ mod tests {
     use mongodb::bson::{self, doc};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn proxy_destination_authorized_catalog_update_and_revocation_are_chained() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "proxy_destination_catalog_update",
+        )
+        .await;
+        let admin = seed_user(&db, true).await;
+        let creator = seed_user(&db, false).await;
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.created_by = creator.clone();
+        catalog.base_url = "http://catalog.internal/api".into();
+        catalog.provider_config_id = None;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let update = |actor: &str, allow: bool| {
+            update_service(
+                State(state.clone()),
+                test_auth_user(actor),
+                Default::default(),
+                Path(catalog.id.clone()),
+                Json(
+                    serde_json::from_value(
+                        serde_json::json!({"approve_private_destination":allow}),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        assert!(matches!(
+            update(&creator, true).await,
+            Err(crate::errors::AppError::Forbidden(_))
+        ));
+        for allow in [true, false] {
+            let _ = update(&admin, allow).await.unwrap();
+            let row = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id":&catalog.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.get_str("approved_private_base_url").ok(),
+                allow.then_some(catalog.base_url.as_str())
+            );
+            let event = db.collection::<bson::Document>(AUDIT_LOGS)
+                .find_one(doc!{"event_type":"catalog_private_destination_changed","event_data.approved":allow}).await.unwrap().unwrap();
+            assert!(event.get_str("entry_hash").is_ok());
+        }
+    }
 
     #[tokio::test]
     async fn workspace_admin_writes_reject_unsafe_destination_recipients() {

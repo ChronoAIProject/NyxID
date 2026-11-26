@@ -383,3 +383,9 @@ values during dry run/validate, and redacted CLI output, manifests and audits.
 Requires local `mongod`, `mongosh`, Python 3 and Rust; uses no production account.
 Recorded results and source snapshots belong in
 [the implementation verification report](plans/2026-10-13-tools-manager-verification.md).
+
+## Approving a destination for caller-token forwarding
+
+A platform administrator can approve an exact catalog URL with `nyxid admin catalog caller-token-destination <service> --destination-url <url>`. Use `--target-id <id>` for a named destination and `--revoke` to withdraw approval. The catalog row must also have `forward_access_token` enabled to forward a bearer.
+
+The command sends `approve_caller_token_destination` to `PUT /api/v1/services/{id}`. The object contains `approved`, `destination_url` and an optional `target_id`. Changing the bound URL clears its approval. Each change is recorded in the audit chain.

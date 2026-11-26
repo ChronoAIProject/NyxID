@@ -7,7 +7,11 @@ use crate::api::CLI_USER_AGENT;
 use crate::cli::{AiSetupCommands, AiToolTarget};
 
 /// GitHub raw base URL for the NyxID repository.
-const GITHUB_RAW: &str = "https://raw.githubusercontent.com/ChronoAIProject/NyxID/main";
+const RELEASE_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+const GITHUB_RAW: &str = concat!(
+    "https://raw.githubusercontent.com/ChronoAIProject/NyxID/v",
+    env!("CARGO_PKG_VERSION")
+);
 
 /// Path within the repo to the canonical skill files.
 const SKILL_DIR: &str = "skills/nyxid";
@@ -35,7 +39,8 @@ const REFERENCE_FILES: &[&str] = &[
 
 /// Claude Code plugin marketplace source: the NyxID repository itself
 /// (`.claude-plugin/marketplace.json` at the repo root).
-const PLUGIN_MARKETPLACE_SOURCE: &str = "ChronoAIProject/NyxID";
+const PLUGIN_MARKETPLACE_SOURCE: &str =
+    concat!("ChronoAIProject/NyxID#v", env!("CARGO_PKG_VERSION"));
 
 /// Marketplace name declared in `.claude-plugin/marketplace.json`.
 const PLUGIN_MARKETPLACE_NAME: &str = "nyxid";
@@ -526,7 +531,7 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
             );
             if claude_cli_plugin_present() {
                 eprintln!(
-                    "Installed via the plugin marketplace: every bundled skill (nyxid, the aevatar family, github-via-nyxid, ...) is available, and `claude plugin update {PLUGIN_SPEC}` keeps them current."
+                    "Installed via the plugin marketplace: every bundled skill (nyxid, the aevatar family, github-via-nyxid, ...) is available, and `nyxid ai-setup update --tool claude-code` selects the bundle for this CLI release."
                 );
             }
         }
@@ -590,8 +595,7 @@ fn claude_cli_available() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Run a `claude` subcommand, capturing output. "Already exists/installed"
-/// responses count as success so the flow stays idempotent.
+/// Run a Claude plugin command and propagate failures from the plugin manager.
 fn run_claude(args: &[&str]) -> Result<()> {
     let output = std::process::Command::new("claude")
         .args(args)
@@ -601,11 +605,6 @@ fn run_claude(args: &[&str]) -> Result<()> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{stdout}{stderr}").to_lowercase();
-    if combined.contains("already") {
-        return Ok(());
-    }
     bail!(
         "`claude {}` failed: {}",
         args.join(" "),
@@ -695,6 +694,75 @@ fn remove_legacy_cli_plugin() {
     }
 }
 
+fn official_marketplace_ref(entries: &[serde_json::Value]) -> Result<Option<&str>> {
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry["name"] == PLUGIN_MARKETPLACE_NAME)
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        entry["source"] == "github"
+            && entry["repo"]
+                .as_str()
+                .is_some_and(|repo| repo.eq_ignore_ascii_case("ChronoAIProject/NyxID")),
+        "The existing nyxid marketplace uses a different source"
+    );
+    Ok(Some(entry["ref"].as_str().unwrap_or("")))
+}
+
+fn list_claude_marketplaces() -> Result<Vec<serde_json::Value>> {
+    let output = std::process::Command::new("claude")
+        .args(["plugin", "marketplace", "list", "--json"])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Could not read Claude marketplace sources"
+    );
+    serde_json::from_slice(&output.stdout).context("Could not read Claude marketplace sources")
+}
+
+fn select_release_marketplace() -> Result<()> {
+    let entries = list_claude_marketplaces()?;
+    match official_marketplace_ref(&entries)? {
+        Some(RELEASE_TAG) => return Ok(()),
+        Some(_) => {
+            // Claude requires a matching source declaration when changing a registered ref.
+            // Re-adding preserves installed plugins, including the hosted MCP edition.
+            let settings = serde_json::json!({"extraKnownMarketplaces": {
+                "nyxid": {"source": {"source":"github","repo":"ChronoAIProject/NyxID","ref":RELEASE_TAG}}
+            }}).to_string();
+            run_claude(&[
+                "--settings",
+                &settings,
+                "plugin",
+                "marketplace",
+                "add",
+                PLUGIN_MARKETPLACE_SOURCE,
+            ])?;
+        }
+        None => run_claude(&["plugin", "marketplace", "add", PLUGIN_MARKETPLACE_SOURCE])?,
+    }
+    anyhow::ensure!(
+        official_marketplace_ref(&list_claude_marketplaces()?)? == Some(RELEASE_TAG),
+        "Claude could not select the NyxID CLI release marketplace"
+    );
+    Ok(())
+}
+
+fn install_release_plugin() -> Result<()> {
+    select_release_marketplace()?;
+    let action = if claude_plugin_registry().is_some_and(|registry| cli_plugin_installed(&registry))
+    {
+        "update"
+    } else {
+        "install"
+    };
+    run_claude(&["plugin", action, PLUGIN_SPEC])?;
+    remove_legacy_cli_plugin();
+    Ok(())
+}
+
 /// Install every bundled NyxID skill through the Claude Code plugin
 /// marketplace. Returns Ok(false) when the `claude` CLI is unavailable so
 /// the caller can fall back to the legacy single-skill copy.
@@ -704,10 +772,7 @@ fn try_install_claude_plugin() -> Result<bool> {
     }
 
     eprintln!("  Adding NyxID plugin marketplace ({PLUGIN_MARKETPLACE_SOURCE})...");
-    run_claude(&["plugin", "marketplace", "add", PLUGIN_MARKETPLACE_SOURCE])?;
-    eprintln!("  Installing plugin {PLUGIN_SPEC} (all bundled skills)...");
-    run_claude(&["plugin", "install", PLUGIN_SPEC])?;
-    remove_legacy_cli_plugin();
+    install_release_plugin()?;
 
     // The legacy per-skill copy shadows the plugin's `nyxid` skill (personal
     // skills take precedence), so a stale copy would pin users to the old
@@ -810,9 +875,10 @@ struct RepoSkill {
 /// git-trees API call for the layout, then raw fetches per file, with the
 /// same URL substitution the single-skill installer applies.
 async fn fetch_all_skills(base_url: &str, dashboard_url: &str) -> Result<Vec<RepoSkill>> {
-    let tree_json =
-        fetch_url("https://api.github.com/repos/ChronoAIProject/NyxID/git/trees/main?recursive=1")
-            .await?;
+    let tree_json = fetch_url(&format!(
+        "https://api.github.com/repos/ChronoAIProject/NyxID/git/trees/{RELEASE_TAG}?recursive=1"
+    ))
+    .await?;
     let tree: serde_json::Value =
         serde_json::from_str(&tree_json).context("Failed to parse GitHub tree response")?;
 
@@ -1029,16 +1095,7 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
                     && claude_cli_plugin_present()
                     && claude_cli_available();
                 if plugin_managed {
-                    // Plugin-managed: refresh the marketplace clone and the
-                    // installed plugin instead of rewriting skill files.
-                    run_claude(&["plugin", "marketplace", "update", PLUGIN_MARKETPLACE_NAME])?;
-                    // Installs made before the CLI edition was renamed hold
-                    // `nyxid@nyxid`, which is now the MCP package, so the CLI
-                    // edition may not be installed yet.
-                    if run_claude(&["plugin", "update", PLUGIN_SPEC]).is_err() {
-                        run_claude(&["plugin", "install", PLUGIN_SPEC])?;
-                    }
-                    remove_legacy_cli_plugin();
+                    install_release_plugin()?;
                     eprintln!("  Plugin {PLUGIN_SPEC} updated.");
                 } else {
                     install_claude_code(&content, &base).await?;
@@ -1119,6 +1176,34 @@ mod tests {
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn release_contract_skill_sources_follow_cli_version() {
+        let release = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(super::GITHUB_RAW.rsplit('/').next(), Some(release.as_str()));
+        assert_eq!(
+            super::PLUGIN_MARKETPLACE_SOURCE.rsplit('#').next(),
+            Some(release.as_str())
+        );
+    }
+
+    #[test]
+    fn marketplace_selection_preserves_other_sources() {
+        use serde_json::json;
+        assert_eq!(super::official_marketplace_ref(&[]).unwrap(), None);
+        let mut entry = json!({"name":"nyxid","source":"github","repo":"ChronoAIProject/NyxID"});
+        assert_eq!(
+            super::official_marketplace_ref(&[entry.clone()]).unwrap(),
+            Some("")
+        );
+        entry["ref"] = super::RELEASE_TAG.into();
+        assert_eq!(
+            super::official_marketplace_ref(&[entry.clone()]).unwrap(),
+            Some(super::RELEASE_TAG)
+        );
+        entry["repo"] = "private/nyxid".into();
+        assert!(super::official_marketplace_ref(&[entry]).is_err());
+    }
 
     fn registry(entries: &[(&str, &str)]) -> serde_json::Value {
         let mut plugins = serde_json::Map::new();

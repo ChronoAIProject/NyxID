@@ -1,6 +1,7 @@
 //! NyxID-issued refresh credentials in broker bindings. These are not external
 //! provider token holders. Historical ciphertext has binding-hash AAD; v3 adds
 //! the immutable owner/client and exact field to its authenticated context.
+use crate::crypto::record_field::historical::HistoricalAad;
 use crate::{
     crypto::aes::{EncryptionKeys, RecordContext},
     errors::{AppError, AppResult},
@@ -13,15 +14,16 @@ const FIELD: &str = "refresh_token_encrypted";
 fn invalid() -> AppError {
     AppError::Internal("Broker credential requires authenticated repair".into())
 }
-fn identity(id: &str, owner: &str, client: &str) -> AppResult<()> {
-    if !super::oauth_broker_service::is_binding_hash(id) || owner.is_empty() || client.is_empty() {
+fn identity<'a>(id: &'a str, owner: &str, client: &str) -> AppResult<HistoricalAad<'a>> {
+    let binding = HistoricalAad::broker_binding(id).ok_or_else(invalid)?;
+    if owner.is_empty() || client.is_empty() {
         return Err(invalid());
     }
     RecordContext::new(COLLECTION_NAME, id, owner, &[FIELD, client])?;
-    Ok(())
+    Ok(binding)
 }
-fn validate(row: &OauthBrokerBinding) -> AppResult<()> {
-    identity(&row.id, &row.user_id, &row.client_id)?;
+fn validate(row: &OauthBrokerBinding) -> AppResult<HistoricalAad<'_>> {
+    let binding = identity(&row.id, &row.user_id, &row.client_id)?;
     if row.secret_context_versions.iter().any(|(field, version)| {
         field != FIELD || *version != 3 || row.refresh_token_encrypted.is_none()
     }) || row
@@ -31,7 +33,7 @@ fn validate(row: &OauthBrokerBinding) -> AppResult<()> {
     {
         return Err(invalid());
     }
-    Ok(())
+    Ok(binding)
 }
 pub(crate) fn versions(keys: &EncryptionKeys) -> std::collections::BTreeMap<String, u8> {
     let mut versions = std::collections::BTreeMap::new();
@@ -48,7 +50,7 @@ pub(crate) async fn encrypt(
     client: &str,
     plaintext: &[u8],
 ) -> AppResult<Vec<u8>> {
-    identity(id, owner, client)?;
+    let binding = identity(id, owner, client)?;
     let components = [FIELD, client];
     let context = RecordContext::new(COLLECTION_NAME, id, owner, &components)?;
     if plaintext.is_empty() || std::str::from_utf8(plaintext).is_err() {
@@ -57,14 +59,14 @@ pub(crate) async fn encrypt(
     if keys.contextual_record_writes() {
         keys.encrypt_record(plaintext, &context).await
     } else {
-        keys.encrypt_with_aad(plaintext, id.as_bytes()).await
+        binding.seal(keys, plaintext).await
     }
 }
 pub(crate) async fn text(
     keys: &EncryptionKeys,
     row: &OauthBrokerBinding,
 ) -> AppResult<Zeroizing<String>> {
-    validate(row)?;
+    let binding = validate(row)?;
     let ciphertext = row.refresh_token_encrypted.as_ref().ok_or_else(invalid)?;
     let bytes = match row.secret_context_versions.get(FIELD) {
         Some(3) => {
@@ -79,9 +81,7 @@ pub(crate) async fn text(
             )
             .await?
         }
-        None if keys.allow_legacy_record_reads() => {
-            Zeroizing::new(keys.decrypt_with_aad(ciphertext, row.id.as_bytes()).await?)
-        }
+        None if keys.allow_legacy_record_reads() => binding.open(keys, ciphertext).await?,
         _ => return Err(invalid()),
     };
     if bytes.is_empty() {

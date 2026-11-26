@@ -1,7 +1,7 @@
 name: Publish Dev Images
 
-# Publishes the staging images on every push to `dev`:
-#   backend and frontend, linux/amd64 only -> tags: dev, dev-<sha>
+# Builds staging images from pushes to `dev`, keeping one pending pair:
+#   backend and frontend, linux/amd64 only -> dev-<sha> and dev (current tip).
 #
 # Deliberately separate from publish-images.yml. A dev push never creates,
 # moves or attests a production tag (`main`, `main-<sha>`, `edge`, semver,
@@ -16,82 +16,71 @@ on:
     branches: [dev]
   workflow_dispatch:
 
-concurrency:
-  group: publish-dev-images
-  cancel-in-progress: true
-
 permissions:
   contents: read
   packages: write
 
 jobs:
   build:
-    name: Build ${{ matrix.component }} (dev)
-    # A manual run from any other branch must not publish `dev` tags.
+    if: github.ref == 'refs/heads/dev'
+    # Coalesce pushes before expanding the matrix so both components build
+    # the same admitted SHA even when their build times differ.
+    concurrency:
+      group: publish-dev-images-build
+    uses: ./.github/workflows/build-dev-images.yml
+
+  deploy-staging:
+    needs: build
     if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - component: backend
-            file: backend/Dockerfile
-            cargo_build_args: CARGO_BUILD_JOBS=4
-          - component: frontend
-            file: frontend/Dockerfile
+    permissions:
+      contents: read
+      actions: read
+    environment:
+      name: staging
+      url: https://staging.nyxid.ai
+    concurrency:
+      # Check the live commits inside this slot. A late rerun can be older.
+      group: deploy-nyxid-staging
+      queue: max
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
-
-      - name: Prepare backend image memory reserve
-        if: matrix.component == 'backend'
-        timeout-minutes: 5
-        run: bash .github/scripts/prepare-backend-runner.sh
-
-      - name: Compute image repo and tags
-        id: image
-        run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          {
-            echo "repo=ghcr.io/${owner}/nyxid/${{ matrix.component }}"
-            echo "sha_tag=dev-${GITHUB_SHA::7}"
-            echo "hash=$(git rev-parse --short=12 HEAD)"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Ensure Ubuntu archive DNS
-        run: bash "$GITHUB_WORKSPACE/.github/scripts/ensure-ubuntu-archive-dns.sh"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # Resolve staging's abbreviated SHAs across branches, including manual deploys.
+          fetch-depth: 0
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Roll out backend and frontend
+        id: rollout
+        env:
+          NYXID_PIN_CHECK_IMAGES: ${{ secrets.NYXID_CHECK_ACCOUNT != '' && secrets.NYXID_CHECK_ALERT_URL != '' }}
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
+          NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
+        run: python3 .github/scripts/deploy_images.py staging
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      - name: Check NyxBot and restore a compatible release on failure
+        if: steps.rollout.outputs.deployed == 'true'
+        id: nyxbot
+        env:
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
+          NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          BACKEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.backend_digest }}
+          FRONTEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.frontend_digest }}
+          PREVIOUS_COMMIT: ${{ steps.rollout.outputs.previous }}
+          NYXID_CHECK_ACCOUNT: ${{ secrets.NYXID_CHECK_ACCOUNT }}
+          NYXID_CHECK_ALERT_URL: ${{ secrets.NYXID_CHECK_ALERT_URL }}
+          NYXID_ROLLBACK_PAIR: ${{ vars.NYXID_ROLLBACK_PAIR }}
+        run: python3 .github/scripts/post_deploy_check.py staging
+
+      - name: Archive deployment check result
+        if: ${{ !cancelled() && steps.nyxbot.outputs.outcome != '' }}
+        uses: actions/upload-artifact@v7
         with:
-          # Repo-root context for both images, as in publish-images.yml.
-          context: .
-          file: ${{ matrix.file }}
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ steps.image.outputs.repo }}:dev
-            ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.sha_tag }}
-          labels: |
-            org.opencontainers.image.title=nyxid-${{ matrix.component }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.licenses=Apache-2.0
-          build-args: |
-            NYXID_GIT_HASH=${{ steps.image.outputs.hash }}
-            ${{ matrix.cargo_build_args }}
-          # Restore from the dev cache first, then main's. Only the dev
-          # reference is written, so main builds keep their own cache intact.
-          cache-from: |
-            type=registry,ref=${{ steps.image.outputs.repo }}:buildcache-dev-linux-amd64
-            type=registry,ref=${{ steps.image.outputs.repo }}:buildcache-linux-amd64
-          cache-to: type=registry,ref=${{ steps.image.outputs.repo }}:buildcache-dev-linux-amd64,mode=max,ignore-error=true
-          provenance: false
+          name: nyxbot-staging-${{ steps.nyxbot.outputs.outcome }}-${{ github.run_attempt }}${{ steps.nyxbot.outputs.image_suffix }}
+          path: ${{ runner.temp }}/nyxbot-deploy.json
+          retention-days: 90
+          if-no-files-found: error

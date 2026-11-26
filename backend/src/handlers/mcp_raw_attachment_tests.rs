@@ -158,23 +158,110 @@ fn pdf() -> Vec<u8> {
     bytes
 }
 
+fn ascii_pdf() -> Vec<u8> {
+    let content = "BT /F1 12 Tf 72 720 Td (Quarterly revenue) Tj ET\n";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+    ];
+    // A valid PDF need not contain a non-UTF-8 binary marker. Compute all byte
+    // offsets so the text-only fixture remains a complete, extractable PDF.
+    let mut pdf = "%PDF-1.4\n".to_owned();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+}
+
 #[tokio::test]
 async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_full_receipt() {
+    assert_pdf_roundtrip(
+        "raw_pdf_roundtrip",
+        pdf(),
+        "application/pdf",
+        Some("attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf"),
+        "文件.pdf",
+        Some("Round trip document"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn raw_attachment_ascii_pdf_download_read_upload_preserves_document_semantics() {
+    let bytes = ascii_pdf();
+    assert!(bytes.is_ascii());
+    assert!(std::str::from_utf8(&bytes).is_ok());
+    for (mime, disposition, name) in [
+        (
+            "application/pdf",
+            Some("attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf"),
+            "文件.pdf",
+        ),
+        ("application/pdf", None, "download_file"),
+        (
+            "application/octet-stream",
+            Some("attachment; filename=report.data"),
+            "report.data",
+        ),
+    ] {
+        assert_pdf_roundtrip(
+            "raw_ascii_pdf_roundtrip",
+            bytes.clone(),
+            mime,
+            disposition,
+            name,
+            Some("Quarterly revenue"),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn raw_attachment_malformed_ascii_pdf_is_not_reported_as_readable_text() {
+    assert_pdf_roundtrip(
+        "raw_malformed_ascii_pdf",
+        b"%PDF-1.7 corrupt".to_vec(),
+        "application/pdf",
+        Some("attachment; filename=broken.pdf"),
+        "broken.pdf",
+        None,
+    )
+    .await;
+}
+
+async fn assert_pdf_roundtrip(
+    name: &'static str,
+    bytes: Vec<u8>,
+    mime: &str,
+    disposition: Option<&str>,
+    expected_name: &str,
+    expected_text: Option<&str>,
+) {
     let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
-    let u = setup_raw("raw_pdf_roundtrip").await;
+    let u = setup_raw(name).await;
     mode(&u, crate::models::assistant_settings::AccessMode::Autopilot).await;
-    let bytes = pdf();
+    let mut response = ResponseTemplate::new(200)
+        .insert_header("content-type", mime)
+        .set_body_bytes(bytes.clone());
+    if let Some(disposition) = disposition {
+        response = response.insert_header("content-disposition", disposition);
+    }
     Mock::given(method("GET"))
         .and(path("/open-apis/download"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/pdf")
-                .insert_header(
-                    "content-disposition",
-                    "attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf",
-                )
-                .set_body_bytes(bytes.clone()),
-        )
+        .respond_with(response)
         .mount(&u.server)
         .await;
     let auth = authenticate(&u.f).await;
@@ -184,8 +271,8 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
         assert_eq!(downloaded["result"]["isError"], false, "{downloaded}");
         let metadata: Value =
             serde_json::from_str(text(&downloaded).lines().next().unwrap()).unwrap();
-        assert_eq!(metadata["name"], "文件.pdf");
-        assert_eq!(metadata["type"], "application/pdf");
+        assert_eq!(metadata["name"], expected_name);
+        assert_eq!(metadata["type"], mime);
         assert!(!text(&downloaded).contains("%PDF"));
         let id = metadata["attachment_id"].as_str().unwrap();
         let read = uploads::read(
@@ -196,13 +283,18 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
         )
         .await
         .unwrap();
-        assert!(
-            read["text"]
-                .as_str()
-                .unwrap()
-                .contains("Round trip document"),
-            "{read}"
-        );
+        if let Some(expected_text) = expected_text {
+            assert!(
+                read["text"].as_str().unwrap().contains(expected_text),
+                "{read}"
+            );
+            assert!(!read["text"].as_str().unwrap().contains("%PDF"));
+            assert_eq!(read["section"]["label"], "Page 1");
+            assert_eq!(read["section"]["offset"], 0);
+        } else {
+            assert_eq!(read["error"], "attachment_has_no_extracted_text");
+            assert!(read.get("text").is_none());
+        }
         let result = raw_call(&u, &auth, meta, "upload_file", raw_args(id)).await;
         assert_eq!(result["result"]["isError"], false, "{result}");
         let image = engine::get(&u.f.state.db, &u.f.owner, &u.f.row.id)
@@ -246,12 +338,22 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
     let receipts = acks::history(&u.f.state.db, &u.f.owner, &u.f.row.id)
         .await
         .unwrap();
-    assert!(
-        receipts
-            .iter()
-            .any(|r| r.decided_by.as_deref() == Some("access_mode")
-                && r.summary.contains("文件.pdf"))
-    );
+    assert!(receipts.iter().any(
+        |r| r.decided_by.as_deref() == Some("access_mode") && r.summary.contains(expected_name)
+    ));
+    let missing = uploads::read(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        auth.chat.as_ref().unwrap(),
+        &json!({"attachment_id": Uuid::new_v4().to_string()}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        crate::errors::AppError::NotFound(message)
+            if message == "Attachment not found"
+    ));
     engine::delete(&u.f.state.db, &u.f.owner, &u.f.row.id)
         .await
         .unwrap();
@@ -264,6 +366,422 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
             .unwrap(),
         0
     );
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_attachment_file_metering_preserves_legacy_bytes_and_token_quantity() {
+    use crate::models::{
+        service_billing::{BillingMetric, LanePricing, ServiceBilling},
+        usage_meter::{COLLECTION_NAME as METERS, CredentialClass, UsageMeterRow},
+    };
+    use futures::TryStreamExt;
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let mut u = setup_raw("raw_file_metering").await;
+    // Billing-disabled fixtures intentionally open no meter rows. Enable the
+    // metering lane, while leaving paid-wallet rollout disabled.
+    u.f.state.config.billing_enabled = true;
+    flag(
+        &u.f,
+        crate::services::feature_flag_service::BILLING_FLAG_KEY,
+        false,
+    )
+    .await;
+    u.f.state.billing = std::sync::Arc::new(crate::services::billing::BillingService::new(
+        u.f.state.db.clone(),
+        std::sync::Arc::new(u.f.state.config.clone()),
+    ));
+    // The shared fixture is no-auth, whose request meter intentionally ignores
+    // pricing lanes. Use an authenticated connection to exercise byte/token use.
+    let credential = crate::services::user_api_key_service::create_api_key(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        &u.f.owner,
+        crate::services::user_api_key_service::CreateApiKeyParams {
+            label: "File metering",
+            credential_type: "bearer",
+            credential: "fixture-file-metering",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    u.f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &u.instance},
+            doc! {"$set": {
+                "auth_method": "bearer", "auth_key_name": "Authorization",
+                "api_key_id": &credential.id, "credential_binding": "user",
+            }},
+        )
+        .await
+        .unwrap();
+    u.f.state
+        .db
+        .collection::<bson::Document>(downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &u.catalog.id},
+            doc! {"$set": {
+                "auth_method": "bearer", "auth_key_name": "Authorization",
+                "requires_user_credential": true,
+            }},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&u.f).await;
+    let mut ordinary = auth.clone();
+    ordinary.chat = None;
+    // ASCII is both a real file (disposition) and byte-identical legacy text.
+    let bytes = vec![b'x'; 10 * 1024 * 1024];
+    Mock::given(method("GET"))
+        .and(path("/open-apis/download"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(bytes.clone())
+                .insert_header("content-type", "application/octet-stream")
+                .insert_header("content-disposition", "attachment; filename=large.log"),
+        )
+        .mount(&u.server)
+        .await;
+    for metric in [BillingMetric::Bytes, BillingMetric::Tokens] {
+        // MCP deliberately retains request metering without a synced lane.
+        // Configure the byte/token lane whose final usage this test exercises.
+        let lane: LanePricing = serde_json::from_value(json!({
+            "metric": metric,
+            "credits_per_unit": "1",
+            "lago_metric_code": format!("file_{}", metric.as_str()),
+            "sync_status": "synced",
+        }))
+        .unwrap();
+        let billing = ServiceBilling {
+            platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
+            platform_metric: Some(metric),
+            byok_pricing: Some(lane.clone()),
+            platform_key_pricing: Some(lane),
+            ..Default::default()
+        };
+        u.f.state
+            .db
+            .collection::<bson::Document>(downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &u.catalog.id},
+                doc! {"$set": {"billing": bson::to_bson(&billing).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let meters = u.f.state.db.collection::<UsageMeterRow>(METERS);
+        meters.delete_many(doc! {}).await.unwrap();
+        let legacy = raw_call(&u, &ordinary, false, "download_file", json!({})).await;
+        assert_eq!(text(&legacy).as_bytes(), bytes);
+        let retained = raw_call(&u, &auth, false, "download_file", json!({})).await;
+        assert_eq!(retained["result"]["isError"], false, "{retained}");
+        assert!(text(&retained).contains("attachment_id"));
+        assert!(text(&retained).len() < 500);
+        let rows: Vec<_> = meters
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "both provider calls must be metered");
+        let expected = if metric == BillingMetric::Bytes {
+            bytes.len() as i64
+        } else {
+            crate::services::llm_usage_service::estimate_tokens_from_bytes(bytes.len() as i64)
+        };
+        for row in rows {
+            assert_eq!(row.credential_class, CredentialClass::UserOwned);
+            assert_eq!(row.metric, metric);
+            assert_eq!(row.quantity, Some(expected));
+        }
+    }
+    for request in u.server.received_requests().await.unwrap() {
+        assert_eq!(
+            request.headers["authorization"],
+            "Bearer fixture-file-metering"
+        );
+    }
+    u.f.state.db.drop().await.unwrap();
+}
+
+async fn assembled_tool_text(
+    u: &UploadFixture,
+    auth: &McpAuthContext,
+    meta: bool,
+    result: &Value,
+) -> String {
+    use crate::services::assistant_tool_result_service as retained;
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let Ok(first) = serde_json::from_str::<Value>(text(result)) else {
+        return text(result).into();
+    };
+    if first.get("ref").is_none() {
+        return text(result).into();
+    }
+    let mut assembled = first["content"].as_str().unwrap().to_owned();
+    for part in 1..first["parts"].as_u64().unwrap() {
+        let args = json!({"ref": first["ref"], "part": part});
+        let params = if meta {
+            json!({"name": "nyx__call_tool", "arguments": {"tool_name": retained::TOOL_NAME, "arguments_json": args.to_string()}})
+        } else {
+            json!({"name": retained::TOOL_NAME, "arguments": args})
+        };
+        let page = rpc(&u.f, auth, "tools/call", Some(params)).await;
+        assert_eq!(page["result"]["isError"], false, "{page}");
+        let page: Value = serde_json::from_str(text(&page)).unwrap();
+        assembled.push_str(page["content"].as_str().unwrap());
+    }
+    assert_eq!(
+        assembled.len(),
+        first["total_bytes"].as_u64().unwrap() as usize
+    );
+    assembled
+}
+
+#[tokio::test]
+async fn raw_attachment_utf8_files_keep_exact_legacy_text_and_large_result_paging() {
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let u = setup_raw("raw_utf8_file_projection").await;
+    let auth = authenticate(&u.f).await;
+    let mut ordinary = auth.clone();
+    ordinary.chat = None;
+    // BOM removal and charset decoding must match the old reqwest reader,
+    // while multibyte text under 8,000 chars still uses main's byte paging once.
+    for (mime, bytes) in [
+        (
+            "application/octet-stream",
+            b"  name: NyxID\nkind: note\n".to_vec(),
+        ),
+        (
+            "application/octet-stream",
+            b"\xef\xbb\xbfname: NyxID\n".to_vec(),
+        ),
+        (
+            "application/octet-stream; charset=windows-1252",
+            "caf\u{e9}".as_bytes().to_vec(),
+        ),
+        ("application/octet-stream", "😀".repeat(7_999).into_bytes()),
+    ] {
+        u.server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/open-apis/download"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(bytes.clone())
+                    .insert_header("content-type", mime)
+                    .insert_header("content-disposition", "attachment; filename=notes.yaml"),
+            )
+            .mount(&u.server)
+            .await;
+        let legacy = raw_call(&u, &ordinary, false, "download_file", json!({})).await;
+        for meta in [false, true] {
+            let downloaded = raw_call(&u, &auth, meta, "download_file", json!({})).await;
+            let full_text = assembled_tool_text(&u, &auth, meta, &downloaded).await;
+            let suffix = full_text
+                .strip_prefix(text(&legacy))
+                .expect("exact legacy text prefix");
+            let handle = suffix.strip_prefix('\n').unwrap();
+            let (metadata, hint) = handle.split_once(" Use attachment_id").unwrap();
+            let metadata: Value = serde_json::from_str(metadata).unwrap();
+            assert_eq!(metadata["name"], "notes.yaml");
+            assert!(hint.contains("nyx__attachment_read"));
+            let id = metadata["attachment_id"].as_str().unwrap();
+            // Any extension is readable, including YAML, XML, LOG, ICS and HTML.
+            let read = uploads::read(
+                &u.f.state.db,
+                &u.f.state.encryption_keys,
+                auth.chat.as_ref().unwrap(),
+                &json!({"attachment_id": id, "limit": 6000}),
+            )
+            .await
+            .unwrap();
+            let page_text = read["text"].as_str().unwrap();
+            assert!(!page_text.is_empty());
+            assert!(std::str::from_utf8(&bytes).unwrap().starts_with(page_text));
+        }
+    }
+    assert_eq!(
+        u.server.received_requests().await.unwrap().len(),
+        3,
+        "reading a large result must not repeat the provider operation"
+    );
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_attachment_large_utf8_files_are_paged_by_attachment_read_for_any_extension() {
+    let _budget_guard = uploads::byte_budget::test_guard().await;
+    let u = setup_raw("raw_large_utf8_file_read").await;
+    let auth = authenticate(&u.f).await;
+    let large = "x".repeat(8_001);
+    Mock::given(method("GET"))
+        .and(path("/open-apis/download"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(large.as_bytes())
+                .insert_header("content-type", "application/octet-stream")
+                .insert_header("content-disposition", "attachment; filename=large.log"),
+        )
+        .mount(&u.server)
+        .await;
+    let downloaded = raw_call(&u, &auth, false, "download_file", json!({})).await;
+    assert!(!text(&downloaded).contains(&large));
+    let metadata: Value = serde_json::from_str(text(&downloaded).lines().next().unwrap()).unwrap();
+    let id = metadata["attachment_id"].as_str().unwrap();
+    for extension in ["yaml", "xml", "log", "ics", "html"] {
+        u.f.state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(doc! {"_id": &u.f.row.id}, doc! {"$set": {"active_turn.attachments.$[file].label": format!("file.{extension}")}})
+            .array_filters(vec![doc! {"file.id": id}]).await.unwrap();
+        let first = uploads::read(
+            &u.f.state.db,
+            &u.f.state.encryption_keys,
+            auth.chat.as_ref().unwrap(),
+            &json!({"attachment_id": id, "limit": 6000}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["text"].as_str(), Some(&large[..6000]));
+        assert_eq!(first["next_offset"], 6000);
+        let second = uploads::read(
+            &u.f.state.db,
+            &u.f.state.encryption_keys,
+            auth.chat.as_ref().unwrap(),
+            &json!({"attachment_id": id, "offset": 6000}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second["text"].as_str(), Some(&large[6000..]));
+        assert!(second["next_offset"].is_null());
+    }
+    // Saturation is a bounded, retryable result; cancellation leaves no waiter.
+    let full = uploads::byte_budget::reserve(uploads::byte_budget::CAPACITY / 2)
+        .await
+        .unwrap();
+    let busy = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        rpc(
+            &u.f,
+            &auth,
+            "tools/call",
+            Some(json!({"name": "nyx__attachment_read", "arguments": {"attachment_id": id}})),
+        ),
+    )
+    .await
+    .expect("bounded budget wait");
+    assert_error(&busy);
+    assert_eq!(payload(&busy)["error"], "attachment_busy");
+    assert_eq!(payload(&busy)["retryable"], true);
+    drop(full);
+    assert_eq!(
+        uploads::byte_budget::available_for_tests(),
+        uploads::byte_budget::CAPACITY
+    );
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_attachment_read_misses_preserve_original_error_and_add_only_one_indexed_lookup() {
+    let u = setup_raw("raw_file_read_miss").await;
+    let auth = authenticate(&u.f).await;
+    let chat = auth.chat.as_ref().unwrap();
+    let id = Uuid::new_v4().to_string();
+    u.f.state.db.run_command(doc! {"profile": 2}).await.unwrap();
+    let original = uploads::for_chat(&u.f.state.db, chat, &id)
+        .await
+        .unwrap_err();
+    u.f.state.db.run_command(doc! {"profile": 0}).await.unwrap();
+    let profile = u.f.state.db.collection::<bson::Document>("system.profile");
+    let conversations = profile
+        .count_documents(
+            doc! {"command.find": crate::models::assistant_conversation::COLLECTION_NAME},
+        )
+        .await
+        .unwrap();
+    u.f.state.db.run_command(doc! {"profile": 2}).await.unwrap();
+    let actual = uploads::read(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        chat,
+        &json!({"attachment_id": id}),
+    )
+    .await
+    .unwrap_err();
+    u.f.state.db.run_command(doc! {"profile": 0}).await.unwrap();
+    assert_eq!(actual.to_string(), original.to_string());
+    assert_eq!(
+        profile
+            .count_documents(
+                doc! {"command.find": crate::models::assistant_conversation::COLLECTION_NAME}
+            )
+            .await
+            .unwrap(),
+        2 * conversations,
+        "a missing tool row must not load the thread again"
+    );
+    let lookup = profile
+        .find_one(
+            doc! {"command.find": crate::models::assistant_attachment::COLLECTION_NAME,
+            "command.filter.origin": "tool"},
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let examined = lookup
+        .get_i64("docsExamined")
+        .unwrap_or_else(|_| i64::from(lookup.get_i32("docsExamined").unwrap()));
+    assert_eq!(examined, 0);
+    let command = lookup.get_document("command").unwrap();
+    assert_eq!(
+        command
+            .get_document("filter")
+            .unwrap()
+            .get_str("_id")
+            .unwrap(),
+        id
+    );
+    assert_eq!(
+        command.get_document("projection").unwrap(),
+        &doc! {"_id": 1}
+    );
+    assert_eq!(
+        profile
+            .count_documents(
+                doc! {"command.find": crate::models::assistant_attachment::COLLECTION_NAME,
+                "command.filter.origin": "tool"}
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    // A missing conversation has a distinct original error; preserve that too.
+    let mut absent = chat.clone();
+    absent.conversation_id = format!("nyxa-{}", Uuid::new_v4().simple());
+    let original = uploads::for_chat(&u.f.state.db, &absent, &id)
+        .await
+        .unwrap_err();
+    let actual = uploads::read(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        &absent,
+        &json!({"attachment_id": id}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(actual.to_string(), original.to_string());
     u.f.state.db.drop().await.unwrap();
 }
 
@@ -368,6 +886,7 @@ async fn raw_attachment_schema_is_always_on_preserves_config_contract_and_denies
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &raw_args(&u.attachment_id),
@@ -386,6 +905,7 @@ async fn raw_attachment_schema_is_always_on_preserves_config_contract_and_denies
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &raw_args(&u.attachment_id)
@@ -452,6 +972,7 @@ async fn raw_attachment_schema_is_always_on_preserves_config_contract_and_denies
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &generic,
             endpoint,
             &raw_args(&u.attachment_id)
@@ -491,6 +1012,7 @@ async fn raw_attachment_chat_accepts_model_authored_body_and_handle_without_flag
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &body_args,
@@ -506,6 +1028,7 @@ async fn raw_attachment_chat_accepts_model_authored_body_and_handle_without_flag
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &both,
@@ -753,7 +1276,7 @@ async fn raw_attachment_tool_file_limits_live_turn_fences_and_chunked_roundtrip(
         .unwrap()
         .contains("file_exceeds_20_mib")
     );
-    for _ in 1..engine::MAX_TURN_ATTACHMENTS {
+    for _ in 1..engine::MAX_TURN_FILES {
         files::retain(
             &u.f.state.db,
             &u.f.state.encryption_keys,
@@ -783,6 +1306,39 @@ async fn raw_attachment_tool_file_limits_live_turn_fences_and_chunked_roundtrip(
             .count_documents(doc! {"origin":"tool"})
             .await
             .unwrap(),
+        8
+    );
+    // File rows have their own eight-entry budget; all eight image slots remain.
+    for index in 0..=engine::MAX_TURN_ATTACHMENTS {
+        let image = engine::attach_routed_image(
+            &u.f.state.db,
+            &u.f.state.encryption_keys,
+            &chat.user_id,
+            &chat.conversation_id,
+            &format!("later-{index}.png"),
+            "image/png",
+            b"png",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(image.is_some(), index < engine::MAX_TURN_ATTACHMENTS);
+    }
+    let active = engine::get(&u.f.state.db, &u.f.owner, &u.f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap();
+    assert_eq!(
+        active.attachments.len(),
+        engine::MAX_TURN_FILES + engine::MAX_TURN_ATTACHMENTS
+    );
+    assert_eq!(
+        active
+            .attachments
+            .iter()
+            .filter(|a| engine::chat_tool_image(a))
+            .count(),
         8
     );
     let mut other = chat.clone();
@@ -830,6 +1386,66 @@ async fn raw_attachment_tool_file_limits_live_turn_fences_and_chunked_roundtrip(
         .await
         .is_err()
     );
+    u.f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &u.f.row.id},
+            doc! {"$set": {"active_turn.stop_requested": false}},
+        )
+        .await
+        .unwrap();
+    let row = engine::get(&u.f.state.db, &u.f.owner, &u.f.row.id)
+        .await
+        .unwrap();
+    let reply_id = Uuid::new_v4().to_string();
+    engine::finish_turn(
+        &u.f.state.db,
+        &row,
+        &chat.api_key_id,
+        &reply_id,
+        &engine::TurnResult {
+            text: "Files and images are ready.".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let reply = engine::messages(&u.f.state.db, &u.f.owner, &u.f.row.id, 10, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.id == reply_id)
+        .unwrap();
+    assert_eq!(
+        reply.attachments.len(),
+        16,
+        "settlement preserves both bounded sets"
+    );
+    assert_eq!(
+        engine::settled_tool_attachments(
+            &u.f.state.db,
+            &u.f.owner,
+            &u.f.row.id,
+            chat.turn_id.as_deref().unwrap()
+        )
+        .await
+        .len(),
+        8,
+        "image readers filter before their cap"
+    );
+    let plan = crate::handlers::nyxbot::images::ImageSendPlan::settled(
+        &u.f.state.db,
+        &u.f.owner,
+        &u.f.row.id,
+        chat.turn_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plan.attachments.len(), 8);
+    assert!(plan.attachments.iter().all(engine::chat_tool_image));
     u.f.state.db.drop().await.unwrap();
 }
 
@@ -929,6 +1545,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 auth.chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &args
@@ -953,6 +1570,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             &unsupported,
             &args
@@ -969,6 +1587,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 auth.chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 &unsupported,
                 &args
@@ -999,6 +1618,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args
@@ -1023,7 +1643,9 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
 #[tokio::test]
 async fn raw_attachment_binary_response_limits_preserve_the_original_reader() {
     let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
-    let u = setup_raw("raw_response_limits").await;
+    let mut u = setup_raw("raw_response_limits").await;
+    // Both readers compare the same loopback response, including its complete body.
+    u.f.state.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
     let auth = authenticate(&u.f).await;
     let mut ordinary = auth.clone();
     ordinary.chat = None;
@@ -1067,6 +1689,12 @@ async fn raw_attachment_binary_response_limits_preserve_the_original_reader() {
             None
         };
         let expected = raw_call(&u, &ordinary, false, "download_file", json!({})).await;
+        assert_eq!(
+            expected["result"]["isError"],
+            false,
+            "ordinary body read failed: {}",
+            text(&expected)
+        );
         for meta in [false, true] {
             let result = raw_call(&u, &auth, meta, "download_file", json!({})).await;
             assert_legacy_chat_projection(&u, &auth, meta, &result, text(&expected)).await;
@@ -1107,6 +1735,7 @@ async fn raw_attachment_legacy_arguments_and_exact_descriptors_keep_original_par
             &u.f.state.db,
             &u.f.state.encryption_keys,
             chat,
+            &auth.assistant_operation_scopes,
             &service,
             &json_endpoint,
             &args,
@@ -1130,6 +1759,7 @@ async fn raw_attachment_legacy_arguments_and_exact_descriptors_keep_original_par
             &u.f.state.db,
             &u.f.state.encryption_keys,
             chat,
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args,
@@ -1638,7 +2268,17 @@ async fn raw_attachment_candidate_text_is_identical_to_legacy_reqwest_decoding()
             .mount(&u.server)
             .await;
         let result = raw_call(&u, &auth, false, "download_file", json!({})).await;
-        let meta: Value = serde_json::from_str(text(&result).lines().next().unwrap()).unwrap();
+        let metadata_text = if let Ok(legacy_text) = std::str::from_utf8(bytes) {
+            text(&result)
+                .strip_prefix(&format!("{legacy_text}\n"))
+                .expect("short UTF-8 files preserve the original text")
+                .split_once(" Use attachment_id")
+                .unwrap()
+                .0
+        } else {
+            text(&result).lines().next().unwrap()
+        };
+        let meta: Value = serde_json::from_str(metadata_text).unwrap();
         let id = meta["attachment_id"].as_str().unwrap();
         assert_eq!(
             engine::read_attachment(
@@ -1669,9 +2309,37 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
         .find(|e| e.name == "upload_file")
         .unwrap();
     let args = raw_args(&u.attachment_id);
-    u.f.state.db.run_command(doc! {"profile":2}).await.unwrap();
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    let finds = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = finds.clone();
+    let mut options =
+        mongodb::options::ClientOptions::parse(crate::test_utils::selected_test_database_uri())
+            .await
+            .unwrap();
+    options.command_event_handler = Some(EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && let Ok(collection) = event.command.get_str("find")
+        {
+            let projection = event.command.get_document("projection").ok().cloned();
+            observed
+                .lock()
+                .unwrap()
+                .push((collection.to_owned(), projection));
+        }
+    }));
+    let db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database(u.f.state.db.name());
+    let count = |name: &str| {
+        finds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(collection, _)| collection == name)
+            .count()
+    };
     let validated = crate::services::raw_attachment_tool::uses_handle(
-        &u.f.state.db,
+        &db,
         auth.chat.as_ref(),
         &service,
         endpoint,
@@ -1681,59 +2349,38 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
     .unwrap()
     .unwrap();
     let prepared = crate::services::raw_attachment_tool::materialize(
-        &u.f.state.db,
+        &db,
         &u.f.state.encryption_keys,
         validated,
     )
     .await
     .unwrap();
-    u.f.state.db.run_command(doc! {"profile":0}).await.unwrap();
-    let profile = u.f.state.db.collection::<bson::Document>("system.profile");
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":service_endpoint::COLLECTION_NAME})
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":"feature_flag_overrides"})
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(count(service_endpoint::COLLECTION_NAME), 1);
+    assert_eq!(count("feature_flag_overrides"), 0);
     // All three identity snapshots (before/after materialization and final egress)
     // project only metadata; no payload or key-rotation metadata is fetched.
     let guard = crate::services::assistant_service_execution::HttpEgressGuard::with_attachment(
         None,
-        &u.f.state.db,
+        &db,
         &service,
         endpoint,
         Some(&prepared.binding),
     )
     .unwrap();
-    u.f.state.db.run_command(doc! {"profile":2}).await.unwrap();
     guard.revalidate().await.unwrap();
-    u.f.state.db.run_command(doc! {"profile":0}).await.unwrap();
-    let snapshots: Vec<bson::Document> = futures::TryStreamExt::try_collect(
-        profile
-            .find(doc! {
-                "command.find":crate::models::assistant_attachment::COLLECTION_NAME,
-                "command.projection.chunk_index":1,
-            })
-            .await
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let snapshots: Vec<_> = finds
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(collection, projection)| {
+            let projection = projection.as_ref()?;
+            (collection == crate::models::assistant_attachment::COLLECTION_NAME
+                && projection.get_i32("chunk_index") == Ok(1))
+            .then(|| projection.clone())
+        })
+        .collect();
     assert_eq!(snapshots.len(), 3);
-    for row in snapshots {
-        let projection = row
-            .get_document("command")
-            .unwrap()
-            .get_document("projection")
-            .unwrap();
+    for projection in snapshots {
         for field in [
             "data_encrypted",
             "text_encrypted",
@@ -1742,20 +2389,8 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
             assert!(!projection.contains_key(field));
         }
     }
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":service_endpoint::COLLECTION_NAME})
-            .await
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":"feature_flag_overrides"})
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(count(service_endpoint::COLLECTION_NAME), 2);
+    assert_eq!(count("feature_flag_overrides"), 0);
     drop(guard);
     drop(prepared);
     let endpoints =
@@ -1773,6 +2408,7 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &args,
@@ -1804,6 +2440,7 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 chat,
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &args,

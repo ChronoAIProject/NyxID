@@ -64,6 +64,7 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
     profile: "Profile",
     security: "Security",
     sessions: "Sessions",
+    notifications: "Notifications",
     mcp: "MCP",
     display: "Display",
     privacy: "Privacy",
@@ -129,7 +130,6 @@ const PAGE_LABELS: Record<string, string> = {
   get "/settings"() { return translateUi("Account Settings"); },
   get "/settings/consents"() { return translateUi("Access & Authorizations"); },
   get "/devices/onboard"() { return translateUi("Device Onboard"); },
-  get "/approvals/settings"() { return translateUi("Notification Settings"); },
   get "/approvals/history"() { return translateUi("Approval History"); },
   get "/approvals/grants"() { return translateUi("Active Grants"); },
   get "/developer/apps"() { return translateUi("Developer Apps"); },
@@ -144,6 +144,7 @@ const PAGE_LABELS: Record<string, string> = {
   get "/admin/users"() { return translateUi("Users"); },
   get "/admin/audit-log"() { return translateUi("Audit Log"); },
   get "/admin/usage"() { return translateUi("Usage"); },
+  get "/admin/crash-reports"() { return translateUi("Crash reports"); },
   get "/admin/integrity"() { return translateUi("Integrity"); },
   get "/admin/credits"() { return translateUi("Credits"); },
   get "/admin/billing"() { return translateUi("Billing"); },
@@ -161,6 +162,7 @@ const PAGE_LABELS: Record<string, string> = {
 };
 
 const DETAIL_LABELS: Record<string, string> = {
+  get "/admin/crash-reports"() { return translateUi("Crash report"); },
   get "/keys"() { return translateUi("Credential"); },
   get "/nodes"() { return translateUi("Node"); },
   get "/services"() { return translateUi("Service"); },

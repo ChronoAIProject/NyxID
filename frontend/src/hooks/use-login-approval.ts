@@ -181,7 +181,7 @@ export function useLoginApproval(flow: LoginFlow, code: string, query: string) {
         current.current = result;
         setIdentity(result);
         if (result.verified && result.keep_signed_in)
-          await useAuthStore.getState().checkAuth({ ephemeral: true });
+          await useAuthStore.getState().checkAuth({ ephemeral: true, isCurrent });
       },
     };
   }

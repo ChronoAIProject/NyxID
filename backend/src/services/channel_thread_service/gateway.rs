@@ -5,6 +5,8 @@ use crate::models::{
     channel_thread::ThreadSenderKind,
 };
 use serde_json::Value;
+#[path = "notice.rs"]
+pub(super) mod notice;
 
 pub fn negotiated(channel: &NyxbotChannel) -> bool {
     channel.transport == "gateway"
@@ -118,6 +120,7 @@ pub(crate) async fn reply_target(
     bot: &ChannelBot,
     credentials: &crate::services::channel_platform::BotCredentials<'_>,
     source: &ChannelMessage,
+    plain_text: Option<&str>,
 ) -> ReplyResult<ThreadReplyTarget> {
     use crate::models::nyxbot_channel::{EVENTS_COLLECTION_NAME as EVENTS, NyxbotEvent};
     let Some(channel) = db
@@ -134,15 +137,64 @@ pub(crate) async fn reply_target(
     if !negotiated(&channel) {
         return Err(ReplyError::target(reply_unavailable()));
     }
-    if let Some(event) = db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {
-        "channel_id":&channel.id,"event_id":message,"delivery.origin.thread.source_message_id":message,
-    }).await? {
-        let (owner, origin, conversation) = admitted_reply(&event, &channel, message).map_err(ReplyError::target)?;
-        crate::services::channel_thread_follow_service::validate_delivery(db, owner, origin, conversation)
-            .await.map_err(ReplyError::authority)?;
-        let mut target = super::resolution::resolve_for_reply(db, adapter, bot, credentials, message).await?;
-        target.admitted = Some((owner.into(), origin.clone(), conversation.into()));
+    use futures::TryStreamExt;
+    // The pin survives the shorter-lived event. A replacement binding, or
+    // expiry of the notice, cannot switch the source to unadmitted routing.
+    let requires_notice = source
+        .nyxbot_admission
+        .as_ref()
+        .is_some_and(|a| a.requires_org_notice);
+    let filter = if requires_notice {
+        doc! {"org_notice.bot_id":&bot.id,"event_id":message}
+    } else {
+        doc! {"channel_id":&channel.id,"event_id":message,"delivery.origin.thread.source_message_id":message}
+    };
+    let mut events = db
+        .collection::<bson::Document>(EVENTS)
+        .find(filter)
+        .projection(
+            doc! {"event_context_ciphertext":0,"response_reply.ciphertext":0,"media":0,
+            "delivery.target_ciphertext":0},
+        )
+        .limit(if requires_notice { 2 } else { 1 })
+        .await?;
+    if let Some(raw) = events.try_next().await? {
+        if requires_notice && events.try_next().await?.is_some() {
+            return Err(ReplyError::target(reply_unavailable()));
+        }
+        let event: NyxbotEvent = bson::from_document(raw.clone())
+            .map_err(|_| ReplyError::target(reply_unavailable()))?;
+        if raw.contains_key("org_notice") && event.turn_id.is_none() {
+            return Box::pin(notice::target(
+                db,
+                adapter,
+                bot,
+                credentials,
+                source,
+                &channel,
+                &raw,
+                &event,
+                plain_text,
+            ))
+            .await;
+        }
+        let (owner, origin, conversation) =
+            admitted_reply(&event, &channel, message).map_err(ReplyError::target)?;
+        crate::services::channel_thread_follow_service::validate_delivery(
+            db,
+            owner,
+            origin,
+            conversation,
+        )
+        .await
+        .map_err(ReplyError::authority)?;
+        let mut target =
+            super::resolution::resolve_for_reply(db, adapter, bot, credentials, message).await?;
+        target.authority = ReplyBinding::Turn(owner.into(), origin.clone(), conversation.into());
         return Ok(target);
+    }
+    if requires_notice {
+        return Err(ReplyError::target(reply_unavailable()));
     }
     super::resolution::resolve_for_reply(db, adapter, bot, credentials, message).await
 }

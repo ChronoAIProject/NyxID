@@ -40,7 +40,7 @@ beforeEach(() => {
       if (!healthy) throw new Error("offline");
       return Response.json(served);
     }
-    if (input === "/index.html") {
+    if (input === "/assistant") {
       return new Response(`<meta name="nyxid-build-id" content="${htmlId}">`);
     }
     return new Response("asset", { headers: {
@@ -86,7 +86,7 @@ describe("background build updates", () => {
     expect(reload).not.toHaveBeenCalled();
     for (const [url, config] of fetcher.mock.calls) {
       expect(config?.credentials).toBe("omit");
-      if (url === "/health" || url === "/build-version.json" || url === "/index.html") {
+      if (url === "/health" || url === "/build-version.json" || url === "/assistant") {
         expect(config?.cache).toBe("no-store");
       }
     }
@@ -112,7 +112,7 @@ describe("background build updates", () => {
     fetcher.mockImplementation(async (input) => {
       if (input === "/health") throw new Error("backend unavailable");
       if (input === "/build-version.json") return Response.json(manifest());
-      if (input === "/index.html") return new Response(`<meta name="nyxid-build-id" content="${next}">`);
+      if (input === "/assistant") return new Response(`<meta name="nyxid-build-id" content="${next}">`);
       return new Response("asset", { headers: { "content-type": String(input).endsWith(".css") ? "text/css" : "text/javascript" } });
     });
     await start();

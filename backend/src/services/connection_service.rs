@@ -36,12 +36,14 @@ pub async fn connect_user(
     credential: Option<&str>,
     credential_label: Option<&str>,
 ) -> AppResult<ConnectionResult> {
-    connect_user_with_audit(
+    let service = load_connectable_catalog(db, service_id).await?;
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
+    write_connection(
         db,
         encryption_keys,
         node_ws_manager,
         user_id,
-        service_id,
+        &service,
         credential,
         credential_label,
         None,
@@ -60,13 +62,42 @@ pub(crate) async fn connect_user_with_audit(
     credential_label: Option<&str>,
     audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
 ) -> AppResult<ConnectionResult> {
-    // Fetch service
-    let service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+    let service = load_connectable_catalog(db, service_id).await?;
+    write_connection(
+        db,
+        encryption_keys,
+        node_ws_manager,
+        user_id,
+        &service,
+        credential,
+        credential_label,
+        audit,
+    )
+    .await
+}
+
+async fn load_connectable_catalog(
+    db: &mongodb::Database,
+    service_id: &str,
+) -> AppResult<DownstreamService> {
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
-        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn write_connection(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    service: &DownstreamService,
+    credential: Option<&str>,
+    credential_label: Option<&str>,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<ConnectionResult> {
+    let service_id = service.id.as_str();
     if service.service_type != "http" {
         return Err(AppError::BadRequest(
             "SSH services do not support credential connections".to_string(),
@@ -186,7 +217,7 @@ pub(crate) async fn connect_user_with_audit(
         .await?;
 
     Ok(ConnectionResult {
-        service_name: service.name,
+        service_name: service.name.clone(),
         connected_at: now,
     })
 }
@@ -565,7 +596,8 @@ mod tests {
             stage
                 .decrypt(staged.credential_encrypted.as_deref().unwrap())
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             b"staged-secret"
         );
         let mut migration = test_encryption_keys();

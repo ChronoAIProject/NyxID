@@ -24,8 +24,8 @@ use crate::services::user_credentials_service;
 /// Decrypted token ready for injection.
 pub struct DecryptedProviderToken {
     pub token_type: String,
-    pub access_token: Option<String>,
-    pub api_key: Option<String>,
+    pub access_token: Option<zeroize::Zeroizing<String>>,
+    pub api_key: Option<zeroize::Zeroizing<String>>,
 }
 
 /// Outcome of an OAuth/device-code callback, regardless of write path.
@@ -3456,7 +3456,7 @@ async fn load_provider_token(
 async fn decrypt_provider_access_token(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     if !matches!(token.status.as_str(), "active" | "expired") {
         return Err(AppError::Internal(
             "OAuth credential is no longer active".to_string(),
@@ -3465,12 +3465,9 @@ async fn decrypt_provider_access_token(
     let encrypted = token.access_token_encrypted.as_ref().ok_or_else(|| {
         AppError::Internal("OAuth token missing encrypted access_token".to_string())
     })?;
-    Ok(
-        super::credential_record_service::CredentialRecord::token(token)
-            .text(encryption_keys, "access_token_encrypted", encrypted)
-            .await?
-            .to_string(),
-    )
+    super::credential_record_service::CredentialRecord::token(token)
+        .text(encryption_keys, "access_token_encrypted", encrypted)
+        .await
 }
 
 async fn refresh_provider_token_with_runtime(
@@ -3478,7 +3475,7 @@ async fn refresh_provider_token_with_runtime(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
     runtime: &ClusterLeaseRuntime,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     let lease_name = provider_token_refresh_lease_name(&token.id);
     let Some(lease) = runtime.acquire(db, &lease_name).await? else {
         let current = wait_for_concurrent_refresh(
@@ -3618,8 +3615,7 @@ async fn materialize_active_provider_token(
             })?;
             let decrypted = super::credential_record_service::CredentialRecord::token(&token)
                 .text(encryption_keys, "api_key_encrypted", encrypted)
-                .await?
-                .to_string();
+                .await?;
 
             Ok(DecryptedProviderToken {
                 token_type: "api_key".to_string(),
@@ -3678,8 +3674,7 @@ async fn materialize_active_provider_token(
             })?;
             let decrypted = super::credential_record_service::CredentialRecord::token(&token)
                 .text(encryption_keys, "access_token_encrypted", encrypted)
-                .await?
-                .to_string();
+                .await?;
 
             Ok(DecryptedProviderToken {
                 token_type: "oauth2".to_string(),
@@ -3728,50 +3723,55 @@ async fn transition_legacy_keys_from_stored_token_state(
 
 /// Atomically claim the currently active provider token by its observed `_id`.
 /// A callback replacement receives a new `_id` and cannot be captured by this claim.
+#[cfg(test)]
 pub async fn claim_provider_token_by_id(
     db: &mongodb::Database,
     user_id: &str,
     token_id: &str,
 ) -> AppResult<Option<UserProviderToken>> {
-    claim_provider_token_by_id_with_expected_state_version(db, user_id, token_id, None).await
+    let context = (db, user_id, token_id);
+    super::transaction_service::run_db_only(db, &context, |tx, &(db, user_id, token_id)| {
+        Box::pin(claim_provider_token_in_session(
+            db, user_id, token_id, None, tx,
+        ))
+    })
+    .await
 }
 
-/// Atomically claim a provider token while optionally fencing the write on
-/// authorization evidence read by the browser.
-pub async fn claim_provider_token_by_id_with_expected_state_version(
+pub(super) async fn claim_provider_token_in_session(
     db: &mongodb::Database,
     user_id: &str,
     token_id: &str,
     expected_state_version: Option<i64>,
+    tx: &mut mongodb::ClientSession,
 ) -> AppResult<Option<UserProviderToken>> {
-    let context = (db, user_id, token_id, expected_state_version);
-    super::transaction_service::run_db_only(db, &context, |tx, context| {
-        let &(db, user_id, token_id, expected_state_version) = context;
-        Box::pin(async move {
-            let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
-            if let Some(expected) = expected_state_version {
-                let current = collection.find_one(doc! {"_id":token_id,"user_id":user_id})
-                    .session(&mut *tx).await?;
-                if current.is_some_and(|token| token.state_version != expected) {
-                    return Err(AppError::Conflict(
-                        "the provider token changed since this action was prepared".into(),
-                    ));
-                }
-            }
-            let mut filter = doc! {"_id":token_id,"user_id":user_id,"status":{"$ne":"revoked"}};
-            if let Some(expected) = expected_state_version {
-                filter.insert("$expr", doc! {"$eq":[{"$ifNull":["$state_version",0_i64]},expected]});
-            }
-            let claimed = collection.find_one_and_update(filter, vec![doc! {"$set":{
+    let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
+    if let Some(expected) = expected_state_version {
+        let current = collection
+            .find_one(doc! {"_id":token_id,"user_id":user_id})
+            .session(&mut *tx)
+            .await?;
+        if current.is_some_and(|token| token.state_version != expected) {
+            return Err(AppError::Conflict(
+                "the provider token changed since this action was prepared".into(),
+            ));
+        }
+    }
+    let mut filter = doc! {"_id":token_id,"user_id":user_id,"status":{"$ne":"revoked"}};
+    if let Some(expected) = expected_state_version {
+        filter.insert(
+            "$expr",
+            doc! {"$eq":[{"$ifNull":["$state_version",0_i64]},expected]},
+        );
+    }
+    let claimed = collection.find_one_and_update(filter, vec![doc! {"$set":{
                 "status":"revoked","api_key_encrypted":bson::Bson::Null,
                 "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
                 "secret_context_versions":{"$literal":{}},
                 "updated_at":bson::DateTime::from_chrono(Utc::now()),
                 "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
             }}]).return_document(ReturnDocument::Before).session(&mut *tx).await?;
-            Ok(claimed)
-        })
-    }).await
+    Ok(claimed)
 }
 
 fn build_user_token_summary(
@@ -5125,7 +5125,8 @@ mod tests {
             assert_eq!(
                 oauth_flow::refresh_oauth_token(&db, &enc, &legacy)
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .as_str(),
                 "rotated-access"
             );
             let saved = db
@@ -5288,7 +5289,8 @@ mod tests {
                 assert_eq!(
                     oauth_flow::refresh_oauth_token(&db, &enc, &token)
                         .await
-                        .unwrap(),
+                        .unwrap()
+                        .as_str(),
                     "rotated-access"
                 );
                 let requests = server.received_requests().await.unwrap();
@@ -8099,8 +8101,8 @@ mod tests {
             .expect("contender task")
             .expect("second replica refresh");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(first, "fresh-legacy-access");
-        assert_eq!(second, "fresh-legacy-access");
+        assert_eq!(first.as_str(), "fresh-legacy-access");
+        assert_eq!(second.as_str(), "fresh-legacy-access");
     }
 
     #[tokio::test]
@@ -8219,8 +8221,13 @@ mod tests {
             .await
             .expect("should return decrypted token");
 
+        let _: &zeroize::Zeroizing<String> = result.api_key.as_ref().unwrap();
+        assert!(!format!("{result:?} {result:#?}").contains("sk-secret-123"));
         assert_eq!(result.token_type, "api_key");
-        assert_eq!(result.api_key.as_deref(), Some("sk-secret-123"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("sk-secret-123")
+        );
         assert!(result.access_token.is_none());
     }
 
@@ -8252,7 +8259,10 @@ mod tests {
             .expect("should return decrypted token");
 
         assert_eq!(result.token_type, "oauth2");
-        assert_eq!(result.access_token.as_deref(), Some("access-token-xyz"));
+        assert_eq!(
+            result.access_token.as_ref().map(|s| s.as_str()),
+            Some("access-token-xyz")
+        );
         assert!(result.api_key.is_none());
     }
 
@@ -8306,7 +8316,10 @@ mod tests {
         let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .expect("should find expired-status token");
-        assert_eq!(result.api_key.as_deref(), Some("key-expired"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("key-expired")
+        );
     }
 
     #[tokio::test]
@@ -8658,7 +8671,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.token_type, "api_key");
-        assert_eq!(result.api_key.as_deref(), Some("roundtrip-key"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("roundtrip-key")
+        );
     }
 
     #[tokio::test]

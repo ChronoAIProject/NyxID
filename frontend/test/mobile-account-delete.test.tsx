@@ -26,9 +26,11 @@ function harness() {
   const deviceStorage = new Map<string, string>();
   const box = ({ children }: NativeProps) => <div>{children}</div>;
   const native = {
+    Platform: { OS: "ios" },
     Alert: { alert: (title: string, message: string, buttons: NativeButton[]) => alerts.push({ title, message, buttons }) },
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
     AppState: { currentState: "active", addEventListener: () => ({ remove: () => undefined }) },
+    Platform: { OS: "ios" },
     // Shared mobile controls animate (e.g. SegmentControl). Animations are
     // inert here: values hold numbers and start/stop do nothing.
     Animated: {
@@ -42,6 +44,7 @@ function harness() {
       timing: () => ({ start: () => undefined, stop: () => undefined }),
     },
     Keyboard: { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined },
+    Platform: { OS: "android" },
     Share: { share: async () => ({}) },
     useWindowDimensions: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }),
     Image: () => null,
@@ -77,6 +80,7 @@ function harness() {
         if (name === "react/jsx-runtime") return jsxRuntime;
         if (name === "@tanstack/react-query") return query;
         if (name === "react-native") return native;
+        if (name === "react-native-safe-area-context") return { SafeAreaView: box };
         if (name === "@react-native-async-storage/async-storage") return { __esModule: true, default: {
           getItem: async (key: string) => deviceStorage.get(key) ?? null,
           setItem: async (key: string, value: string) => { deviceStorage.set(key, value); },
@@ -87,6 +91,22 @@ function harness() {
         if (name === "expo/fetch") return { fetch: transport };
         if (name === "lucide-react-native") return new Proxy({ __esModule: true }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => null });
         if (name === "expo-linear-gradient") return { LinearGradient: box };
+        // Shared page containers animate the Duo rail inset; outside the
+        // Duo they render a plain view, so a static stand-in suffices.
+        // Floating header controls fall back to the theme surface without
+        // liquid glass.
+        if (name === "expo-glass-effect") return { GlassView: box, GlassContainer: box, isLiquidGlassAvailable: () => false };
+        if (name === "react-native-reanimated") {
+          const transition = { duration: () => transition, reduceMotion: () => transition };
+          return {
+            __esModule: true,
+            default: { View: box },
+            useAnimatedStyle: () => ({}),
+            FadeIn: transition,
+            FadeOut: transition,
+            ReduceMotion: { System: "system" },
+          };
+        }
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
         // Native keyboard measurements are inert in this account deletion suite.
         if (name.endsWith("/KeyboardViewport")) return { KeyboardViewport: box };
@@ -98,6 +118,8 @@ function harness() {
         // The Voice settings row is gated on a live feature read; this suite covers deletion only.
         if (name.endsWith("/assistantVoiceApi")) return { assistantVoiceFeatures: async () => [] };
         if (name.endsWith("/pushNotifications")) return { activatePushAfterLogin: vi.fn() };
+        // No paired Apple Watch here, so the Apple Watch row stays hidden.
+        if (name.endsWith("/watch/watchLink")) return { nativeWatchLink: () => null };
         if (name.endsWith("/errorMessages")) return { resolveErrorMessage: vi.fn() };
         if (name.endsWith("/OfflineBanner")) return { OfflineBanner: () => null };
         if (name.endsWith("/TelegramLinkModal")) return { TelegramLinkModal: () => null };

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { describeConnection, isSavedCredential } from "../services/connectionPresentation";
 import type {
   CatalogEntry,
@@ -32,11 +33,11 @@ function catalogMeta(entry: CatalogEntry): string {
   if (entry.service_type === "ssh") return "ssh";
   const provider = entry.provider_type?.toLowerCase();
   if (provider === "oauth2") return "oauth";
-  if (provider === "device_code") return "device code";
-  if (!entry.requires_credential) return "no credential";
-  if (entry.token_exchange_credential_fields?.length) return "token exchange";
+  if (provider === "device_code") return translateApp("device code");
+  if (!entry.requires_credential) return translateApp("no credential");
+  if (entry.token_exchange_credential_fields?.length) return translateApp("token exchange");
   if (entry.requires_gateway_url) return "self-hosted";
-  return "api key";
+  return translateApp("api key");
 }
 
 function healthy(connection: ServiceConnection): boolean {
@@ -54,7 +55,7 @@ function connectionState(
   connections: readonly ServiceConnection[],
 ): Pick<ConnectorCardItem, "status" | "statusTone"> {
   if (connections.every((connection) => !connection.is_active))
-    return { status: "Disabled", statusTone: "neutral" };
+    return { status: translateApp("Disabled"), statusTone: "neutral" };
   const saved = connections.filter(connection => healthy(connection) && isSavedCredential(connection));
   if (saved.length) {
     const health = saved.map(describeConnection);
@@ -62,10 +63,10 @@ function connectionState(
     return { status: result.label, statusTone: result.tone === "muted" ? "neutral" : result.tone };
   }
   if (connections.some(healthy))
-    return { status: "Enabled", statusTone: "success" };
+    return { status: translateApp("Enabled"), statusTone: "success" };
   const enabled = connections.filter((connection) => connection.is_active);
   if (enabled.some((connection) => connection.credential_missing))
-    return { status: "Missing credential", statusTone: "warning" };
+    return { status: translateApp("Missing credential"), statusTone: "warning" };
   if (
     enabled.some(
       (connection) =>
@@ -73,7 +74,7 @@ function connectionState(
         !connection.credential_source.allowed,
     )
   )
-    return { status: "Restricted", statusTone: "neutral" };
+    return { status: translateApp("Restricted"), statusTone: "neutral" };
   if (
     enabled.some((connection) =>
       ["failed", "refresh_failed", "revoked", "error"].includes(
@@ -81,7 +82,7 @@ function connectionState(
       ),
     )
   )
-    return { status: "Needs attention", statusTone: "error" };
+    return { status: translateApp("Needs attention"), statusTone: "error" };
   if (
     enabled.some(
       (connection) =>
@@ -89,16 +90,16 @@ function connectionState(
         connection.connection_status === "expired",
     )
   )
-    return { status: "Expired", statusTone: "warning" };
+    return { status: translateApp("Expired"), statusTone: "warning" };
   if (enabled.some((connection) => connection.status === "pending_auth"))
-    return { status: "Authorization needed", statusTone: "warning" };
-  return { status: "Check connection", statusTone: "neutral" };
+    return { status: translateApp("Authorization needed"), statusTone: "warning" };
+  return { status: translateApp("Check connection"), statusTone: "neutral" };
 }
 
 function authLabel(type: string): string {
-  if (type === "none") return "No auth";
+  if (type === "none") return translateApp("No auth");
   if (type === "oauth2") return "OAuth";
-  if (type === "api_key") return "API key";
+  if (type === "api_key") return translateApp("API key");
   return type.replaceAll("_", " ");
 }
 
@@ -115,7 +116,7 @@ function addedItem(
       connections.map((connection) =>
         connection.credential_source?.type === "org"
           ? connection.credential_source.org_name
-          : "Personal",
+          : translateApp("Personal"),
       ),
     ),
   ].join(" + ");
@@ -127,8 +128,10 @@ function addedItem(
   const count = `${connections.length} ${connections.length === 1 ? "connection" : "connections"}`;
   const endpointDescription = isSavedCredential(first) ? describeConnection(first).description :
     first.endpoint_url
-      ? `Connected through the NyxID proxy (${first.endpoint_url}).`
-      : "Connected through the NyxID proxy.";
+      ? translateApp("Connected through the NyxID proxy ({{endpointUrl}}).", {
+          endpointUrl: first.endpoint_url,
+        })
+      : translateApp("Connected through the NyxID proxy.");
   return {
     id,
     name,
@@ -140,14 +143,15 @@ function addedItem(
           first.catalog_icon_url ||
           catalogEntry?.icon_url ||
           null,
-    category: first.service_type === "ssh" ? "Connector · SSH" : "Connector",
+    category: first.service_type === "ssh" ? translateApp("Connector · SSH")
+        : translateApp("Connector"),
     description:
       catalogEntry?.description ?? first.description ?? endpointDescription,
     meta:
       connections.length > 1
         ? count
         : first.credential_type === "none"
-          ? "No auth"
+          ? translateApp("No auth")
           : first.credential_type.replaceAll("_", " "),
     added: true,
     disabled: connections.every((connection) => !connection.is_active),
@@ -155,7 +159,11 @@ function addedItem(
     connections,
     catalogEntry,
     ...connectionState(connections),
-    summary: `${owners} · ${auth} · ${count}`,
+    summary: translateApp("{{owners}} · {{authentication}} · {{count}}", {
+      owners: owners,
+      authentication: auth,
+      count: count,
+    }),
   };
 }
 
@@ -196,18 +204,21 @@ export function deriveConnectorItems(
         iconSlug: entry.slug,
         iconUrl: entry.icon_url,
         category:
-          entry.service_type === "ssh" ? "Connector · SSH" : "Connector",
+          entry.service_type === "ssh" ? translateApp("Connector · SSH")
+            : translateApp("Connector"),
         description:
           entry.description ??
           (entry.base_url
-            ? `Proxy requests to ${entry.base_url}.`
-            : "Connect this service through the NyxID proxy."),
+            ? translateApp("Proxy requests to {{baseUrl}}.", {
+                baseUrl: entry.base_url,
+              })
+            : translateApp("Connect this service through the NyxID proxy.")),
         meta: catalogMeta(entry),
         added: false,
         connectSlug: entry.slug,
         connections: [],
         catalogEntry: entry,
-        status: "Connect",
+        status: translateApp("Connect"),
         statusTone: "neutral" as const,
         summary: catalogMeta(entry),
       })),

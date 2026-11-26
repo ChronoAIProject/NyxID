@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    # Rollup PRs must be gated with the same CI coverage as main/dev PRs.
+    # Rollup PRs retain their path-filtered checks.
     # Also validate fixes targeting the Oracle retirement branch.
     branches: [main, dev, 'rollup-*', 'chore/retire-builtin-oracle']
   push:
@@ -41,7 +41,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/dev' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,7 +74,7 @@ jobs:
   #                    fmt + clippy)
   #   - `wizard`  = anything that could change the committed wizard bundle
   #                 hash (frontend sources, .node-version, cli wizard glue)
-  #   - `ci`      = this workflow itself; forces a full run when changed
+  #   - `ci`      = CI configuration; selects every path in the active profile
   # ---------------------------------------------------------------------------
   changes:
     name: Detect Changes
@@ -94,7 +94,8 @@ jobs:
       codex_plugin: ${{ steps.filter.outputs.codex_plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
-      ci: ${{ steps.filter.outputs.ci }}
+      profile: ${{ steps.profile.outputs.profile }}
+      ci: ${{ steps.profile.outputs.profile == 'full' || steps.filter.outputs.ci == 'true' }}
     steps:
       - uses: actions/checkout@v6
       - name: Test CI helpers
@@ -105,9 +106,26 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p 'test_security_reporting.py'
           python3 scripts/check-security-reporting.py
+      - name: Select CI profile
+        id: profile
+        env:
+          BASE: ${{ github.base_ref }}
+          CALL_FORCE_ALL: ${{ inputs.force-all }}
+        run: |
+          profile=filtered
+          if [[ -z "$CALL_FORCE_ALL" ]]; then
+            case "$GITHUB_EVENT_NAME/$BASE/$GITHUB_REF" in
+              pull_request/dev/*) profile=dev ;;
+              pull_request/main/*|push//refs/heads/dev) profile=full ;;
+            esac
+          fi
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v4
+        if: steps.profile.outputs.profile != 'full'
         id: filter
         with:
+          # Keep the comparison base for rollup pushes after the default branch moves.
+          base: main
           # Shared workspace files (Cargo.toml / Cargo.lock / nextest config)
           # are duplicated into both `backend` and `cli` filters by design:
           # any change to the shared lock file must retest both crates,
@@ -223,6 +241,8 @@ jobs:
               - '.config/nextest.toml'
             frontend:
               - 'frontend/**'
+              # Frontend cross-app tests load real mobile screens and controls.
+              - 'mobile/src/**'
               - 'shared/**'
               - '.node-version'
             mobile:
@@ -265,9 +285,8 @@ jobs:
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
-            # Any workflow change forces a full run -- stops a broken
-            # publish-gate or release pipeline from sneaking through under
-            # path filtering.
+            # Any workflow change selects all paths in the active profile so a broken
+            # publish or release configuration receives the available checks.
             ci:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -452,10 +471,43 @@ jobs:
   # ---------------------------------------------------------------------------
   # Rust: clippy lint
   # ---------------------------------------------------------------------------
+  rust-clippy-dev:
+    name: Rust Clippy (dev)
+    needs: changes
+    if: >-
+      needs.changes.outputs.profile == 'dev' &&
+      (needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true')
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 1
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: ./.github/actions/ci-rust-cache
+        with:
+          backend-reserve: 'true'
+          save-if: 'false'
+          shared-key: rust-clippy-dev
+          incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Check Clippy with resource samples
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/clippy.log" --
+          python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --lib --bins --locked -- -D warnings
+
   rust-clippy:
     name: Rust Clippy
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'rust-clippy')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
@@ -506,6 +558,7 @@ jobs:
     name: Backend Test
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-test')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     uses: ./.github/workflows/backend-tests.yml
@@ -516,6 +569,7 @@ jobs:
     name: Backend Image Inputs
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'backend-image-inputs')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
@@ -558,7 +612,9 @@ jobs:
   backend-image-smoke:
     name: Backend Release Image
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.backend_image == 'true'
+    if: >-
+      needs.changes.outputs.profile == 'full' ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev' && needs.changes.outputs.backend_image == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -600,6 +656,7 @@ jobs:
       contents: read
       attestations: read
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'machine-container')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true')
     runs-on: ubuntu-latest
@@ -751,6 +808,7 @@ jobs:
     name: Rust Features (${{ matrix.variant }})
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'rust-features')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
@@ -798,10 +856,49 @@ jobs:
   # ---------------------------------------------------------------------------
   # Frontend: lint, type-check, test, build
   # ---------------------------------------------------------------------------
+  frontend-dev:
+    name: Frontend (dev ${{ matrix.lane }})
+    needs: changes
+    if: >-
+      needs.changes.outputs.profile == 'dev' &&
+      (needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [lint-and-build, '1/5', '2/5', '3/5', '4/5', '5/5']
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - if: matrix.lane == 'lint-and-build'
+        name: Frontend health and readiness contracts (nginx 1.27)
+        run: |
+          python3 scripts/test-frontend-readiness.py
+          python3 scripts/test-nginx-policy.py
+          python3 scripts/test-nginx-readiness.py
+      - if: matrix.lane == 'lint-and-build'
+        run: npm run lint && npm run build
+      - if: matrix.lane == 'lint-and-build'
+        name: Validate readiness inventory against real build
+        run: python3 scripts/frontend-readiness.py --inventory --root dist --manifest "$RUNNER_TEMP/frontend-static-readiness.json"
+      - if: matrix.lane != 'lint-and-build'
+        env:
+          SHARD: ${{ matrix.lane }}
+        run: npm test -- --shard="$SHARD"
+
   frontend:
     name: Frontend
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'frontend')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true')
     runs-on: ubuntu-latest
@@ -818,7 +915,14 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run test
+      - name: Frontend health and readiness contracts (nginx 1.27)
+        run: |
+          python3 scripts/test-frontend-readiness.py
+          python3 scripts/test-nginx-policy.py
+          python3 scripts/test-nginx-readiness.py
       - run: npm run build
+      - name: Validate readiness inventory against real build
+        run: python3 scripts/frontend-readiness.py --inventory --root dist --manifest "$RUNNER_TEMP/frontend-static-readiness.json"
       - name: Build frontend Docker inputs
         working-directory: .
         run: docker build --target builder --file frontend/Dockerfile .
@@ -851,6 +955,14 @@ jobs:
       - run: pnpm test
       - run: pnpm test:jest --runInBand
       - run: pnpm typecheck
+      # The Apple Watch app's Foundation-only core (sign-in, refresh, API
+      # contracts, reply parsing) is plain SwiftPM, so it runs on the
+      # runner's preinstalled Swift without Xcode or a simulator.
+      - name: Apple Watch core tests
+        working-directory: mobile/ios/NyxIDWatch
+        run: |
+          swift --version
+          swift test
 
   # ---------------------------------------------------------------------------
   # CLI wizard bundle: source-closure freshness check.
@@ -960,6 +1072,7 @@ jobs:
     needs: changes
     # Publish exact-commit baselines on rollup tips and full publish gates.
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-backend')) &&
       (inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     uses: ./.github/workflows/backend-tests.yml
@@ -976,7 +1089,7 @@ jobs:
       contents: read
       actions: read
     needs: changes
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    if: github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1041,7 +1154,7 @@ jobs:
   coverage-backend-summary:
     name: Coverage (Backend Summary)
     needs: [changes, coverage-backend, coverage-backend-base]
-    if: always() && github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    if: always() && github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1081,6 +1194,7 @@ jobs:
     name: Coverage (CLI)
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-cli')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
@@ -1110,8 +1224,24 @@ jobs:
       # --no-report implies --no-clean. Cached executables from older source
       # revisions otherwise contribute stale, uncovered mappings to `report`.
       # Keep dependency artifacts, but rebuild workspace coverage objects.
+      # rust-cache restores llvm-cov-target without cargo's CACHEDIR.TAG, and
+      # cargo refuses to clean a target directory without one. cargo-llvm-cov
+      # reports that refusal only as a warning, so recreate the tag and fail
+      # the step if the clean still does not run.
       - name: Clear stale workspace coverage objects
-        run: cargo llvm-cov clean --workspace
+        run: |
+          dir=target/llvm-cov-target
+          if [ -d "$dir" ] && [ ! -f "$dir/CACHEDIR.TAG" ]; then
+            printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' \
+              '# This file is a cache directory tag created by cargo.' \
+              '# For information about cache directory tags see https://bford.info/cachedir/' \
+              > "$dir/CACHEDIR.TAG"
+          fi
+          cargo llvm-cov clean --workspace 2>&1 | tee "$RUNNER_TEMP/llvm-cov-clean.log"
+          if grep -q "didn't exit successfully" "$RUNNER_TEMP/llvm-cov-clean.log"; then
+            echo "::error::cargo llvm-cov clean did not remove stale coverage objects"
+            exit 1
+          fi
       - name: Build head coverage with incremental retry
         run: >-
           python3 .github/scripts/retry_incremental.py
@@ -1147,7 +1277,7 @@ jobs:
   coverage-cli-base:
     name: Coverage (CLI Base)
     needs: changes
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
+    if: github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     continue-on-error: true
     runs-on: ubuntu-latest
     env:
@@ -1186,7 +1316,7 @@ jobs:
   coverage-cli-summary:
     name: Coverage (CLI Summary)
     needs: [changes, coverage-cli, coverage-cli-base]
-    if: always() && github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
+    if: always() && github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -1227,6 +1357,7 @@ jobs:
     name: Coverage (Frontend)
     needs: changes
     if: >-
+      needs.changes.outputs.profile != 'dev' &&
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'coverage-frontend')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true')
     runs-on: ubuntu-latest
@@ -1325,8 +1456,10 @@ jobs:
   # ---------------------------------------------------------------------------
   coverage-comment:
     name: Coverage Comment Payload
-    if: always() && github.event_name == 'pull_request'
+    if: >-
+      always() && github.event_name == 'pull_request' && needs.changes.outputs.profile != 'dev'
     needs:
+      - changes
       - coverage-backend-summary
       - coverage-cli-summary
       - coverage-frontend
@@ -1354,6 +1487,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: echo "$PR_NUMBER" > pr-number.txt
       - name: Upload coverage comment payload
+        if: hashFiles('coverage-artifacts/coverage-backend.json', 'coverage-artifacts/coverage-cli.json', 'coverage-artifacts/coverage-frontend.json') != ''
         uses: actions/upload-artifact@v4
         with:
           # Deliberately NOT matching `coverage-*` so the pattern download
@@ -1367,8 +1501,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that summarises the whole pipeline.
   #
-  # Branch protection / required-checks rules should require ONLY this job by
-  # name (`CI Pipeline`). Conditional jobs above may legitimately be skipped
+  # Branch protection requires CI Pipeline and the independent Main Merge Guard.
+  # Conditional jobs above may legitimately be skipped
   # (e.g. a docs-only PR or an identical successful publish-run reuse), and
   # listing them individually as required would leave PRs stuck pending. This
   # job runs unconditionally (`if: always()`) and treats `success` and
@@ -1389,6 +1523,7 @@ jobs:
       - oracle-worker-test
       - rust-fmt
       - rust-clippy
+      - rust-clippy-dev
       - backend-test
       - permissions-test
       - backend-image-inputs
@@ -1397,6 +1532,7 @@ jobs:
       - machine-container
       - rust-features
       - frontend
+      - frontend-dev
       - mobile
       - wizard-bundle-freshness
       - sdk
@@ -1443,6 +1579,7 @@ jobs:
             oracle-worker-test=${{ needs.oracle-worker-test.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
+            rust-clippy-dev=${{ needs.rust-clippy-dev.result }}
             backend-test=${{ needs.backend-test.result }}
             permissions-test=${{ needs.permissions-test.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
@@ -1451,6 +1588,7 @@ jobs:
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}
             frontend=${{ needs.frontend.result }}
+            frontend-dev=${{ needs.frontend-dev.result }}
             mobile=${{ needs.mobile.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
             sdk=${{ needs.sdk.result }}

@@ -157,6 +157,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "service_type",
         "service_category",
         "base_url",
+        "approved_private_base_url",
         "auth_method",
         "auth_scheme",
         "auth_key_name",
@@ -168,6 +169,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "destination_targets",
         "identity_propagation_mode",
         "forward_access_token",
+        super::caller_token_approval::FIELD,
         "inject_delegation_token",
         "token_exchange_config",
         "default_request_headers",
@@ -203,7 +205,7 @@ pub async fn commit_update(
             let (live, admin) = fence(db, session, observed, Some(authority)).await?;
             let tool = live.offering_kind == OfferingKind::Tool;
             require_desired_kind(&live, fields, authority, admin)?;
-            validate_update_fields(db, session, &live, fields, authority, admin).await?;
+            validate_update_fields(db, session, &live, fields, authority, admin, Some(key)).await?;
             if fields.get_str("offering_kind") == Ok("tool") {
                 require_providerless_tool(db, session, &live).await?;
             }
@@ -234,6 +236,7 @@ pub async fn commit_update(
                 super::audit_service::log_actor_event_in_session(db, session, key, &authority.actor, "tools_manager_updated",
                     serde_json::json!({"service_id":live.id,"authority":if admin {"admin"} else {"tools_manager"},"fields":fields.keys().filter(|k| k.as_str() != "updated_at").collect::<Vec<_>>()})).await?;
             }
+            super::caller_token_approval::audit_change(db, session, key, Some(&authority.actor), &live, &updated.caller_token_approved_destinations).await?;
             Ok(updated)
         })
     }).await
@@ -248,7 +251,33 @@ pub(crate) async fn validate_update_fields(
     fields: &Document,
     authority: &Authority,
     admin: bool,
+    audit_key: Option<&[u8]>,
 ) -> AppResult<()> {
+    if let Ok(approved) = fields.get_str("approved_private_base_url")
+        && (!admin
+            || !authority.first_party_human
+            || live.owner_user_id.is_some()
+            || approved != fields.get_str("base_url").unwrap_or(&live.base_url))
+    {
+        return Err(AppError::Forbidden(
+            "Private destination approval requires platform Admin authority".into(),
+        ));
+    }
+    if let Some(value) = fields.get("approved_private_base_url") {
+        let approved = value.as_str();
+        if live.approved_private_base_url.as_deref() != approved {
+            super::audit_service::log_actor_event_in_session(
+                db,
+                session,
+                audit_key
+                    .ok_or_else(|| AppError::Internal("Catalog audit key unavailable".into()))?,
+                &authority.actor,
+                "catalog_private_destination_changed",
+                serde_json::json!({"service_id":live.id, "approved":approved.is_some()}),
+            )
+            .await?;
+        }
+    }
     if let Some(value) = fields.get("billing") {
         let requested: Option<crate::models::service_billing::ServiceBilling> =
             bson::from_bson(value.clone())

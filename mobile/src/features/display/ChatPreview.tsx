@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { StyleSheet, View } from "react-native";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { useTheme } from "../../theme/ThemeContext";
@@ -29,6 +31,7 @@ export function ChatPreview({
   /** Thumbnail size for the Light/Dark appearance tiles. */
   compact?: boolean;
 }) {
+  useAppLanguage();
   const theme = useTheme();
   const mode = modeProp ?? (theme.mode === "dark" ? "dark" : "light");
   const palette = paletteProp ?? theme.bubblePalette;
@@ -38,7 +41,9 @@ export function ChatPreview({
   return (
     <View
       accessible
-      accessibilityLabel={`Chat preview, ${mode} appearance`}
+      accessibilityLabel={translateApp("Chat preview, {{mode}} appearance", {
+        mode: mode,
+      })}
       style={[
         styles.frame,
         compact && styles.compactFrame,
@@ -61,13 +66,14 @@ export function ChatPreview({
           ]}
         >
           <Text style={[text, { color: bubble.foreground }]}>
-            {compact ? "Hi NyxBot" : "Show me my connected services."}
+            {compact ? translateApp("Hi NyxBot")
+              : translateApp("Show me my connected services.")}
           </Text>
         </View>
         <Text style={[text, { color: colors.textPrimary }]}>
           {compact
-            ? "Here you go."
-            : "You have GitHub, Gmail and Notion connected."}
+            ? translateApp("Here you go.")
+            : translateApp("You have GitHub, Gmail and Notion connected.")}
         </Text>
         <View
           style={[
@@ -84,7 +90,7 @@ export function ChatPreview({
         >
           {compact ? null : (
             <Text style={[styles.placeholder, { color: colors.textMuted }]}>
-              Message NyxBot
+              {translateApp("Message NyxBot")}
             </Text>
           )}
         </View>

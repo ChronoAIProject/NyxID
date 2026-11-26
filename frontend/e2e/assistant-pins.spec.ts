@@ -1,13 +1,37 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { conversationRow, openAssistant, sendMessage, stopButton } from "./helpers";
+import { conversationRow, openAssistant, sendMessage, stopButton, waitForAssistantNavigation } from "./helpers";
 
 const titles = ["First pin candidate", "Second pin candidate", "Newest conversation"];
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route("**/api/v1/triggers", (route) => route.fulfill({ json: { triggers: [] } }));
+});
+
 async function showChats(page: Page) {
+  await waitForAssistantNavigation(page);
+  if (page.viewportSize()!.width < 768) {
+    const drawer = page.locator('aside[data-tour="sidebar"]:visible');
+    if (!(await drawer.isVisible())) await page.getByRole("button", { name: "Open chats", exact: true }).click();
+    await expect(drawer).toBeVisible();
+    if (!(await drawer.getByRole("navigation", { name: "Threads with NyxBot", exact: true }).isVisible())) {
+      await drawer.getByRole("button", { name: /^NyxBot —/ }).click();
+    }
+    const list = drawer.getByRole("navigation", { name: "Threads with NyxBot", exact: true });
+    await expect(list).toBeVisible();
+    return drawer;
+  }
   const nav = page.getByRole("navigation", { name: "Agents and conversations" });
   await expect(nav.or(page.getByRole("button", { name: "Open chats" })).first()).toBeVisible();
   if (!(await nav.isVisible())) await page.getByRole("button", { name: "Open chats" }).click();
   await expect(nav).toBeVisible();
+  const threads = page.getByRole("complementary", { name: "Threads", exact: true });
+  if (page.viewportSize()!.width >= 1024 && new URL(page.url()).pathname === "/assistant" && !(await threads.isVisible())) {
+    await nav.getByRole("button", { name: /^NyxBot —/ }).click();
+    await expect(threads).toBeVisible();
+  }
+  if (await threads.isVisible()) return threads;
   return nav;
 }
 
@@ -57,9 +81,9 @@ async function seedParentChatTopics(page: Page) {
   });
   await page.reload();
   const nav = await showChats(page);
-  const header = nav.getByRole("button", { name: "Topics bot on Telegram, 8 chats", exact: true });
-  await header.click();
-  return { header, group: header.locator("..") };
+  const header = nav.getByRole("button", { name: "Engineering group on Telegram, 4 threads", exact: true });
+  if (await header.getAttribute("aria-expanded") === "false") await header.click();
+  return { header, group: nav.getByRole("region", { name: "Connected bot chats", exact: true }) };
 }
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
@@ -90,7 +114,6 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   test(`multiple pins across two parent chats precede ordinary topics at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     let { group } = await seedParentChatTopics(page);
-    await group.getByRole("button", { name: "Show 3 more" }).click();
     const pins = ["Engineering topic 2", "Engineering topic 3", "Support topic 2", "Support topic 3"];
     for (const title of pins) await togglePin(page, title);
     await expectTopicOrder(group, [
@@ -98,16 +121,16 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     ]);
     await page.reload();
     const nav = await showChats(page);
-    const header = nav.getByRole("button", { name: "Topics bot on Telegram, 8 chats", exact: true });
-    await header.click();
-    group = header.locator("..");
-    await expectTopicOrder(group, [...pins, "Engineering topic 0"]);
+    group = nav.getByRole("region", { name: "Connected bot chats", exact: true });
+    await expectTopicOrder(group, [
+      ...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1",
+    ]);
     for (const title of pins) {
-      const parentGroup = group.getByRole("button", { name: title, exact: true }).locator("../../..");
+      const parentGroup = group.getByRole("region", { name: `${title.split(" ")[0]} group`, exact: true })
+        .filter({ has: page.getByRole("button", { name: title, exact: true }) });
       await expect(parentGroup.getByText(`${title.split(" ")[0]} group`, { exact: true })).toBeVisible();
     }
     await expect(group.getByRole("img", { name: "Pinned chat", exact: true })).toHaveCount(4);
-    await group.getByRole("button", { name: "Show 3 more" }).click();
     await expectTopicOrder(group, [
       ...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1",
     ]);
@@ -140,9 +163,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await page.reload();
     await expectOrder(page, [titles[1]!, titles[0]!, titles[2]!]);
     await expect(conversationRow(page, titles[2]!)).toHaveAttribute("aria-current", "page");
+    if (viewport.width < 768) await page.getByRole("button", { name: "Back to workspace", exact: true }).click();
     await page.getByRole("link", { name: "Automations", exact: true }).click();
     await expect(page).toHaveURL(/\/assistant\/automations/);
-    await showChats(page);
+    await waitForAssistantNavigation(page);
+    if (viewport.width < 768) await page.getByRole("button", { name: "Open chats", exact: true }).click();
     await page.getByRole("button", { name: "Home", exact: true }).click();
     await showChats(page);
     await conversationRow(page, titles[2]!).click();
@@ -178,7 +203,8 @@ test("channel pins stay within their bot across keyboard actions, reload and Sho
         const id = `nyxa-${String(botIndex + 1)}${String(index).padStart(31, "0")}`;
         row.history.conversation = { ...row.history.conversation,
           id, title: `${bot} chat ${index}`, last_message_at: `2026-11-${String(12 - botIndex).padStart(2, "0")}T00:0${6-index}:00.000Z`,
-          channel: { ...row.history.conversation.channel, channel_agent_id: `bot-${botIndex}`, bot_label: bot },
+          channel: { ...row.history.conversation.channel, channel_agent_id: `bot-${botIndex}`, bot_label: bot,
+            parent_chat_id: `parent-${botIndex}`, parent_title: `${bot} source`, thread_id: `thread-${index}` },
         };
         extra.push([id, row]);
       }
@@ -188,11 +214,12 @@ test("channel pins stay within their bot across keyboard actions, reload and Sho
   });
   await page.reload();
   const nav = await showChats(page);
-  const first = nav.getByRole("button", { name: "First bot on Telegram, 7 chats", exact: true });
-  const second = nav.getByRole("button", { name: "Second bot on Telegram, 7 chats", exact: true });
-  const group = second.locator("..");
+  const first = nav.getByRole("button", { name: "First bot source on Telegram, 7 threads", exact: true });
+  const group = nav.locator('section:has(> button[data-channel-group="bot-1"])');
+  const second = group.locator("> button[data-channel-source]").last();
+  if (await first.getAttribute("aria-expanded") === "true") await first.click();
   const rows = group.locator("[data-conversation-options]");
-  await second.click();
+  await expect(second).toHaveAttribute("aria-expanded", "true");
   await group.getByRole("button", { name: "Show 2 more" }).click();
   await togglePin(page, "Second bot chat 6");
   await togglePin(page, "Second bot chat 5");
@@ -206,14 +233,14 @@ test("channel pins stay within their bot across keyboard actions, reload and Sho
   await testInfo.attach("channel-pins-in-bot", { body: await page.screenshot({ path: testInfo.outputPath("channel-pins-in-bot.png") }), contentType: "image/png" });
   await page.reload();
   await showChats(page);
-  await expect(second).toHaveAttribute("aria-expanded", "false");
-  await second.click();
-  await expect(rows).toHaveCount(5);
+  if (await first.getAttribute("aria-expanded") === "true") await first.click();
+  await expect(second).toHaveAttribute("aria-expanded", "true");
+  await expect(rows).toHaveCount(7);
   await expect(rows.nth(0)).toHaveAttribute("aria-label", "Options for Second bot chat 5");
   await expect(rows.nth(1)).toHaveAttribute("aria-label", "Options for Second bot chat 6");
   await togglePin(page, "Second bot chat 5", true, second);
   await expect(rows.nth(0)).toHaveAttribute("aria-label", "Options for Second bot chat 6");
-  // Unpinning beyond the preview limit returns focus to the bot header.
+  // Unpinning beyond the preview limit returns focus to the exact source header.
   const options = page.getByRole("button", { name: "Options for Second bot chat 6", exact: true });
   await options.focus();
   await page.keyboard.press("Enter");

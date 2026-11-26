@@ -202,9 +202,10 @@ impl AsyncContinuation {
             json!({w.contract.id_parameter.clone():crate::services::cma_operation::poll_id(w)});
         mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?
             .authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
-        let fresh = acks::for_key(db, &w.user_id, Some(&w.api_key_id))
-            .await?
-            .ok_or_else(denied)?;
+        let fresh =
+            acks::chat_for_key_version(db, &w.user_id, Some(&w.api_key_id), chat.key_version, None)
+                .await?
+                .ok_or_else(denied)?;
         if fresh.agent_id != w.agent_id || fresh.conversation_id != w.conversation_id {
             return Err(denied());
         }

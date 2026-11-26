@@ -1,3 +1,9 @@
+import { discardUploadDraft } from "../assistant/assistantDraftStore";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { SkeletonRows } from "../../components/Skeleton";
 import { useEffect, useRef, useState } from "react";
@@ -38,6 +44,7 @@ export type GroupEditorScreenProps = {
 };
 
 export function GroupEditorScreen(props: GroupEditorScreenProps) {
+  useAppLanguage();
   const { epoch } = useGroupAvailability();
   return <GroupEditor key={`${epoch}:${props.groupId ?? "new"}`} {...props} />;
 }
@@ -48,13 +55,14 @@ function GroupEditor({
   onSaved,
   onRemoved,
 }: GroupEditorScreenProps) {
+  useAppLanguage();
   const live = useGroupAvailability();
   const client = useQueryClient();
   const scope = useRef({ mounted: true, epoch: live.epoch });
   const lock = useRef(false);
   const exitConsumed = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [baseline, setBaseline] = useState<Group>();
   const [initialized, setInitialized] = useState(false);
   const [name, setName] = useState("");
@@ -176,12 +184,12 @@ function GroupEditor({
     if (!dirty) setExitTo({ kind: "back" });
     else
       Alert.alert(
-        "Discard crew changes?",
-        "Your changes have not been saved.",
+        translateApp("Discard crew changes?"),
+        translateApp("Your changes have not been saved."),
         [
-          { text: "Keep editing", style: "cancel" },
+          { text: translateApp("Keep editing"), style: "cancel" },
           {
-            text: "Discard",
+            text: translateApp("Discard"),
             style: "destructive",
             onPress: () => setExitTo({ kind: "back" }),
           },
@@ -192,13 +200,14 @@ function GroupEditor({
     active: !exitTo && (dirty || busy),
     defaultRole: "back",
     disabled: !exitTo && busy,
-    label: groupId ? "Back to crew" : "Back to crews",
+    label: groupId ? translateApp("Back to crew")
+      : translateApp("Back to crews"),
     onBack: back,
     discardOnClose:
       !exitTo && dirty
         ? {
-            title: "Discard crew changes?",
-            message: "Your changes have not been saved.",
+            title: translateApp("Discard crew changes?"),
+            message: translateApp("Your changes have not been saved."),
           }
         : undefined,
   });
@@ -218,7 +227,7 @@ function GroupEditor({
       await action();
     } catch (cause) {
       if (scope.current.mounted && live.available())
-        setError(groupError(cause));
+        setError(() => (groupError(cause)));
     } finally {
       lock.current = false;
       if (scope.current.mounted) setBusy(false);
@@ -235,12 +244,13 @@ function GroupEditor({
       });
       if (!valid.success)
         throw new Error(
-          valid.error.issues[0]?.message ?? "Review the crew details.",
+          valid.error.issues[0]?.message ??
+            translateApp("Review the crew details."),
         );
       let saved: Group;
       if (!groupId) {
         if (org && (!orgEnabled || !enabledOrgs.some((row) => row.id === org)))
-          throw new Error("You cannot create a crew for this organization.");
+          throw localizedError("You cannot create a crew for this organization.");
         saved = await groupsApi.create(valid.data);
       } else {
         const patch: GroupUpdate = {};
@@ -248,17 +258,15 @@ function GroupEditor({
         if (memberTouched || gone) patch.member_agent_ids = selectedMembers;
         if (org && peopleTouched) patch.participant_user_ids = people;
         if (org && (!lead || !selectedMembers.includes(lead)))
-          throw new Error("Choose a lead from the selected agents.");
+          throw localizedError("Choose a lead from the selected agents.");
         if (org && lead !== baseline!.lead_agent_id) {
           if (!lead || !selectedMembers.includes(lead))
-            throw new Error("Choose a lead from the selected agents.");
+            throw localizedError("Choose a lead from the selected agents.");
           patch.lead_agent_id = lead;
         }
         const latest = await groupsApi.detail(groupId);
         if (!groupCanManage(latest))
-          throw new Error(
-            "You can no longer manage this crew. Reopen it to review access.",
-          );
+          throw localizedError("You can no longer manage this crew. Reopen it to review access.");
         const ids = (values: readonly string[]) =>
           [...values].sort().join("\n");
         if (
@@ -272,12 +280,10 @@ function GroupEditor({
           (patch.lead_agent_id &&
             latest.lead_agent_id !== baseline!.lead_agent_id)
         ) {
-          throw new Error(
-            "This crew changed elsewhere. Your draft is kept. Go back and reopen settings to review the latest changes.",
-          );
+          throw localizedError("This crew changed elsewhere. Your draft is kept. Go back and reopen settings to review the latest changes.");
         }
         if (!live.available())
-          throw new Error("Reconnect and keep crew settings open to save.");
+          throw localizedError("Reconnect and keep crew settings open to save.");
         saved = await groupsApi.update(groupId, patch);
       }
       if (scope.current.mounted && scope.current.epoch === getAuthEpoch()) {
@@ -298,19 +304,31 @@ function GroupEditor({
     )
       return;
     Alert.alert(
-      kind === "delete" ? `Delete ${baseline.name}?` : "Leave crew?",
+      kind === "delete" ? translateApp("Delete {{name}}?", { name: baseline.name })
+        : translateApp("Leave crew?"),
       kind === "delete"
-        ? "The crew and its messages will be deleted. Your agents and their own threads stay. This cannot be undone."
-        : "The creator or a participating Admin must remain. Leaving as the last participant deletes the crew. Wait for your running turns to finish.",
+        ? translateApp(
+            "The crew and its messages will be deleted. Your agents and their own threads stay. This cannot be undone.",
+          )
+        : translateApp(
+            "The creator or a participating Admin must remain. Leaving as the last participant deletes the crew. Wait for your running turns to finish.",
+          ),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: kind === "delete" ? "Delete crew" : "Leave crew",
+          text: kind === "delete" ? translateApp("Delete crew")
+              : translateApp("Leave crew"),
           style: "destructive",
           onPress: () =>
             void perform(async () => {
+              const owner = getAuthAccountId();
+              const epoch = getAuthEpoch();
               if (kind === "delete") await groupsApi.remove(baseline.id);
               else await groupsApi.leave(baseline.id);
+              void discardUploadDraft(owner, `crew:${baseline.id}`).catch(() => {
+                if (epoch === getAuthEpoch() && owner === getAuthAccountId())
+                  Alert.alert(translateApp("The draft could not be discarded. Try again."));
+              });
               if (
                 scope.current.mounted &&
                 scope.current.epoch === getAuthEpoch()
@@ -349,19 +367,22 @@ function GroupEditor({
     <SettingsPage>
       {error && <Notice message={error} tone="error" />}
       {(agents.isPending || (!!groupId && detail.isPending)) && (
-        <SkeletonRows rows={3} title accessibilityLabel="Loading crew editor" />
+        <SkeletonRows rows={3} title accessibilityLabel={translateApp("Loading crew editor")}
+        />
       )}
       {(agents.isError || detail.isError) && (
         <>
           <Notice
-            message="Could not load the crew's agents and settings."
+            message={translateApp(
+              "Could not load the crew's agents and settings.",
+            )}
             tone="error"
           />
           <SettingsGroup inset={false}>
             <SettingsRow
               tone="action"
-              label="Retry"
-              accessibilityLabel="Retry crew editor"
+              label={translateApp("Retry")}
+              accessibilityLabel={translateApp("Retry crew editor")}
               onPress={() => {
                 void agents.refetch();
                 if (groupId) void detail.refetch();
@@ -374,36 +395,42 @@ function GroupEditor({
         <>
           {baseline?.owner?.type === "org" && (
             <Notice
-              message={`${baseline.owner.name} · ${canManage ? "You can manage this crew." : "Only the creator and participating Admins manage this crew."}`}
+              message={(canManage ? translateApp("{{name}} · You can manage this crew.", { name: baseline.owner.name }) : translateApp("{{name}} · Only the creator and participating Admins manage this crew.", { name: baseline.owner.name }))}
             />
           )}
           <SettingsGroup
             inset={false}
             footer={
               !groupId && (orgs.isError || features.isError)
-                ? "Organization choices could not be loaded. Personal crews remain available."
+                ? translateApp(
+                    "Organization choices could not be loaded. Personal crews remain available.",
+                  )
                 : !groupId && !!enabledOrgs.length && !orgEnabled
-                  ? "Organization crews are not enabled."
+                  ? translateApp("Organization crews are not enabled.")
                   : !groupId
-                    ? "Changing ownership resets the selected agents and participants."
+                    ? translateApp(
+                        "Changing ownership resets the selected agents and participants.",
+                      )
                     : undefined
             }
           >
             <SettingsTextField
-              accessibilityLabel="Name"
+              accessibilityLabel={translateApp("Name")}
               value={name}
               onChangeText={setName}
-              placeholder="Crew name, e.g. Launch crew"
+              placeholder={translateApp("Crew name, e.g. Launch crew")}
               autoCapitalize="sentences"
               editable={!disabled}
             />
             {!groupId && (
               <SettingsSelectionRow
-                label="Ownership"
-                title="Choose crew owner"
-                description="Choose where this crew belongs. Changing ownership resets its selected agents and participants."
+                label={translateApp("Ownership")}
+                title={translateApp("Choose crew owner")}
+                description={translateApp(
+                  "Choose where this crew belongs. Changing ownership resets its selected agents and participants.",
+                )}
                 options={[
-                  { value: "personal", label: "Personal" },
+                  { value: "personal", label: translateApp("Personal") },
                   ...enabledOrgs.map((row) => ({
                     value: row.id,
                     label: row.display_name ?? row.slug,
@@ -414,7 +441,7 @@ function GroupEditor({
                 value={[org ?? "personal"]}
                 disabled={busy || !live.active}
                 scopeKey={`${live.epoch}:new-group-owner`}
-                confirmLabel="Use this owner"
+                confirmLabel={translateApp("Use this owner")}
                 onChange={([owner]) => {
                   const nextOrg = owner === "personal" ? undefined : owner;
                   if (nextOrg === org) return;
@@ -442,25 +469,30 @@ function GroupEditor({
           </SettingsGroup>
           <SettingsGroup
             inset={false}
-            title="Members"
+            title={translateApp("Members")}
             footer={
               !eligible.length
-                ? "No eligible agents available."
-                : "@mention agents or choose recipients in the chat. Otherwise, messages go to whoever you last addressed, then the lead agent."
+                ? translateApp("No eligible agents available.")
+                : translateApp(
+                    "@mention agents or choose recipients in the chat. Otherwise, messages go to whoever you last addressed, then the lead agent.",
+                  )
             }
           >
             <SettingsSelectionRow
-              label="Members"
-              title="Choose crew agents"
-              description={`Choose up to ${GROUP_MAX_MEMBERS} agents. Apply updates this draft; save the crew to keep your changes.`}
+              label={translateApp("Members")}
+              title={translateApp("Choose crew agents")}
+              description={translateApp(
+                "Choose up to {{count}} agents. Apply updates this draft; save the crew to keep your changes.",
+                { count: GROUP_MAX_MEMBERS },
+              )}
               options={eligible.map((agent) => ({
                 value: agent.id,
                 label: agent.display_name ?? agent.name,
                 leading: <AgentAvatar agent={agent} size="lg" />,
                 description:
                   agent.kind === "nyxbot"
-                    ? "Your personal agent"
-                    : agent.description || "Specialist",
+                    ? translateApp("Your personal agent")
+                    : agent.description || translateApp("Specialist"),
                 searchText: agent.name,
               }))}
               value={members}
@@ -469,8 +501,8 @@ function GroupEditor({
               disabled={selectionDisabled}
               readOnly={!canManage}
               scopeKey={`${live.epoch}:${groupId ?? "new"}:${org ?? "personal"}:agents`}
-              placeholder="Choose agents"
-              confirmLabel="Use these agents"
+              placeholder={translateApp("Choose agents")}
+              confirmLabel={translateApp("Use these agents")}
               onChange={(ids) => {
                 setMemberTouched(true);
                 setMembers(ids);
@@ -480,7 +512,9 @@ function GroupEditor({
               <SettingsRow
                 key={member.id}
                 label={member.name}
-                detail="No longer available; removed when you save."
+                detail={translateApp(
+                  "No longer available; removed when you save.",
+                )}
                 disabled
               />
             ))}
@@ -488,21 +522,25 @@ function GroupEditor({
           {!!org && (
             <SettingsGroup
               inset={false}
-              title="Organization"
+              title={translateApp("Organization")}
               footer={
                 participants.isPending
-                  ? "Loading organization members…"
+                  ? translateApp("Loading organization members…")
                   : undefined
               }
             >
               <SettingsSelectionRow
-                label="Participants"
-                title="Choose crew participants"
-                description={`Choose up to ${GROUP_MAX_PARTICIPANTS} organization Admins and Members. The creator is included when creating a crew.`}
+                label={translateApp("Participants")}
+                title={translateApp("Choose crew participants")}
+                description={translateApp(
+                  "Choose up to {{count}} organization Admins and Members. The creator is included when creating a crew.",
+                  { count: GROUP_MAX_PARTICIPANTS },
+                )}
                 options={[
                   ...availablePeople.map((person) => ({
                     value: person.user_id,
-                    label: person.display_name ?? person.email ?? "Member",
+                    label: person.display_name ?? person.email ??
+                      translateApp("Member"),
                     description: person.email
                       ? `${person.email} · ${person.role}`
                       : person.role,
@@ -520,11 +558,15 @@ function GroupEditor({
                       label:
                         baseline?.participants?.find(
                           (person) => person.id === id,
-                        )?.display_name ?? "Selected participant",
+                        )?.display_name ?? translateApp("Selected participant"),
                       description:
                         !groupId && id === identity.data?.id
-                          ? "Creator · included when creating a crew"
-                          : "No longer listed as an eligible organization member. Remove this participant before saving.",
+                          ? translateApp(
+                              "Creator · included when creating a crew",
+                            )
+                          : translateApp(
+                              "No longer listed as an eligible organization member. Remove this participant before saving.",
+                            ),
                       disabled: !groupId && id === identity.data?.id,
                     })),
                 ]}
@@ -538,8 +580,8 @@ function GroupEditor({
                 }
                 readOnly={!canManage}
                 scopeKey={`${live.epoch}:${groupId ?? "new"}:${org}:participants`}
-                placeholder="Choose participants"
-                confirmLabel="Use these participants"
+                placeholder={translateApp("Choose participants")}
+                confirmLabel={translateApp("Use these participants")}
                 onChange={(ids) => {
                   setPeopleTouched(true);
                   setPeople(ids);
@@ -547,9 +589,11 @@ function GroupEditor({
               />
               {!!groupId && (
                 <SettingsSelectionRow
-                  label="Lead agent"
-                  title="Choose the lead agent"
-                  description="Messages use the lead agent when no recipient or previous recipient is selected. Choose from this crew's selected agents."
+                  label={translateApp("Lead agent")}
+                  title={translateApp("Choose the lead agent")}
+                  description={translateApp(
+                    "Messages use the lead agent when no recipient or previous recipient is selected. Choose from this crew's selected agents.",
+                  )}
                   options={eligible
                     .filter((agent) => members.includes(agent.id))
                     .map((agent) => ({
@@ -563,8 +607,8 @@ function GroupEditor({
                   disabled={selectionDisabled || !members.length}
                   readOnly={!canManage}
                   scopeKey={`${live.epoch}:${groupId}:${org}:lead:${members.join(",")}`}
-                  placeholder="Choose"
-                  confirmLabel="Use this lead agent"
+                  placeholder={translateApp("Choose")}
+                  confirmLabel={translateApp("Use this lead agent")}
                   onChange={([id]) => setLead(id)}
                 />
               )}
@@ -572,7 +616,7 @@ function GroupEditor({
           )}
           {!!org && participants.isError && (
             <Notice
-              message="Could not load organization members."
+              message={translateApp("Could not load organization members.")}
               tone="error"
             />
           )}
@@ -584,13 +628,15 @@ function GroupEditor({
                 label={
                   busy
                     ? groupId
-                      ? "Saving…"
-                      : "Creating…"
+                      ? translateApp("Saving…")
+                      : translateApp("Creating…")
                     : groupId
-                      ? "Save changes"
-                      : "Create crew"
+                      ? translateApp("Save changes")
+                      : translateApp("Create crew")
                 }
-                accessibilityLabel={groupId ? "Save changes" : "Create crew"}
+                accessibilityLabel={groupId ? translateApp("Save changes")
+                    : translateApp("Create crew")
+                }
                 onPress={() => void save()}
                 disabled={
                   busy ||
@@ -609,7 +655,7 @@ function GroupEditor({
             <SettingsGroup inset={false}>
               <SettingsRow
                 tone="danger"
-                label="Leave crew"
+                label={translateApp("Leave crew")}
                 disabled={busy || !live.active}
                 onPress={() => confirmDestructive("leave")}
               />
@@ -618,13 +664,15 @@ function GroupEditor({
           {baseline && canManage && (
             <SettingsGroup
               inset={false}
-              footer="Deletes the crew and its messages. Your agents and their own threads stay."
+              footer={translateApp(
+                "Deletes the crew and its messages. Your agents and their own threads stay.",
+              )}
             >
               <SettingsRow
                 centered
                 destructive
-                label="Delete Crew"
-                accessibilityLabel="Delete crew"
+                label={translateApp("Delete Crew")}
+                accessibilityLabel={translateApp("Delete crew")}
                 disabled={busy || !live.active}
                 onPress={() => confirmDestructive("delete")}
               />

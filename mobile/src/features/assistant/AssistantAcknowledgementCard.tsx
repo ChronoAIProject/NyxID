@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import type { ReactNode } from "react";
 import { StyleSheet, View } from "react-native";
@@ -14,49 +16,58 @@ export function acknowledgementCardTitle(
 ): string {
   if (row.decider === "orchestrator") {
     if (row.kind === "service")
-      return `Allow this agent to use ${row.service_name ?? row.service_slug ?? "this service"}?`;
+      return translateApp("Allow this agent to use {{service}}?", { service: row.service_name ?? row.service_slug ?? translateApp("this service") });
     if (row.kind === "account")
-      return "Allow this agent to read your NyxID account?";
-    return `Confirm: ${row.summary}`;
+      return translateApp("Allow this agent to read your NyxID account?");
+    return translateApp("Confirm: {{summary}}", { summary: row.summary});
   }
   if (row.kind === "service")
-    return `Allow this chat to use ${row.service_name ?? "this service"}?`;
+    return translateApp("Allow this chat to use {{service}}?", { service: row.service_name ?? translateApp("this service") });
   if (row.kind === "account")
-    return "Allow this chat to manage your NyxID account (keys, channel bots, services, nodes, approval settings)?";
-  return `Confirm: ${row.summary}`;
+    return translateApp(
+      "Allow this chat to manage your NyxID account (keys, channel bots, services, nodes, approval settings)?",
+    );
+  return translateApp("Confirm: {{summary}}", { summary: row.summary});
 }
 export function acknowledgementHelp(row: AssistantAcknowledgement): string {
   const routed = row.decider === "orchestrator";
   return (
     (row.kind === "skills"
-      ? routed
-        ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
-        : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
-      : row.kind === "operations"
-        ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
-        : routed
-          ? "NyxBot decides this specialist's request against what you asked for. You can decide it here instead; the agent resumes on its own."
-          : row.kind === "action"
-            ? "This confirmation applies once, to this action only."
-            : "This permission applies to this chat only.") +
-    (routed
-      ? ""
-      : " Allowing lets the assistant continue as soon as it finishes its reply.")
+      ? (routed
+        ? (routed ? translateApp("Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode.") : translateApp("Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode. Allowing lets the assistant continue as soon as it finishes its reply.")) : (routed ? translateApp("Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor.") : translateApp("Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor. Allowing lets the assistant continue as soon as it finishes its reply."))) : (row.kind === "operations"
+        ? (routed
+          ? translateApp("This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode.") : translateApp("This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode. Allowing lets the assistant continue as soon as it finishes its reply.")) : (routed ? (routed ? translateApp("NyxBot decides this specialist's request against what you asked for. You can decide it here instead; the agent resumes on its own.") : translateApp("NyxBot decides this specialist's request against what you asked for. You can decide it here instead; the agent resumes on its own. Allowing lets the assistant continue as soon as it finishes its reply.")) : (row.kind === "action"
+            ? (routed
+      ? translateApp("This confirmation applies once, to this action only.") : translateApp("This confirmation applies once, to this action only. Allowing lets the assistant continue as soon as it finishes its reply.")) : (routed ? translateApp("This permission applies to this chat only.") : translateApp("This permission applies to this chat only. Allowing lets the assistant continue as soon as it finishes its reply."))))))
   );
 }
 function confirmationReason(row: AssistantAcknowledgement): string {
   if (row.confirmation?.reason === "webhook")
-    return "This automation's confirmation policy asks.";
+    return translateApp("This automation's confirmation policy asks.");
   if (row.confirmation?.reason === "policy")
-    return "This machine's or saved login's confirmation setting asks.";
+    return translateApp(
+      "This machine's or saved login's confirmation setting asks.",
+    );
   const labels = {
-    autopilot: "Full access",
-    nyxmode: "Auto",
-    ask_every_time: "Ask every time",
+    autopilot: translateApp("Full access"),
+    nyxmode: translateApp("Auto"),
+    ask_every_time: translateApp("Ask every time"),
   };
   return row.confirmation?.access_mode
-    ? `Your access mode is ${labels[row.confirmation.access_mode]}.`
-    : "Your access mode asks.";
+    ? translateApp("Your access mode is {{label}}.", {
+        label: labels[row.confirmation.access_mode],
+      })
+    : translateApp("Your access mode asks.");
+}
+function confirmationRisk(
+  risk: NonNullable<AssistantAcknowledgement["confirmation"]>["risk"],
+) {
+  return {
+    read: translateApp("Read"),
+    change: translateApp("Change"),
+    sensitive: translateApp("Sensitive"),
+    destructive: translateApp("Destructive"),
+  }[risk];
 }
 export function AssistantAcknowledgementCard({
   row,
@@ -73,6 +84,7 @@ export function AssistantAcknowledgementCard({
   onDecision: (choice: "allow" | "deny") => void;
   authoredReview?: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   if (row.status !== "pending") return null;
   const expired = Date.parse(row.expires_at) <= Date.now();
@@ -80,7 +92,7 @@ export function AssistantAcknowledgementCard({
     <View accessibilityLabel={acknowledgementCardTitle(row)}>
       <Card style={selected ? { borderColor: colors.primary } : undefined}>
         {row.decider === "orchestrator" ? (
-          <Label muted>Requested from NyxBot</Label>
+          <Label muted>{translateApp("Requested from NyxBot")}</Label>
         ) : null}
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <ServiceIcon slug={row.service_slug} size="sm" />
@@ -90,9 +102,8 @@ export function AssistantAcknowledgementCard({
         </View>
         {row.confirmation ? (
           <Label muted>
-            {row.confirmation.risk.charAt(0).toUpperCase() +
-              row.confirmation.risk.slice(1)}{" "}
-            · {confirmationReason(row)}
+            {confirmationRisk(row.confirmation.risk)} ·{" "}
+            {confirmationReason(row)}
           </Label>
         ) : null}
         {authoredReview ?? (
@@ -104,22 +115,26 @@ export function AssistantAcknowledgementCard({
               </Label>
             ) : null}
             <Label muted>
-              Expires {new Date(row.expires_at).toLocaleString()}
+              {translateApp("Expires {{date}}", {
+                date: new Date(row.expires_at).toLocaleString(appLocale()),
+              })}
             </Label>
             {expired ? (
               <Label muted>
-                This request expired. Refresh for its latest state.
+                {translateApp(
+                  "This request expired. Refresh for its latest state.",
+                )}
               </Label>
             ) : null}
             <View style={styles.row}>
               <ActionButton
-                label="Deny"
+                label={translateApp("Deny")}
                 variant="secondary"
                 disabled={disabled || expired}
                 onPress={() => onDecision("deny")}
               />
               <ActionButton
-                label="Allow"
+                label={translateApp("Allow")}
                 loading={deciding}
                 disabled={disabled || expired}
                 onPress={() => onDecision("allow")}

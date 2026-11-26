@@ -184,6 +184,23 @@ test("native legacy page keeps the preservation notice and admin-only switch", (
     true,
   );
 });
+test("native admin sees model-only access and where to review the frozen list", () => {
+  const e = setup(true);
+  Object.assign(e.query.data, {
+    guest_enabled: true,
+    binding_limits_guest_services: true,
+    effective_guest_services: [],
+  });
+  e.harness.mount(() => e.module.OrgGuestChannel({
+    agent,
+    channel: { id: "bot", bot_label: "Office helper", platform: "discord", status: "active" },
+  }));
+  elements(e.harness.flush()).find((r) => r.props.label === "Office helper")!.props.onPress();
+  const rows = elements(e.harness.flush());
+  assert.ok(rows.some((r) => r.props.detail === "Model-only chat"));
+  assert.ok(rows.some((r) => r.props.label?.startsWith("This bot's saved limits exclude services listed for guests")));
+  assert.equal(e.writes.length, 0);
+});
 test("native handoff needs explicit confirmation and rejects a stale account callback", async () => {
   const e = setup();
   e.query.data = e.review;
@@ -256,4 +273,17 @@ test("organization channel slugs bypass translation", () => {
     assert.equal(rows.find((r) => r.props.label === "Plain slug")?.props.detail, platform);
     assert.ok(!e.translations.includes(platform));
   }
+});
+
+test("an admin outside the maintainer list can read guest settings but cannot toggle them", () => {
+  const e = setup();
+  e.harness.mount(() => e.module.OrgGuestChannel({
+    agent: { ...agent, can_use: true, can_maintain: false },
+    channel: { id: "bot", bot_label: "Finance", platform: "lark", status: "active" },
+  }));
+  elements(e.harness.flush()).find((r) => r.props.label === "Finance")!.props.onPress();
+  const toggle = elements(e.harness.flush()).find((r) => r.props.label === "Allow guests")!.props.accessory;
+  assert.equal(toggle.props.disabled, true);
+  toggle.props.onValueChange(true);
+  assert.deepEqual(e.writes, []);
 });

@@ -7,7 +7,7 @@ Nyxbot failures use `nyxbot.error` through the same authenticated relay. See
 
 ## Permission and dispatch
 
-An account's `profile_config.analytics` is default off. An authenticated first-party human can read or change it with `GET` or `PUT /api/v1/users/me/preferences/analytics`. A mutation includes its expected `account_id`; the server checks it against the authenticated subject before writing. Each explicit choice stores the server's policy version (`"1"`) and a database-generated change time, and receives a new random revision even when the boolean is unchanged. Older records without a policy version retain an unknown version; the server does not invent a historical acknowledgement. Responses are `no-store`.
+An account's `profile_config.analytics` is default off. An authenticated first-party human can read or change it with `GET` or `PUT /api/v1/users/me/preferences/analytics`. A mutation includes its expected `account_id`; the server checks it against the authenticated subject before writing. Each explicit choice stores its acknowledged policy version (`"1"` when omitted by legacy clients; `"2"` only on explicit updated acknowledgement) marks the one-time prompt as seen, and records a database-generated change time, and receives a new random revision even when the boolean is unchanged. Older records without a policy version retain an unknown version; the server does not invent a historical acknowledgement. Responses are `no-store`.
 
 Account permission is necessary on every surface. A device's account-bound local choice and DNT can only narrow it. A surface/version header classifies a request; it grants no permission. Authenticated requests eligible for analytics carry both `X-NyxID-Analytics: enabled` and `X-NyxID-Analytics-Account` matching the authenticated actor. Agent/API-key activity cannot acquire analytics permission merely from its surface header. Anonymous and partially authenticated login/MFA events are denied. A full-login event needs an explicitly authenticated context; pre-auth contexts remain denied after reconstruction.
 
@@ -48,6 +48,22 @@ The backend's `telemetry::dispatch_inventory_tests` enumerates direct `track` ca
 
 `NYXID_TELEMETRY_DSN` selects the operator's PostHog ingestion project; `NYXID_TELEMETRY_HOST` selects its ingest host. The built-in default is `https://us.i.posthog.com`. `NYXID_SHARE_ANALYTICS` is an alternative operator configuration. Without a configured backend destination no product event dispatches. A configured destination never grants account or device permission. Public configuration may describe availability to clients; it supplies no consent authority.
 
+`GET /api/v1/public/config` also has an optional `crash_diagnostics_offered`
+discovery field, emitted only as `true` for a Global or Cohort diagnostics rollout
+and omitted when Off or Killed. Its value starts false and comes only from process
+memory on the public request path. A tracked worker evaluates rollout at startup
+and every 60 seconds; local admin flag writes refresh it through cache invalidation
+before returning (a maximum 200 ms read), while other replicas converge at their
+next successful periodic evaluation. Read failures retain the last value. The
+independent manifest worker keeps its 15-minute cadence.
+
+The web consent banner queries preferences only when the diagnostics discovery
+field is true, retaining the session cache. With the hint absent, product telemetry
+keeps its first-time disclosure without any preference GET. Only the
+authenticated preference response determines the person's real diagnostics offer
+and consent. A Cohort non-member makes at most one cached GET per session and sees
+no diagnostics banner. The public hint never grants capture authority.
+
 Operators must establish their own deployed-provider register, disclosures, processing locations, retention windows, contracts and transfer arrangements. Source defaults do not prove legal roles, contracts or regional processing. Security logs and database/backups have separate retention arrangements.
 
 ## Erasure status
@@ -75,3 +91,47 @@ failed service invocations. Its only event properties are the finite
 [SERVICE_MONITORING.md](SERVICE_MONITORING.md#automatic-failure-diagnostics).
 It uses the same account/device consent gates as other product events; the
 separate operational log counter and security audit do not depend on consent.
+
+## Policy 2 crash diagnostics
+
+[CRASH_REPORTING.md](CRASH_REPORTING.md) defines the closed schema, admission,
+native buffer, private artifacts and fenced server exporter. Existing categorical
+analytics remains policy agnostic. Diagnostics additionally requires policy 2 on
+the account and device, serving `diagnostics:crash-reports` readiness and flag,
+first-party human authority, device headers, and fresh revision checks on
+admission and before export. DNT/GPC deny. Web and iOS report automatically;
+Android reports **JavaScript errors and JavaScript fatal errors only**. Android
+native JVM/NDK crashes are **not captured**.
+
+Reports live in `client_error_reports` for at most 30 days; every read filters
+expiry, and personal erasure removes owner-linked rows. Anonymous hourly
+`client_error_report_counters` expire after 30 days. Raw messages, URLs, function
+names, register values, credentials and request metadata are excluded. iOS's
+protected on-device raw file can contain registers until next-launch processing;
+all raw-file branches purge it. The sanitized consent-bound mobile buffer has
+three records / 256 KiB / 24-hour limits and is purged on authority loss.
+
+Before enabling Sentry export the owner must accept the erasure approach:
+**separate web/mobile projects**, **project retention ≤30 days**, **Prevent
+Storing of IP Addresses enabled**, and **server-side data scrubbing enabled**.
+Vendor events carry no account/user/IP/UA/cookie identifiers. NyxID's local rows
+are the only event-to-person link and personal erasure deletes them. Exported
+events expire under vendor retention; no supported per-event deletion guarantee
+is assumed. These deployed operator settings require direct verification.
+
+Withdrawing permission stops new reports and pending exports; reports NyxID has already received remain for up to 30 days unless the account is deleted, and exported vendor copies expire under vendor retention.
+
+Crash permission responses distinguish definitive denial from unknown status.
+Timeout, lookup failures and unserving readiness pause client capture without
+purging pending mobile records; 13401 also pauses. A failed linearizable consent
+read remains unknown: ingestion and policy-2 acknowledgement return transient
+503 `security_readiness_unavailable`, and export stays pending with a short
+`consent_unknown` backoff. Only a successful consent read can establish denial.
+A restore timeout with no known account pauses; a later same-account restore
+can resume. Invalid or expired mobile records are rejected individually by their
+capture time, keeping the binding and other records. Envelope-less 4xx responses
+pause and retain records; only a numeric NyxID error envelope can reject one. Definitive not-offered/13400,
+withdrawal, logout and account switch purge. Export interval zero stores new
+rows as disabled and never works existing pending rows. Release-version counts
+include only identities verified by `client_release_registry`; unknown store
+builds appear separately until an administrator registers them.

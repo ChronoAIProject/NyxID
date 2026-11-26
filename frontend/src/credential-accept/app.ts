@@ -32,6 +32,7 @@ type AcceptStatus =
   | "waiting_pubkey"
   | "encrypting"
   | "posting"
+  | "delivery_unknown"
   | "polling"
   | "consumed"
   | "partial_decrypted"
@@ -134,6 +135,7 @@ const statusLabel: Readonly<Record<AcceptStatus, string>> = {
   encrypting: "Encrypting",
   posting: "Sending ciphertext",
   polling: "Waiting for node",
+  delivery_unknown: "Delivery unknown",
   consumed: "Stored",
   partial_decrypted: "Partially stored",
   decrypt_failed: "Decrypt failed",
@@ -145,6 +147,7 @@ const statusLabel: Readonly<Record<AcceptStatus, string>> = {
 };
 
 const terminalDescriptions: Partial<Readonly<Record<AcceptStatus, string>>> = {
+  delivery_unknown: "The credential may or may not have been installed. Check the service credential on the node. To send it again, start a new credential injection.",
   consumed: "The node consumed the encrypted credential.",
   partial_decrypted: "Some nodes stored the credential and some still need retry.",
   decrypt_failed: "The node could not decrypt the submitted envelope.",
@@ -227,16 +230,17 @@ function failedFanOutTargetIds(
   );
 }
 
-function resolveTerminalState(
-  pending: PendingCredentialWithState,
-  now: number,
-): AcceptStatus | null {
-  if (pending.consumed_at || pending.remote_state === "consumed") return "consumed";
+type PollStatus = Partial<Pick<PendingCredentialWithState,
+  "remote_state" | "expires_at" | "is_active" | "consumed_at" | "declined_at">>;
+
+function resolveTerminalState(pending: PollStatus, now: number): AcceptStatus | null {
+  if (pending.consumed_at) return "consumed";
   if (pending.declined_at) return "declined";
-  if (pending.remote_state === "decrypt_failed") return "decrypt_failed";
-  if (pending.remote_state === "expired") return "expired";
-  if (Date.parse(pending.expires_at) <= now) return "expired";
-  if (!pending.is_active && !pending.consumed_at && !pending.declined_at) return "expired";
+  const terminal = statusFromRemoteState(pending.remote_state ?? "ciphertext_received");
+  if (terminal) return terminal;
+  if (pending.is_active === false || Date.parse(pending.expires_at ?? "") <= now) {
+    return pending.remote_state === "delivery_unknown" ? "delivery_unknown" : "expired";
+  }
   return null;
 }
 
@@ -459,22 +463,33 @@ async function fetchPendingMetadata(
   return pending;
 }
 
-async function pollTerminalState(
+async function pollCredentialStatus<T extends PollStatus>(
   deps: CredentialAcceptDeps,
-  route: RouteInfo,
-): Promise<AcceptStatus> {
-  const startedAt = deps.now();
-  let attempt = 0;
-  while (deps.now() - startedAt < POLL_WAIT_MS) {
-    const pending = await fetchPendingMetadata(deps, route);
-    const terminal = resolveTerminalState(pending, deps.now());
-    if (terminal) return terminal;
-    const remaining = POLL_WAIT_MS - (deps.now() - startedAt);
-    if (remaining <= 0) break;
+  fetchStatus: () => Promise<T>,
+  onUnknown: () => void,
+): Promise<{ status: AcceptStatus; pending: T }> {
+  let deadline = deps.now() + POLL_WAIT_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    const pending = await fetchStatus();
+    const now = deps.now();
+    const terminal = resolveTerminalState(pending, now);
+    if (terminal) return { status: terminal, pending };
+    if (pending.remote_state === "delivery_unknown") {
+      onUnknown();
+      const expiry = Date.parse(pending.expires_at ?? "");
+      if (Number.isFinite(expiry)) deadline = expiry;
+    }
+    const remaining = deadline - now;
+    if (remaining <= 0) return { status: "timeout", pending };
     await deps.delay(Math.min(nextDelay(POLL_DELAYS_MS, attempt), remaining));
-    attempt += 1;
   }
-  return "timeout";
+}
+
+function showUnknownDelivery(root: HTMLElement, state: PageState, deps: CredentialAcceptDeps): void {
+  if (state.status !== "delivery_unknown") {
+    state.status = "delivery_unknown";
+    render(root, state, deps);
+  }
 }
 
 async function fetchFanOutStatus(
@@ -580,24 +595,6 @@ function encryptedFanOutItems(
   });
 }
 
-async function pollFanOutTerminalState(
-  deps: CredentialAcceptDeps,
-  route: RouteInfo,
-): Promise<FanOutPendingCredentialResponse | null> {
-  const startedAt = deps.now();
-  let attempt = 0;
-  while (deps.now() - startedAt < POLL_WAIT_MS) {
-    const pending = await fetchFanOutStatus(deps, route);
-    const terminal = statusFromRemoteState(pending.remote_state ?? "ciphertext_received");
-    if (terminal) return pending;
-    const remaining = POLL_WAIT_MS - (deps.now() - startedAt);
-    if (remaining <= 0) break;
-    await deps.delay(Math.min(nextDelay(POLL_DELAYS_MS, attempt), remaining));
-    attempt += 1;
-  }
-  return null;
-}
-
 async function waitForFanOutPubkeys(
   deps: CredentialAcceptDeps,
   route: RouteInfo,
@@ -656,16 +653,12 @@ async function runFanOutCiphertextFlow(
     return;
   }
 
-  state.status = "polling";
+  state.status = postResult.remote_state === "delivery_unknown" ? "delivery_unknown" : "polling";
   render(root, state, deps);
-  const terminalPending = await pollFanOutTerminalState(deps, input.route);
-  if (!terminalPending) {
-    state.status = "timeout";
-    return;
-  }
-  state.fanOutResponse = terminalPending;
-  state.status =
-    statusFromRemoteState(terminalPending.remote_state ?? "ciphertext_received") ?? "timeout";
+  const final = await pollCredentialStatus(deps, () => fetchFanOutStatus(deps, input.route),
+    () => showUnknownDelivery(root, state, deps));
+  state.fanOutResponse = final.pending;
+  state.status = final.status;
   if (state.status === "partial_decrypted") {
     retainFanOutPlaintextForRetry(state, plaintext);
   }
@@ -945,9 +938,14 @@ async function submitCredential(
       state.status = directTerminal;
       return;
     }
-    state.status = "polling";
+    state.status = postResult.remote_state === "delivery_unknown" ? "delivery_unknown" : "polling";
     render(root, state, deps);
-    state.status = await pollTerminalState(deps, state.route);
+    const final = await pollCredentialStatus(deps, () => fetchPendingMetadata(deps, state.route),
+      () => showUnknownDelivery(root, state, deps));
+    state.status = final.status;
+    if (state.ciphertextResponse?.delivery_status === "unknown" && final.status !== "delivery_unknown") {
+      state.ciphertextResponse = null;
+    }
   } catch (err) {
     state.status = "error";
     state.errorMessage =

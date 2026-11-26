@@ -327,11 +327,13 @@ async fn service_preference_http_scopes_stale_slug_config_and_validation() {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec![],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: None,
             created_at: now,
@@ -927,6 +929,13 @@ async fn service_preference_command_monitoring_bounds_detail_and_single_listing_
 
 #[tokio::test]
 async fn service_preference_group_merge_capacity_and_explicit_hidden_release() {
+    crate::services::oauth_token_authority_service::with_fixture_read_budget(
+        group_merge_and_release(),
+    )
+    .await;
+}
+
+async fn group_merge_and_release() {
     let (state, router, owner, token, ids) = fixture("preference_group_merge_release").await;
     let db = &state.db;
     let second_person = Uuid::new_v4().to_string();

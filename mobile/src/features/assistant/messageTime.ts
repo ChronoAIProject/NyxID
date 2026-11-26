@@ -1,3 +1,4 @@
+import { appLocale } from "../../i18n/appTranslation";
 /** A message instant, formatted for the reader's own locale and time zone. */
 export interface MessageTimeLabels {
   /** The instant itself, for `<time dateTime>`. */
@@ -45,21 +46,6 @@ function formatter(
   return cached;
 }
 
-function readerLocale(locale: string | undefined): string | undefined {
-  if (locale) return locale;
-  const preferences = (
-    globalThis as {
-      navigator?: { languages?: readonly string[]; language?: string };
-    }
-  ).navigator;
-  // Native has no browser language preferences; Intl uses the device locale.
-  return (
-    preferences?.languages?.[0] ??
-    preferences?.language ??
-    Intl.DateTimeFormat().resolvedOptions().locale
-  );
-}
-
 /**
  * Display labels for a stored message instant (epoch milliseconds or an ISO
  * string). `label` always names the date and zone, so messages from different
@@ -75,7 +61,7 @@ export function messageTime(
   if (value == null || value === "") return undefined;
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return undefined;
-  const reader = readerLocale(locale);
+  const reader = locale ?? appLocale();
   const dayFirst = reader?.toLowerCase().startsWith("en") ? "en-GB" : reader;
   const year = formatter("year", YEAR, "en", timeZone);
   const thisYear = year.format(date) === year.format(now);

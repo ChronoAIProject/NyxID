@@ -190,8 +190,8 @@ https://app.example.com/callback?code=AUTH_CODE&state=RANDOM_STATE
 
 **Supported redirect URI types:**
 - Standard HTTPS URLs
-- Loopback redirects (RFC 8252 s7.3): `http://127.0.0.1:*`, `http://localhost:*`, `http://[::1]:*`
-- Private-use URI schemes (RFC 8252 s7.1): e.g., `cursor://`, `vscode://`
+- With `auth:oauth-exact-redirects-v1` enabled for public clients, register the complete HTTP loopback callback. Only its port may vary. Register each loopback host separately.
+- Register each complete native callback URI, including its scheme, authority and path. With exact redirects enabled, silent repeat consent requires the exact callback the person reviewed, including its port.
 
 ### Step 4: Exchange Code for Tokens
 
@@ -231,10 +231,40 @@ curl -X POST https://auth.example.com/oauth/token \
   -d "client_id=YOUR_CLIENT_ID"
 ```
 
+Public OAuth clients send their registered client ID with the refresh token.
+Confidential clients also authenticate with their registered secret using
+HTTP Basic or a form secret. The global `auth:oauth-refresh-client-auth-v1` flag enables enforcement after clients have been updated.
+
 NyxID uses **refresh token rotation**: each refresh returns a new refresh
 token and invalidates the old one. A 120-second grace period handles network
 retries. Reuse of a revoked refresh token outside the grace period triggers
 revocation of the entire token family.
+
+### OAuth consent disclosure
+
+The consent screen presents identity and OAuth permissions, access duration
+and revocation, and service access separately. The final service summary uses
+the same service selection as the submitted decision. A live announcement
+reports the selection mode. It includes the count for a restricted selection.
+Service names and permission details appear in the summary before approval.
+All services lists the
+currently included connections and includes future connections. The summary
+shows retained access when existing authorization data is available.
+Ordinary approval preserves the stored grant and issues authority
+for the approved request. Incremental review lists newly requested permissions,
+including long-lived and durable broker access. Incremental approval carries
+forward the existing grant and adds the approved services.
+
+Service disclosures describe the connected credential and known catalog
+operations. They do not narrow full service access or replace credential,
+resource, or approval checks. Unavailable details fall back to full-access
+copy without blocking approval. Revoking app access in Authorized Applications
+requires the app to obtain consent again. The screen lists the configured
+standard and broker token lifetimes. The app's token flow determines which
+applies. Refresh rotation can keep the app connected.
+
+See [the disclosure API](API.md#post-apiv1user-servicesconsent-disclosure)
+for field and availability details.
 
 ---
 
@@ -463,8 +493,8 @@ conditional migration writes protect concurrent administrator policy changes.
 
 Supplied redirect URIs are validated, trimmed, and deduplicated using the same
 validator as developer apps. Registration permits an omitted or empty list for
-public native clients; authorization still enforces NyxID's loopback/private-scheme
-rules or a registered callback. Limits are 16 redirect URIs of 2048 bytes each,
+public native clients. Register callbacks before enabling `auth:oauth-exact-redirects-v1`.
+With enforcement enabled, an empty list cannot authorize a callback. Limits are 16 redirect URIs of 2048 bytes each,
 64 scope tokens of 256 bytes each, and a 256-byte client name. The existing request
 body limit also applies.
 

@@ -533,6 +533,7 @@ mod tests {
     fn guest_1995_payer_is_agent_owner_and_owner_resource_billing_is_unchanged() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let mut chat = ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
@@ -612,6 +613,7 @@ mod tests {
     fn shared_recipient_never_uses_guest_owner_payer_override() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let chat = ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,

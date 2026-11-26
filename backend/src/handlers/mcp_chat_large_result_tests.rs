@@ -439,3 +439,122 @@ async fn oversized_unretainable_result_reports_completed_effect_without_replay_a
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn list_schedules_reads_all_sixty_through_direct_and_wrapped_mcp() {
+    use crate::models::trigger::COLLECTION_NAME;
+
+    let f = Box::pin(orchestrator_fixture("list_sixty_schedules")).await;
+    let auth = authenticate(&f).await;
+    let now = bson::DateTime::now();
+    let instruction = "Review 值 \"quoted\"\n".repeat(210);
+    let mut expected = Vec::new();
+    let mut rows = Vec::new();
+    for i in 0..62 {
+        let at = bson::DateTime::from_millis(now.timestamp_millis() - i % 2);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut row = doc! {
+            "_id": &id, "user_id": &f.owner, "label": format!("task {i}"),
+            "source": "schedule", "schedule": {"kind": "at", "at": now},
+            "status": if i == 0 { "active" } else { "disabled" },
+            "secret_hash": format!("schedule:{id}"), "verification": {"mode":"schedule"},
+            "delivery": {"type":"assistant", "agent_id": &f.chat.agent_id, "instruction": &instruction},
+            "created_at": at, "updated_at": now,
+        };
+        if i == 1 || i == 60 {
+            row.remove("source"); // Legacy webhook source.
+            row.remove("schedule");
+            row.insert("verification", doc! {"mode":"token","location":"bearer"});
+        }
+        match i {
+            60 => {
+                row.insert("delivery", doc! {"type": "notification"});
+            }
+            61 => {
+                row.insert("user_id", uuid::Uuid::new_v4().to_string());
+            }
+            _ => expected.push((std::cmp::Reverse(at), id)),
+        }
+        rows.push(row);
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    expected.sort();
+    let expected: Vec<_> = expected.into_iter().map(|(_, id)| id).collect();
+
+    let mut args = json!({});
+    let mut actual = Vec::new();
+    let mut pages = 0;
+    loop {
+        let name = "nyxid__list_schedules";
+        let reply = if pages == 0 {
+            direct_call(&f, &auth, name, args.clone()).await
+        } else {
+            call(&f, &auth, name, args.clone()).await
+        };
+        let mut value = page(reply).await;
+        if let Some(reference) = value["ref"].as_str().map(str::to_owned) {
+            let mut text = value["content"].as_str().unwrap().to_string();
+            while let Some(part) = value["next_part"].as_u64() {
+                value = page(
+                    call(
+                        &f,
+                        &auth,
+                        retained::TOOL_NAME,
+                        json!({"ref":reference,"part":part}),
+                    )
+                    .await,
+                )
+                .await;
+                text.push_str(value["content"].as_str().unwrap());
+            }
+            assert_eq!(value["complete"], true);
+            value = serde_json::from_str(&text).unwrap();
+        }
+        let items = value["schedules"].as_array().unwrap();
+        assert!(!items.is_empty());
+        for item in items {
+            actual.push(item["id"].as_str().unwrap().to_owned());
+            assert_eq!(item["delivery"]["instruction"], instruction);
+        }
+        pages += 1;
+        assert!(actual.len() <= expected.len());
+        if value["next_cursor"].is_null() {
+            break;
+        }
+        args["cursor"] = value["next_cursor"].clone();
+    }
+    assert!(pages > 1);
+    assert_eq!(actual, expected);
+
+    let active = page(
+        direct_call(
+            &f,
+            &auth,
+            "nyxid__list_schedules",
+            json!({"enabled":true,"limit":1}),
+        )
+        .await,
+    )
+    .await;
+    let active = active["schedules"].as_array().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["label"], "task 0");
+    let empty = page(
+        call(
+            &f,
+            &auth,
+            "nyxid__list_schedules",
+            json!({"agent_id":uuid::Uuid::new_v4()}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(empty["schedules"], json!([]));
+    assert!(empty["next_cursor"].is_null());
+    f.state.db.drop().await.unwrap();
+}

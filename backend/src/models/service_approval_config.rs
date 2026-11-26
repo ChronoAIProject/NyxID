@@ -106,6 +106,24 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OrgApprovers {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver_user_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub approver_revision: i64,
+    #[serde(default)]
+    pub min_grant_revision: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgPolicyStamp {
+    pub config_id: String,
+    pub revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+}
+
 /// Per-service approval override for a user.
 ///
 /// When a user has global `approval_required = true`, they can exempt specific
@@ -118,6 +136,8 @@ fn is_false(value: &bool) -> bool {
 /// services; this explicit configuration remains authoritative in both cases.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceApprovalConfig {
+    #[serde(flatten)]
+    pub approvers: OrgApprovers,
     /// UUID v4 string
     #[serde(rename = "_id")]
     pub id: String,
@@ -167,6 +187,7 @@ mod tests {
 
     fn make_config() -> ServiceApprovalConfig {
         ServiceApprovalConfig {
+            approvers: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

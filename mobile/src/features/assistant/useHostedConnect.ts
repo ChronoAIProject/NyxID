@@ -1,3 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import * as WebBrowser from "expo-web-browser";
 import { connectLinksApi } from "../../lib/api/connectLinksApi";
@@ -16,7 +19,7 @@ import {
 } from "./connectLinkState";
 
 const errorText = (error: unknown) =>
-  error instanceof Error ? error.message : "The connection request failed.";
+  error instanceof Error ? error.message : translateApp("The connection request failed.");
 
 /** Token/credentials stay in this mounted chat dialog, never routes or caches. */
 export function useHostedConnect(
@@ -39,7 +42,7 @@ export function useHostedConnect(
     url: string;
     platform: boolean;
   }>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
@@ -138,7 +141,7 @@ export function useHostedConnect(
         /* A missing catalog choice never widens credential authority. */
       }
     } catch (cause) {
-      if (current()) setError(errorText(cause));
+      if (current()) setError(() => (errorText(cause)));
     } finally {
       if (alive()) setLoading(false);
     }
@@ -146,18 +149,14 @@ export function useHostedConnect(
   function applyResult(result: CompleteConnectLinkResponse, platform: boolean) {
     if (!current()) return;
     if (linkId.current && result.id !== linkId.current)
-      throw new Error(
-        "The server returned a different connection request. Please reload.",
-      );
+      throw localizedError("The server returned a different connection request. Please reload.");
     linkId.current = result.id;
     // Completed links can return a provisioned UserService slug, not the catalog slug.
     if (
       result.status !== "completed" &&
       result.service_slug !== latest.current.preview?.service_slug
     )
-      throw new Error(
-        "The server returned a different service. Please reload.",
-      );
+      throw localizedError("The server returned a different service. Please reload.");
     if (result.status === "completed") {
       terminal("completed");
       return;
@@ -168,9 +167,7 @@ export function useHostedConnect(
     } else {
       const url = providerUrl(result.authorization_url);
       if (!url)
-        throw new Error(
-          "The provider did not return a safe authorization URL. Try again.",
-        );
+        throw localizedError("The provider did not return a safe authorization URL. Try again.");
       setOAuth({ id: result.id, url, platform });
       setDevice(undefined);
     }
@@ -185,9 +182,7 @@ export function useHostedConnect(
       status.status !== "completed" &&
       status.service_slug !== latest.current.preview?.service_slug
     )
-      throw new Error(
-        "The server returned a different service. Please reload.",
-      );
+      throw localizedError("The server returned a different service. Please reload.");
     terminal(status.status);
     if (status.status === "pending" && recover && canAct()) {
       // Same recovery call as the web return page. Browser dismissal is never
@@ -201,7 +196,7 @@ export function useHostedConnect(
       );
       applyResult(result, value.platform);
     }
-    if (current() && status.last_error) setError(status.last_error);
+    if (current() && status.last_error) setError(() => (status.last_error ?? undefined));
   }
   async function openProvider(url: string) {
     const safe = providerUrl(url);
@@ -209,7 +204,7 @@ export function useHostedConnect(
     try {
       await WebBrowser.openBrowserAsync(safe);
     } catch {
-      if (current()) setError("Could not open the provider. Try again.");
+      if (current()) setError(() => (translateApp("Could not open the provider. Try again.")));
     }
   }
   async function act(
@@ -231,9 +226,7 @@ export function useHostedConnect(
           current() &&
           result.service_slug !== latest.current.preview?.service_slug
         )
-          throw new Error(
-            "The server returned a different service. Please reload.",
-          );
+          throw localizedError("The server returned a different service. Please reload.");
         terminal(result.status);
       } else if (kind === "check" && oauth) {
         await checkOAuth(oauth, true);
@@ -259,7 +252,7 @@ export function useHostedConnect(
       }
     } catch (cause) {
       if (current()) {
-        setError(errorText(cause));
+        setError(() => (errorText(cause)));
         try {
           const fresh = await request((signal) =>
             connectLinksApi.preview(token, signal),
@@ -345,7 +338,7 @@ export function useHostedConnect(
         if (stopped || !current()) return;
         const next = connectPollDelay(cause, ++failures, interval);
         if (next === null) {
-          setError(errorText(cause));
+          setError(() => (errorText(cause)));
           return;
         }
         interval = next;

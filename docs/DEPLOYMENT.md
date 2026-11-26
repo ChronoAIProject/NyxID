@@ -8,6 +8,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 
 - [Prerequisites](#prerequisites)
 - [Local Development](#local-development)
+- [Releasing to production](#releasing-to-production)
 - [Building for Production](#building-for-production)
 - [Docker Deployment](#docker-deployment)
 - [Delegated Catalog v2 and Exact Authority v2 Rollout](#delegated-catalog-v2-and-exact-authority-v2-rollout)
@@ -96,6 +97,147 @@ The frontend starts on `http://localhost:3000`.
 curl http://localhost:3001/health
 # {"status":"ok","version":"0.5.0"}
 ```
+
+---
+
+## Releasing to production
+
+Feature PRs target `dev`. Pushes there trigger the staging build and deploy
+workflow for the backend and frontend. To promote the commit running on both, preview the rollup with
+`scripts/cut-release.sh --dry-run`, then run `scripts/cut-release.sh` to open
+the snapshot PR. The snapshot stays fixed while work continues on `dev`.
+
+**Main Merge Guard** accepts three sources from this repository for a PR into
+`main`. Each PR needs one approval, full **CI Pipeline**, a passing guard and
+**Create a merge commit**.
+
+| Source | What the guard checks |
+| --- | --- |
+| `dev` | The source is the integration branch. |
+| `release/YYYY-MM-DD` | The date is valid and the head is already in `dev` history. An optional numeric suffix starts at `-2`. |
+| `hotfix/<name>` | The head contains the current `main` tip and every commit it adds is absent from `dev`. The name has 1–64 ASCII characters, starts with a lowercase letter or digit, and may also contain `.`, `_` and `-`. |
+
+For an urgent production fix, branch from current `main` and open the hotfix
+PR back into `main`. If `main` advances during review, update the hotfix and
+rerun its checks. After it lands, open a PR **from `main` into `dev`** and
+choose **Create a merge commit** so the hotfix keeps its commit ancestry.
+The next rollup must use a snapshot containing that sync. Its notes follow
+the first parent of `dev` and list the sync PR once.
+
+### Automatic production deploys
+
+In GitHub, create the `production` environment with a deployment branch rule
+for `main` only. Store `NYXID_PRODUCTION_DEPLOY_CLIENT_ID` and
+`NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET` as environment secrets for the
+NyxID service account authorized to deploy the two production apps through
+the deployment proxy (OAuth scope `proxy`). The staging job reads
+`NYXID_STAGING_DEPLOY_CLIENT_ID` and `NYXID_STAGING_DEPLOY_CLIENT_SECRET`
+from the `staging` environment.
+
+Set `NYXID_DEPLOY_TARGET` separately in each GitHub environment's secrets.
+Supply a single-line JSON object with the following required fields.
+
+| Field | Meaning |
+| --- | --- |
+| `apps_url` | Full apps collection URL for the deployment project. The job appends the app name for updates and the app name followed by `/status` for readiness checks. |
+| `org_id` | Namespace scope sent with each deployment request. |
+| `backend.app`, `frontend.app` | App name in the corresponding component's JSON object. |
+| `backend.service`, `frontend.service` | Kubernetes service whose image the job updates and whose pod status it reads. |
+| `backend.version_url` | Backend health URL that reports status and the running commit. |
+| `frontend.version_url` | Frontend build-version URL that reports the running commit. |
+
+Use HTTPS URLs without credentials, query strings or fragments. App and service
+names start with an ASCII letter or digit, may also contain dots, underscores
+and hyphens, and have a 63-character limit. The namespace scope also permits
+colons after the first character and has a 128-character limit.
+
+Open **Actions → Publish Images → the main run → deploy-production** for
+progress. A push to `main` or **Run workflow** on `main` deploys once the
+CI gate and multi-architecture manifests succeed. Version tags only publish
+images. Production deploy jobs serialize. Each compares the live versions
+to the candidate before updating either app and checks the app again before
+its PATCH. A newer observed commit stops the run. A divergent or unknown
+commit fails it.
+
+The job deploys the backend first. It requires three consecutive ready
+samples, ten seconds apart, with the candidate commit and backend health
+status `ok`. It then checks both apps together as the frontend rolls out.
+For a failed or partial rollout, use **Re-run failed jobs** on that run.
+An app already serving the candidate is checked for readiness and skipped
+for update.
+
+### NyxBot deployment check
+
+The staging and production deploy jobs hold their existing deployment slot
+through a private NyxBot check. After both apps serve the candidate, the job
+signs in on the backend health URL's HTTPS origin, submits one owner invocation
+to a fixed private thread, requires a completed root turn with reply text,
+then sends one fixed message to a private test channel. The channel must
+return a platform message ID. The check has a 90-second deadline. An uncertain
+admission or unfinished turn gets one bounded cancellation request by its
+original idempotency key. The check never retries a paid turn or a send.
+
+Configure each GitHub environment separately. Use a dedicated, unprivileged
+owner with a hard-capped model budget, a private model-only specialist thread,
+and one opted-in channel route whose only recipient is a test account. Enable
+owner invocations for this owner after the fleet supports them. See
+[owner invocation rollout](chat/09-owner-cli-api.md#rollout-and-rollback).
+
+| Environment setting | Value |
+| --- | --- |
+| Secret `NYXID_CHECK_ACCOUNT` | JSON object with string fields `email`, `password`, `owner_id` (UUID returned by first-party CLI login), `conversation_id` (private specialist thread) and `channel_id` (channel conversation UUID). |
+| Secret `NYXID_CHECK_ALERT_URL` | HTTPS incoming webhook accepting a Slack-style JSON `text` field. Use an independent release on-call destination. |
+| Variable `NYXID_ROLLBACK_PAIR` | Optional compatibility approval in the form `<previous full SHA>..<candidate full SHA>`. An empty or stale value permits checks and blocks automatic restoration. |
+
+When check credentials are configured and both apps need updating, the job
+resolves both published manifests and pins each PATCH to its digest. The
+passing artifact name and JSON record the two digests actually applied. If
+registry lookup is unavailable, the usual SHA-tag rollout and check can
+proceed. Only a passing pair deployed by digest establishes a rollback target.
+
+Missing check secrets produce a visible skip. A passing check produces a JSON
+artifact retained for 90 days. Each record contains UTC time, environment,
+candidate commit, outcome, stage and rollback disposition. Failures keep the
+deploy job red, including after successful recovery. The alert includes the
+run link. Use the failed run's artifact and summary for incident history.
+
+Before arming a pair, review **every** intervening release and the environment's
+actual migrations, feature activations, workers and external writers against
+the rollback rules in `CLAUDE.md`. Examples include exact billing cutover, new
+billing allocation writers and the first owner invocation. Verify the previous
+binary supports all state the candidate or check can write. Coordinate manual
+deploys and hold incompatible activations through the deploy/check/restore
+window. Leave the variable empty for a forward-fix release or uncertain fleet
+state. Configure the pair before the deploy job starts.
+
+On failure the job requires the same predecessor SHA observed at **both** live
+version endpoints before rollout and immediately before their respective updates.
+It verifies commit ancestry, the exact compatibility approval and an unexpired passing
+check artifact from the latest run and attempt of that SHA's branch
+publish workflow. That run must have succeeded. Both live apps must still serve the failed candidate.
+Restoration uses the same deployer and the two recorded digests, updating the backend first
+and verifying both apps together when the frontend is ready. A changed live
+pair, missing proof, expired receipt, partial start or already-current start
+blocks automatic restoration. An ambiguous PATCH stops the sequence. Inspect
+the reported disposition before rerunning a failed deployment since a rerun
+can redeploy the failed candidate.
+
+### Rolling back a production release
+
+Coordinate the rollback with any active or queued Publish Images deploys.
+In the deployment platform, select the project and namespace identified by
+`apps_url` and `org_id` in the production environment's `NYXID_DEPLOY_TARGET`.
+Choose the seven-character SHA of a known-good, rollback-compatible `main`
+build. Update the backend and frontend apps and services named in the
+environment's `NYXID_DEPLOY_TARGET` in this order.
+
+1. Set the backend image to `ghcr.io/chronoaiproject/nyxid/backend:main-<sha7>`.
+   Wait for the app to report ready and for `backend.version_url` to return
+   `status: ok` and the expected 12-character commit.
+2. Set the frontend image to `ghcr.io/chronoaiproject/nyxid/frontend:main-<sha7>`.
+   Verify the same commit at `frontend.version_url`.
+
+Land the revert or fix on `main` so the next automatic deployment carries it.
 
 ---
 
@@ -215,7 +357,8 @@ The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
 2. Unprivileged nginx 1.27 runtime with a validating Python origin/policy renderer
 
 The frontend nginx config (`frontend/nginx.conf.template`) handles:
-- SPA fallback (`try_files $uri /index.html`)
+- Generated public routes serve prerendered HTML; explicit app routes serve the
+  internal `app.html` shell. Unknown routes and raw `/index.html` return 404.
 - Reverse proxy for `/api`, `/oauth`, `/.well-known`, `/health` to the backend
 - Gzip compression and cache headers for hashed assets
 - Response-specific enforcing CSP and complete security headers on every location
@@ -232,7 +375,8 @@ background check within that ten-minute window.
 Frontend metadata is authoritative because frontend and backend images can roll
 independently. Two consecutive observations of a different frontend build stage
 its initial JavaScript and CSS in the browser cache, without executing scripts,
-attaching styles, or remounting the running application. The served `index.html`
+attaching styles, or remounting the running application. The application shell
+served at `/assistant`
 must also identify that build before it is considered ready.
 
 Confirmed updates are saved in a Zustand store persisted to local storage, with
@@ -432,8 +576,11 @@ SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready
 returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
 including ordinary requests and new turns that arrive while routing converges.
-There is no drain rejection on these request paths and no database lookup in
-`/ready`.
+There is no drain rejection on these request paths and `/ready` never accesses
+the database. The staging platform's readiness checks and load balancer retain
+this drain-only, empty-body contract. chrono-probe can use the same `/ready` signal;
+MongoDB availability is monitored separately (see
+[Health and readiness contract](HEALTH_READINESS.md)).
 
 The process stops taking new background queue claims, scheduled work and polls.
 Already claimed work finishes, with turn heartbeats, capacity renewal, node
@@ -577,6 +724,86 @@ process earlier, or MongoDB cannot confirm settlement within cleanup, peers use
 the unchanged stale-heartbeat recovery: 75 seconds plus the 15-second sweep
 cadence. A worker loss never automatically replays execution. A fully drained
 turn has its complete reply and needs no recovery.
+
+### Background turn rollback
+
+Enrollment in `nyxagent-reattach-v1` defaults off. An admin can enable
+`assistant:turn-handoff` for a person, an organization
+or globally in Feature Flags after every NyxID replica advertises
+`assistant:turn-handoff-v2` and every NyxAgent replica advertises
+`reattach.credential_watch`. Enrollment requires live fleet readiness, the
+watch capability and a selected profile with `inference_credential: thread`.
+
+Standalone NyxBot specialist assignments and member turns in personal web groups
+also require `assistant:turn-handoff-v3` across the serving NyxID fleet. They
+use the same feature flag. The survivor takes over the original team slot,
+publishes an assignment to its saved report thread, or settles the member reply
+and mention budget together in the group transcript. A pending group follower
+receives its ordinary `group_settled` event when the group becomes quiet.
+
+Owner-private chat turns and NyxBot event wakes require `assistant:turn-handoff-v4`
+on every serving replica. A survivor uses the admitted channel or team slot and
+the turn's saved routing. The existing event delivery worker owns the primary chat
+reply. A wake's supplemental replies carry their original destination through
+settlement. Their delivery workers skip confirmed parts and preserve uncertain
+sends for review. Personal manager chats use their admitted manager transport
+for discovery, replay and cancellation. Guest, voice, shared-agent, organization
+and collaboration lanes stay excluded.
+
+The admitting replica discovers missing metadata with the owner's existing
+private assistant credential. It allows two seconds in total before admission
+for `GET /v1/capabilities` and `GET /v1/models?include_capabilities=true`.
+The replica reuses deployment capabilities and the owner's profiles for up to
+60 seconds. Browser, mobile and automation clients can start a turn directly.
+If discovery lacks an authorized credential or times out, the turn proceeds
+in the foreground.
+
+Group `Assistant turn settled` logs by `restart_eligibility`. Count
+`watched_thread_credential` for enrolled turns. `capability_unavailable`
+indicates missing or incompatible deployment evidence, `profile_unknown`
+indicates insufficient evidence for the selected profile, and
+`platform_credential` identifies a profile using a platform key.
+`lane_ineligible` identifies a turn excluded by the lane check. `discovery_skipped`
+means the admission caller supplied no discovery snapshot. `upstream_refused_background`
+identifies a turn that fell back after an upstream refusal. The field is absent
+when the feature flag or fleet readiness gate skips negotiation.
+
+Disable every enabling override in Feature Flags **before rolling NyxAgent back**
+to a version without the credential watch. Allow 30 seconds for admission hints
+to expire and let admissions already in flight finish. Keep enrollment disabled until every NyxAgent
+replica advertises `reattach.credential_watch` again. Model discovery can
+precede a profile reload, and a different replica can admit the request.
+
+Before rolling back a fleet that has enrolled turns, disable every enabling
+override, allow 30 seconds for admission hints to expire and let admissions already in
+flight finish. Keep compatible subscribers and cancellation handlers serving.
+Run `mongosh "$NYXID_MONGODB_URI" --quiet --file scripts/mongodb/check-turn-handoff-rollback.js`
+with a URI selecting the NyxID database. Exit 0 means the majority read on the
+primary found zero outstanding conversation records and zero saved chat replies
+awaiting delivery. Exit 2 prints counts for subscribed, offered, claimed or
+stopped windows, grouped by the active lane when present, and the number of
+pending saved deliveries. Keep v4 subscribers and delivery workers running until
+both counts reach zero before rolling back to v3. Run this check before removing v3 subscribers even when rolling
+back to a v2-capable build. V2 readers decode the compatible source and skip
+version 3 in both offer discovery and the claim update. A read error requires another
+check. A stopped window clears after confirmed cancellation or after the next
+authorized admission replaces the internal credential. Deleting its marker by
+hand could let an earlier execution use the next turn's authority.
+
+Admins can read `assistant_turn_handoff` entries in the audit log. Each committed
+offer, claim and settlement records the generation of the pod that offered the
+turn. A second handoff has its own offering generation. Count transitions by
+generation in the NyxID database with the following read-only aggregation.
+
+```javascript
+db.audit_log.aggregate([
+  { $match: { event_type: "assistant_turn_handoff" } },
+  { $group: { _id: { generation: "$event_data.generation",
+                     transition: "$event_data.transition", outcome: "$event_data.outcome" },
+              count: { $sum: 1 } } },
+  { $sort: { "_id.generation": 1, "_id.transition": 1, "_id.outcome": 1 } }
+], { readConcern: { level: "majority" } })
+```
 
 ## Environment Configuration
 
@@ -933,6 +1160,18 @@ npm run build
 
 ## Health Checks and Monitoring
 
+For the frontend/backend endpoint matrix, finite JSON failure reasons, actual
+production/staging base URLs, chrono-probe assertions and staged rollout, see
+[Health and readiness contract](HEALTH_READINESS.md). Frontend `/health` retains
+its backend/version proxy; frontend-only probes are `/frontend/health` and
+`/frontend/ready`. The staging deployment platform and chrono-probe use backend
+`/ready` only for drain status. Both backend probes operate independently of MongoDB.
+Production Compose keeps backend `/health` and checks frontend `/frontend/ready`
+over loopback, exempt from its public rate/concurrency limits. Frontend
+orchestrators and load balancers must use `/frontend/health` for liveness and
+routing; `/frontend/ready` is for chrono-probe and local container healthchecks
+only, and must not drive replica eviction.
+
 Publish Images may reuse successful CI jobs from an identical pull-request
 merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
 Any uncertainty runs the complete release gate.
@@ -962,6 +1201,7 @@ readinessProbe:
   httpGet:
     path: /ready
     port: 3001
+  timeoutSeconds: 3
   initialDelaySeconds: 5
   periodSeconds: 5
 ```

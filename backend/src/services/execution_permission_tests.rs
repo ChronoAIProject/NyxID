@@ -12,6 +12,7 @@ fn now() -> DateTime<Utc> {
 pub(crate) fn fixture() -> ApprovalGrant {
     let validity = Validity::Persistent;
     ApprovalGrant {
+        org_policy: None,
         execution_review: None,
         execution_last_used_at: None,
         execution_use: None,
@@ -681,7 +682,7 @@ fn oauth_refresh_preserves_coverage_but_account_replacement_invalidates() {
             auth_key_name: "Authorization".into(),
             credential: "first-oauth-token".to_owned().into(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: Some("oauth-account".into()),

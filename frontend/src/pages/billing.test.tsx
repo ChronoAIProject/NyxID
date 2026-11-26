@@ -45,8 +45,8 @@ const MEMBER_ORG = "33333333-3333-4333-8333-333333333333";
 vi.mock("@/hooks/use-orgs", () => ({ useOrgs: mocks.orgs }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: Object.assign(
-    (select: (state: { user: { id: string } }) => unknown) =>
-      select({ user: { id: ACTOR } }),
+    (select: (state: { user: { id: string; capabilities: { billing_available: boolean } } }) => unknown) =>
+      select({ user: { id: ACTOR, capabilities: { billing_available: true } } }),
     { getState: () => ({ user: { id: ACTOR } }) },
   ),
 }));
@@ -952,7 +952,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     expect(screen.getByText("Failed to load top-up history.")).toBeVisible();
     expect(screen.queryByText("No top-ups yet.")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add credits" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add credits" })).toBeEnabled();
   });
   it("keeps wallet provisioning connected to its real mutation", async () => {
     mocks.wallet.mockReturnValue(

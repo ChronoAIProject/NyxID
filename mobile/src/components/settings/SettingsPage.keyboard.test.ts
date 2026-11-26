@@ -97,7 +97,7 @@ function setup({
         },
         Dimensions: {
           get: (name: string) => {
-            assert.equal(name, "window");
+            assert.ok(name === "window" || name === "screen");
             return { height: windowHeight };
           },
           addEventListener: () => ({ remove() {} }),
@@ -121,6 +121,7 @@ function setup({
         useSafeAreaFrame: () => geometry?.provider ?? { y: 0, height: 852 },
       },
       "expo-linear-gradient": { LinearGradient: "Gradient" },
+      expo: { requireOptionalNativeModule: () => null },
       "lucide-react-native": {},
       "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
       "../../lib/accessibility/useReducedMotion": {
@@ -260,6 +261,10 @@ function setup({
       invoke(viewport(), "onLayout");
       flushLayout();
     },
+    contentSizeChange: () => {
+      invoke(scroll(), "onContentSizeChange", 393, 1000);
+      flushLayout();
+    },
     fieldBottom: () => inputY + inputHeight,
   };
 }
@@ -376,6 +381,18 @@ test("native offset updates during keyboard layout remeasure the focused field f
   assert.deepEqual(env.scrolls, [
     { y: 650 + 120 - (552 - spacing.lg), animated: true },
   ]);
+  env.h.unmount();
+});
+
+test("content growth while the keyboard stays open re-reveals the focused field", () => {
+  const env = setup();
+  env.focus();
+  env.show();
+  env.resetField();
+  const initialScrolls = env.scrolls.length;
+  env.contentSizeChange();
+  assert.equal(env.scrolls.length, initialScrolls + 1);
+  assert.ok(env.fieldBottom() <= 552 - spacing.lg);
   env.h.unmount();
 });
 

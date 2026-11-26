@@ -160,14 +160,21 @@ pub(super) async fn note_owner_presence(
             chat.owner_chat = true;
             chat.title = Some("You".into());
         }
-        state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .update_one(
-                doc! {"_id": &chat.id,"channel_id":&row.id},
-                doc! {"$set": set},
+        if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+            crate::services::channel_meta_service::scopes::observe_thread(
+                &state.db, row, &chat, set,
             )
             .await?;
+        } else {
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .update_one(
+                    doc! {"_id": &chat.id,"channel_id":&row.id},
+                    doc! {"$set": set},
+                )
+                .await?;
+        }
         chat.owner_seen = true;
     }
     Ok(chat)
@@ -328,6 +335,24 @@ pub(super) async fn record_chat_with_relay(
             "partition":{"$ne":partition}
         }
     });
+    if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+        let source = relay_message_id
+            .or(last_message_id)
+            .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?;
+        return crate::services::channel_meta_service::scopes::record_thread(
+            &state.db,
+            &row.channel_bot_id,
+            source,
+            doc! {"channel_id":&row.id,"partition":partition},
+            crate::services::nyxbot_chat_settings_service::record_update(
+                row,
+                facts.kind == "private" && facts.thread_id.is_none(),
+                set,
+                now,
+            ),
+        )
+        .await;
+    }
     crate::services::nyxbot_thread_mutation::record(
         &state.db,
         doc! {"channel_id":&row.id,"partition":partition},
@@ -603,6 +628,17 @@ pub(super) async fn replies_to_bot(
         .is_some())
 }
 
+pub(super) async fn gateway_replies_to_bot(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat_id: &str,
+    message_id: &str,
+) -> AppResult<bool> {
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    let reply_to = inbound_reply_to(state, row, message_id).await?;
+    replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await
+}
+
 /// The platform message a gateway event replies to, read from NyxID's own
 /// record of the inbound message (the gateway's activity does not say).
 pub(super) async fn inbound_reply_to(
@@ -646,8 +682,10 @@ pub(super) async fn waiting_hint(
             doc! {"$set": {"guest_hint_at": bson::DateTime::from_chrono(now)}},
         )
         .await?;
-    Ok((claimed.modified_count == 1)
-        .then(|| "I'll answer everyone here once my owner has talked to me in this chat.".into()))
+    Ok(
+        (claimed.modified_count == 1)
+            .then(|| Notice::OwnerAbsent.text(chat.notice_language).into()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1190,7 @@ async fn reconcile_gateway_groups(
 
 #[derive(Serialize)]
 pub struct ChannelChatResponse {
+    notice_language: Option<NoticeLanguage>,
     guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     parent_chat_id: Option<String>,
     id: String,
@@ -1207,6 +1246,7 @@ impl ChannelChatResponse {
 
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {
     ChannelChatResponse {
+        notice_language: chat.notice_language,
         guest_readiness: None,
         parent_chat_id: chat.follow.parent_chat_id.clone(),
         has_thread_history: chat.follow.has_thread_history,
@@ -1310,24 +1350,23 @@ pub(crate) async fn list_chats(
     {
         return Err(AppError::NotFound(format!("Channel {id} not found")));
     }
-    let mut managed = Vec::new();
-    for row in channels {
-        if let Some(binding) = &row.org_specialist {
-            match crate::services::org_channel_service::require_admin(
-                &state.db,
-                owner,
-                &binding.org_id,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(AppError::Forbidden(_)) if channel_id.is_none() => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        managed.push(row);
+    let manageable = crate::services::org_channel_service::management::manageable_agents(
+        &state.db, owner, &channels,
+    )
+    .await?;
+    let channels: Vec<_> = channels
+        .into_iter()
+        .filter(|row| {
+            row.org_specialist.is_none()
+                || row
+                    .agent_id
+                    .as_ref()
+                    .is_some_and(|id| manageable.contains(id))
+        })
+        .collect();
+    if channel_id.is_some() && channels.is_empty() {
+        return Err(crate::services::org_channel_service::denied());
     }
-    let channels = managed;
     let ids: Vec<&str> = channels.iter().map(|row| row.id.as_str()).collect();
     let chats: Vec<NyxbotThread> = state
         .db
@@ -1406,6 +1445,7 @@ async fn load_chat(
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSettings {
+    pub notice_language: Option<String>,
     #[serde(default, deserialize_with = "non_null_threads")]
     pub threads: Option<String>,
     pub reply_mode: Option<String>,
@@ -1441,6 +1481,21 @@ pub(crate) async fn update_chat(
     }
     let mut set = doc! {"updated_at": bson::DateTime::now()};
     let mut unset = doc! {};
+    if let Some(language) = &settings.notice_language {
+        match language.as_str() {
+            "en" | "zh-CN" | "zh-TW" => {
+                set.insert("notice_language", language);
+            }
+            "default" => {
+                unset.insert("notice_language", "");
+            }
+            _ => {
+                return Err(AppError::ValidationError(
+                    "notice_language must be en, zh-CN, zh-TW or default".into(),
+                ));
+            }
+        }
+    }
     if let Some(threads) = settings.threads.as_deref() {
         if !matches!(threads, "follow" | "off") || !group {
             return Err(AppError::ValidationError(
@@ -1555,7 +1610,7 @@ pub(crate) async fn update_chat(
         "nyxbot_channel_chat_updated",
         json!({"channel_agent_id": &row.id, "chat_id": &chat.id,
             "reply_mode": settings.reply_mode, "members": settings.members,
-            "allow_posts": settings.allow_posts, "threads":settings.threads, "agent_changed": agent_changed.is_some()}),
+            "notice_language":settings.notice_language,"allow_posts": settings.allow_posts, "threads":settings.threads, "agent_changed": agent_changed.is_some()}),
     )
     .await;
     let on = super::thread_follow::enabled(state, owner).await?;
@@ -1640,19 +1695,8 @@ pub(crate) async fn audience_readiness(
     owner: &str,
     channel_id: &str,
 ) -> AppResult<crate::services::assistant_service_execution::readiness::AudienceReadiness> {
-    let row = load_channel(state, owner, channel_id).await?;
-    if let Some(org) = row.bot_owner_id.as_deref()
-        && !super::manages_bot_owner(state, owner, org).await?
-    {
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
-    crate::services::assistant_service_execution::readiness::audience_readiness(
-        &state.db,
-        &state.encryption_keys,
-        owner,
-        row.agent_id.as_deref(),
-    )
-    .await
+    crate::services::nyxbot_channel_setup_service::audience_readiness(state, owner, channel_id)
+        .await
 }
 
 pub(crate) async fn update_access(
@@ -1661,96 +1705,8 @@ pub(crate) async fn update_access(
     channel_id: &str,
     settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
 ) -> AppResult<Value> {
-    settings.validate()?;
-    let row = load_channel(state, owner, channel_id).await?;
-    if let Some(org) = row.bot_owner_id.as_deref()
-        && !super::manages_bot_owner(state, owner, org).await?
-    {
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
-    if settings.private_chats.as_deref() == Some("everyone")
-        || settings.private_chat_posts == Some(true)
-    {
-        crate::services::platform_bot_authority::require_personal_routes(
-            &state.db,
-            &row.channel_bot_id,
-        )
-        .await?;
-    }
-    // Read before mutation: diagnostics must not turn a committed change into a failure.
-    let mut audience =
-        if settings.private_chats.as_deref() == Some("everyone") && row.org_specialist.is_none() {
-            Some(
-                crate::services::assistant_service_execution::readiness::audience_readiness(
-                    &state.db,
-                    &state.encryption_keys,
-                    owner,
-                    row.agent_id.as_deref(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-    let applied =
-        crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
-            .await?;
-    audit(
-        state,
-        owner,
-        "nyxbot_channel_access_updated",
-        json!({"channel_agent_id":&row.id,
-        "private_chats":settings.private_chats,"private_chat_posts":settings.private_chat_posts,
-        "apply_to_existing":settings.apply_to_existing,"applied_count":applied}),
-    )
-    .await;
-    let mut result = json!({"channel_agent_id":row.id,
-        "guest_access_description": if row.org_specialist.is_some() {
-            crate::services::org_channel_service::management::ORG_GUEST_EXPLANATION
-        } else {
-            crate::services::org_channel_service::management::PERSONAL_GUEST_EXPLANATION
-        },
-        "private_chats":settings.private_chats.as_deref().or(row.private_chats.as_deref()).unwrap_or("owner"),
-        "private_chat_posts":settings.private_chat_posts.or(row.private_chat_posts).unwrap_or(false),"applied_count":applied});
-    if let Some(access) = settings
-        .private_chats
-        .as_deref()
-        .filter(|_| row.org_specialist.is_none())
-    {
-        let prepared = access != "everyone"
-            || super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None)
-                .await
-                .is_ok();
-        let readiness = if prepared {
-            crate::services::assistant_service_execution::guest_readiness(
-                &state.db,
-                &state.encryption_keys,
-                owner,
-                row.agent_id.as_deref(),
-                None,
-            )
-            .await
-            .ok()
-        } else {
-            None
-        };
-        let readiness = readiness.unwrap_or(
-            crate::services::assistant_service_execution::GuestReadiness {
-                status: "not_ready",
-                reason: Some("readiness_unavailable".into()),
-                fix: Some(
-                    "Access was saved. Refresh customer model readiness before relying on replies."
-                        .into(),
-                ),
-            },
-        );
-        result["guest_readiness"] = json!(&readiness);
-        if let Some(facts) = &mut audience {
-            facts.guest_readiness = readiness;
-            result["audience_readiness"] = json!(facts);
-        }
-    }
-    Ok(result)
+    crate::services::nyxbot_channel_setup_service::update_access(state, owner, channel_id, settings)
+        .await
 }
 
 /// Validate an automation destination with the same posting ACL as native tools.
@@ -1847,10 +1803,12 @@ pub(crate) async fn post_turn_is_live(
         return Ok(false);
     }
     // None deliberately forces fresh owner/org/group ACL resolution.
-    let current = crate::services::assistant_acknowledgement_service::for_key(
+    let current = crate::services::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &chat.user_id,
         Some(&chat.api_key_id),
+        chat.key_version,
+        None,
     )
     .await?;
     Ok(current.is_some_and(|current| {
@@ -1955,6 +1913,7 @@ pub(crate) async fn post_current_turn(
                 state,
                 super::images::ImageSendContext {
                     source: crate::models::image_preparation::Source::Post {
+                        key_version: chat.key_version,
                         api_key_id: chat.api_key_id.clone(),
                     },
                     owner: &chat.user_id,
@@ -2309,6 +2268,11 @@ async fn send_post_planned_impl(
         models::channel_text_delivery::TextPartState,
         services::{channel_reply_plan as plan, channel_text_delivery as journal},
     };
+    // Bound customer replies use the relay reply journal. An initiated post
+    // for a Meta inbox must fail before creating an outbound delivery plan.
+    if crate::services::channel_adapters::meta::is_meta(&target.bot.platform) {
+        return Err(AppError::ChannelPlatformSendUnsupported);
+    }
     if !outbound.attachments.is_empty() || plan::has_structured_content(&outbound) {
         return send_post_one(state, target, outbound, fence).await;
     }
@@ -3127,16 +3091,66 @@ pub async fn list_channel_chats(
     if let Some(binding) = &row.org_specialist {
         let access =
             crate::services::org_agent_service::access(&state.db, &owner, &binding.org_id).await?;
+        let admin = matches!(
+            access,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+        );
         if !crate::services::org_agent_service::can_use(&access) && row.user_id != owner {
             return Err(crate::services::org_channel_service::denied());
         }
-        if matches!(access, crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } if role.can_proxy())
+        let manageable = crate::services::org_channel_service::management::manageable_agents(
+            &state.db,
+            &owner,
+            std::slice::from_ref(&row),
+        )
+        .await?;
+        if !row
+            .agent_id
+            .as_ref()
+            .is_some_and(|id| manageable.contains(id))
         {
-            return Ok(Json(member_chat_settings(&state, &row).await?));
+            let mut view = member_chat_settings(&state, &row).await?;
+            if admin {
+                add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await;
+            }
+            return Ok(Json(view));
         }
+        let chats = list_chats(&state, &owner, Some(&id)).await?;
+        let mut view = json!({"chats": chats, "can_manage":true});
+        if admin {
+            add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await;
+        }
+        return Ok(Json(view));
     }
     let chats = list_chats(&state, &owner, Some(&id)).await?;
     Ok(Json(json!({"chats": chats, "can_manage":true})))
+}
+
+async fn add_guest_history_links(
+    state: &AppState,
+    actor: &str,
+    org: &str,
+    channel: &str,
+    view: &mut Value,
+) {
+    let chats = view["chats"].as_array_mut().expect("serialized chat list");
+    let ids: Vec<_> = chats
+        .iter()
+        .filter_map(|chat| chat["id"].as_str())
+        .collect();
+    let links = crate::services::org_channel_service::guest_history::latest_by_chat(
+        &state.db, actor, org, channel, &ids,
+    )
+    .await;
+    let Ok(links) = links else {
+        tracing::debug!(channel_id = channel, "Guest history links unavailable");
+        return;
+    };
+    for chat in chats {
+        if let Some(id) = chat["id"].as_str().and_then(|id| links.get(id)) {
+            chat["guest_conversation_id"] = json!(id);
+        }
+    }
 }
 
 // Filter before sorting/limiting. The bounded list has no total, cursor or

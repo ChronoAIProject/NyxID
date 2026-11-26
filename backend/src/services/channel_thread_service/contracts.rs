@@ -22,11 +22,18 @@ pub struct ThreadReplyTarget {
     pub(super) route_key_id: String,
     pub(super) platform: String,
     pub(super) facts: ChannelThreadFacts,
-    pub(super) admitted: Option<(
+    pub(super) authority: ReplyBinding,
+}
+
+#[derive(Clone)]
+pub(super) enum ReplyBinding {
+    Source,
+    Turn(
         String,
         crate::models::assistant_conversation::ChannelOrigin,
         String,
-    )>,
+    ),
+    Notice(Box<super::gateway::notice::NoticeTarget>),
 }
 
 impl ThreadReplyTarget {
@@ -39,7 +46,7 @@ impl ThreadReplyTarget {
             route_key_id: "key".into(),
             platform: platform.into(),
             facts,
-            admitted: None,
+            authority: ReplyBinding::Source,
         }
     }
     pub fn facts(&self) -> &ChannelThreadFacts {
@@ -74,6 +81,7 @@ impl std::fmt::Debug for ThreadReplyTarget {
 }
 
 pub struct ThreadHistoryMessage {
+    pub truncated_original_bytes: Option<usize>,
     pub message_id: String,
     pub sender_id: String,
     pub sender_kind: ThreadSenderKind,
@@ -82,6 +90,19 @@ pub struct ThreadHistoryMessage {
     /// Provider proof of who could see this message; populated for private
     /// email threads and empty for other transports.
     pub participant_hashes: Vec<String>,
+}
+
+impl ThreadHistoryMessage {
+    pub fn limit_text(&mut self, budget: usize) -> bool {
+        let end = self
+            .text
+            .floor_char_boundary(budget.min(HISTORY_MESSAGE_BYTES));
+        if end < self.text.len() {
+            self.truncated_original_bytes.get_or_insert(self.text.len());
+            self.text.truncate(end);
+        }
+        self.truncated_original_bytes.is_some()
+    }
 }
 
 impl std::fmt::Debug for ThreadHistoryMessage {

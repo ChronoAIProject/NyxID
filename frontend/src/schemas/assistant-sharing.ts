@@ -54,6 +54,7 @@ export const sharedConsentsSchema = z.object({
     expires_at: z.string().nullable(), scope: z.string(),
   })),
 });
+export type SharedConsent = z.infer<typeof sharedConsentsSchema>["consents"][number];
 export type SharingForm = z.infer<typeof sharingFormSchema>;
 export type Sharing = z.infer<typeof sharingSchema>;
 export type SharedNotes = z.infer<typeof sharedNotesSchema>;

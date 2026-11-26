@@ -96,6 +96,7 @@ impl Fixture {
         db.collection("service_approval_configs")
             .insert_one(
                 crate::models::service_approval_config::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: Uuid::new_v4().to_string(),
                     user_id: owner.clone(),
                     service_id: catalog.clone(),
@@ -420,6 +421,48 @@ async fn disable_and_account_replacement_fence_an_admitted_reusable_permission()
 }
 
 #[tokio::test]
+async fn consumed_node_permission_stays_not_sent_and_cannot_dispatch_again() {
+    let f = Fixture::new("execution_node_not_sent").await;
+    f.enroll(true).await;
+    let target = f.target().await;
+    let mut grant = f.grant().await;
+    f.store(&grant).await;
+    let context = RequestContext::enrolled(Some(1), &f.owner, &f.key, None).unwrap();
+    let initial = f.prepare(&context, &target).await;
+    assert!(!initial.single_dispatch());
+    let contract = grant.execution.as_mut().unwrap().v1.as_mut().unwrap();
+    contract.validity = Validity::Operation {
+        operation_id: initial.operation_id.clone(),
+        prepared_digest: initial.digest.clone(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+    };
+    grant.expires_at = super::contract::legacy_expiry(&contract.validity);
+    let grants = f.state.db.collection::<ApprovalGrant>("approval_grants");
+    grants
+        .replace_one(doc! {"_id":&grant.id}, &grant)
+        .await
+        .unwrap();
+    let mut context = RequestContext::enrolled(Some(1), &f.owner, &f.key, None).unwrap();
+    Arc::get_mut(&mut context).unwrap().operation_id = initial.operation_id.clone();
+    let permit = f.prepare(&context, &target).await;
+    assert!(permit.single_dispatch());
+    permit.before_send(&target).await.unwrap();
+    permit.node_not_sent().await.unwrap();
+    let terminal = grants
+        .find_one(doc! {"_id":&grant.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.execution_use.unwrap().state,
+        ExecutionUseState::NotSent
+    );
+    assert!(permit.before_send(&target).await.is_err());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn twenty_duplicate_operation_claims_send_once_and_uncertain_never_replays() {
     let f = Fixture::new("execution_once_race").await;
     f.enroll(true).await;
@@ -558,18 +601,39 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
 
 #[tokio::test]
 async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once() {
-    use tracing::instrument::WithSubscriber;
-    let captured = migration_tests::Capture::default();
     let f = Fixture::new("execution_mcp_covered").await;
     f.enroll(true).await;
-    let endpoint = test_utils::test_service_endpoint(&f.catalog, "status", "GET", "/status");
+    f.store(&f.grant().await).await;
+    check_covered_mcp_calls(&f, "GET").await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn assistant_mcp_covered_write_skips_action_and_service_review_on_both_entry_points() {
+    let (f, _) = proposal_tests::assistant("execution_mcp_covered_write").await;
+    seed_for_chat(
+        &f.state,
+        &f.auth().await,
+        &f.connection,
+        &f.catalog,
+        "PUT",
+        "/status",
+    )
+    .await;
+    check_covered_mcp_calls(&f, "PUT").await;
+    f.cleanup().await;
+}
+
+async fn check_covered_mcp_calls(f: &Fixture, method: &str) {
+    use tracing::instrument::WithSubscriber;
+    let captured = migration_tests::Capture::default();
+    let endpoint = test_utils::test_service_endpoint(&f.catalog, "status", method, "/status");
     f.state
         .db
         .collection("service_endpoints")
         .insert_one(endpoint)
         .await
         .unwrap();
-    f.store(&f.grant().await).await;
     for generic in [false, true] {
         let tool = "execution-fixture__status";
         let params = if generic {
@@ -577,7 +641,7 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
         } else {
             json!({"name":tool,"arguments":{}})
         };
-        let response = f
+        let send = f
             .router()
             .oneshot(
                 Request::builder()
@@ -591,8 +655,10 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
                     ))
                     .unwrap(),
             )
-            .with_subscriber(captured.subscriber())
+            .with_subscriber(captured.subscriber());
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), send)
             .await
+            .expect("covered call entered a wait")
             .unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -601,7 +667,12 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
         assert!(body.get("error").is_none(), "{body}");
         assert_eq!(body["result"]["isError"], false, "{body}");
     }
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+    let sent = f.server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent.iter()
+            .all(|r| r.method.as_str() == method && r.url.path() == "/status")
+    );
     assert_eq!(
         captured.0.lock().unwrap().len(),
         2,
@@ -616,7 +687,6 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
             .all(|event| event["cause"] == "permission_covered")
     );
     f.no_prompts().await;
-    f.cleanup().await;
 }
 
 #[tokio::test]

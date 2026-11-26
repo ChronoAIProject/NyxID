@@ -155,6 +155,12 @@ pub async fn revoke(
     policies::get(&state.db, &auth.user_id.to_string(), &id).await?;
     let actor = audit_service::AuditActor::from_auth_user(&auth);
     let intent = crate::services::api_key_audit_service::permission_revoked(&actor, &id)?;
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &actor.user_id,
+        mongodb::bson::doc! {"user_id":&actor.user_id,"credential_api_key_id":&id},
+    )
+    .await;
     key_service::delete_api_key_audited(&state.db, &actor.user_id, &id, &intent).await?;
     Ok(StatusCode::NO_CONTENT)
 }

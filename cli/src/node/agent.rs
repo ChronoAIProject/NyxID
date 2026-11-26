@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Deserialize)]
 struct PendingCredentialMetadata {
+    message: Option<String>,
     id: String,
     service_slug: String,
     injection_method: String,
@@ -60,7 +61,7 @@ pub async fn cmd_register(
     // M2: Use ws:// for localhost (wss:// requires TLS not available in dev)
     let ws_url = url.unwrap_or("ws://localhost:3001/api/v1/nodes/ws");
 
-    tracing::info!(url = %ws_url, "Registering node...");
+    tracing::info!("Registering node...");
 
     let (node_id, auth_token, signing_secret) = ws_client::register_node(ws_url, token).await?;
 
@@ -111,7 +112,6 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
 
     tracing::info!(
         node_id = %node_config.node.id,
-        server = %node_config.server.url,
         storage = %node_config.storage_backend,
         credentials = shared_creds.snapshot().count(),
         "Starting node agent"
@@ -474,6 +474,9 @@ pub async fn cmd_credentials(
 
             println!("Pending credentials:");
             for item in pending {
+                if let Some(message) = &item.message {
+                    println!("  {message}");
+                }
                 println!(
                     "  {}: {} {} (age {}, expires {})",
                     item.service_slug,
@@ -3441,6 +3444,7 @@ mod tests {
         let mut config =
             NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
         let pending = PendingCredentialMetadata {
+            message: None,
             id: "p1".into(),
             service_slug: "svc".into(),
             injection_method: "header".into(),
@@ -3462,6 +3466,7 @@ mod tests {
         let mut config =
             NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
         let pending = PendingCredentialMetadata {
+            message: None,
             id: "p2".into(),
             service_slug: "svc2".into(),
             injection_method: "query-param".into(),
@@ -3482,6 +3487,7 @@ mod tests {
         let mut config =
             NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
         let pending = PendingCredentialMetadata {
+            message: None,
             id: "p3".into(),
             service_slug: "svc3".into(),
             injection_method: "unknown".into(),
@@ -3501,6 +3507,7 @@ mod tests {
         let mut config =
             NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
         let pending = PendingCredentialMetadata {
+            message: None,
             id: "p4".into(),
             service_slug: "svc4".into(),
             injection_method: "path-prefix".into(),

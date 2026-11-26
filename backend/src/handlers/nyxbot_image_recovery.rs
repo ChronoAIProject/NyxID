@@ -112,10 +112,14 @@ async fn target_with(
                 .ok_or_else(preparation::lost)?
             }
         }
-        Source::Post { api_key_id } => {
-            let chat = acks::for_key(&state.db, owner, Some(api_key_id))
-                .await?
-                .ok_or_else(preparation::lost)?;
+        Source::Post {
+            api_key_id,
+            key_version,
+        } => {
+            let chat =
+                acks::chat_for_key_version(&state.db, owner, Some(api_key_id), *key_version, None)
+                    .await?
+                    .ok_or_else(preparation::lost)?;
             if chat.conversation_id != route.conversation_id
                 || chat.turn_id.as_deref() != Some(route.turn_id.as_str())
                 || !bot::chats::post_turn_is_live(state, &chat).await?

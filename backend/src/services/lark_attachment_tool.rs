@@ -261,6 +261,7 @@ pub struct Binding {
     attachment_id: String,
     _reservation: byte_budget::ByteReservation,
     raw: Option<(String, Value)>,
+    scope_json: Option<Vec<u8>>,
 }
 impl Binding {
     pub(crate) fn raw(
@@ -275,7 +276,11 @@ impl Binding {
             attachment_id,
             _reservation: reservation,
             raw: Some((snapshot, display)),
+            scope_json: None,
         }
+    }
+    pub(super) fn scope_json(&self) -> Option<&[u8]> {
+        self.scope_json.as_deref()
     }
     pub(crate) fn is_raw(&self) -> bool {
         self.raw.is_some()
@@ -344,20 +349,28 @@ pub async fn filter_discovery(
     Ok(())
 }
 
-pub async fn materialize(
+pub(super) use multipart::UploadArguments;
+
+pub(super) async fn require_upload_chat<'a>(
     db: &Database,
-    keys: &crate::crypto::aes::EncryptionKeys,
-    chat: Option<&ChatAuthority>,
+    chat: Option<&'a ChatAuthority>,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
-    args: &Value,
-) -> AppResult<Materialized> {
+) -> AppResult<&'a ChatAuthority> {
     eligibility::require_eligible(db, chat, service, endpoint).await?;
     if !matches!(endpoint.attachment_input, Some(Projection::Stored(_))) {
         return Err(Reason::UntrustedContract.error());
     }
-    let chat = chat.ok_or_else(|| Reason::NotLive.error())?;
-    let id = args["attachment_id"].as_str().ok_or_else(|| {
+    chat.ok_or_else(|| Reason::NotLive.error())
+}
+
+pub(super) async fn materialize(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    chat: &ChatAuthority,
+    upload: UploadArguments<'_>,
+) -> AppResult<Materialized> {
+    let id = upload.args["attachment_id"].as_str().ok_or_else(|| {
         AppError::BadRequest(
             "attachment_write_attachment_id_required: Supply an attachment_id from this owner chat"
                 .into(),
@@ -370,7 +383,7 @@ pub async fn materialize(
         .ok()
         .filter(|n| *n > 0 && *n <= super::attachment_extraction::MAX_BYTES)
         .ok_or_else(|| diagnostics::Reason::AttachmentSize.error(AppError::BadRequest("attachment_write_invalid_attachment_size: Choose a nonempty attachment within upload limits".into())))?;
-    let fields = multipart::fields(args, attachment.label(), size)?;
+    let fields = upload.fields(&attachment.filename(), size)?;
     let reservation = byte_budget::reserve(size).await?;
     let bytes = uploads::egress_bytes(db, keys, chat, &attachment)
         .await
@@ -384,6 +397,7 @@ pub async fn materialize(
             attachment_id: id.into(),
             _reservation: reservation,
             raw: None,
+            scope_json: upload.scope_json,
         },
     })
 }

@@ -394,6 +394,30 @@ request. Read denial, missing authentication, and transport failure have
 separate failure codes; an unavailable validator is never reported as an
 invalid package.
 
+During acknowledgement, NyxID claims the reviewed operation before it calls the
+proxy. The proxy records the durable dispatch marker after checking the route,
+connection policy and approval, before forwarding the reviewed ZIP. If the
+proxy refuses the create during admission, the card offers **Retry publication**
+for the same package and operation. A cancelled admission cannot resume and
+send after the card becomes retryable.
+
+An Ornn 5xx, timeout or missing response after dispatch leaves the save
+unconfirmed. Full access returns an MCP error in the drafting turn. A failed
+card decision returns HTTP 409. Both carry `details.reason: publication_ambiguous`,
+`details.recovery: check` and the upstream HTTP status when available. The
+durable proposal keeps `publish_uncertain`. Check Ornn directly if there is
+no review card. Recognized Ornn refusals carry the specific reason and either
+`check_access` or `revise_draft`.
+
+For a create with a missing response, **Check again** searches the approving
+person's private skills. When keyword search has no exact name or spans several
+pages, NyxID also reads the canonical skill name at the reviewed version. It
+attaches a match only after checking the signed owner's private ACL, GUID,
+version, package hash, dependency closure and downloaded bytes. A missing
+version can still belong to a delayed request. The owner can ask NyxBot to
+start a new skill draft. The original card only checks the existing operation. A confirmed name collision on a fresh create
+returns the draft for revision.
+
 For a definitive refusal before Ornn mutation, NyxID clears the started flag
 only if that operation has never had an uncertain dispatch. The same
 transaction releases its reserved target, allowing a revised draft to claim
@@ -804,9 +828,22 @@ Build agents from description (role/scope), persona (tone/style), and Ornn skill
 preview and propose attaching existing skills before drafting uncovered procedures.
 Never package or publish through Ornn Playground, sandboxes, machines or raw
 Ornn upload APIs. NyxID validates bounded text, rejects credential shapes, encrypts
-the draft and, in Auto and Ask every time, shows all proposed files on one owner
-approval card. The card stores
-only IDs/revisions; its human review view reads the encrypted proposal.
+the draft and, in Auto and Ask every time, presents one owner approval request.
+The pinned stack shows a compact draft summary, file/line counts and a bounded
+preview. Review full draft opens all proposed files in a desktop dialog or
+full-height mobile sheet, with one scrolling body and an always-visible decision
+footer. Allow and publish appears only in full review; reduced-scope acceptance
+survives closing and reopening. The card stores only IDs/revisions; its human
+review view reads the encrypted proposal.
+
+The review card records consent to publish under the owner's signed identity;
+it does not change the owner's Ornn role or skill access. Ornn still requires
+`ornn:skill:create` for creation, or `ornn:skill:update` plus skill write access
+for an update. A consumed (`used`) acknowledgement records that consent was
+claimed, not that publication succeeded. Publication failures remain visible
+on the authored card, including after switching to Full access. If the outcome
+cannot be loaded, the card reports that it is unavailable instead of showing
+only the consumed acknowledgement.
 
 Approval uses the existing server ZIP builder and signed approving-person Ornn
 identity, verifies the returned exact version/hash and pins transactionally.

@@ -55,6 +55,7 @@ pub async fn started(
     db: &Database,
     owner: &str,
     conversation: &str,
+    turn_id: &str,
 ) -> AppResult<Option<ActiveTurn>> {
     let row = db
         .collection::<bson::Document>(COLLECTION_NAME)
@@ -62,7 +63,7 @@ pub async fn started(
             doc! {
                 "_id": conversation,
                 "user_id": owner,
-                "active_turn.turn_id": {"$type": "string"},
+                "active_turn.turn_id": turn_id,
                 "active_turn.stop_requested": {"$ne": true},
             },
             doc! {"$inc": {"active_turn.tool_progress.started": 1_i64}},
@@ -164,11 +165,7 @@ pub async fn completed(
 pub const HARD_MAX: i32 = 32;
 pub const INSTRUCTION: &str = "Continue the task where you left off. Observe current state before repeating an action whose result was uncertain. Do not repeat completed work. Stop when the task is complete or an owner decision is needed.";
 
-pub struct Continuations {
-    maximum: u32,
-    pub count: u32,
-    previous: Option<String>,
-}
+pub use crate::models::assistant_conversation::Continuations;
 impl Continuations {
     pub fn new(maximum: i32) -> Self {
         Self {
@@ -210,8 +207,19 @@ mod tests {
         }})
         .await
         .unwrap();
-        let started = started(&db, "owner", "thread").await.unwrap().unwrap();
-        super::started(&db, "owner", "thread").await.unwrap();
+        assert!(
+            started(&db, "owner", "thread", "previous")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let started = started(&db, "owner", "thread", "turn")
+            .await
+            .unwrap()
+            .unwrap();
+        super::started(&db, "owner", "thread", "turn")
+            .await
+            .unwrap();
         let secret = uuid::Uuid::new_v4().to_string();
         let call = call_digest(
             "tool",

@@ -20,14 +20,10 @@ pub(crate) use source::{eligible, pin_pool};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v2";
 
 pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&ProposalV2> {
-    row.execution_proposal
-        .as_ref()
-        .filter(|e| e.version == 2 && e.v1.is_none())
-        .and_then(|e| e.v2.as_ref())
-        .ok_or_else(conflict)
-}
-fn aad(id: &str) -> String {
-    format!("execution-proposal:v2:{id}")
+    match Arm::of(row)? {
+        Arm::V2(p) => Ok(p),
+        Arm::Assistant(_, _) => Err(conflict()),
+    }
 }
 pub(crate) fn pending(row: &ApprovalRequest, frontend_url: &str) -> AppError {
     if (row.status == "pending" || row.status == "approved") && row.expires_at > Utc::now() {
@@ -163,6 +159,11 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         crate::services::notification_service::approval_timeout_secs(db, &context.actor).await?
     };
     let mut end = now + Duration::seconds(i64::from(timeout));
+    let wait_budget = crate::services::approval_service::connected_budget_deadline(timeout)
+        .filter(|_| !background_allowed);
+    if let Some(deadline) = wait_budget {
+        end = end.min(deadline);
+    }
     if let Some(t) = &task {
         end = end.min(t.hard_deadline);
     }
@@ -206,7 +207,9 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         return Err(refused());
     }
     let id = Uuid::new_v4().to_string();
-    let encrypted = keys.encrypt_with_aad(&encoded, aad(&id).as_bytes()).await?;
+    let (encrypted, payload_context_version) = Slot::V2
+        .seal(keys, &id, &context.actor, Field::Payload, &encoded)
+        .await?;
     if encrypted.len() > MAX_PAYLOAD {
         tracing::info!(
             reason = "encrypted_payload_too_large",
@@ -344,6 +347,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         choices,
         review: review_v2(db, context, chat, effect, reusable, &task, gaps).await?,
         payload: Some(binary(encrypted)),
+        payload_context_version,
         state: "pending".into(),
         grant_id: None,
         selected_choice: None,
@@ -351,6 +355,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         resume_turn_id: None,
         claimed_at: None,
         result: None,
+        result_context_version: None,
         failure_code: None,
     };
     let group_binding = if let Some(chat) = chat {
@@ -365,6 +370,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         None
     };
     let request = ApprovalRequest {
+        org_policy: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: Some(ExecutionProposal {
@@ -444,7 +450,14 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
     })).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     // Send before the connected waiter starts polling. Failure cannot roll back
     // the committed review; the sweep can claim an unclaimed notification.
-    if delivery::notify_once(state, &committed).await.is_err() {
+    let notice = delivery::notify_once(state, &committed);
+    let notice_failed = if wait_budget.is_some() {
+        let remaining = (end - Utc::now()).to_std().unwrap_or_default();
+        !matches!(tokio::time::timeout(remaining, notice).await, Ok(Ok(_)))
+    } else {
+        notice.await.is_err()
+    };
+    if notice_failed {
         tracing::warn!(
             reason = "execution_notification_failed",
             "Execution permission notification failed"

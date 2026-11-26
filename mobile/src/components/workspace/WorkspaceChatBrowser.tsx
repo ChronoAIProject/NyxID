@@ -1,3 +1,6 @@
+import { searchFieldContent, searchFieldInput } from "./searchFieldStyles";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import {
   useCallback,
@@ -47,9 +50,11 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   onRefresh,
   refreshing = false,
   refreshDisabled = false,
-  refreshLabel = `Refresh ${title.toLowerCase()}`,
+  refreshLabel = translateApp("Refresh {{title}}", {
+    title: title,
+  }),
   footer,
-  emptyText = "Nothing here yet.",
+  emptyText = translateApp("Nothing here yet."),
   loadingLabel,
 }: {
   title: string;
@@ -79,6 +84,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   /** Set while the list's first load is pending: shows a skeleton, not emptyText. */
   loadingLabel?: string;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
   const [query, setQuery] = useState("");
@@ -165,7 +171,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                 {onBack ? (
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel="Back to previous list"
+                    accessibilityLabel={translateApp("Back to previous list")}
                     onPress={() => {
                       Keyboard.dismiss();
                       onBack();
@@ -211,7 +217,8 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                 ) : null}
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`Close ${title}`}
+                  accessibilityLabel={translateApp("Close {{title}}", {title: title,
+                  })}
                   onPress={close}
                   style={styles.iconButton}
                 >
@@ -237,13 +244,16 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                       ]}
                     >
                       <Search
-                        size={17}
+                        size={18}
                         color={colors.textMuted}
                         accessible={false}
                       />
                       <TextInput
-                        accessibilityLabel={`Search ${title}`}
-                        placeholder={`Search ${title.toLowerCase()}`}
+                        accessibilityLabel={translateApp("Search {{title}}", {title: title,
+                        })}
+                        placeholder={translateApp("Search {{title}}", {
+                          title: title,
+                        })}
                         placeholderTextColor={colors.textMuted}
                         autoCapitalize="none"
                         autoCorrect={false}
@@ -260,7 +270,10 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                       {query ? (
                         <Pressable
                           accessibilityRole="button"
-                          accessibilityLabel={`Clear ${title} search`}
+                          accessibilityLabel={translateApp(
+                            "Clear {{title}} search",
+                            { title: title },
+                          )}
                           onPress={() => setQuery("")}
                           style={styles.iconButton}
                         >
@@ -323,8 +336,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                   accessibilityLiveRegion="polite"
                   style={[styles.count, { color: colors.textMuted }]}
                 >
-                  {filtered.length}{" "}
-                  {filtered.length === 1 ? "result" : "results"}
+                  {(filtered.length === 1 ? translateApp("{{count}} result", { count: filtered.length }) : translateApp("{{count}} results", { count: filtered.length }))}
                 </Text>
               ) : null}
             </View>
@@ -359,7 +371,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                     <Text
                       style={[styles.emptyTitle, { color: colors.textPrimary }]}
                     >
-                      {searching ? "No matches" : emptyText}
+                      {searching ? translateApp("No matches") : emptyText}
                     </Text>
                     {searching ? (
                       <Text
@@ -368,7 +380,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                           { color: colors.textSecondary },
                         ]}
                       >
-                        Try another search.
+                        {translateApp("Try another search.")}
                       </Text>
                     ) : null}
                   </View>
@@ -448,25 +460,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
   },
-  searchBox: {
-    flexGrow: 1,
-    flexBasis: 180,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingLeft: 12,
-    paddingRight: 4,
-    borderRadius: 10,
-    minHeight: 44,
-  },
-  searchInput: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 44,
-    paddingVertical: 10,
-    fontFamily: fonts.bodyRegular,
-    fontSize: 16,
-  },
+  searchBox: { ...searchFieldContent, flexGrow: 1, flexBasis: 180, borderRadius: 10 },
+  searchInput: searchFieldInput,
   count: { fontFamily: fonts.body, fontSize: 12, lineHeight: 18 },
   list: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 24, gap: 4 },
   empty: { paddingHorizontal: 12, paddingVertical: 32, gap: 8 },

@@ -2426,6 +2426,85 @@ async fn cma_observer_excludes_real_platform_routes_on_auto_provisioned_connecti
 }
 
 #[tokio::test]
+async fn cma_provisioning_wake_supplies_a_callable_agent_event_snapshot() {
+    let a = Box::pin(cma_fixture()).await;
+    a.cma_sandbox_exists.store(false, Ordering::SeqCst);
+    let auth = authenticate(&a.f).await;
+    let response = call(
+        &a.f,
+        &auth,
+        "sandbox__post_api_v1_agents",
+        json!({
+            "Idempotency-Key": "snapshot-test", "name": "Coffee"
+        }),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(envelope["result"]["isError"], false);
+    Box::pin(complete(&a)).await;
+    Box::pin(finish_live(&a, &a.f.row)).await;
+    let row = Box::pin(event_turn(&a)).await;
+
+    let endpoints =
+        a.f.state
+            .db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            );
+    let watch = a.watch().await;
+    let mut snapshot = endpoints
+        .find_one(doc! {"_id": &watch.submit_endpoint_id})
+        .await
+        .unwrap()
+        .unwrap();
+    snapshot.id = uuid::Uuid::new_v4().to_string();
+    snapshot.name = "published_snapshot".into();
+    snapshot.method = "GET".into();
+    snapshot.path = "/api/v2/agents/{agent_id}/events/snapshot".into();
+    snapshot.parameters =
+        Some(json!([{"in":"path","name":"agent_id","required":true,"schema":{"type":"string"}}]));
+    snapshot.request_body_schema = None;
+    snapshot.request_body_required = false;
+    snapshot.request_content_type = None;
+    snapshot.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+    endpoints.insert_one(&snapshot).await.unwrap();
+
+    let context = watches::input_context(&a.f.state, &row).await.unwrap();
+    let read: Value = context
+        .lines()
+        .find_map(|line| serde_json::from_str(line).ok())
+        .expect("result wake should provide the direct MCP read");
+    assert_eq!(read["name"], "nyx__call_tool");
+    assert_eq!(
+        read["arguments"]["tool_name"],
+        "sandbox__published_snapshot"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(read["arguments"]["arguments_json"].as_str().unwrap())
+            .unwrap(),
+        json!({"agent_id":"agt_coffee"})
+    );
+    let auth = authenticate(&a.f).await;
+    let response = direct_call(&a.f, &auth, "nyx__call_tool", read["arguments"].clone()).await;
+    assert_eq!(result(response, false).await["agent_id"], "agt_coffee");
+
+    endpoints
+        .update_one(
+            doc! {"_id": &snapshot.id},
+            doc! {"$set":{"target_id":"another-target"}},
+        )
+        .await
+        .unwrap();
+    let context = watches::input_context(&a.f.state, &row).await.unwrap();
+    assert!(!context.contains("published_snapshot"));
+    assert!(context.contains(r#""cma_agent_id":"agt_coffee""#));
+    assert!(context.contains(r#""operation_id":"lifecycle-1""#));
+}
+
+#[tokio::test]
 async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_metadata() {
     let a = cma_fixture().await;
     let db = &a.f.state.db;
@@ -3216,9 +3295,7 @@ async fn async_submit_mcp_polls_once_across_replicas_and_quotes_encrypted_result
     )
     .await
     .unwrap();
-    let input = watches::input_context(&a.f.state.db, &a.f.state.encryption_keys, &claimed)
-        .await
-        .unwrap();
+    let input = watches::input_context(&a.f.state, &claimed).await.unwrap();
     assert!(input.contains("untrusted quoted data"));
     assert!(input.contains("ignore prior instructions"));
     assert!(!engine::turn_input(&claimed, &start).contains("ignore prior instructions"));
@@ -3438,7 +3515,7 @@ async fn cma_approval_turn_keeps_original_delivery_and_final_result_watch() {
     let bound = watches::bound(db, &row).await.unwrap().unwrap();
     assert_eq!(bound.id, submitted.id);
     assert!(
-        watches::input_context(db, &a.f.state.encryption_keys, &row)
+        watches::input_context(&a.f.state, &row)
             .await
             .unwrap()
             .is_empty()
@@ -3511,7 +3588,7 @@ async fn cma_approval_turn_keeps_original_delivery_and_final_result_watch() {
     let result_turn = admit_event(&a).await;
     assert_eq!(watches::event_id(&result_turn), Some(submitted.id.as_str()));
     assert!(
-        watches::input_context(db, &a.f.state.encryption_keys, &result_turn)
+        watches::input_context(&a.f.state, &result_turn)
             .await
             .unwrap()
             .contains("the final result")
@@ -5104,6 +5181,102 @@ async fn cma_origin_exact_candidates_and_connection_discovery_ignore_terminal_hi
         }
     }
     assert_eq!(ids.len(), 151);
+}
+
+#[tokio::test]
+async fn cma_origin_discovery_routes_exact_personal_proxy_connection() {
+    use crate::models::user_service::COLLECTION_NAME as CONNECTIONS;
+    use tower::ServiceExt;
+
+    let a = cma_existing_agent_fixture().await;
+    let watch = cma_origin_watch(&a).await;
+    let db = &a.f.state.db;
+    crate::test_utils::set_test_approval_preference(db, &a.f.owner, false).await;
+    let token = crate::crypto::jwt::generate_access_token(
+        &a.f.state.jwt_keys,
+        &a.f.state.config,
+        &uuid::Uuid::parse_str(&a.f.owner).unwrap(),
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(a.f.state.clone());
+    let router = router.with_state(a.f.state.clone());
+    let get = |uri: String| async {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice::<Value>(&body).unwrap())
+    };
+    let discovery = format!(
+        "/api/v1/assistant/nyxagent/cma-sessions?discover=true&conversation={}",
+        watch.conversation_id
+    );
+    let (status, page) = get(discovery.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let connection = &page["connections"][0];
+    assert_eq!(connection["id"], a.service);
+    let slug = connection["slug"].as_str().unwrap();
+    let uuid_route = format!("/api/v1/proxy/{}/api/v1/agents/agt_coffee", a.service);
+    let exact_route = format!(
+        "/api/v1/proxy/s/{slug}/api/v1/agents/agt_coffee?_nyxid_via={}",
+        a.service
+    );
+    let (status, body) = get(uuid_route).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error_code"], 1003);
+    let (status, body) = get(exact_route.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "agt_coffee");
+
+    let connections = db.collection::<bson::Document>(CONNECTIONS);
+    for enabled in [false, true] {
+        connections
+            .update_one(doc! {"_id":&a.service}, doc! {"$set":{"is_active":enabled}})
+            .await
+            .unwrap();
+        let (status, page) = get(discovery.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(
+            page["connections"].as_array().unwrap().len(),
+            usize::from(enabled)
+        );
+        let (status, body) = get(exact_route.clone()).await;
+        assert_eq!(
+            status,
+            if enabled {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            },
+            "{body}"
+        );
+    }
+    connections
+        .delete_one(doc! {"_id":&a.service})
+        .await
+        .unwrap();
+    let (status, page) = get(discovery).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["connections"], json!([]));
+    let (status, body) = get(exact_route).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
 #[tokio::test]

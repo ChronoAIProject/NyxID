@@ -128,7 +128,7 @@ class CacheWarmTests(unittest.TestCase):
         keys = [lane[0] for lane in writers]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(set(keys), {
-            "backend-build", "coverage-backend-build", "rust-clippy",
+            "backend-build", "coverage-backend-build", "rust-clippy", "rust-clippy-dev",
             "features-aws-kms-rust-features", "features-gcp-kms-rust-features",
             "features-aws-and-gcp-kms-rust-features", "cli-cli-test",
             "coverage-cli-coverage-cli", "permissions-test",
@@ -210,7 +210,7 @@ class CacheWarmTests(unittest.TestCase):
         graph_lanes = {lane for lane, _, inputs, *_ in cache_lanes(self.warm, self.action)
                        if inputs.get('incremental') == 'true'}
         self.assertEqual(graph_lanes, {
-            'rust-clippy', 'features-aws-kms-rust-features', 'features-gcp-kms-rust-features',
+            'rust-clippy', 'rust-clippy-dev', 'features-aws-kms-rust-features', 'features-gcp-kms-rust-features',
             'features-aws-and-gcp-kms-rust-features', 'cli-cli-test',
             'coverage-cli-coverage-cli', 'permissions-test',
         })
@@ -244,7 +244,7 @@ class CacheWarmTests(unittest.TestCase):
                                 for command in steps:
                                     self.assertNotRegex(command.get('run', ''), r'nextest(?:\s+archive|-archive)')
 
-    def test_manual_dispatch_saves_branch_caches_and_push_saves_main_only(self):
+    def test_manual_dispatch_saves_branch_caches_and_push_saves_main_and_dev(self):
         policy = next(step for step in self.action["runs"]["steps"] if step.get("id") == "save-policy")
         rust = next(step for step in self.action["runs"]["steps"]
                     if step.get("uses", "").startswith("Swatinem/rust-cache@"))
@@ -254,6 +254,8 @@ class CacheWarmTests(unittest.TestCase):
         cases = {
             ("false", "push", "refs/heads/main"): "false",
             ("true", "push", "refs/heads/main"): "true",
+            ("true", "push", "refs/heads/dev"): "true",
+            ("false", "push", "refs/heads/dev"): "false",
             ("true", "push", "refs/heads/feature"): "false",
             ("true", "workflow_dispatch", "refs/heads/feature"): "true",
             ("true", "workflow_dispatch", "refs/heads/main"): "true",
@@ -264,7 +266,7 @@ class CacheWarmTests(unittest.TestCase):
             with self.subTest(save_if=save_if, event=event, ref=ref):
                 emitted = run_bash(policy["run"], {"SAVE_IF": save_if, "EVENT": event, "REF": ref})
                 self.assertEqual(emitted["enabled"], expected)
-        self.assertEqual(self.warm["on"]["push"]["branches"], ["main"])
+        self.assertEqual(self.warm["on"]["push"]["branches"], ["main", "dev"])
         self.assertIn("workflow_dispatch", self.warm["on"])
 
     def test_reserved_disk_is_released_after_compilation_before_cache_save(self):
@@ -359,7 +361,7 @@ class CacheWarmTests(unittest.TestCase):
 
     def test_warm_runs_on_backend_and_all_workspace_main_changes(self):
         trigger = self.warm["on"]["push"]
-        self.assertEqual(trigger["branches"], ["main"])
+        self.assertEqual(trigger["branches"], ["main", "dev"])
         self.assertIn("workflow_dispatch", self.warm["on"])
         members = re.search(r'^members = (\[.*\])$', Path("Cargo.toml").read_text(), re.M)[1]
         paths = [f"{member}/src/lib.rs" for member in json.loads(members)]
@@ -372,8 +374,25 @@ class CacheWarmTests(unittest.TestCase):
                   "integrations/oracle/cdp-worker/worker.mjs"]
         for path in paths:
             self.assertTrue(any(fnmatch.fnmatchcase(path, glob) for glob in trigger["paths"]), path)
-        self.assertEqual(self.warm["concurrency"], {"group": "ci-cache-warm-${{ github.ref }}", "cancel-in-progress": True})
         self.assertTrue(all(job.get("continue-on-error") for job in self.warm["jobs"].values()))
+
+    def test_frontend_selection_covers_real_mobile_test_dependencies(self):
+        filter_step = next(step for step in self.ci["jobs"]["changes"]["steps"]
+                           if step.get("id") == "filter")
+        paths = strict_load_workflow(filter_step["with"]["filters"])["frontend"]
+        # mobile-account-delete.test.tsx executes these real mobile sources.
+        for path in ("mobile/src/features/account/AccountSettingsScreen.tsx",
+                     "mobile/src/components/ScreenContainer.tsx",
+                     "mobile/src/theme/mobileTheme.ts"):
+            with self.subTest(path=path):
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(any(fnmatch.fnmatchcase(path, glob) for glob in paths))
+
+    def test_dev_push_keeps_the_running_warmer(self):
+        self.assertEqual(self.warm["concurrency"], {
+            "group": "ci-cache-warm-${{ github.ref }}",
+            "cancel-in-progress": "${{ github.event_name != 'push' || github.ref != 'refs/heads/dev' }}",
+        })
 
     def test_feature_variants_keep_flags_and_lane_names(self):
         expected = {"aws-kms": "aws-kms", "gcp-kms": "gcp-kms", "aws-and-gcp-kms": "aws-kms,gcp-kms"}
@@ -463,7 +482,7 @@ class CacheWarmTests(unittest.TestCase):
         cache = next(i for i, step in enumerate(steps)
                      if step.get("uses") == CACHE_ACTION)
         clean = next(i for i, step in enumerate(steps)
-                     if step.get("run") == "cargo llvm-cov clean --workspace")
+                     if "cargo llvm-cov clean --workspace" in step.get("run", ""))
         build = next(i for i, step in enumerate(steps)
                      if "cargo llvm-cov --package nyxid-cli --no-report" in step.get("run", ""))
         report = next(i for i, step in enumerate(steps)
@@ -473,6 +492,12 @@ class CacheWarmTests(unittest.TestCase):
         self.assertLess(build, report)
         self.assertNotIn("if", steps[clean])
         self.assertFalse(steps[clean].get("continue-on-error", False))
+        run = steps[clean]["run"]
+        # Cargo will not clean a target directory that lacks CACHEDIR.TAG, and
+        # cargo-llvm-cov only warns, so the step restores the tag and fails loudly.
+        self.assertLess(run.index("CACHEDIR.TAG"), run.index("cargo llvm-cov clean"))
+        self.assertIn("Signature: 8a477f597d28d172789f06886806bc55", run)
+        self.assertIn("exit 1", run)
 
 
 if __name__ == "__main__":

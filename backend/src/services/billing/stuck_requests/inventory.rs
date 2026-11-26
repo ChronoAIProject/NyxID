@@ -422,7 +422,7 @@ async fn count_keys(db: &mongodb::Database, tx: &mut ClientSession, index: &str)
         .max_time(std::time::Duration::from_millis(500))
         .session(&mut *tx)
         .await?;
-    let row = cursor.stream(&mut *tx).try_next().await?;
+    let row = next_document(&mut cursor, tx).await?;
     match row {
         None => Ok(0),
         Some(row) => match row.get("rows") {
@@ -482,7 +482,7 @@ async fn scan_once(
                 .batch_size(PAGE_ROWS as u32)
                 .session(&mut *tx)
                 .await?;
-            let mut page: Vec<Document> = cursor.stream(&mut *tx).try_collect().await?;
+            let mut page = read_documents(&mut cursor, tx).await?;
             let count = page.len();
             *stage.lock().unwrap() = "voice_evidence";
             voice::read(db, tx, &mut page).await?;

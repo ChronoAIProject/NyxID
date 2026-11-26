@@ -954,6 +954,7 @@ async fn delete_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
+    Query(query): Query<users::ErasureResponseQuery>,
     Json(body): Json<DeleteAssistantAccountRequest>,
 ) -> AppResult<Json<AssistantAccountDeletionResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
@@ -1009,7 +1010,14 @@ async fn delete_account(
                     crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
                 ),
             );
-            let _ = users::delete_me(State(state.clone()), auth_user, tele, headers).await?;
+            let _ = users::delete_me(
+                State(state.clone()),
+                auth_user,
+                tele,
+                headers,
+                Query(users::ErasureResponseQuery::default()),
+            )
+            .await?;
             mark_completed(&state.db, &receipt).await?;
             false
         }
@@ -1019,7 +1027,8 @@ async fn delete_account(
         .await?
         .ok_or_else(|| AppError::Conflict("Account deletion has not been accepted".into()))?;
     Ok(Json(AssistantAccountDeletionResponse {
-        erasure: users::DeleteAccountResponse::from_job(&state.db, erasure).await?,
+        erasure: users::DeleteAccountResponse::from_job(&state.db, erasure, query.include_retained)
+            .await?,
         resource: AssistantAccountResource { user_id },
         replayed,
     }))
@@ -1435,17 +1444,14 @@ async fn revoke_approval_grant(
             true
         }
         ReceiptOutcome::Reserved(receipt) => {
-            approval_service::revoke_grant(&state.db, &grant.user_id, &grant_id).await?;
-            crate::services::audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "approval_grant_revoked",
-                Some(serde_json::json!({
-                    "grant_id": grant_id,
-                    "owner_user_id": grant.user_id,
-                    "assistant_action": true,
-                })),
-            );
+            approval_service::revoke_grant_with_audit(
+                &state.db,
+                &grant.user_id,
+                &grant_id,
+                &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+                approval_service::GrantRevokeSource::AssistantAction,
+            )
+            .await?;
             let _ = tele;
             mark_completed(&state.db, &receipt).await?;
             false
@@ -4094,7 +4100,7 @@ mod wave4_effect_tests {
             .expect("insert actor");
         let body = AssistantOpenClawConnectRequest {
             action_request_id: "openclaw-reserved".to_string(),
-            gateway_url: "https://openclaw.example.test".to_string(),
+            gateway_url: "https://127.0.0.1".to_string(),
             credential: "bearer-token".to_string(),
             label: Some("Reserved OpenClaw".to_string()),
         };
@@ -6002,3 +6008,7 @@ impl std::fmt::Debug for AssistantDeveloperAppResponse {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "approval_audit_tests.rs"]
+mod approval_audit_tests;

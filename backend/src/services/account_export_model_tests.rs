@@ -168,6 +168,9 @@ struct OrgMessage {
 
 fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> {
     match collection {
+        "client_error_reports" => {
+            roundtrip::<crate::models::client_error_report::ClientErrorReport>(row)
+        }
         "agent_key_login_requests" => {
             roundtrip::<crate::models::agent_key_login_request::AgentKeyLoginRequest>(row)
         }
@@ -374,6 +377,9 @@ fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> 
         "connect_links" => roundtrip::<crate::models::connect_link::ConnectLink>(row),
         "consents" => roundtrip::<crate::models::consent::Consent>(row),
         "credit_grants" => roundtrip::<crate::models::credit_grant::CreditGrant>(row),
+        "credit_schedule_recipients" => {
+            roundtrip::<crate::models::credit_schedule_recipient::CreditScheduleRecipient>(row)
+        }
         "device_codes" => roundtrip::<crate::models::device_code::DeviceCode>(row),
         "device_onboard_credentials" => {
             roundtrip::<crate::models::device_onboard_credential::DeviceOnboardCredential>(row)
@@ -652,6 +658,76 @@ fn every_export_path_exists_in_serialized_storage_models() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[tokio::test]
+async fn recipient_schedule_export_is_person_scoped_and_anchors_are_financially_retained() {
+    use crate::models::credit_schedule_recipient::{
+        COLLECTION_NAME, CreditScheduleRecipient, CreditScheduleRecipientScan, SCAN_COLLECTION_NAME,
+    };
+    use personal_data_registry::{Erasure, ExclusionReason, Export, RetainedCategory};
+
+    let db = crate::test_utils::connect_transaction_test_database("export_recipient_cycles").await;
+    let owner = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(crate::test_utils::test_user(
+            &owner,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let mut own: CreditScheduleRecipient =
+        bson::from_document(model_fixture(COLLECTION_NAME)).unwrap();
+    own.recipient_user_id.clone_from(&owner);
+    own.schedule_id = "own-cycle".into();
+    let mut other = own.clone();
+    other.id = "other-cycle".into();
+    other.recipient_user_id = "other-person".into();
+    other.schedule_id = "other-schedule".into();
+    db.collection::<CreditScheduleRecipient>(COLLECTION_NAME)
+        .insert_many([own.clone(), other])
+        .await
+        .unwrap();
+    db.collection::<CreditScheduleRecipientScan>(SCAN_COLLECTION_NAME)
+        .insert_one(CreditScheduleRecipientScan {
+            id: "own-cycle".into(),
+            cursor_user_id: Some(owner.clone()),
+        })
+        .await
+        .unwrap();
+
+    let export = build(&db, &owner).await.unwrap();
+    let cycles = &export.sections["billing"][COLLECTION_NAME];
+    assert_eq!(cycles.total_count, 1);
+    assert_eq!(cycles.items.len(), 1);
+    assert_eq!(cycles.items[0]["schedule_id"], "own-cycle");
+    assert_eq!(cycles.items[0]["recipient_user_id"], owner);
+    assert_eq!(cycles.items[0]["anchor_at"], own.anchor_at.to_rfc3339());
+    assert!(cycles.items[0].get("eligibility_version").is_none());
+    assert!(
+        export
+            .sections
+            .values()
+            .all(|section| !section.contains_key(SCAN_COLLECTION_NAME))
+    );
+    assert_eq!(
+        personal_data_registry::find(COLLECTION_NAME)
+            .unwrap()
+            .erasure,
+        Erasure::Retained(RetainedCategory::FinancialBilling)
+    );
+    assert_eq!(
+        personal_data_registry::find(SCAN_COLLECTION_NAME)
+            .unwrap()
+            .export,
+        Export::Excluded(ExclusionReason::TransientCoordination)
+    );
+    // Removing the anchor would change future deterministic grant identities.
+    assert!(
+        crate::services::personal_erasure_service::local::inventory(&owner)
+            .iter()
+            .all(|(collection, _)| *collection != COLLECTION_NAME)
+    );
 }
 
 #[tokio::test]
@@ -1232,4 +1308,33 @@ async fn personal_group_owner_inputs_from_the_real_writer_are_exported() {
     assert!(text.contains("MY_PERSONAL_GROUP_INPUT"));
     assert!(!text.contains("OTHER_ORG_MEMBER_INPUT"));
     db.drop().await.unwrap();
+}
+
+#[test]
+fn crash_reports_export_metadata_without_frames_or_delivery_state() {
+    let row = model_fixture("client_error_reports");
+    let item = safe_item(&row, fields_for("client_error_reports").unwrap());
+    assert_eq!(item["report"]["platform"], "ios");
+    assert_eq!(item["report"]["app_version"], "1.2.3");
+    assert_eq!(item["report"]["runtime"]["name"], "hermes");
+    assert_eq!(item["report"]["native_signal"], "SIGSEGV");
+    let serialized = serde_json::to_string(&item).unwrap();
+    for forbidden in [
+        "js_frames",
+        "native_frames",
+        "native_images",
+        "fingerprint",
+        "consent_revision",
+        "artifact_id",
+        "destination_id",
+        "frame-sentinel",
+        "delivery-sentinel",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "unexpected diagnostic field: {forbidden}"
+        );
+    }
+    assert_eq!(item.as_object().unwrap().len(), 5);
+    assert_eq!(item["report"].as_object().unwrap().len(), 8);
 }

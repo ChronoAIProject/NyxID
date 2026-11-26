@@ -6,6 +6,7 @@
  */
 const transformed = [
   "(jest-)?react-native",
+  "decode-uri-component",
   "@react-native(-community)?",
   "expo(nent)?",
   "@expo(nent)?/.*",

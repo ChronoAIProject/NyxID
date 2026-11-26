@@ -11,6 +11,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Error Codes](#error-codes)
 - [Endpoints](#endpoints)
   - [Health](#health)
+  - [Public Configuration](#public-configuration)
   - [Interactive Documentation](#interactive-documentation)
   - [Auth](#auth)
   - [Social Auth](#social-auth)
@@ -68,7 +69,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 
 Most endpoints require authentication. NyxID supports three active authentication methods, checked in the following order:
 
-1. **Bearer Token** -- `Authorization: Bearer <access_token>` header
+1. **Access token** -- `Authorization: Bearer <access_token>`. A token bound to a DPoP key also supports `Authorization: DPoP <access_token>` and requires a matching proof for the request method and public URL.
 2. **Session Cookie** -- `nyx_session` HttpOnly cookie for first-party browser sessions
 3. **API Key** -- `X-API-Key: <key>` header
 
@@ -78,6 +79,12 @@ Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = 
 Endpoints marked **Auth: None** may still require a grant-specific credential in the request body, such as a refresh token.
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
+
+### Registered apps and account management
+
+The global rollout flag `auth:app-token-management-v1` defaults to off. Each server replica logs the first request that would require designation for a registered client ID, HTTP method and matched route template with `count=1`. It then logs the number of additional matching requests at most once per minute while the caller is active, including the final nonempty interval. When enforcement is enabled, an ordinary registered-app access token needs an admin-designated client for account management. An undesignated client receives HTTP 403 with `error_code=1002`, `details.reason="credential_type_unsupported"` and `details.credential_type="oauth_client"`. The admin OAuth client PATCH controls designation. Each handler still applies its scopes, ownership checks and first-party session requirements.
+
+Apps retain access to the organization metadata and AI-service inventory GETs available to general Agent Keys, and to the two channel lists below. OAuth userinfo, creator-side connect links, token exchange, broker client authentication and execution routes retain their own authorization contracts.
 
 ### Channel management and agent discovery
 
@@ -173,7 +180,8 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
-| 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 7000 | `approval_required`        | 403         | Approval is required and the request was not held: an eligible request sent `X-NyxID-Approval-Mode: async`, or an assistant call needs an execution-permission review. Carries `request_id`. NyxID sends or resumes the request after approval, so never re-send it. Ordinary proxy/LLM requests wait for the decision instead; see [Proxy](#proxy) |
+| 7001 | `approval_failed`          | 403         | Approval was rejected, expired or timed out, or the occurrence is already terminal; NyxID did not send the request on this call. Carries `request_id`, `approve_url` and `details` |
 | 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
@@ -203,7 +211,48 @@ Returns service health status. No authentication required.
 curl http://localhost:3001/health
 ```
 
+This is a dependency-free process liveness check and remains HTTP 200 during
+draining or a MongoDB outage. Existing `commit` and `encryption` diagnostics are
+also retained. Responses use `Cache-Control: no-store`.
+
+#### GET /ready
+
+No authentication required. Preserves the drain-only orchestration signal:
+HTTP 200 with an empty body while accepting traffic, HTTP 503 with an empty
+body during graceful draining. No database I/O; MongoDB failure or pool pressure
+does not evict every replica from load balancers. Responses are `no-store`.
+
+chrono-probe can use `/ready` with HTTP 200 and an empty body as its backend
+readiness assertion. These probes do not check MongoDB or other dependencies.
+
+The frontend serves `/frontend/health` and `/frontend/ready` independently and
+preserves backend `/health` and `/ready` proxies. Frontend orchestrators/load
+balancers must use `/frontend/health` for liveness and routing. `/frontend/ready`
+is for chrono-probe diagnostics and loopback container healthchecks only;
+loopback bypasses its public rate/concurrency limits. See
+[health/readiness contract](HEALTH_READINESS.md) for exact assertions, rate limits,
+public targets, staging chrono-cd compatibility and rollout.
+
 ---
+
+### Public Configuration
+
+#### GET /api/v1/public/config
+
+Returns public deployment configuration without authentication: frontend, MCP and
+node URLs, version, configured social providers, registration/email gates,
+`mobile_new_domains`, and optional telemetry configuration.
+
+The optional boolean `crash_diagnostics_offered` is included only as `true` when
+the diagnostics rollout is Global or Cohort; Off or Killed omits the field. It is
+a process-local discovery hint with no per-person data and adds no database reads
+to this endpoint. It starts false until the first successful startup evaluation.
+A tracked worker refreshes it every 60 seconds; local admin flag writes refresh
+it immediately through cache invalidation with a 200 ms read bound. Other replicas
+converge on the next successful refresh; failures keep the previous value. The
+manifest refresh remains a separate 15-minute task. Clients may use the hint to
+ask for preferences; actual offer and consent authority remain in the authenticated
+`/users/me/preferences/analytics` response.
 
 ### Interactive Documentation
 
@@ -531,12 +580,15 @@ grant. This route remains compatible with existing account-only clients.
   "user_code": "7KM2RQ9D",
   "verification_uri": "https://app.nyxid.dev/login/device",
   "verification_uri_complete": "https://app.nyxid.dev/login/device?user_code=7KM2RQ9D",
+  "app_verification_uri": "https://api.nyxid.dev/login/device?user_code=7KM2RQ9D",
   "expires_in": 600,
   "interval": 5
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. `app_verification_uri` is optional: it requires an origin-only HTTPS `BASE_URL`, a different `FRONTEND_URL` origin, and a configured Apple (nonblank `APNS_TEAM_ID` + `APNS_TOPIC`) or Android app-link identity. This includes selectable v2 and request-bound app-login responses; configuration does not establish live OS association. Only `/login` (including its MFA app option) opts into native QR payloads. On coarse-pointer mobile web, tapping the ready, live QR button opens “Open NyxID app?” confirmation; only the affirmative link opens a new tab with `noopener noreferrer` and no referrer, preserving the original poll. The dialog binds the exact request/URL, rechecks original expiry on tap and confirmation, and retires on close, expiry, terminal state, replacement or eligibility loss. No automatic opening occurs on Continue, generation, mount, polling or resume. Fine-pointer `/login` uses a plain native QR for external scanning. Other consumers, including request-bound identity verification and onboarding, use plain `verification_uri_complete` QR payloads with no handoff UI. Older responses and HTTP development also use that web fallback. Configuration does not detect installation or guarantee OS handoff. Verified native links load the public mobile preview without scanning; approval remains a separate authenticated action. Without native opening, `GET /login/device` on the API origin redirects to the configured frontend with only the validated, hyphenated public code. Missing, invalid or duplicate codes return 400; a same-origin fallback returns 404. The original browser must collect an approved delivery within the existing 60-second window; resuming prompts a poll while respecting the minimum interval and server backoff. See the [app-link runbook](../mobile/docs/APP_LINKS.md).
+
+Older clients may continue using `verification_uri_complete`. The web page validates before formatting, retains validated codes in the URL, and loads a non-mutating public preview on mount. Manual entry previews after Continue; malformed codes show an explanation. Review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -1029,7 +1081,7 @@ Initiate an OAuth 2.0 authorization flow with a social provider.
 | Parameter      | Type   | Description |
 |----------------|--------|-------------|
 | `client`       | string | Set to `"mobile"` for native mobile deep-link mode |
-| `redirect_uri` | string | Required for mobile mode. Must be an allowed `nyxid://` or `exp://` deep link |
+| `redirect_uri` | string | Required for mobile mode. The released app uses `nyxid://auth/social/callback`. Additional exact destinations require `MOBILE_SOCIAL_REDIRECT_URIS`. Expo destinations require development mode. |
 
 **Errors:**
 - `6000 social_auth_failed` -- Provider not configured (missing client ID/secret) or unsupported provider
@@ -1043,6 +1095,14 @@ http://localhost:3001/api/v1/auth/social/google
 ```
 
 ---
+
+#### Mobile social code delivery
+
+An app can start a verifier-bound sign-in at `GET /api/v1/auth/social/{provider}/mobile-code`. Generate a random PKCE verifier for this attempt and keep it in the app. Supply the exact `redirect_uri`, the base64url SHA-256 `code_challenge`, and `code_challenge_method=S256`. Deploy support on every API replica before enabling code delivery in the app.
+
+NyxID records the provider, API callback origin, destination, Apple nonce hash when applicable, and optional challenge for ten minutes. A provider callback consumes that attempt once. If a state cookie accompanies the callback, it must match. A sign-in started before upgrade can require a fresh attempt.
+
+A successful code-mode callback carries `status=success`, `provider`, and `code`. The app checks its active attempt and posts `{"code":"…","code_verifier":"…"}` to `POST /api/v1/auth/social/mobile-code/redeem` on its original API origin. The code expires after 60 seconds. Redemption creates the session and its refresh record in the same transaction that consumes the code. One matching exchange receives `access_token`, `refresh_token`, and `expires_in` in a non-cacheable JSON response. An invalid, expired, or used code receives HTTP 400. Handle MFA fragments and cancellation through the existing app flow. For a code-mode attempt, require the code on success and discard the verifier on completion or cancellation.
 
 #### GET /api/v1/auth/social/{provider}/callback
 
@@ -1096,6 +1156,79 @@ Possible error keys in the redirect:
 ---
 
 ### Users
+
+#### GET /api/v1/users/me/quick-access
+
+Returns the ordered account preference used by the Duo quick-access rail.
+All three quick-access methods require a first-party **person** session cookie
+or access JWT. API keys, delegated tokens (including `account:read`), service
+accounts, relay tokens, OAuth-client tokens and organization subjects are refused
+with 401 or 403. GET deliberately follows the human-only device-preference
+policy of `/users/me/analytics-consent`; it is not a delegated profile read.
+
+**Response (200):**
+
+```json
+{
+  "items": [
+    { "kind": "destination", "id": "new_chat" },
+    { "kind": "destination", "id": "notifications" },
+    { "kind": "destination", "id": "scan_qr" },
+    { "kind": "destination", "id": "recent_chats" },
+    { "kind": "destination", "id": "settings" }
+  ],
+  "customized": false,
+  "has_unsupported_entries": false
+}
+```
+
+The additive `has_unsupported_entries` boolean reports whether this server
+omitted stored kinds/destinations it cannot parse. Clients must also detect any
+entries they omit locally. A partial list remains visible but read-only; only
+explicit Reset may replace it. Older clients may ignore this response field;
+server-side PUT protection still prevents them erasing unsupported entries.
+
+#### PUT /api/v1/users/me/quick-access
+
+Saves the ordered list. The JSON body is `{ "items": [...] }`, with zero to
+12 unique entries. Each entry has a `kind` and `id`:
+
+| Kind | Accepted ID |
+|------|-------------|
+| `destination` | `new_chat`, `notifications`, `scan_qr`, `terminal_login_code`, `recent_chats`, `settings`, `automations`, `machines`, `plugins`, `activity`, `create_agent`, `agents`, `crews` |
+| `agent` | UUID, stored in canonical lowercase form |
+| `crew` | Valid `nyxg-` crew ID; `group` is accepted as an alias |
+
+Unknown kinds/destinations, malformed IDs, duplicates and oversized lists return
+400. Shape-valid agent/crew IDs are accepted without checking roster access:
+these inert preferences confer no access, and clients resolve them only against
+the authenticated person's authorized roster. Unavailable entries are not shown.
+The response has the GET shape with `customized: true`; an empty saved list is
+different from the default list. If the raw stored list contains entries this
+server cannot parse, PUT returns 409 `conflict` (existing code 1004) without
+changing storage. Replacement also compares the complete raw preference so a
+concurrent newer-version edit returns 409 rather than being overwritten. Reload
+before retrying a concurrent edit; unsupported lists require a newer compatible
+client/server or intentional Reset.
+
+#### DELETE /api/v1/users/me/quick-access
+
+Removes the saved preference and returns the current default list with
+`customized: false`. All methods operate only on the authenticated person; there
+is no owner override. Storage is the existing users row at
+`profile_config.quick_access`, included in account export and removed with the
+person during erasure; no collection is added. These users preference routes,
+like their adjacent preference endpoints, are documented here rather than
+registered as utoipa paths.
+
+Rolling deployments are compatible: older binaries ignore this optional field.
+All current profile preference writers (service-view filters/named views,
+analytics consent, security policy and onboarding completion) update their own
+`profile_config.*` path; they do not replace the profile object. Quick-access
+save/reset likewise changes only `profile_config.quick_access`. This preserves
+sibling and unknown future settings. Older binaries cannot read the new route;
+clients must retain the default rail if that route returns 404. No migration or
+new personal-data collection is required.
 
 #### GET /api/v1/users/me
 
@@ -3734,6 +3867,30 @@ List user's service bindings.
 
 The integration contract guarantees `services[].id`, `services[].slug`, and `services[].is_active` across compatible `/api/v1` releases. Other fields are documented for current clients but may evolve additively; clients should ignore unknown fields.
 
+#### POST /api/v1/user-services/consent-disclosure
+
+Read consent display metadata for up to 100 exact user-service UUIDs in
+`{"service_ids":["…"]}`. An empty list returns only configured token lifetimes.
+Only first-party human sessions and access tokens qualify. Unknown, disabled,
+and non-executable services are omitted under the active user-service listing's
+visibility policy. The response is private and non-cacheable.
+
+`access_token_ttl_secs`, `broker_access_token_ttl_secs`, and
+`refresh_token_ttl_secs` report the NyxID OAuth lifetimes. Each `services` entry contains `service_id`,
+`credential_source` (personal or organization), and `credential_kind`. Only a
+linked OAuth credential's recorded scope string can populate `upstream_scopes`.
+Known entries include the curated label, description and sensitivity. Other
+entries retain the raw scope with `known: false` and unknown sensitivity. A
+null list means the permissions could not be determined or do not apply.
+
+`known_operations` counts active published catalog rows under `read`, `write`,
+`delete`, and `unclassified`. It is null when no published inventory is known
+or the connection has an owner-mounted OpenAPI spec.
+Explicit endpoint risk supplies read and write, and a classified write using
+HTTP DELETE counts as delete. The counts carry `limiting: false`. Capability
+values report positive catalog evidence or null for unknown. These fields are
+descriptive and approval never depends on the projection.
+
 #### PUT /api/v1/user-services/{id}
 
 Update auth config or node routing.
@@ -3757,7 +3914,7 @@ For channel bot setup, see [Bot connection links](#bot-connection-links). Bot li
 1. Obtain a normal user OAuth access token through the authorization-code flow.
 2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
 3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
-4. On a terminal outcome, the browser returns to the stored callback URI after NyxID adds `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
+4. The browser that completes or declines the link returns to the stored callback URI. A later visit shows the outcome. The callback URI for each terminal state includes `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
 5. Use `GET /api/v1/connect-links/{id}` as the polling fallback. `POST /api/v1/connect-links/{id}/cancel` cancels an attempt from the creating app.
 
 **Create request:**
@@ -4183,13 +4340,25 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approval continues the original held request on the same connection, so the caller must not re-send it; rejection, expiry or timeout returns HTTP 403 `approval_failed` (code `7001`). An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+
+**Approval controls** apply to authenticated proxy requests.
+
+| Header | Behavior |
+| --- | --- |
+| `X-NyxID-Approval-Mode: async` | An eligible v2 proposal returns `approval_required` with a request ID for same-credential readback at `GET /api/v1/approvals/requests/{id}/status`. After approval NyxID sends the retained request itself; never re-send it. Ineligible requests keep the connected wait. |
+| `X-NyxID-Approval-Wait-Seconds` | Supply one decimal integer from 10 through 300 to cap the connected wait and approval expiry from request receipt. The configured approval timeout and any shorter route deadline also apply. Omit the header to use the usual server wait. |
+
+An invalid or repeated budget returns HTTP 400 before approval creation. When
+both controls are supplied, an eligible async proposal uses its async deadline.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
 **Errors:**
 - `1000 bad_request` -- Service is inactive, service is a provider, invalid proxy path, or connection missing credential
-- `1002 forbidden` -- No active connection to this service, or approval was rejected/timed out
+- `1002 forbidden` -- No active connection to this service, or an approval policy Deny rule refused the operation
+- `7000 approval_required` -- An eligible async request or an assistant review needs approval; the request was not held (see Approval controls)
+- `7001 approval_failed` -- Approval was rejected, expired or timed out; the request was not sent
 - `1003 not_found` -- Service does not exist
 
 **Example:**
@@ -4610,7 +4779,7 @@ NyxID implements the OpenID Connect Authorization Code flow with mandatory PKCE.
 
 #### GET /oauth/authorize
 
-Authorization endpoint. Validates the OAuth client and parameters, then issues an authorization code. Only `response_type=code` is supported. PKCE with `S256` method is required for all requests.
+Authorization endpoint. A first-party account session approves the grant for every scope. Browsers can start the flow before sign-in. NyxID validates the OAuth client and parameters before issuing an authorization code. Only `response_type=code` is supported. PKCE with `S256` method is required for all requests.
 
 **Auth:** Required (the user must be logged in)
 
@@ -5504,6 +5673,19 @@ val response = client.newCall(request).execute()
 
 List all OAuth consents the current user has granted to third-party applications.
 
+The `granted_at` and `expires_at` fields describe base OAuth consent. Explicit
+service allowlists resolve display metadata in one database snapshot. A
+first-party human session can see personally owned services and services
+covered by the person's current organization proxy scope. The read checks
+active organizations, memberships and service-level admin restrictions.
+The list uses the owner-bound endpoint label or the authorized service's slug.
+It displays `—` as the string label when neither name is usable. Catalog
+names require a matching owner-bound endpoint. An eligible disabled
+service with a surviving endpoint has the additive `disabled: true` field.
+Missing, deleted, and inaccessible entries keep their `id` and use
+`deleted: true` with a label numbered in list order (`#1`, `#2`, and so on).
+Use the `deleted` and `disabled` flags to render localized display labels.
+
 **Auth:** Required
 
 **Response (200):**
@@ -5529,6 +5711,47 @@ List all OAuth consents the current user has granted to third-party applications
 curl http://localhost:3001/api/v1/users/me/consents \
   -H "Authorization: Bearer <access_token>"
 ```
+
+---
+
+#### GET /api/v1/users/me/consents/{client_id}/machine-grant
+
+Requires a human owner session. The response includes the latest owned Machine
+grant (active first, then retained revoked history) or `null`, the independent
+`source_valid` and `grant_valid` booleans and their nullable validity reasons,
+and `source_and_grant_valid` (the logical AND of the independent checks).
+
+When the owner has saved consent or grant history for the client, the response
+also includes `oauth_machine_status`. The server reads the displayed grant
+and source in one database snapshot. It reports the first applicable owner,
+client, or consent blocker, then evaluates the grant if the source passes.
+
+| Check | `oauth_machine_status` values in evaluation order |
+| --- | --- |
+| Owner | `owner_unavailable` |
+| Client | `client_missing`, `client_disabled`, `client_machine_scope_missing`, `client_proxy_scope_missing` |
+| Consent | `consent_missing`, `consent_expired`, `consent_revision_missing`, `consent_machine_scope_missing`, `consent_proxy_scope_missing` |
+| Grant | `grant_missing`, `grant_revoked`, `grant_expired`, `grant_stale`, `valid` |
+
+A stale grant has a security epoch or consent binding that differs from the
+live source. Proxy capability here means `proxy` or `proxy:*`. The status
+describes saved permissions. Execution also checks live token authority and
+Machine readiness. See [optional Machine permission on consent](security/OAUTH_AUTHORITY_ROLLOUT.md#optional-machine-permission-on-consent)
+for first approval and renewal.
+
+When the response contains an OAuth Machine grant, `oauth_machine_services`
+is a display map keyed by the assigned service IDs. Labels use the resource
+owner's endpoint or the authorized service's slug in the same snapshot. The
+lookup applies the current consent ceiling and the person's direct ownership
+or proxy access through an active organization and membership, including the
+membership's effective service scope and service-level admin restrictions.
+Removed services and services outside that access use the same placeholder
+with `deleted: true` and a null `label`. This covers explicit deletion markers
+and older inactive rows whose owner-bound endpoint is gone. An accessible
+disabled service with a surviving owner-bound endpoint has `deleted: false`
+and the additive `disabled: true` field. The `label` is null when neither
+name is usable. The map is empty when the source or the
+assigned service list is unavailable.
 
 ---
 
@@ -6956,6 +7179,7 @@ Update an OAuth client by `_id` as a platform admin, including ownerless Dynamic
 
 | Field                       | Type     | Description                                                  |
 |-----------------------------|----------|--------------------------------------------------------------|
+| `first_party_management`    | boolean  | A first-party platform-admin session can designate the client for management access. Defaults to false. |
 | `broker_capability_enabled` | boolean  | Grants or removes admin-provisioned OAuth broker capability  |
 | `is_active`                 | boolean  | Activates or deactivates the client                          |
 | `redirect_uris`             | string[] | Replacement redirect URI list                                |
@@ -8615,7 +8839,7 @@ This prevents authenticated callers from polling approval requests that belong t
 
 Status values: `pending`, `approved`, `rejected`, `expired`.
 
-When status changes to `approved`, the caller can retry the original proxy request (the grant now exists).
+Do not re-send the original request when the status becomes `approved`. A connected request already received its response on its own connection. For a v2 proposal, NyxID sends the approved request itself and this response adds an `execution` field with its state and bounded result; v2 polls with a different credential receive a not-found-shaped response. See [execution permissions](EXECUTION_PERMISSIONS.md#external-requests-and-readback).
 
 **curl:**
 
@@ -8827,6 +9051,49 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/service-configs/a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
+### Read or replace an organization service's approvers
+
+```http
+GET /api/v1/approvals/service-configs/{service_id}/approvers?org_id={org_uuid}
+PUT /api/v1/approvals/service-configs/{service_id}/approvers?org_id={org_uuid}
+```
+
+Both endpoints require a first-party human session or access token and an active Admin membership entitled to manage the organization's service config. A concrete connection must be in the caller's scope. A catalog ID addresses the config shared by its connections. An entitled Admin can govern the policy even when another person is the sole named approver.
+
+GET and successful PUT return the same object. For example, a config that inherits has the following response.
+
+```json
+{
+  "config_id": "381192a0-966c-4daf-bd2d-669cc144090c",
+  "revision": 0,
+  "approver_user_ids": null,
+  "authoring_available": true,
+  "authoring_unavailable_reason": null,
+  "unavailable": [],
+  "eligible_candidates": [
+    {"user_id": "bc398c50-3b4e-4b5e-b141-973ef5bda829", "display_name": "Alex"}
+  ]
+}
+```
+
+Candidates are live Admins entitled to the config. For a shared catalog config this includes Admins scoped to any active sibling. Each decision still requires entitlement to the requested connection. A candidate's display name can be null. The saved list can contain a person who has since lost eligibility. A stored empty list means pruning removed every named approver and required review fails closed.
+
+The additive `unavailable` array describes up to 128 saved IDs absent from `eligible_candidates`. Each entry contains `user_id`, nullable `display_name` and `reason`. Only a current or revoked membership in this organization permits a display-name lookup. A revoked or absent membership yields `not_member`. A membership with no matching person yields `unknown`. Among current members, an inactive or deleting account yields `inactive`, a Member or Viewer yields `not_admin`, and an otherwise eligible Admin outside the service scope yields `out_of_scope`.
+
+For an authorized reader, `authoring_unavailable_reason` is `flag_off` when the effective flag is off, `readiness_missing` when activation or live server support is missing, and `null` when editing is available. A caller without management permission receives HTTP 403 and no policy or person data.
+
+PUT requires all three fields below. Send `null` to restore inheritance, or 1–128 distinct, currently eligible person UUIDs to select approvers. The calling Admin may select themselves.
+
+```json
+{
+  "config_id": "381192a0-966c-4daf-bd2d-669cc144090c",
+  "expected_revision": 0,
+  "approver_user_ids": ["bc398c50-3b4e-4b5e-b141-973ef5bda829"]
+}
+```
+
+GET returns 404 for a missing config. PUT returns 409 for a deleted, replaced or concurrently edited config. Read the current config and review the edit before resubmitting. Reordering the same valid set at the expected revision leaves the revision and audit count intact. PUT returns 403 when authoring is disabled or fleet support is unavailable. GET continues to return the saved policy with `authoring_available: false`.
+
 ### Delete Per-Service Approval Config
 
 ```
@@ -8967,7 +9234,15 @@ Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{
 
 ### Inbound Triggers
 
-Triggers provide a provider-neutral inbound event relay. Management routes accept a normal user token or agent API key and reject delegated, relay, and service-account tokens.
+Triggers provide a provider-neutral inbound event relay. Every `/api/v1/triggers` route rejects delegated, relay, and service-account tokens. The remaining credential rules depend on the route and the trigger:
+
+| Routes | Credentials |
+|---|---|
+| Create, `GET`/`PATCH`/`DELETE /triggers/{id}`, `rotate-secret`, `rotate-delivery-secret`, `deliveries` and `redeliver` on a webhook-source trigger with `webhook`, `agent` or `notification` delivery | A normal user token or agent API key |
+| The same routes on an automation: a trigger with `source: "schedule"` or `assistant` delivery, including a create or `PATCH` that sets `assistant` delivery | A first-party human session only. `GET /triggers` omits automations for other credentials. Automations belong to a person, so create refuses `target_org_id` |
+| `POST /triggers/preview`, `GET /triggers/setup/{id}`, `GET /triggers/{id}/runs`, `POST /triggers/{id}/run` and `POST /triggers/{id}/runs/{run_id}/cancel`, for every trigger | A first-party human session only |
+
+A first-party human session is an account login from the NyxID web app, mobile app or CLI, with no OAuth client ID, API key or delegation. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for automation behaviour.
 
 #### Create and manage
 
@@ -8998,18 +9273,27 @@ Prefer bearer or HMAC verification. Query tokens are supported only for senders 
 `delivery` supports:
 
 - `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once and `delivery_signing_key_id`; outbound delivery uses the timestamp-bound signature and stable-header contract above.
-- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure; it is also the only target with durable cross-replica dedup and the delivery-history/replay contract described below.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. The destination is the callback URL configured on the conversation's assigned agent key; use `webhook` to send to a URL set on the trigger itself. `webhook` is also the only target with the delivery-history/replay contract described below. Dedup differs by target; see [Public ingress](#public-ingress).
 - `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
+- `{"type":"assistant","agent_id":"...","instruction":"..."}` wakes a NyxBot agent as an automation. Its optional fields are described in [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations).
 
-Create returns `trigger`, the one-time inbound `secret`, and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
+Create also accepts the automation fields `source` (`webhook` by default, or `schedule`), `schedule`, `overlap` (`skip` by default, or `queue`) and `watch_id` (the opaque ID of a NyxBot setup link). Trigger responses add `source`, `schedule`, `overlap`, `next_runs`, `next_run_at`, `last_run`, `pause_reason`, and `inbound_url` (webhook-source triggers only).
+
+Create returns `trigger`, the one-time inbound `secret` (webhook-source triggers only), and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
 
 - `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`
-- `PATCH /api/v1/triggers/{id}` for `label`, `status`, or `delivery`
+- `PATCH /api/v1/triggers/{id}` for `label`, `status`, `delivery`, `schedule`, or `overlap`
 - `DELETE /api/v1/triggers/{id}`
 - `POST /api/v1/triggers/{id}/rotate-secret`
 - `POST /api/v1/triggers/{id}/rotate-delivery-secret` for webhook targets; returns a replacement `delivery_signing_secret` and `key_id` once.
 - `GET /api/v1/triggers/{id}/deliveries?page=1&per_page=20` for metadata-only delivery history, newest first (`per_page` maximum 100).
 - `POST /api/v1/triggers/{id}/deliveries/{event_id}/redeliver` to replay a retained encrypted envelope.
+- `POST /api/v1/triggers/preview` with `{"schedule": ...}` returns a `description` and `next_runs` for a schedule specification.
+- `GET /api/v1/triggers/setup/{id}` returns the owner's pending NyxBot setup-link prefill for an automation form.
+- `POST /api/v1/triggers/{id}/run` admits an immediate test run and returns its run metadata.
+- `GET /api/v1/triggers/{id}/runs` and `POST /api/v1/triggers/{id}/runs/{run_id}/cancel`; see [Automation coordinator completion](#automation-coordinator-completion).
+
+These automation routes are specified in [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations).
 
 Changing a trigger's `delivery` through `PATCH` intentionally mints a replacement delivery secret. Use `rotate-delivery-secret` when only key rotation is intended. Receivers should follow the two-key `X-NyxID-Key-Id` rotation procedure documented above.
 
@@ -9017,8 +9301,11 @@ The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <eve
 
 #### Automation coordinator completion
 
-When coordinator completion is enabled and every serving replica advertises
-`automation:coordinator-completion-v2`, newly admitted assistant runs track
+When coordinator completion is enabled and `automation:coordinator-completion-v2`
+is serving-ready (it is recorded active, immediately on a clean `ready` assessment or
+after 90 seconds of observed support, and every live generation supports it; advisory
+roster warnings do not block it; see [security readiness](SECURITY_ROLLOUT_READINESS.md)),
+newly admitted assistant runs track
 specialist assignments and group handoffs through the coordinator's final reply.
 Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
 for the default-off configuration, bounds and downgrade procedure.
@@ -9031,8 +9318,8 @@ pending. The hard deadline terminates the run with `reason: "coordinator_timeout
 `POST /api/v1/triggers/{id}/runs/{run_id}/cancel` returns the owner's updated run
 metadata with HTTP 200. It cancels an enrolled run and fences its delegated work;
 already completed external actions remain completed. This route requires a
-first-party human session and rejects API keys, delegated tokens, service-account
-tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
+first-party human session and rejects API keys, third-party OAuth-client tokens,
+delegated tokens, service-account tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
 
 `GET /api/v1/admin/automation-continuations/readiness` requires admin or operator
 access and returns `configured`, fleet `readiness`, `rollback_safe` and
@@ -9066,8 +9353,9 @@ Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event
 
 Delivery and dedup semantics depend on the target:
 
-- `webhook`: an atomic `trigger_deliveries` insert provides exactly-once admission and durable dedup across replicas and restarts. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
-- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters a best-effort in-memory dedup cache only after success. Dedup is per process, bounded to the configured cache capacity and a five-minute default window, and does not coordinate replicas. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+- `webhook`: an atomic `trigger_deliveries` insert provides unique admission and durable dedup across replicas and restarts for as long as the delivery record is retained (`TRIGGER_DELIVERY_RETENTION_HOURS`, or 72 hours when retention is `0`); once MongoDB's TTL monitor has removed the expired record, the same event ID is admitted again. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
+- `agent` and `notification`: ingress first takes a claim on the trigger and event ID in a shared MongoDB collection, so it applies across replicas. The claim lasts `CHANNEL_EVENT_DEDUP_TTL_SECS` (300 seconds by default). Delivery completes before the ingress response. On success the claim is committed and the event ID stays deduplicated for another `CHANNEL_EVENT_DEDUP_TTL_SECS`; on failure the claim is released so a retry can deliver. A repeat that arrives while a claim or committed entry is live returns `duplicate`, even if the claimed attempt later fails. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+- `assistant`: ingress takes the same shared claim, then admits the run in one MongoDB transaction under a run ID derived from the trigger and event ID. A repeat returns `duplicate` while the claim or committed entry is live; after that, a repeat whose run is still retained in run history returns `accepted` without a second run or transcript event. Admission therefore does not depend on the claim lasting. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for run-history retention.
 
 Webhook-target envelopes are encrypted at rest with the configured encryption keys and removed by a database TTL index after `TRIGGER_DELIVERY_RETENTION_HOURS` (72 hours by default). Delivery list responses never contain payloads. Setting retention to `0` stores metadata for the default 72-hour bounded window but no envelope, makes `replay_available` false, and causes redelivery to return `trigger_delivery_record_not_found` (11606). Agent and notification payloads are never persisted.
 
@@ -9140,6 +9428,41 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
 
+## Organization specialist member access
+
+`GET /api/v1/assistant/nyxagent/agents/{id}/org-access` returns both lists,
+the edit revision and current authoring availability. GET and PUT require the
+NyxAgent engine and a first-party human session or access token for a live
+Admin of the owning organization, including an Admin outside both lists.
+
+```json
+{"maintainers":null,"users":[],"revision":3,"authoring_available":true}
+```
+
+`PUT` on the same resource replaces both lists and returns the GET shape.
+Supply these three fields and use the revision from GET.
+
+```json
+{"maintainers":[],"users":null,"expected_revision":3}
+```
+
+Each list independently accepts `null` for inheritance, `[]` for nobody, or
+up to 128 distinct eligible Admin or Member person UUIDs. A reordered
+equivalent set is a no-op. Unknown fields, omissions, invalid subjects and
+negative revisions return HTTP 400 `validation_error`. A stale revision returns
+HTTP 409 `conflict`. Read the current policy and review the draft before saving
+again. With the authoring flag off or fleet readiness blocked, PUT returns
+HTTP 403 `org_agent_access_authoring_unavailable`. The Admin can still read
+the saved lists. See [organization specialist agents](ORG_AGENTS.md).
+
+## Assistant setup handoff presentation
+
+The assistant conversation DTO and client-capability header are defined in the
+[engine API contract](chat/08-nyxagent-engine.md#browser-routes) and
+[session context contract](chat/08-nyxagent-engine.md#session-instructions-and-per-turn-context).
+The [browser handoff and setup contract](chat/05-frontend-ui.md#specialist-setup-handoffs)
+defines the user action and completion flow.
+
 ## Owner NyxBot invocations
 
 These endpoints let a first-party owner account session or access token drive
@@ -9200,6 +9523,63 @@ native `nyxid__list_notifications` tool uses the same authorized previews and
 never marks read. It is available to owner NyxBot threads and NyxBot automation
 turns with the flag enabled. Upgrade all replicas before enabling the flag.
 
+## Remote Machines
+
+Owner routes require a first-party human session; API-key, service-account,
+delegated and relay credentials are rejected. Quote, create, resume and rekey
+also require the `experimental:remote-machines` flag and a ready platform
+configuration (see [ENV.md](ENV.md#remote-machine-runtime-funding-and-bootstrap-verification));
+pause and delete do not. A create, resume or rekey whose exact request was
+already accepted (same idempotency key and body) can be recovered while platform
+probes are unavailable; the flag check still applies.
+
+Create always requires an `Idempotency-Key` and the current policy
+acknowledgements (`policy_version`, `data_policy_version`,
+`acknowledge_shared_environment`). A free-slot create (`free_slot: true`) needs
+nothing more. A paid create or resume additionally requires an accepted
+`quote_id` and `accept_account_balance: true`.
+Request and response fields, profile/rate rules, bounded reads and deletion are
+specified in
+[Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/remote-machine-entitlement` | Entitlement and advisory billing preflight for a profile. |
+| POST | `/api/v1/remote-machine-quotes` | Quote a new Machine or the resume of an existing one. |
+| GET | `/api/v1/remote-machines` | Owner Machines, cursor-paged; `include_deleted=true` adds retained records. |
+| POST | `/api/v1/remote-machines` | Create a Machine: free slot, or paid from an accepted quote (`Idempotency-Key` required; see above). |
+| GET | `/api/v1/remote-machines/{machine_id}` | Machine detail. |
+| DELETE | `/api/v1/remote-machines/{machine_id}` | Delete the Machine and its workspace (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines/{machine_id}/actions` | Owner lifecycle action: `pause`, `resume`, `rekey` or `delete` (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines/{machine_id}/rekey` | Fenced owner-authorized credential recovery (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}/events` | Lifecycle events, `(created_at, _id)` seek cursor. |
+| GET | `/api/v1/remote-machines/{machine_id}/operations` | Lifecycle operations for the Machine. |
+| GET | `/api/v1/remote-machine-operations/{operation_id}` | One lifecycle operation. |
+| POST | `/api/v1/remote-machine-operations/{operation_id}/retry-delete` | Retry a failed deletion (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}/billing` | Runtime billing detail (optional `run_id`, `offset`). |
+| GET | `/api/v1/remote-machines/{machine_id}/billing/runs` | Funded runtime runs. |
+| GET | `/api/v1/remote-machines/{machine_id}/usage` | Storage usage observations. |
+| GET | `/api/v1/remote-machines/{machine_id}/jobs` | External execution jobs on this Machine. |
+| GET | `/api/v1/remote-machines/{machine_id}/jobs/{job_id}/output` | Job output. |
+| POST | `/api/v1/remote-machines/{machine_id}/jobs/{job_id}/cancel` | Cancel a job. |
+| GET | `/api/v1/remote-machines/{machine_id}/grants` | External execution grants for this Machine. |
+| POST | `/api/v1/remote-machines/{machine_id}/confirmations/{id}/decision` | Decide a pending execution confirmation bound to this Machine. |
+
+Admin routes require a first-party human admin or operator for reads and an
+admin for writes; runtime rate writes also require the flag for the acting admin.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/admin/remote-machines/platform` | Platform configuration, controller health and investigations. |
+| GET | `/api/v1/admin/billing/runtime` | Runtime rates and their synchronization state. |
+| POST | `/api/v1/admin/billing/runtime/rates` | Stage a runtime rate. |
+| POST | `/api/v1/admin/billing/runtime/rates/{id}/resync` | Retry rate synchronization. |
+| POST | `/api/v1/admin/billing/runtime/rates/{id}/retire` | Retire a rate. |
+
+The managed workload calls `POST /api/v1/machines/managed/prepare` and
+`POST /api/v1/machines/managed/bootstrap` without a user credential; they accept
+only workload authentication (72 KiB body limit).
+
 ## NyxBot CMA Sandbox management scope
 
 `GET /api/v1/assistant/nyxagent/sandboxes` lists only Sandboxes with a
@@ -9210,6 +9590,32 @@ human owner and the CMA feature flag. The response includes `sandboxes`,
 and connection aliases; `limit` is `1`. Creating or logging into a Sandbox
 directly in CMA does not make it a NyxID-created resource.
 
+All management paths below use the prefix `/api/v1/assistant/nyxagent`; `{id}`
+is NyxID's local reference ID. Handlers require a first-party human, an active
+personal owner and `assistant:cma-sandboxes`. Delegated `account:read` is denied
+for every read, stream and upgrade path. Accepted lifecycle commands return
+`202` while pending; acknowledgement alone is not completion.
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| GET | `/sandboxes` | NyxID-created resources and account allocation status |
+| GET | `/sandboxes/{id}` | Live detail with durable unknown/pending facts |
+| PATCH | `/sandboxes/{id}` | Local label change bound to generation |
+| POST | `/sandboxes/{id}/commands` | `pause` or `revive`, bound to generation and one stable `Idempotency-Key`; `recover_creation`, bound to generation |
+| DELETE | `/sandboxes/{id}` | Retirement intent bound to generation and one stable `Idempotency-Key`; release only after exact retirement observation |
+| GET | `/sandboxes/{id}/events` | Bounded Sandbox lifecycle events |
+| GET | `/cma-agents/{id}` | Exact Agent detail and safe profile |
+| GET | `/cma-agents/{id}/transcript` | Authoritative conversation turns and compatible flat messages |
+| GET | `/cma-agents/{id}/events/snapshot` | Agent event snapshot; the `cursor` query maps to CMA's `page_cursor` |
+| GET | `/cma-agents/{id}/events` | Agent SSE; resume with `after_cursor` or `Last-Event-ID` |
+| GET | `/cma-agents/{id}/responses/{response_id}` | Exact response bound to that Agent |
+| GET | `/cma-agents/{id}/responses/{response_id}/events` | Response SSE; resume with a numeric `after_cursor` or `Last-Event-ID` (CMA's `starting_after`) |
+| GET | `/cma-agents/{id}/desktop` | Availability/descriptor for the exact Agent |
+| GET | `/cma-agents/{id}/desktop/ws` | Authorized RFB WebSocket relay |
+
+`GET /api/v1/assistant/nyxagent/cma-sessions` is the read-only session-card
+projection described in [CMA session status cards](chat/12-cma-sessions.md).
+
 The same scope applies to Sandbox detail, label, lifecycle and event routes,
 Agent parent bindings, `nyxid__list_cma_resources`, and cached assistant context.
 External `discovered`, `claimed`, or `conflict` references are hidden and cannot
@@ -9217,8 +9623,8 @@ be used to manage an external Sandbox. There are no Sandbox `claim` or
 `unregistered` management endpoints. Raw CMA catalog proxy reads retain CMA's
 own response and may list other resources in the upstream account.
 
-The Agent summaries in `nyxid__list_cma_resources` and the cached CMA context
-include nullable `last_known_response_id`, taken from an existing observed
+The Agent summaries in `nyxid__list_cma_resources` include nullable
+`last_known_response_id`, taken from an existing observed
 submission. This lets another NyxBot chat locate that work without copying the
 source chat's transcript. It is a historical lookup hint, not the current task
 or permission to control it. Read the live Response and verify its conversation,
@@ -9364,6 +9770,26 @@ Eligible owner NyxAgent chat keys also receive `nyx__artifact_delivery`, accepti
 an empty object. The server freezes its original-reply target and preflights
 recoverability before auditing or requesting an owner confirmation. Disabled or
 ineligible callers retain the ordinary unknown-tool response.
+
+## Organization guest conversation reads
+
+The following first-party reads use the [organization guest transcript policy](chat/09-nyxbot-orchestrator.md#guest-settings-and-binding-recovery).
+
+| Route | Response |
+|---|---|
+| `GET /api/v1/assistant/nyxagent/agents/{id}/guest-conversations` | `conversations` and optional `next_cursor`. Rows have read-only `org-guest-` IDs and channel source metadata. `limit` and `cursor` page in descending activity time and ID order. |
+| `GET /api/v1/assistant/nyxagent/guest-conversations/{id}` | `conversation`, `messages`, and optional `before_seq`. The page presents messages in ascending sequence order. Pass `before_seq` and `limit` for older messages. |
+| `GET /api/v1/assistant/nyxagent/channels/{id}/chats` | Eligible admin chat rows include `guest_conversation_id`, a read-only link to the most recent retained guest conversation for that source. |
+
+Guest conversation IDs address the dedicated history read. Ineligible agent
+or conversation IDs return 404. Page limits range from 1 to 100.
+
+With `nyxid nyxbot conversations --agent <id>`, an eligible admin's results
+include guest rows in the same recency order and within the requested limit.
+Pass the returned `next_cursor` to the same agent query. The CLI accepts regular
+conversation cursors for ordinary history discovery and uses a guest ID with
+`nyxid nyxbot history <id>` to read the guest transcript. A server without
+guest discovery continues to serve ordinary conversations.
 
 ## Assistant skill review and image input
 
@@ -9622,6 +10048,22 @@ absence alone never proves no creation. A stale revision/observation returns
 conflict; an invalid action returns validation failure. Authority/storage
 unavailability is retryable. No action deletes a replacement version.
 
+For a Discord bot stopped by `create_outcome_unconfirmed`, use the owner's
+NyxID bot page to identify its `channel_bot_id`. Page through the release list
+and inspect the corresponding parent release. The list and inspection expose
+`channel_bot_id` and `dispatch_started_at` (null for an undispatched attempt
+or when historical data is unavailable). Give the gateway operator the captured
+creator, gateway service, reserved `record_id` and dispatch time so they can
+verify that the original request has drained and the connection is absent.
+Repeated missing reads and elapsed time alone cannot establish this.
+
+Only after that verification and the 24-hour minimum, submit `confirm_missing`
+with `dispatch_drained: true`, the inspected revision and the inspected
+`{"status":"missing"}` observation. If the revision changes, inspect again.
+Once the release settles, the sweep starts the 90-second Discord drain and
+relay discovery resumes when all fences clear. If the gateway operator cannot
+establish the dispatch outcome, leave the release under automatic observation.
+
 ### OAuth consent decisions
 
 Browser consent forms submit a `browser_form=true` marker. Successful, denied,
@@ -9722,6 +10164,96 @@ history, cancellation, departure and deletion; binary rollback requires the
 archive/drain procedure in the design.
 
 
+## Admin CMA sandbox reservations
+
+These routes require a first-party human platform administrator. Operators,
+API keys, OAuth-client, delegated (including `account:read`), service-account
+and relay tokens cannot use them. No personal CMA-management flag is required.
+
+### GET `/api/v1/admin/cma-sandbox-reservations`
+
+Query: optional `owner_id`, comma-separated admission `states`, opaque `after`
+(the preceding row's local ID), and `limit` (default 50, clamped to 1–100).
+Response: `{ "items": [...], "next_cursor": "..." | null }`. A full page may
+return a cursor followed by an empty final page. Only slot-holding rows appear,
+including legacy sources. Each item projects local/owner/catalog-service IDs,
+source, admission/submission/observation states, generation, parent `revision`,
+`creation_revision`, known remote sandbox and lifecycle operation IDs, `associated`
+(whether the parent is bound rather than only carrying a creation receipt), creation/
+update/observation timestamps, and `holding`: `live_sandbox`, `creation_unknown`,
+`creation_in_progress`, or `retiring`. Missing matching creation metadata is null.
+Request ciphertext, request bytes, idempotency keys, and request hashes are omitted.
+
+### POST `/api/v1/admin/cma-sandbox-reservations/{id}/inspect`
+
+No request body. Performs exact owner-authenticated CMA GET observations using
+saved Sandbox, lifecycle operation and Agent identities. Never lists to infer
+absence, replays a creation, or sends a lifecycle mutation. It writes only an
+admin-attributed audit. Sandbox/creation documents, observation timestamps,
+recovery cooldown and revision fences stay unchanged, on success or failure. Response:
+`{ "reservation": {...}, "outcome": {...}, "next_step": null }` (`next_step`
+contains owner-retry guidance when applicable), where `outcome.kind` is:
+
+- `exists`: `remote_sandbox_id` and normalized remote `state`.
+- `proven_absent`: `evidence: "confirmed_not_created"`, the durable non-creation
+  state already established by normal admission/recovery. Legacy rows do not
+  retain which accepted refusal produced that state; no subtype is invented.
+- `unknown`: a closed `reason`, such as `resource_not_found_without_creation_proof`,
+  `idempotency_window_passed`, `creation_dispatch_time_unknown`, `operation_without_resource`,
+  `creation_identity_not_observable_without_replay`, or `gateway_unavailable`.
+  Lifecycle operations without a resource also distinguish `operation_in_progress_without_resource`,
+  `operation_waiting_for_connection` and `operation_failed_without_resource`. None proves absence;
+  `next_step` explains automatic observation, owner connection completion, or the missing CMA evidence.
+  `owner_retry_will_recover` means the dispatched generic Sandbox creation is
+  inside the 23-hour replay window: the owner's next allocating create or retry
+  of the original request automatically attempts the existing recovery. If CMA
+  is still unavailable or uncertain, the slot remains held.
+
+### POST `/api/v1/admin/cma-sandbox-reservations/{id}/resolve`
+
+Use the latest inspection's three fences (`creation_revision` is null for a legacy
+row with no matching creation; it can authorize only exact bound-resource retirement). Example
+association body:
+
+```json
+{"generation":1,"revision":2,"creation_revision":3,"action":"associate","remote_sandbox_id":"sandbox-id"}
+```
+
+For an already bound sandbox, `"action":"confirm_retirement"` freshly reads its exact identity and requires CMA state `retired`. It completes local retirement and clears recovery material with the same transaction and fences, including for legacy bound rows without a journal. A 404, timeout, live state or retirement acknowledgment cannot authorize it. This action never sends a retirement command.
+
+For release use `"action":"release"` and omit `remote_sandbox_id`. Caller-supplied
+proof is not accepted. `associate` requires a saved creation receipt or exact
+lifecycle/Agent lineage, then freshly verifies that sandbox's existence and owner.
+Same-owner ownership alone refuses with `cma_creation_provenance_required`; it
+cannot prove that NyxID created one of the owner's other CMA sandboxes. It reuses normal
+association folding for an existing metadata-only discovered reference, preserving
+retirement intent and dependent Agent generations; another creation is never folded. `release` requires
+already durable `confirmed_not_created` with no resource/operation receipt. It clears
+the encrypted requests/context while preserving the existing idempotency identity
+and hash replay fences. A live
+associated sandbox cannot be released: create Agents in its workspace or ask its
+owner to retire it. Stale fences return HTTP 409/code 1004; erasure fences refuse
+without a change. No new error code or existing refusal change is introduced.
+
+Inspection appends metadata-only `admin_cma_sandbox_reservation_inspected` under
+the admin actor and makes no owner state change. Resolution appends
+`admin_cma_sandbox_reservation_resolved` in the same transaction as the local
+change. Exact CMA GETs use the owner identity only for resource authorization;
+this direct management boundary does not create owner `service_request`/usage
+rows, charge billing or consume the owner's proxy rate limits. Refused resolutions also emit a best-effort metadata audit.
+Occupied-slot admission keeps its existing HTTP 409/code 1004/message bytes and
+emits `cma_sandbox_slot_occupied` at most once per owner/reservation per hour across
+upgraded replicas. A bounded process-local suppression cache precedes a separate
+one-hour TTL claim collection; that claim and the audit commit together, without
+writing the reservation or creation. Existing lifecycle writers cannot conflict
+with this diagnostic write. No field is added to existing models.
+
+An old unknown creation cannot be released on a 404, list omission, timeout or
+elapsed time. CMA must supply durable, owner-authenticated evidence tied to that
+exact creation identity that neither a resource nor a pending creation exists.
+The current read contract cannot supply this proof when every remote receipt is
+missing; inspection reports unknown and leaves the slot held.
+
 ## CMA Sandbox billing producer API
 
 The routes below require a verified service-account JWT from the single
@@ -9732,7 +10264,7 @@ units, retry semantics and rollout requirements are in [CMA billing](CMA_BILLING
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/v1/billing/sandboxes/quotes` | Quote the existing catalog service prices for an owner and full Sandbox allocation. |
+| POST | `/api/v1/billing/sandboxes/quotes` | Quote the effective CMA rate card, synchronized for the configured plan, for an owner and full Sandbox allocation. |
 | POST | `/api/v1/billing/sandboxes/windows` | Atomically reserve at most 300 seconds across all applicable resource metrics. |
 | GET | `/api/v1/billing/sandboxes/cursors/{sandbox_id}` | Recover the durable ordered allocation-evidence checkpoint. |
 | GET | `/api/v1/billing/sandboxes/receipts/{request_id}` | Recover an already committed producer request, including during an admission/provider outage. |

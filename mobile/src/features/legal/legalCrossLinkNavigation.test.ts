@@ -86,7 +86,9 @@ for (const inSheet of [false, true])
             "../../app/WorkspaceHeader": {
               useWorkspaceSheet: () => (inSheet ? {} : null),
             },
-            "../../components/BlurBackButton": { BlurBackButton: "Back" },
+            "../../components/FloatingBackButton": {
+              FloatingBackButton: "Back",
+            },
             "../../components/ScreenContainer": {
               ScreenContainer: "ScreenContainer",
             },

@@ -8,6 +8,7 @@ import {
   type NativeAudioTrack,
 } from "./NativeOpenAIMedia";
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
+import { systemStatusActivityActive } from "../../../lib/systemStatusActivity";
 
 type Event = { data?: unknown; track?: NativeAudioTrack };
 type Listener = (event: Event) => void;
@@ -210,7 +211,9 @@ function harness() {
 test("native preparation keeps capture disabled, negotiates once and releases real native resources", async () => {
   const h = harness();
   try {
+    assert.equal(systemStatusActivityActive(), false);
     assert.equal(await h.start(), "private-sdp-offer");
+    assert.equal(systemStatusActivityActive(), true, "a real native stream acquired the microphone");
     assert.equal(h.captures(), 1);
     assert.equal(h.stream().track.enabled, false);
     assert.equal(h.createdPeer().added[0], h.stream().track);
@@ -222,6 +225,7 @@ test("native preparation keeps capture disabled, negotiates once and releases re
       false,
     );
     h.media.close();
+    assert.equal(systemStatusActivityActive(), false);
     assert.deepEqual(h.stream().releases, [true]);
     assert.equal(h.stream().track.stops, 1);
     assert.equal(h.createdPeer().closes, 1);
@@ -321,11 +325,13 @@ test("abort during getUserMedia rejects promptly and frees a late native capture
   const pending = deferred<NativeAudioStream>();
   h.capture(pending.promise);
   const start = h.start();
+  assert.equal(systemStatusActivityActive(), false, "pending capture does not signal a privacy light");
   h.signal.abort();
   await assert.rejects(start, /closed/);
   const stream = new Stream();
   pending.resolve(stream);
   await tick();
+  assert.equal(systemStatusActivityActive(), false, "a cancelled late stream never activates the rail");
   assert.deepEqual(stream.releases, [true]);
   assert.equal(stream.track.enabled, false);
   assert.equal(h.peers.length, 0);

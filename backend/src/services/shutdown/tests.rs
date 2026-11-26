@@ -234,7 +234,9 @@ async fn shutdown_zero_keeps_readiness_and_background_claims_unchanged() {
     assert!(!state.shutdown.is_draining());
     assert!(state.shutdown.background().is_some());
     assert_eq!(
-        crate::handlers::health::ready(axum::extract::State(state.clone())).await,
+        crate::handlers::health::ready(axum::extract::State(state.clone()))
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(state.shutdown.tracked_units(), 1);

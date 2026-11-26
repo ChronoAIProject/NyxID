@@ -151,8 +151,16 @@ pub mod fields {
 // Feature flag
 // ---------------------------------------------------------------------------
 
-fn flag_cache() -> &'static Mutex<HashMap<String, (Instant, bool)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, bool)>>> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct AdmissionFeatures {
+    notifications: bool,
+    turn_handoff: bool,
+}
+
+type FlagCache = Mutex<HashMap<String, (Instant, AdmissionFeatures)>>;
+
+fn flag_cache() -> &'static FlagCache {
+    static CACHE: OnceLock<FlagCache> = OnceLock::new();
     CACHE.get_or_init(Mutex::default)
 }
 
@@ -166,25 +174,30 @@ fn flag_cache_key(db: &Database, user_id: &str) -> String {
 /// cache so producers without an admission snapshot add no database reads
 /// on hot paths. Admin flag changes apply within [`FLAG_CACHE_TTL`].
 pub async fn enabled(db: &Database, user_id: &str) -> AppResult<bool> {
+    if let Some(features) = cached_features(db, user_id) {
+        return Ok(features.notifications);
+    }
+    let features = feature_flag_service::resolve_personal_features(db, user_id).await?;
+    cache_features(db, user_id, &features);
+    Ok(enabled_in(&features))
+}
+
+pub(crate) fn turn_handoff_enabled(db: &Database, user_id: &str) -> bool {
+    cached_features(db, user_id).is_some_and(|features| features.turn_handoff)
+}
+
+pub(crate) fn has_admission_features(db: &Database, user_id: &str) -> bool {
+    cached_features(db, user_id).is_some()
+}
+
+fn cached_features(db: &Database, user_id: &str) -> Option<AdmissionFeatures> {
     let key = flag_cache_key(db, user_id);
-    if let Some(value) = flag_cache()
+    flag_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
         .filter(|(at, _)| at.elapsed() < FLAG_CACHE_TTL)
         .map(|(_, value)| *value)
-    {
-        return Ok(value);
-    }
-    let value = feature_flag_service::personal_flag_enabled(db, user_id, FLAG_KEY).await?;
-    let mut cache = flag_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cache.len() >= FLAG_CACHE_CAPACITY {
-        cache.clear();
-    }
-    cache.insert(key, (Instant::now(), value));
-    Ok(value)
 }
 
 /// The same decision from an already-resolved feature snapshot (HTTP
@@ -204,7 +217,18 @@ pub fn cache_features(db: &Database, user_id: &str, features: &[String]) {
     if cache.len() >= FLAG_CACHE_CAPACITY && !cache.contains_key(&key) {
         cache.clear();
     }
-    cache.insert(key, (Instant::now(), enabled_in(features)));
+    cache.insert(
+        key,
+        (
+            Instant::now(),
+            AdmissionFeatures {
+                notifications: enabled_in(features),
+                turn_handoff: features
+                    .iter()
+                    .any(|key| key == feature_flag_service::TURN_HANDOFF_FLAG_KEY),
+            },
+        ),
+    );
 }
 
 /// Forget this database's cached decisions (tests flip the flag mid-run;

@@ -1,3 +1,4 @@
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { z } from "zod";
 import {
   classifyLoginError,
@@ -14,7 +15,7 @@ import type {
 export function defaultNewAgentKey(now = Date.now()): NewAgentKey {
   return {
     kind: "new",
-    name: "CLI Agent",
+    name: translateApp("CLI Agent"),
     scopes: "read proxy",
     allowed_service_ids: [],
     allowed_node_ids: [],
@@ -37,7 +38,7 @@ export function newKeySummary(
     key_prefix: "",
     owner_type: org ? "org" : "personal",
     owner_id: org?.id ?? "",
-    owner_name: org?.name ?? "Your personal account",
+    owner_name: org?.name ?? translateApp("Your personal account"),
     allowed_services: options.services.filter(
       (item) =>
         input.allowed_service_ids.includes(item.id) ||
@@ -49,7 +50,7 @@ export function newKeySummary(
       input.allowed_node_ids.includes(item.id),
     ),
     expires_at: input.never_expires ? null
-      : input.expires_at ?? new Date(Date.now() + 90 * 86400000).toISOString(),
+      : (input.expires_at ?? new Date(Date.now() + 90 * 86400000).toISOString()),
     rate_limit_per_second: input.rate_limit_per_second ?? null,
     rate_limit_burst: input.rate_limit_burst ?? null,
     platform: input.platform ?? null,
@@ -69,76 +70,84 @@ export function permissionRows(
     .filter(Boolean)
     .join(", ");
   return [
-    { label: "Key", value: key.name },
-    { label: "Owner", value: `${key.owner_name} (${key.owner_type})` },
-    { label: "Prefix", value: key.key_prefix || "Created on approval" },
-    { label: "Effective permissions", value: effective },
-    { label: "Scopes", value: key.scopes },
+    { label: translateApp("Key"), value: key.name },
+    { label: translateApp("Owner"), value: `${key.owner_name} (${key.owner_type})` },
+    { label: translateApp("Prefix"), value: key.key_prefix || translateApp("Created on approval"),
+    },
+    { label: translateApp("Effective permissions"), value: effective },
+    { label: translateApp("Scopes"), value: key.scopes },
     {
-      label: "Services",
+      label: translateApp("Services"),
       value: key.allow_all_services
-        ? "All services, including future services"
+        ? translateApp("All services, including future services")
         : [
             key.allow_auto_connected_services
-              ? "All auto-connected platform services (including future additions)"
+              ? translateApp(
+                  "All auto-connected platform services (including future additions)",
+                )
               : "",
             ...key.allowed_services.map(
               (item) =>
-                `${item.name}${item.auto_connected ? " (Platform)" : ""}`,
+                (item.auto_connected ? translateApp("{{name}} (Platform)", { name: item.name }) : item.name),
             ),
           ]
             .filter(Boolean)
-            .join(", ") || "None",
+            .join(", ") || translateApp("None"),
       warning: key.allow_all_services,
     },
     {
-      label: "Nodes",
+      label: translateApp("Nodes"),
       value: key.allow_all_nodes
-        ? "All nodes, including future nodes"
-        : key.allowed_nodes.map((item) => item.name).join(", ") || "None",
+        ? translateApp("All nodes, including future nodes")
+        : key.allowed_nodes.map((item) => item.name).join(", ") ||
+          translateApp("None"),
       warning: key.allow_all_nodes,
     },
     {
-      label: "Key expiry",
+      label: translateApp("Key expiry"),
       value: key.expires_at
-        ? new Date(key.expires_at).toLocaleString()
-        : "No expiry",
+        ? new Date(key.expires_at).toLocaleString(appLocale())
+        : translateApp("No expiry"),
     },
     {
-      label: "Rate limit",
-      value: `${key.rate_limit_per_second ?? "Default"} requests/s; burst ${key.rate_limit_burst ?? "default"}`,
+      label: translateApp("Rate limit"),
+      value: translateApp("{{rate}} requests/s; burst {{burst}}", {
+        rate: key.rate_limit_per_second ?? "Default",
+        burst: key.rate_limit_burst ?? "default",
+      }),
     },
-    { label: "Platform", value: key.platform ?? "Not specified" },
+    { label: translateApp("Platform"), value: key.platform ?? translateApp("Not specified"),
+    },
   ];
 }
 
 export function issuanceNotice(existing: boolean): string {
-  return `A new login credential will be issued for this key. ${existing ? "The key's existing secret and other consumers are unaffected." : "The primary key secret will not be shown."} Revoke it from the key's Login credentials section. Revoking the key invalidates every login credential.`;
+  return (existing ? translateApp("A new login credential will be issued for this key. The key's existing secret and other consumers are unaffected. Revoke it from the key's Login credentials section. Revoking the key invalidates every login credential.") : translateApp("A new login credential will be issued for this key. The primary key secret will not be shown. Revoke it from the key's Login credentials section. Revoking the key invalidates every login credential."));
 }
 
 export function agentKeyLoginError(error: unknown): string {
   if (error instanceof z.ZodError) {
-    return error.issues[0]?.message ?? "Check the login details.";
+    return error.issues[0]?.message ?? translateApp("Check the login details.");
   }
   const code = (error as { errorCode?: number } | null)?.errorCode;
   if (code === 2003) return MOBILE_MFA_STEP_UP_MESSAGE;
   const messages: Record<number, string> = {
-    11900: "This request is no longer available.",
-    11901: "This request has expired.",
-    11902: "Waiting for approval.",
-    11903: "Please wait before trying again.",
-    11904: "This request was rejected.",
-    11905: "This request was already completed.",
-    11906: "Too many attempts. Try again later.",
-    11907: "Enter a valid eight-character code.",
-    11908: "This key is no longer eligible. Choose another key.",
-    11909: "This credential is no longer available.",
+    11900: translateApp("This request is no longer available."),
+    11901: translateApp("This request has expired."),
+    11902: translateApp("Waiting for approval."),
+    11903: translateApp("Please wait before trying again."),
+    11904: translateApp("This request was rejected."),
+    11905: translateApp("This request was already completed."),
+    11906: translateApp("Too many attempts. Try again later."),
+    11907: translateApp("Enter a valid eight-character code."),
+    11908: translateApp("This key is no longer eligible. Choose another key."),
+    11909: translateApp("This credential is no longer available."),
   };
   return (
     (code === undefined ? undefined : messages[code]) ??
     (error instanceof Error
       ? error.message
-      : "Could not reach NyxID. Try again.")
+      : translateApp("Could not reach NyxID. Try again."))
   );
 }
 

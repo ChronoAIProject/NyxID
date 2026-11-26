@@ -57,7 +57,7 @@ pub fn failure_reason(code: &str, transport: &str) -> String {
         return reason.into();
     }
     if code == "not_received" {
-        return format!("{receiver} accepted it but never passed it on");
+        return crate::services::channel_bot_health::GATEWAY_NOT_RECEIVED_REASON.into();
     }
     if code == "routed_elsewhere" {
         return "another route on this bot, from an earlier setup, sent it to a different agent"
@@ -74,6 +74,9 @@ pub fn failure_reason(code: &str, transport: &str) -> String {
 
 pub fn gateway_error_guidance(code: &str) -> &'static str {
     match code {
+        "gateway_provider_not_registered" => {
+            "The gateway has not registered NyxBot as a provider yet (operator step). Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay."
+        }
         "gateway_configuration_required" => {
             "Ask an administrator to check the active cmaeg service and its URL."
         }
@@ -82,6 +85,9 @@ pub fn gateway_error_guidance(code: &str) -> &'static str {
         }
         "gateway_permission_required" => {
             "Ask an administrator to verify the actual gateway confidential client's cmaeg introspection association."
+        }
+        "gateway_rejected_request" => {
+            "The gateway rejected the connection request (HTTP 400). Ask an administrator to check the gateway request contract before reconnecting. Bot verification and owner pairing do not fix this rejection."
         }
         "gateway_unavailable" => "The gateway is temporarily unavailable; retry shortly.",
         _ => "",

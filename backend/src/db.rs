@@ -1,4 +1,7 @@
 mod pool_monitor;
+mod session_cursor;
+
+pub(crate) use session_cursor::{next_document, read_documents};
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -217,6 +220,10 @@ async fn named_index_needs_replacement(
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<bson::Document>(crate::services::assistant_cma_slot_audit::COLLECTION)
+        .create_indexes(crate::services::assistant_cma_slot_audit::indexes())
+        .await?;
+    crate::services::crash_report_service::ensure_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .create_indexes(crate::services::assistant_cma_sandbox_service::indexes())
         .await?;
@@ -402,14 +409,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
-    db.collection::<Document>("assistant_attachments")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"parent_attachment_id": 1, "chunk_index": 1})
-                .options(IndexOptions::builder().unique(true).sparse(true).build())
-                .build(),
-        )
-        .await?;
+    crate::services::assistant_upload_service::pdf_vision::ensure_indexes(db).await?;
     Box::pin(crate::services::assistant_upload_retention::ensure_indexes(
         db,
     ))
@@ -734,6 +734,42 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 )
                 .build(),
         )
+        .await?;
+
+    let mobile_flows = db.collection::<crate::models::mobile_social::MobileSocialFlow>(
+        crate::models::mobile_social::MobileSocialFlow::COLLECTION_NAME,
+    );
+    let mobile_deliveries = db.collection::<crate::models::mobile_social::MobileSocialDelivery>(
+        crate::models::mobile_social::MobileSocialDelivery::COLLECTION_NAME,
+    );
+    let expiry = IndexModel::builder()
+        .keys(doc! {"expires_at": 1})
+        .options(
+            IndexOptions::builder()
+                .expire_after(std::time::Duration::ZERO)
+                .build(),
+        )
+        .build();
+    mobile_flows.create_index(expiry.clone()).await?;
+    mobile_deliveries.create_index(expiry).await?;
+    mobile_flows
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"state_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mobile_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"code_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mobile_deliveries
+        .create_index(IndexModel::builder().keys(doc! {"user_id": 1}).build())
         .await?;
 
     // ── mfa_factors ──
@@ -1760,6 +1796,18 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     .await?;
     sac.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+
+    sac.create_index(
+        IndexModel::builder()
+            .keys(doc! {"approver_grants_pending": 1})
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(doc! {"approver_grants_pending": true})
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // ── user_provider_credentials ──
     let user_creds = db.collection::<mongodb::bson::Document>("user_provider_credentials");
@@ -2984,6 +3032,15 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    // Shared signing migrations traverse all dependent bots, including inactive ones.
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform":1,"credential_source":1,"_id":1})
+                .build(),
+        )
+        .await?;
+
     // Bounded Discord Gateway keyset discovery, additive for mixed replicas.
     channel_bots
         .create_index(
@@ -3142,6 +3199,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     crate::services::channel_reply_delivery::ensure_indexes(db).await?;
+    crate::services::channel_meta_service::ensure_indexes(db).await?;
     crate::services::channel_text_delivery::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──
@@ -3305,6 +3363,14 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "org_user_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    org_invites
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"org_user_id":1, "created_by":1, "redeemed_at":1, "expires_at":1})
                 .build(),
         )
         .await?;
@@ -3747,6 +3813,13 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
+    db.collection::<Document>(CREDIT_SCHEDULES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "timing": 1, "is_active": 1, "target_kind": 1, "target_group_ids": 1 })
+                .build(),
+        )
+        .await?;
     let credit_schedule_periods = db.collection::<Document>(CREDIT_SCHEDULE_PERIODS);
     credit_schedule_periods
         .create_index(
@@ -3763,6 +3836,32 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    credit_schedule_periods
+        .create_index(IndexModel::builder().keys(doc! { "period_end": 1 }).build())
+        .await?;
+
+    db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "schedule_id": 1, "recipient_user_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "recipient_user_id": 1, "created_at": -1, "_id": -1 })
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "schedule_id": 1, "is_eligible": 1, "next_due_at": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
     // ── usage_allowances / usage_allowance_periods ──
     let usage_allowances = db.collection::<Document>(USAGE_ALLOWANCES);
     usage_allowances
@@ -6482,6 +6581,8 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "system".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

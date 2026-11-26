@@ -3,41 +3,6 @@ use super::*;
 use crate::services::assistant_nyxagent as engine;
 use futures::TryStreamExt;
 
-fn pdf() -> Vec<u8> {
-    use lopdf::{Document, Object, dictionary};
-    let mut pdf = Document::with_version("1.5");
-    let pages = pdf.new_object_id();
-    let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
-    pdf.objects.insert(
-        pages,
-        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1}),
-    );
-    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
-    pdf.trailer.set("Root", catalog);
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    bytes
-}
-async fn named_call(
-    u: &BaseFixture,
-    auth: &McpAuthContext,
-    meta: bool,
-    operation: &str,
-    args: Value,
-) -> Value {
-    let slug = if u.catalog.slug.ends_with("-bot") {
-        format!("{}-3", u.catalog.slug)
-    } else {
-        "receipts".into()
-    };
-    let name = format!("{slug}__{operation}");
-    let params = if meta {
-        json!({"name":"nyx__call_tool","arguments":{"tool_name":name,"arguments_json":args.to_string()}})
-    } else {
-        json!({"name":name,"arguments":args})
-    };
-    rpc(&u.f, auth, "tools/call", Some(params)).await
-}
 async fn audits(u: &BaseFixture, event: &str, count: usize) -> Vec<Value> {
     // log_async appends through the audit-chain writer. Wait only for our DB.
     for _ in 0..100 {
@@ -397,6 +362,7 @@ async fn lark_base_writes_successful_contract_probes_do_not_leave_a_false_refusa
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args(&u.attachment_id),

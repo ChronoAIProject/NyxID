@@ -10,6 +10,7 @@ import {
   watchCmaSession,
   discoverCmaSessions,
   listPinnedCmaSessions,
+  readCmaInitialTaskOutcome,
 } from "./cma-session-api";
 import { cmaFrame, cmaHead, cmaSession } from "./cma-session.test-fixtures";
 import type { CmaSessionState } from "@/schemas/cma-session";
@@ -116,6 +117,13 @@ describe("read-only CMA session observation", () => {
       },
     );
     await vi.waitFor(() => expect(tailCount).toBe(1));
+    for (const { url } of requests) {
+      const proxy = new URL(url, "http://localhost");
+      expect(proxy.pathname).toMatch(/^\/api\/v1\/proxy\/s\/cma\//);
+      expect(proxy.searchParams.getAll("_nyxid_via")).toEqual([
+        cmaSession.connection.id,
+      ]);
+    }
     expect(requests.at(-1)?.url).toContain(
       "after_cursor=cursor-10&follow=true",
     );
@@ -356,13 +364,13 @@ it("uses advertised CMA routes while keeping requests on NyxID's proxy", async (
   ).toEqual(cmaSession.routes);
   expect(
     cmaProxyPath(
-      cmaSession.connection.id,
+      cmaSession.connection,
       cmaSession.routes.agent,
       cmaSession.agentId,
     ),
-  ).toBe(`/proxy/${cmaSession.connection.id}/api/v1/agents/agt_observed`);
+  ).toBe(`/proxy/s/cma/api/v1/agents/agt_observed?_nyxid_via=${cmaSession.connection.id}`);
   expect(() =>
-    cmaProxyPath(cmaSession.connection.id, "//external.test/agents"),
+    cmaProxyPath(cmaSession.connection, "//external.test/agents"),
   ).toThrow();
 });
 
@@ -639,6 +647,8 @@ it("joins beyond fifty unlinked active candidates without scanning terminal hist
           ),
         });
       if (url.pathname.endsWith("/agents")) {
+        expect(url.pathname).toBe(`/api/v1/proxy/s/${connection.slug}/api/v1/agents`);
+        expect(url.searchParams.getAll("_nyxid_via")).toEqual([connection.id]);
         expect(["starting", "working", "waiting_approval", "paused"]).toContain(
           url.searchParams.get("status"),
         );
@@ -733,6 +743,7 @@ for (const mode of ["source-routes", "source-list", "pins"] as const) {
         specialist_id: "specialist",
         turn_id: "turn",
         cma_url: null,
+        connection_slug: "cma",
       });
       const pins = [badConnection, cmaSession.connection].map(
         (connection) => `${connection.id}:${cmaSession.agentId}`,
@@ -765,7 +776,8 @@ for (const mode of ["source-routes", "source-list", "pins"] as const) {
               next_cursor: null,
             });
           }
-          const bad = url.pathname.includes(badConnection.id);
+          const bad = url.pathname.includes(badConnection.id) ||
+            url.searchParams.get("_nyxid_via") === badConnection.id;
           const routes = url.pathname.endsWith("openapi.json");
           if (routes) routeReads.push(url.pathname);
           if (failing && bad && (mode === "source-list" ? !routes : routes)) {
@@ -1001,6 +1013,7 @@ it.each([0, 12_000])(
       specialist_id: "specialist",
       turn_id: "turn",
       cma_url: null,
+      connection_slug: c.slug,
     }));
     const previous = connections.slice(0, 2).map((connection, i) => ({
       ...cmaSession,
@@ -1162,8 +1175,96 @@ it.each([403, 503, "network"] as const)(
 it("preserves CMA problem documents through the session API proxy read", async () => {
   const body = { status: 409, title: "invalid state", detail: "Session is not ready", code: "invalid_state", details: { retryable: true } };
   vi.stubGlobal("fetch", vi.fn(async () => Response.json(body, { status: 409 })));
-  await expect(listCmaAgents("owner", cmaSession.connection.id, cmaSession.routes, new AbortController().signal)).rejects.toMatchObject({
+  await expect(listCmaAgents("owner", cmaSession.connection, cmaSession.routes, new AbortController().signal)).rejects.toMatchObject({
     status: 409, message: body.detail,
     errorResponse: { ...body, error: body.code, message: body.detail },
+  });
+});
+
+describe("initial task outcome from Agent detail", () => {
+  const receipt = {
+    connectionId: cmaSession.connection.id,
+    agentId: cmaSession.agentId,
+    operationId: "original-lifecycle",
+  };
+  const origin = {
+    service_id: receipt.connectionId,
+    agent_id: receipt.agentId,
+    turn_id: "turn",
+    specialist_id: "agent",
+    conversation_id: "source",
+    cma_url: null,
+    connection_slug: "current-cma",
+  };
+  const agent = {
+    id: receipt.agentId,
+    status: "ready",
+    first_message: { purpose: "task", state: "completed" },
+  };
+  const read = (signal = new AbortController().signal) =>
+    readCmaInitialTaskOutcome("owner", "source", receipt, signal, async () => cmaSession.routes);
+
+  it.each([
+    [agent, "completed"],
+    [{ ...agent, status: "stopped" }, "completed"],
+    [{ ...agent, status: "deleted", first_message: { purpose: "task", state: "failed" } }, "failed"],
+    ...["stopped", "failed", "deleted"].map((status) => [
+      { ...agent, status, first_message: { purpose: "task", state: "queued" } },
+      "needs_attention",
+    ] as const),
+    [{ ...agent, status: "working", first_message: { purpose: "task", state: "failed" } }, "failed"],
+    [{ ...agent, first_message: { purpose: "task", state: "write_confirmed" } }, "pending"],
+    [{ ...agent, first_message: { purpose: "task", state: "recovery_required" } }, "needs_attention"],
+    [{ ...agent, status: "starting", bootstrap: { operation_id: receipt.operationId }, first_message: { purpose: "task", state: "queued" } }, "pending"],
+    [{ ...agent, status: "starting", bootstrap: { operation_id: "different-lifecycle" }, first_message: { purpose: "task", state: "queued" } }, null],
+    [{ ...agent, first_message: { purpose: "setup", state: "completed" } }, null],
+    [{ ...agent, first_message: { state: "completed" } }, null],
+    [{ ...agent, first_message: undefined }, null],
+    [{ ...agent, bootstrap: null }, null],
+  ] as const)("uses only authorized initial task evidence from %j", async (detail, outcome) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input, "https://nyx.example");
+      if (url.pathname.endsWith("/cma-sessions")) {
+        expect(url.searchParams.get("conversation")).toBe("source");
+        expect(url.searchParams.get("agents")).toBe(`${receipt.connectionId}:${receipt.agentId}`);
+        return Response.json({ sessions: [origin], next_cursor: null });
+      }
+      expect(url.pathname).toBe(`/api/v1/proxy/s/current-cma/api/v1/agents/${receipt.agentId}`);
+      expect(url.searchParams.getAll("_nyxid_via")).toEqual([receipt.connectionId]);
+      return Response.json(detail);
+    }));
+    await expect(read()).resolves.toBe(outcome);
+  });
+
+  it.each([
+    { sessions: [] },
+    { sessions: [{ ...origin, conversation_id: "different-source" }] },
+    { sessions: [{ ...origin, service_id: "52ec5c70-b8bb-4133-8824-031a1dc63945" }] },
+    { sessions: [{ ...origin, connection_slug: undefined }] },
+  ])("does not proxy an unauthorized receipt projection %j", async ({ sessions }) => {
+    const fetcher = vi.fn(async () => Response.json({ sessions, next_cursor: null }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(read()).resolves.toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["source", "account"])("ignores an in-flight detail after a %s switch", async (scope) => {
+    const controller = new AbortController();
+    let respond!: (response: Response) => void;
+    const fetcher = vi.fn(async (input: string) =>
+      input.includes("/cma-sessions?")
+        ? Response.json({ sessions: [origin], next_cursor: null })
+        : new Promise<Response>((resolve) => { respond = resolve; }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const result = read(controller.signal);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    if (scope === "source") controller.abort();
+    else {
+      transitionAssistantIdentity("other");
+      transitionAssistantIdentity("owner");
+    }
+    respond(Response.json(agent));
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
   });
 });

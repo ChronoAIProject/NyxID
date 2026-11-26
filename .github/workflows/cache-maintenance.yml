@@ -3,7 +3,7 @@ name: CI Cache Maintenance
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - .github/actions/ci-rust-cache/action.yml
       - .github/scripts/cache_budget.py
@@ -13,9 +13,9 @@ on:
   schedule:
     - cron: '25 */6 * * *'
   workflow_run:
-    workflows: [CI, Publish Images]
+    workflows: [CI, CI Cache Warm, Publish Images, Release Build Cache]
     types: [completed]
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -30,8 +30,9 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CACHE_SOFT_CAP_GB: '40'
-    # Run trusted main code only; never consume an upstream artifact or PR code.
-    if: github.ref == 'refs/heads/main'
+      CACHE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    # Use the deployed maintenance policy, including on default-branch schedules.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6

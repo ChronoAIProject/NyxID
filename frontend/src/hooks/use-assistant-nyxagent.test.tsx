@@ -128,6 +128,39 @@ it("keeps polling a CMA job after the assistant turn has ended", async () => {
   unmount();
 }, 8000);
 
+it("polls pending approvals through fifteen seconds after the latest pending deadline", async () => {
+  vi.useFakeTimers();
+  const start = Date.parse("2026-09-17T00:01:00Z");
+  vi.setSystemTime(start);
+  page.conversation.active_turn = null;
+  const approval = {
+    id: "old", service_slug: "sheets", service_name: "Sheets", summary: "Append row",
+    status: "pending" as const, approval_mode: "per_request" as const, agent_key_prefix: "",
+    created_at: page.conversation.created_at, expires_at: new Date(start - 60_000).toISOString(),
+  };
+  page.approvals = [
+    approval,
+    { ...approval, id: "last-pending", expires_at: new Date(start - 13_000).toISOString() },
+    { ...approval, id: "decided", status: "approved", expires_at: new Date(start + 60_000).toISOString() },
+  ];
+  const { unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(),
+  }), { wrapper });
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const reads = () => requests.filter((request) => request.includes(`/conversations/${id}?`)).length;
+
+  await advance(0);
+  const initial = reads();
+  expect(initial).toBeGreaterThan(0);
+  await advance(2000);
+  expect(reads()).toBe(initial + 1);
+  await advance(2000);
+  expect(reads()).toBe(initial + 2);
+  await advance(6000);
+  expect(reads()).toBe(initial + 2);
+  unmount();
+});
+
 it("polls only selected history every two seconds and refreshes the agent's threads once on settlement",
   async () => {
     const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
@@ -247,7 +280,7 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
     // Allow resumes the assistant with a visible continuation turn.
     expect(send).toHaveBeenCalledExactlyOnceWith(
       id,
-      "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
+      "Approved: account management for this chat. Continue. Then continue the original task and tell the user when it is finished or when you need their input.",
       expect.any(Function),
       expect.any(Function),
       expect.objectContaining({ acknowledgementId: "12345678-1234-4123-8123-123456789012" }),
@@ -297,8 +330,8 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
     await waitFor(() => expect(send).toHaveBeenCalledOnce());
     expect(send).toHaveBeenCalledWith(
       id,
-      "Approved: this chat may use GitHub. Continue. Then tell the user in one or two plain sentences what you did and the result.\n" +
-        "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
+      "Approved: this chat may use GitHub. Continue. Then continue the original task and tell the user when it is finished or when you need their input.\n" +
+        "Approved: account management for this chat. Continue. Then continue the original task and tell the user when it is finished or when you need their input.",
       expect.any(Function),
       expect.any(Function),
       expect.objectContaining({ acknowledgementId: "12345678-1234-4123-8123-123456789011" }),
@@ -584,31 +617,31 @@ it("phrases continuation turns per acknowledgement kind", () => {
   };
   expect(
     continuationText({ ...base, kind: "service", service_slug: "github", service_name: "GitHub" }),
-  ).toBe("Approved: this chat may use GitHub. Continue. Then tell the user in one or two plain sentences what you did and the result.");
+  ).toBe("Approved: this chat may use GitHub. Continue. Then continue the original task and tell the user when it is finished or when you need their input.");
   expect(continuationText({ ...base, kind: "service", service_slug: "github" })).toBe(
-    "Approved: this chat may use github. Continue. Then tell the user in one or two plain sentences what you did and the result.",
+    "Approved: this chat may use github. Continue. Then continue the original task and tell the user when it is finished or when you need their input.",
   );
   expect(continuationText({ ...base, kind: "account" })).toBe(
-    "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
+    "Approved: account management for this chat. Continue. Then continue the original task and tell the user when it is finished or when you need their input.",
   );
   expect(continuationForAll([{ ...base, kind: "account" }])).toBe(
-    "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
+    "Approved: account management for this chat. Continue. Then continue the original task and tell the user when it is finished or when you need their input.",
   );
   expect(continuationText({ ...base, kind: "action", tool_name: "delete_agent_key" })).toBe(
-    `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now. Then tell the user in one or two plain sentences what you did and the result.`,
+    `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now. Then continue the original task and tell the user when it is finished or when you need their input.`,
   );
   for (const kind of ["machine", "saved_login"] as const) {
     expect(continuationText({ ...base, kind })).toBe(
-      "Approved: Delete agent key ci-bot Continue within the updated machine and saved-login grants. Then tell the user in one or two plain sentences what you did and the result.",
+      "Approved: Delete agent key ci-bot Continue within the updated machine and saved-login grants. Then continue the original task and tell the user when it is finished or when you need their input.",
     );
   }
   // Only a routed skills card (NyxBot decides) wakes NyxBot after an allow.
   expect(continuationText({ ...base, kind: "skills", decider: "orchestrator" })).toBe(
-    "Skill proposal reviewed: Delete agent key ci-bot NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again. Then tell the user in one or two plain sentences what you did and the result.",
+    "Skill proposal reviewed: Delete agent key ci-bot NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again. Then continue the original task and tell the user when it is finished or when you need their input.",
   );
   const unrouted = continuationText({ ...base, kind: "skills" });
   expect(unrouted).toBe(
-    "Skill proposal reviewed: Delete agent key ci-bot Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again. Then tell the user in one or two plain sentences what you did and the result.",
+    "Skill proposal reviewed: Delete agent key ci-bot Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again. Then continue the original task and tell the user when it is finished or when you need their input.",
   );
   expect(unrouted).not.toMatch(/NyxBot/);
 });

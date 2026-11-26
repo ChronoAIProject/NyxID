@@ -14,13 +14,17 @@ import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
+import { announceAssistantAccount } from "./lib/assistant/account-session";
 import { ConsentBanner } from "./components/consent-banner";
 import { isContentPath } from "./features/public-site/routes";
 import { shouldRetryQuery } from "./lib/query-retry";
 import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
+import { installCrashReporting, crashRootOptions } from "./lib/crash-reporting/install";
+import { subscribeCrashPermission } from "./lib/crash-reporting/permission-refresh";
 
+installCrashReporting();
 installNyxbotErrorFallback();
 
 // Public content uses a separate hydration router and entry point.
@@ -36,11 +40,13 @@ const queryClient = new QueryClient({
     },
   },
 });
+subscribeCrashPermission(queryClient);
 
-subscribeAssistantIdentity(() => {
-  queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
+subscribeAssistantIdentity((userId) => {
+  queryClient.removeQueries({ queryKey: ["assistant"] });
   queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
   queryClient.removeQueries({ queryKey: ["cma-session"] });
+  announceAssistantAccount(userId);
 });
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
@@ -124,13 +130,13 @@ function Root() {
   }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
   // When auth resolves, redirect as needed:
-  // - Authenticated user on landing → dashboard
+  // - Authenticated user on landing → assistant
   // - Unauthenticated user on protected route → login
   useEffect(() => {
     if (!ready) return;
     const path = window.location.pathname;
     if (isAuthenticated && (path === "/" || path === "/zh")) {
-      router.navigate({ to: "/dashboard" });
+      router.navigate({ to: "/assistant" });
     } else if (!isAuthenticated) {
       // Send unauthenticated users on a real protected route to login,
       // but let a genuinely-unmatched path fall through to the router's
@@ -178,7 +184,7 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-void appLanguageReady.then(() => createRoot(rootElement).render(
+void appLanguageReady.then(() => createRoot(rootElement, crashRootOptions).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <Root />

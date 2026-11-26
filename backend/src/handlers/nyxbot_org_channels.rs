@@ -2,17 +2,26 @@
 use super::*;
 use crate::services::org_channel_service as org;
 
-const MEMBER_REFUSAL: &str =
-    "Verify your organization membership in NyxID to chat with this assistant.";
-
+#[cfg(test)]
 pub(crate) async fn member_refusal(
     state: &AppState,
     row: &NyxbotChannel,
     sender_id: &str,
     eligible: bool,
 ) -> &'static str {
+    member_notice(state, row, sender_id, eligible)
+        .await
+        .text(None)
+}
+
+async fn member_notice(
+    state: &AppState,
+    row: &NyxbotChannel,
+    sender_id: &str,
+    eligible: bool,
+) -> Notice {
     if row.org_restored_at.is_none() || !eligible {
-        return MEMBER_REFUSAL;
+        return Notice::VerifyMember;
     }
     let previously_linked = {
         let mut prior = vec![doc! {
@@ -49,9 +58,9 @@ pub(crate) async fn member_refusal(
             .is_some()
     };
     if previously_linked {
-        "This organization connection was restored. Members must verify their chat account again in NyxID before chatting with this assistant."
+        Notice::RestoredMember
     } else {
-        MEMBER_REFUSAL
+        Notice::VerifyMember
     }
 }
 
@@ -69,11 +78,28 @@ pub(super) async fn inbound(
         return Ok(Inbound::Silent("refused_sender"));
     }
     let private = chat.kind.as_deref() == Some("private");
+    let grant = if crate::services::channel_adapters::meta::is_meta(&row.platform) {
+        Some(
+            crate::services::channel_meta_service::scopes::event_reference(&state.db, event)
+                .await?
+                .ok_or_else(crate::services::channel_meta_service::grants::incomplete)?,
+        )
+    } else {
+        None
+    };
     if private
         && sender.owner_eligible
         && sender.original_message
         && sender.kind == ThreadSenderKind::Human
-        && org::links::receive(&state.db, row, sender.id, text, sender.display_name).await?
+        && org::links::receive_for_grant(
+            &state.db,
+            row,
+            sender.id,
+            text,
+            sender.display_name,
+            grant.as_ref(),
+        )
+        .await?
     {
         return Ok(Inbound::Reply(
             "Return to NyxID and confirm this chat account in your own session to finish linking."
@@ -98,8 +124,9 @@ pub(super) async fn inbound(
         Err(AppError::Forbidden(_)) => {
             return Ok(if private || addressed == Some(true) {
                 Inbound::Reply(
-                    member_refusal(state, row, sender.id, sender.owner_eligible)
+                    member_notice(state, row, sender.id, sender.owner_eligible)
                         .await
+                        .text(chat.notice_language)
                         .into(),
                 )
             } else {
@@ -126,8 +153,9 @@ pub(super) async fn inbound(
         chats::Admission::Owner | chats::Admission::Guest => {}
         chats::Admission::Refuse => {
             return Ok(Inbound::Reply(
-                member_refusal(state, row, sender.id, sender.owner_eligible)
+                member_notice(state, row, sender.id, sender.owner_eligible)
                     .await
+                    .text(chat.notice_language)
                     .into(),
             ));
         }
@@ -171,7 +199,10 @@ pub(super) async fn inbound(
             | AppError::BillingNotConfigured(_)
             | AppError::InsufficientCredits
             | AppError::WalletSuspended,
-        ) => Ok(Inbound::Reply(org::UNAVAILABLE.into())),
+        ) => Ok(Inbound::Reply(InboundReply::fixed(
+            NoticeKind::GuestUnavailable,
+            Notice::Unavailable.text(chat.notice_language),
+        ))),
         other => other,
     }
 }

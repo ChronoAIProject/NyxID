@@ -1,7 +1,9 @@
-//! Binary tool results stay encrypted server-side. Model results contain handles only.
+//! Tool files stay encrypted server-side. UTF-8 files preserve short legacy text alongside handles.
 use super::{
-    assistant_acknowledgement_service::ChatAuthority, assistant_upload_service as uploads,
-    attachment_extraction::MAX_BYTES, content_type,
+    assistant_acknowledgement_service::ChatAuthority,
+    assistant_upload_service as uploads,
+    attachment_extraction::{self, MAX_BYTES},
+    content_type,
 };
 use crate::{
     crypto::aes::EncryptionKeys,
@@ -50,11 +52,12 @@ pub(crate) async fn reserve() -> Option<uploads::byte_budget::ByteReservation> {
 }
 
 /// A binary MIME alone is not enough: many providers label textual results as
-/// application/*. Preserve their original reader unless the bytes are non-UTF-8
-/// or Content-Disposition explicitly identifies a file.
+/// application/*. Preserve their original reader unless a PDF signature,
+/// non-UTF-8 bytes or Content-Disposition identifies a file.
 pub(crate) fn is_file(status: u16, mime: &str, disposition: Option<&str>, bytes: &[u8]) -> bool {
     candidate(status, mime)
-        && (std::str::from_utf8(bytes).is_err()
+        && (attachment_extraction::is_pdf(bytes)
+            || std::str::from_utf8(bytes).is_err()
             || disposition.is_some_and(|value| {
                 let mut parts = disposition_parts(value).into_iter();
                 parts
@@ -69,7 +72,7 @@ pub(crate) fn is_file(status: u16, mime: &str, disposition: Option<&str>, bytes:
             }))
 }
 
-/// No bytes or lossy strings enter the model-facing result for a retained file.
+/// Retained UTF-8 files preserve short legacy text; binary files expose handles only.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn response_text(
     db: &Database,
@@ -79,6 +82,7 @@ pub(crate) async fn response_text(
     mime: &str,
     disposition: Option<&str>,
     fallback: &str,
+    legacy_text: Option<&str>,
     bytes: &[u8],
 ) -> Option<String> {
     if !is_file(status, mime, disposition, bytes) {
@@ -88,13 +92,27 @@ pub(crate) async fn response_text(
         return None;
     }
     let name = filename(disposition, fallback);
-    Some(match retain(db, keys, chat, &name, mime, bytes).await {
+    let result = match retain(db, keys, chat, &name, mime, bytes).await {
         Ok(text) => text,
         Err(error) => {
             tracing::warn!(code = error.error_code(), "Tool file retention unavailable");
             omitted("attachment_storage_or_authority_unavailable")
         }
-    })
+    };
+    // PDF source is not extracted document text, even when it decodes as UTF-8.
+    Some(file_response_text(
+        legacy_text.filter(|_| !attachment_extraction::is_pdf(bytes)),
+        result,
+    ))
+}
+
+fn file_response_text(legacy_text: Option<&str>, handle: String) -> String {
+    match legacy_text.filter(|text| text.chars().take(8_001).count() <= 8_000) {
+        // Preserve every character, including leading/trailing whitespace and
+        // the transport's own BOM/charset decoding, then append one handle line.
+        Some(text) => format!("{text}\n{}", handle.replace('\n', " ")),
+        None => handle,
+    }
 }
 
 /// RFC 5987 UTF-8 extended names take precedence. Reject malformed encodings;
@@ -197,13 +215,7 @@ pub(crate) async fn retain(
     }
     super::assistant_resource_service::require_live(db, chat).await?;
     let mut filter = super::assistant_resource_service::live_filter(chat)?;
-    filter.insert(
-        format!(
-            "active_turn.attachments.{}",
-            super::assistant_nyxagent::MAX_TURN_ATTACHMENTS - 1
-        ),
-        doc! {"$exists":false},
-    );
+    super::assistant_nyxagent::file_attachment_capacity_filter(&mut filter);
     let conversations =
         db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
     if conversations
@@ -231,6 +243,7 @@ pub(crate) async fn retain(
         size: bytes.len() as i64,
         pages: None,
         chat_delivery: Some(false),
+        pdf: None,
         image_input: None,
         image_input_reason: None,
         image_inspection: Some(false),
@@ -288,6 +301,8 @@ pub(crate) async fn retain(
             });
         }
     }
+    // Encryption and chunk preparation can outlast the preflight lease.
+    let filter = retention_claim_filter(filter);
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
@@ -373,6 +388,23 @@ pub(crate) async fn payload(
     Ok(bytes)
 }
 
+fn retention_claim_filter(live_and_capacity: bson::Document) -> bson::Document {
+    let ttl_ms = super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS * 1000;
+    // Keep the existing authority and capacity filter, including its own $expr.
+    // Null or absent leases use the same started_at fallback as live_filter.
+    doc! {"$and": [live_and_capacity, {"$expr": {"$cond": [
+        {"$in": [{"$type": "$active_turn.lease_expires_at"}, ["null", "missing"]]},
+        {"$and": [
+            {"$eq": [{"$type": "$active_turn.started_at"}, "date"]},
+            {"$gt": ["$active_turn.started_at", {"$subtract": ["$$NOW", ttl_ms]}]},
+        ]},
+        {"$and": [
+            {"$eq": [{"$type": "$active_turn.lease_expires_at"}, "date"]},
+            {"$gt": ["$active_turn.lease_expires_at", "$$NOW"]},
+        ]},
+    ]}}]}
+}
+
 fn unavailable() -> AppError {
     AppError::NotFound("Attachment not found or expired".into())
 }
@@ -380,6 +412,69 @@ fn unavailable() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn retention_claim_checks_server_time_after_preflight() {
+        use crate::test_utils::connect_transaction_test_database;
+        use chrono::Duration;
+        let db = connect_transaction_test_database("tool_file_claim_clock").await;
+        let rows = db.collection::<bson::Document>("threads");
+        let now = Utc::now();
+        let ttl = Duration::seconds(super::super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS);
+        let at = bson::DateTime::from_chrono;
+        // Preflight saw these leases as valid two minutes before the claim.
+        let cutoff = now - Duration::minutes(2);
+        let mut preflight = doc! {"_id": "thread", "$or": [
+            {"active_turn.lease_expires_at": {"$gt": at(cutoff)}},
+            {"active_turn.lease_expires_at": bson::Bson::Null,
+             "active_turn.started_at": {"$gt": at(cutoff - ttl)}},
+        ]};
+        super::super::assistant_nyxagent::file_attachment_capacity_filter(&mut preflight);
+        let claim = retention_claim_filter(preflight.clone());
+        for legacy in [false, true] {
+            for expired in [false, true] {
+                let expiry = if expired {
+                    now - Duration::minutes(1)
+                } else {
+                    now + Duration::minutes(1)
+                };
+                let mut turn = doc! {"started_at": at(expiry - ttl)};
+                if !legacy {
+                    turn.insert("lease_expires_at", at(expiry));
+                }
+                rows.replace_one(
+                    doc! {"_id": "thread"},
+                    doc! {"_id": "thread", "active_turn": turn},
+                )
+                .upsert(true)
+                .await
+                .unwrap();
+                assert!(rows.find_one(preflight.clone()).await.unwrap().is_some());
+                let result = rows.update_one(claim.clone(), doc! {"$push": {
+                    "active_turn.attachments": {"origin":"tool", "content_type":"application/pdf"}
+                }}).await.unwrap();
+                assert_eq!(result.matched_count, u64::from(!expired));
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn tool_file_inline_text_preserves_whitespace_and_counts_characters() {
+        let handle = "{\"attachment_id\":\"id\"}\nUse attachment_id or nyx__attachment_read";
+        for text in ["  hello\n", "\u{feff}hello", ""] {
+            assert_eq!(
+                file_response_text(Some(text), handle.into()),
+                format!("{text}\n{}", handle.replace('\n', " "))
+            );
+        }
+        let multibyte = "😀".repeat(8000);
+        assert!(file_response_text(Some(&multibyte), handle.into()).starts_with(&multibyte));
+        assert_eq!(
+            file_response_text(Some(&"x".repeat(8001)), handle.into()),
+            handle
+        );
+        assert_eq!(file_response_text(None, handle.into()), handle);
+    }
     #[test]
     fn tool_file_names_decode_extended_and_sanitize_paths_controls_and_bounds() {
         assert_eq!(
@@ -469,6 +564,7 @@ mod tests {
             "image/webp",
         ] {
             assert!(!candidate(200, mime), "{mime}");
+            assert!(!is_file(200, mime, None, b"%PDF-1.4"), "{mime}");
         }
         assert!(candidate(200, "application/pdf"));
         assert!(!candidate(200, "application/json"));

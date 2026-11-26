@@ -2,6 +2,7 @@
 //! scope and grant scope preserve the ordinary disconnect contract; potentially
 //! grant-wide effects use a single attempt with a bounded start window.
 use super::*;
+use crate::crypto::record_field::historical::HistoricalAad;
 use crate::{
     crypto::aes::{EncryptionKeys, RecordContext},
     models::provider_config::ProviderConfig,
@@ -603,14 +604,6 @@ pub(super) fn encode_capability<T: Serialize>(value: &T) -> AppResult<Zeroizing<
     Ok(writer.0)
 }
 
-fn capability_aad(id: &str, owner: &str) -> Vec<u8> {
-    let mut aad = b"nyxid:erasure-capability:v1\0".to_vec();
-    for part in [EFFECTS, id, owner, "capability_encrypted"] {
-        aad.extend_from_slice(&(part.len() as u32).to_be_bytes());
-        aad.extend_from_slice(part.as_bytes());
-    }
-    aad
-}
 pub(super) async fn encrypt_capability(
     keys: &EncryptionKeys,
     id: &str,
@@ -628,7 +621,8 @@ pub(super) async fn encrypt_capability(
         ))
     } else {
         Ok((
-            keys.encrypt_with_aad(bytes, &capability_aad(id, owner))
+            HistoricalAad::erasure_capability(id, owner)
+                .seal(keys, bytes)
                 .await?,
             2,
         ))
@@ -658,10 +652,11 @@ async fn decrypt_capability(
             )
             .await
         }
-        Some(bson::Bson::Int32(2)) if keys.allow_legacy_record_reads() => keys
-            .decrypt_with_aad(bytes, &capability_aad(id, owner))
-            .await
-            .map(Zeroizing::new),
+        Some(bson::Bson::Int32(2)) if keys.allow_legacy_record_reads() => {
+            HistoricalAad::erasure_capability(id, owner)
+                .open(keys, bytes)
+                .await
+        }
         _ => Err(AppError::Internal(
             "Unsupported preserved capability format".into(),
         )),

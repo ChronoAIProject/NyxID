@@ -14,6 +14,7 @@ function setup(
   kind: timeline.LiveReplayKind = "chief-of-staff",
   reduced = false,
 ) {
+  let language = "en";
   let clock = 0,
     nextTimer = 0;
   const timers = new Map<number, { at: number; fn: () => void }>();
@@ -21,6 +22,7 @@ function setup(
   let size = { height: 667, width: 375, fontScale: 1 };
   const h = hookHarness<E>(
     {
+      "../../i18n/LanguageProvider": { useAppLanguage: () => ({ language, t: (text: string) => text }) },
       "react/jsx-runtime": {
         jsx: (type: unknown, props: unknown) => ({ type, props }),
         jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -104,6 +106,10 @@ function setup(
     listeners,
     advance,
     all: () => nodes(h.value()),
+    setLanguage(value: string) {
+      language = value;
+      h.render();
+    },
     reduce(value: boolean) {
       reduced = value;
       h.render();
@@ -237,4 +243,16 @@ test("replay width is bounded on phones, iPad and split windows, with native tex
     );
   }
   f.h.unmount();
+});
+
+test("switching the app language replaces a mounted reduced-motion replay immediately", () => {
+  const x = setup("chief-of-staff", true);
+  const text = () => JSON.stringify(x.all());
+  assert.match(text(), /Plan my day/);
+  x.setLanguage("zh-CN");
+  assert.match(text(), /帮我安排今天的日程/);
+  assert.doesNotMatch(text(), /Plan my day/);
+  x.setLanguage("en");
+  assert.match(text(), /Plan my day/);
+  x.h.unmount();
 });

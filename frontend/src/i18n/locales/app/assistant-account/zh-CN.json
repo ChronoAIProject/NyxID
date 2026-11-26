@@ -73,6 +73,7 @@
   "The service-account reference is missing.": "缺少服务账号引用。",
   "This app will need to ask for consent again before it can act.": "此应用程序需要再次征求同意才能执行操作。",
   "This bot's guest spend today, including earlier connections. The organization pays.": "此机器人今日的访客花费，包括先前连接产生的费用，由组织支付。",
+  "This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.": "此机器人的已保存限制排除了专属智能体「授权」中列出的部分或全部访客服务。组织管理员可在「授权」中审核所有已关联机器人的访客访问权限。",
   "This change revokes access and must be confirmed every time.": "此更改将撤销访问权限，并且每次都必须确认。",
   "This connection is unavailable. Saved guest settings are kept; reconnect the same bot and specialist to use them again.": "此连接不可用。已保存的访客设置会保留；重新连接同一个机器人和专属智能体即可再次使用。",
   "This verification code expired. Generate a new code and send it privately to the bot, then confirm here.": "此验证码已过期。请生成新代码并私下发送给机器人，然后在此确认。",

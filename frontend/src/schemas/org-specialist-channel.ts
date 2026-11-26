@@ -5,6 +5,7 @@ export const orgChannelSettingsSchema = z.object({
   channel_id: z.string(),
   agent_id: z.string().nullish(),
   grants_ready: z.boolean().default(false),
+  binding_limits_guest_services: z.boolean().default(false),
   guest_policy_mode: z.enum(["legacy", "grants"]).default("legacy"),
   effective_guest_services: z
     .array(

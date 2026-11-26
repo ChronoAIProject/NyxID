@@ -616,6 +616,24 @@ async fn channel_media_gateway_concurrent_duplicates_claim_once_and_keep_same_id
     );
     assert!(saved.turn_id.is_some());
     assert_eq!((saved.expires_at - saved.created_at).num_days(), 7);
+    assert_eq!(saved.event_context_version, Some(3));
+    let context = event_record::event_context(
+        &state.encryption_keys,
+        &saved,
+        saved.event_context_ciphertext.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    let winner = if saved.event_id == "delivery-a" {
+        &a
+    } else {
+        &b
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&context).unwrap(),
+        winner["event_context"]
+    );
+
     let media = saved.media.as_ref().unwrap();
     assert_eq!(
         media.key,
@@ -1493,6 +1511,9 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let message=messages.find_one(doc! {"conversation_id":&current.id,"turn_id":&written.turn_id,"role":{"$ne":"assistant"}}).await.unwrap().unwrap();
             let captured = calls.lock().await.last().unwrap().clone();
             assert!(current.active_turn.is_none());
+            let input = captured_text(&captured);
+            let (_, caption) = input.rsplit_once("]\n\n").unwrap();
+            assert_eq!(caption, text, "{transport}/{sender}");
             if sender == "guest" {
                 assert!(current.guest_turn);
                 assert_ne!(Some(&current.id), owner_conversation.as_ref());
@@ -1523,10 +1544,124 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
                     captured
                 );
                 assert!(message.media_bound.unwrap().failed.is_empty());
+                assert_eq!(message.attachments[0].label, "attachment.png");
+                assert_eq!(message.attachments[0].content_type, "image/png");
+                let stored = state
+                    .db
+                    .collection::<crate::models::assistant_upload::AssistantUpload>(
+                        crate::models::assistant_upload::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id":&message.attachments[0].id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.label, "attachment.png");
+                assert_eq!(stored.content_type, "image/png");
+                assert!(stored.source.is_some());
                 assert!(captured.to_string().contains("input_image"), "{captured}");
                 assert!(message.media_pending.is_none());
             }
         }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_lark_pdf_names_survive_fetch_and_misleading_types_wait_for_validation() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    for (header, expected) in [
+        (None, "attachment.pdf"),
+        (
+            Some("attachment; filename*=UTF-8''%E6%94%B6%E6%8D%AE.pdf"),
+            "收据.pdf",
+        ),
+        (Some("attachment; filename=Receipt"), "Receipt"),
+    ] {
+        let (state, row, _, _, server) = media_fixture("lark_pdf_filename", "direct").await;
+        enable_media(&state).await;
+        let bytes = crate::test_utils::test_pdf();
+        assert!(bytes.len() > 42);
+        let provider = ingestion_provider(&state, &row, bytes.clone()).await;
+        // This deliberately disagrees with the bytes. The download must not
+        // manufacture attachment.txt before extraction discovers the PDF.
+        let mut reply = ResponseTemplate::new(200)
+            .set_body_bytes(bytes.clone())
+            .insert_header("content-type", "text/plain");
+        if let Some(header) = header {
+            reply = reply.insert_header("content-disposition", header);
+        }
+        Mock::given(method("GET"))
+            .and(path_regex(".*/resources/.*"))
+            .respond_with(reply)
+            .with_priority(1)
+            // The source advertises 42 bytes. Serve the same metadata when
+            // the bounded first GET is rejected and collection retries.
+            .expect(2)
+            .mount(&provider)
+            .await;
+        let mut source = media_source(
+            &state,
+            &row,
+            "pdf-source",
+            "pdf-native",
+            "Read this receipt",
+        )
+        .await;
+        source.content_type = "file".into();
+        source.attachments[0].content_type = "file".into();
+        source.attachments[0].size_bytes = Some(42);
+        source.attachments[0].file_key = source.attachments[0].image_key.take();
+        source.attachments[0].provider_ref = source.attachments[0]
+            .provider_ref
+            .replace("type=image", "type=file");
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .replace_one(doc! {"_id":&source.id}, &source)
+            .await
+            .unwrap();
+        let (_guard, done) = watch_relay_callback(&row.id, &source.id);
+        assert_eq!(
+            direct_private(&state, &row, &source.id, "human", "Read this receipt").await,
+            StatusCode::ACCEPTED
+        );
+        tokio::time::timeout(Duration::from_secs(30), done)
+            .await
+            .unwrap()
+            .unwrap();
+        let written = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":&source.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let message = state.db.collection::<crate::models::assistant_message::AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {"conversation_id":&written.conversation_id,"turn_id":&written.turn_id,"role":"user"}).await.unwrap().unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        let upload = state
+            .db
+            .collection::<crate::models::assistant_upload::AssistantUpload>(
+                crate::models::assistant_upload::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&message.attachments[0].id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(upload.label, expected);
+        assert_eq!(upload.content_type, "application/pdf");
+        let expected_egress = if header.is_none() {
+            "attachment.pdf"
+        } else {
+            expected
+        };
+        assert_eq!(
+            crate::services::assistant_upload_service::EgressAttachment::User(Box::new(upload))
+                .filename(),
+            expected_egress
+        );
+        assert_eq!(message.attachments[0].content_type, "application/pdf");
+        provider.verify().await;
         server.abort();
     }
 }
@@ -1581,6 +1716,8 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
         body["input"][0]["content"][0]["text"] = json!("OLD RENDERING must disappear");
         let text = if kind == "capped" {
             format!("{}\n[post truncated]", "Dinner ".repeat(5000))
+        } else if kind == "all_failed" {
+            String::new()
         } else {
             "Dinner".into()
         };
@@ -1592,10 +1729,12 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
                 .await
                 .contains("Here is your answer")
         );
-        let input = calls.lock().await.last().unwrap().to_string();
+        let captured = calls.lock().await.last().unwrap().clone();
+        let input = captured.to_string();
         assert!(!input.contains("OLD RENDERING"));
         if kind == "all_failed" {
             assert!(input.contains(crate::services::assistant_channel_media::FAILED_NOTE));
+            assert!(captured_text(&captured).trim_end().ends_with(']'));
         } else {
             assert!(input.contains("too large"));
             assert!(!input.contains("too_large"));
@@ -2017,8 +2156,9 @@ async fn channel_media_gateway_headers_return_while_download_is_blocked_in_run_t
 
 #[tokio::test]
 async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_finalize() {
+    let clock_jump = Duration::from_secs(91);
     for deadline in [false, true] {
-        let (state, row, key, calls, server) =
+        let (mut state, row, key, calls, server) =
             media_fixture("media_fetch_cancellation", "gateway").await;
         enable_media(&state).await;
         gateway_ready(&state, &key).await;
@@ -2027,6 +2167,15 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
             streaming_ingestion_provider(&state, &row, native_png(), false, Some(gate)).await;
         let mut source = media_source(&state, &row, "cancel-fetch", "cancel-fetch", "").await;
         if deadline {
+            // Advancing Tokio time must expire the media budget while the turn still owns its slot.
+            let slots = crate::services::cluster_slot_service::RenewableSlotManager::new(
+                state.db.clone(),
+                state.replica_identity.coordination_holder(),
+                clock_jump + Duration::from_secs(state.config.cluster_slot_ttl_secs),
+                Duration::from_secs(state.config.cluster_slot_renew_secs),
+            );
+            state.direct_chat_limiter =
+                crate::mw::rate_limit::create_direct_chat_rate_limiter(state.db.clone(), slots);
             let mut fast = source.attachments[0].clone();
             fast.provider_ref = fast.provider_ref.replace("img_receipt", "fast");
             fast.image_key = Some("fast".into());
@@ -2072,7 +2221,7 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
             .unwrap();
         if deadline {
             tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(91)).await;
+            tokio::time::advance(clock_jump).await;
             tokio::time::resume();
         } else {
             engine::request_stop(&state.db, OWNER, event.conversation_id.as_deref().unwrap())
@@ -2675,3 +2824,233 @@ mod relay_v2_tests;
 
 #[path = "nyxbot_guest_media_tests.rs"]
 mod guest_media_tests;
+
+#[tokio::test]
+async fn signed_feishu_direct_pdf_webhook_delivers_pages_and_replies() {
+    use base64::Engine as _;
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+
+    let _budget = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    let (mut state, mut channel, _, calls, upstream) =
+        media_fixture("feishu_scanned_pdf", "direct").await;
+    enable_media(&state).await;
+    crate::services::assistant_upload_service::pdf_vision::ensure_indexes(&state.db)
+        .await
+        .unwrap();
+    state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(), "flag_key":"assistant:pdf-vision", "enabled":true,
+        "target_kind":"global", "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+        "updated_by":OWNER,
+    }).await.unwrap();
+    channel.platform = "feishu".into();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &channel.id}, &channel)
+        .await
+        .unwrap();
+
+    let provider = MockServer::start().await;
+    let adapter = Arc::new(
+        crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+            &provider.uri(),
+            "feishu",
+        ),
+    );
+    crate::services::assistant_channel_media::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(channel.channel_bot_id.clone(), adapter.clone());
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(channel.channel_bot_id.clone(), adapter);
+    let bytes = crate::services::attachment_extraction::pdf_fixture(
+        &[None, Some("Receipt fixture"), None],
+        0,
+    );
+    Mock::given(method("POST"))
+        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"code":0,"tenant_access_token":"fixture-tenant","expire":7200}),
+            ),
+        )
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/open-apis/im/v1/messages/om_receipt/resources/file_receipt",
+        ))
+        .and(query_param("type", "file"))
+        .and(header("authorization", "Bearer fixture-tenant"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(bytes.clone())
+                .insert_header("content-type", "application/pdf"),
+        )
+        .expect(1)
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex("/open-apis/im/v1/messages(/om_receipt/reply)?"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"data":{"message_id":"fixture-reply"}})),
+        )
+        .expect(1)
+        .mount(&provider)
+        .await;
+
+    let binary = |bytes| bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic,
+        bytes,
+    };
+    let encrypt_key = "fixture-event-key";
+    let verification_token = "fixture-verification-token";
+    state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(doc! {"_id":&channel.channel_bot_id}, doc! {"$set":{
+            "platform":"feishu","webhook_registered":true,
+            "lark_verification_token_encrypted":binary(state.encryption_keys.encrypt(verification_token.as_bytes()).await.unwrap()),
+            "lark_encrypt_key_encrypted":binary(state.encryption_keys.encrypt(encrypt_key.as_bytes()).await.unwrap()),
+        }}).await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &channel.route_id},
+            doc! {"$set":{"platform":"feishu"}},
+        )
+        .await
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+    let callback_url = format!(
+        "{}/api/v1/nyxbot/relay/{}",
+        state.config.base_url, channel.id
+    );
+    state
+        .db
+        .collection::<bson::Document>("api_keys")
+        .update_one(
+            doc! {"_id":&channel.route_api_key_id},
+            doc! {"$set":{"callback_url":callback_url}},
+        )
+        .await
+        .unwrap();
+    let app = Router::new()
+        .route("/api/v1/nyxbot/relay/{id}", post(relay_callback))
+        .route(
+            "/api/v1/webhooks/channel/{platform}/{id}",
+            post(crate::handlers::channel_webhooks::channel_webhook_with_runtime),
+        )
+        .with_state(state.clone());
+    let callback_app = app.clone();
+    let callback = tokio::spawn(async move {
+        axum::serve(listener, callback_app).await.unwrap();
+    });
+
+    let mut payload: Value = serde_json::from_str(include_str!(
+        "../services/channel_adapters/fixtures/lark_callback/feishu-file-in.json"
+    ))
+    .unwrap();
+    payload["header"]["token"] = json!(verification_token);
+    payload["event"]["sender"]["sender_id"]["open_id"] = json!("human");
+    payload["event"]["message"]["chat_id"] = json!("oc_human");
+    payload["event"]["message"]["content"] = json!(
+        json!({"file_key":"file_receipt","file_name":"receipt.pdf","file_size":bytes.len()})
+            .to_string()
+    );
+
+    let key = Sha256::digest(encrypt_key.as_bytes());
+    let iv = [42_u8; 16];
+    let mut plaintext = serde_json::to_vec(&payload).unwrap();
+    let length = plaintext.len();
+    plaintext.resize(length + 16, 0);
+    let ciphertext = cbc::Encryptor::<aes::Aes256>::new(&key, (&iv).into())
+        .encrypt_padded_mut::<Pkcs7>(&mut plaintext, length)
+        .unwrap();
+    let raw = json!({"encrypt":base64::engine::general_purpose::STANDARD.encode([iv.as_slice(), ciphertext].concat())}).to_string();
+    let timestamp = Utc::now().timestamp().to_string();
+    let nonce = "fixture-nonce";
+    let signature = hex::encode(Sha256::digest(format!(
+        "{timestamp}{nonce}{encrypt_key}{raw}"
+    )));
+    let webhook = |signature: &str| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/webhooks/channel/feishu/{}",
+                channel.channel_bot_id
+            ))
+            .header("x-lark-request-timestamp", &timestamp)
+            .header("x-lark-request-nonce", nonce)
+            .header("x-lark-signature", signature)
+            .body(Body::from(raw.clone()))
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(webhook("invalid-signature"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .count_documents(doc! {"channel_bot_id": &channel.channel_bot_id})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(calls.lock().await.is_empty());
+    assert_eq!(
+        app.oneshot(webhook(&signature)).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let messages = state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        );
+    let (user, reply) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(user) = messages.find_one(doc! {"role":"user","attachments.label":"receipt.pdf"}).await.unwrap()
+                && let Some(reply) = messages.find_one(doc! {"role":"assistant","conversation_id": &user.conversation_id,"turn_id":&user.turn_id}).await.unwrap()
+                && provider.received_requests().await.unwrap().iter().any(|req| {
+                    req.method.as_str() == "POST" && req.url.path().starts_with("/open-apis/im/v1/messages")
+                })
+            {
+                break (user, reply);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(reply.text, "Here is your answer");
+    let report = user.attachments[0].pdf.as_ref().unwrap();
+    assert_eq!(report.text_pages, [2]);
+    assert_eq!(report.image_pages, [1, 3]);
+    assert!(report.unread_pages.is_empty());
+    assert!(report.image_input_confirmed);
+    let captured = calls.lock().await;
+    let parts = captured.last().unwrap()["input"][0]["content"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|part| part["type"] == "input_image")
+            .count(),
+        2
+    );
+    provider.verify().await;
+    callback.abort();
+    upstream.abort();
+}

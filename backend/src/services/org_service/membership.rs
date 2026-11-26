@@ -206,7 +206,16 @@ pub(super) async fn create(
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     let result = create_and_audit(db, creation, actor, &mut transaction).await;
-    org_membership_authority::finish(transaction, result).await
+    let membership = org_membership_authority::finish(transaction, result).await?;
+    // The membership has committed; scheduled credits are best effort.
+    crate::services::billing::schedules::eligibility::after_org_joined(
+        db,
+        &membership.org_user_id,
+        &membership.member_user_id,
+        membership.created_at,
+    )
+    .await;
+    Ok(membership)
 }
 async fn create_and_audit(
     db: &Database,
@@ -290,6 +299,13 @@ async fn update_membership_in_session(
         .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
     org_membership_authority::fence_org(db, &current.org_user_id, &mut *transaction).await?;
     if role.is_some_and(|role| role != OrgRole::Admin) && current.role == OrgRole::Admin {
+        crate::services::org_service_approvers::prune(
+            db,
+            &current.org_user_id,
+            &current.member_user_id,
+            transaction,
+        )
+        .await?;
         org_membership_authority::ensure_other_admin(
             db,
             &current.org_user_id,
@@ -304,8 +320,23 @@ async fn update_membership_in_session(
             &mut *transaction,
         )
         .await?;
+        crate::services::org_invite_service::retire_issuer_in_session(
+            db,
+            &current.org_user_id,
+            &current.member_user_id,
+            actor,
+            transaction,
+        )
+        .await?;
     }
     if role.is_some_and(|r| !r.can_proxy()) {
+        crate::services::org_agent_service::prune_member(
+            db,
+            transaction,
+            &current.org_user_id,
+            &current.member_user_id,
+        )
+        .await?;
         org_channel_service::lifecycle::revoke_member_in_session(
             db,
             &mut *transaction,
@@ -356,7 +387,13 @@ pub(super) async fn revoke_membership(
     let result =
         revoke_membership_in_session(db, org_user_id, member_user_id, actor, &mut transaction)
             .await;
-    org_membership_authority::finish(transaction, result).await
+    org_membership_authority::finish(transaction, result).await?;
+    crate::services::billing::schedules::eligibility::after_org_exited(
+        db,
+        org_user_id,
+        member_user_id,
+    );
+    Ok(())
 }
 async fn revoke_membership_in_session(
     db: &Database,
@@ -389,6 +426,14 @@ async fn revoke_membership_in_session(
             &mut *transaction,
         )
         .await?;
+        crate::services::org_invite_service::retire_issuer_in_session(
+            db,
+            org_user_id,
+            member_user_id,
+            actor,
+            transaction,
+        )
+        .await?;
     }
     let result = db
         .collection::<OrgMembership>(ORG_MEMBERSHIPS)
@@ -403,6 +448,10 @@ async fn revoke_membership_in_session(
             "Membership changed; reload before removal".into(),
         ));
     }
+    crate::services::org_service_approvers::prune(db, org_user_id, member_user_id, transaction)
+        .await?;
+    crate::services::org_agent_service::prune_member(db, transaction, org_user_id, member_user_id)
+        .await?;
     org_channel_service::lifecycle::revoke_member_in_session(
         db,
         &mut *transaction,

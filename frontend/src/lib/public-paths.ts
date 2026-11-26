@@ -22,6 +22,8 @@ export function isPublicPath(path: string): boolean {
       "/contact",
     ].includes(websitePath) ||
     /^\/solutions\/[^/]+$/.test(websitePath) ||
+    path === "/activity" ||
+    path === "/activity/" ||
     path === "/login" ||
     path === "/register" ||
     path === "/nyxbot/onboarding" ||
@@ -39,6 +41,8 @@ export function isPublicPath(path: string): boolean {
     path.startsWith("/error") ||
     path.startsWith("/oauth-consent") ||
     path === "/oauth-complete" ||
+    path === "/channel-bots/meta-callback/messenger" ||
+    path === "/channel-bots/meta-callback/instagram" ||
     path === "/oauth-launching" ||
     path === "/cli-auth" ||
     path === "/cli/pair" ||
