@@ -1,3 +1,4 @@
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { agentSchema } from "../../features/agents/agentContracts";
@@ -251,4 +252,16 @@ test("pending decisions take precedence over running turns without inventing com
     threadStatus({ ...running, pending_acknowledgements: 2 }),
     "Needs you",
   );
+});
+
+test("the picker translates a provisional default and preserves authored and legacy titles", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  for (const [language, label] of [["zh-CN", "新对话"], ["zh-TW", "新對話"], ["en", "New conversation"]] as const) {
+    setAppTranslationLanguage(language);
+    const draft = { title: "New conversation", title_source: "provisional" };
+    assert.equal(threadTitle(chat(1, null, draft)), label);
+    for (const title_source of ["user", "generated", "future", undefined])
+      assert.equal(threadTitle(chat(1, null, { ...draft, title_source })), draft.title);
+    assert.equal(threadTitle(chat(1, null, { ...draft, channel: { platform: "lark", chat_title: "New conversation" } })), draft.title);
+  }
 });
