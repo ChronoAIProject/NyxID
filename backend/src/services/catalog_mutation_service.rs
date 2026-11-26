@@ -18,6 +18,8 @@ pub struct Authority {
     pub first_party_human: bool,
     /// Bind privileged ingress validation to a live Admin role at commit.
     pub admin_required: bool,
+    /// Explicit denial captured from the HTTP request's verified session.
+    pub privileged_mfa_denied: bool,
 }
 
 pub async fn fence(
@@ -85,6 +87,12 @@ async fn check_parent(
             write_fence,
         )
         .await?;
+        if authority.privileged_mfa_denied {
+            if tool || catalog || authority.admin_required {
+                return Err(AppError::MfaStepUpRequired);
+            }
+            admin = false;
+        }
         if super::platform_key_service::model_only(&live)
             && (!authority.first_party_human || !admin)
         {

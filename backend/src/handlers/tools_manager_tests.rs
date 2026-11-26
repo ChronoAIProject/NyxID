@@ -102,6 +102,7 @@ async fn change_test_publication(
             catalog_base_url: "http://localhost:3001".into(),
             actor: actor.clone(),
             first_party_human: true,
+            privileged_mfa_denied: false,
             admin_required: false,
         },
         ids,
@@ -1110,6 +1111,7 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
         catalog_base_url: state.config.base_url.clone(),
         actor: AuditActor::from_auth_user(&test_auth_user(&catalog)),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: false,
     };
     let (rows, _) = operations::commit_mutation(
@@ -1223,6 +1225,7 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
         catalog_base_url: state.config.base_url.clone(),
         actor: AuditActor::from_auth_user(&test_auth_user(&admin)),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: true,
     };
     // Authorized conversion is supported; stale Tool callers then conflict.
@@ -3211,6 +3214,7 @@ async fn tools_manager_icons_and_operation_fences_recheck_live_authority() {
     let authority = crate::services::catalog_mutation_service::Authority {
         actor: actor.clone(),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: false,
         catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
@@ -4170,6 +4174,7 @@ async fn tools_manager_parent_projection_allows_billing_sync_but_binds_contract(
         catalog_base_url: state.config.base_url.clone(),
         actor: AuditActor::from_auth_user(&test_auth_user(&admin)),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: true,
     };
     db.collection::<Document>(SERVICES).update_one(doc! {"_id":&observed.id},doc! {"$set":{"billing":bson::to_bson(&crate::models::service_billing::ServiceBilling {platform_pricing:Some(crate::models::service_billing::ServicePlatformPricing {credits_per_unit:"1".into(),lago_metric_code:"projection".into(),sync_status:crate::models::service_billing::PricingSyncStatus::Failed,sync_error:Some("loopback sync fixture".into())}),..Default::default()}).unwrap(),"updated_at":bson::DateTime::now()}}).await.unwrap();
@@ -4246,6 +4251,7 @@ async fn tools_manager_operation_description_demotes_one_and_route_demotes_all()
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(&admin)),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: true,
     };
     for (name, path) in [("read", "/read"), ("second", "/second")] {
@@ -4676,6 +4682,7 @@ async fn tools_manager_provider_and_identity_alternate_paths_bind_live_parent_an
             &catalog,
         )),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: false,
     };
     db.collection::<Document>(SERVICES)
@@ -4727,6 +4734,7 @@ async fn tools_manager_provider_and_identity_alternate_paths_bind_live_parent_an
         .unwrap();
     let authority = mutations::Authority {
         actor: crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(&admin)),
+        privileged_mfa_denied: false,
         admin_required: true,
         ..authority
     };
@@ -4861,6 +4869,7 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
         catalog_base_url: "http://localhost:3001".into(),
         actor: AuditActor::from_auth_user(&test_auth_user(&manager)),
         first_party_human: true,
+        privileged_mfa_denied: false,
         admin_required: false,
     };
     let key = [2_u8; 32];

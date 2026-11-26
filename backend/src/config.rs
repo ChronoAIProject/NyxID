@@ -303,6 +303,29 @@ impl std::str::FromStr for TrustedProxyRange {
     }
 }
 
+/// Rollout mode for platform administration MFA.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdminMfaEnforcement {
+    #[default]
+    Off,
+    Audit,
+    Enforce,
+}
+
+impl AdminMfaEnforcement {
+    fn from_env() -> Self {
+        match std::env::var("ADMIN_MFA_ENFORCEMENT")
+            .unwrap_or_default()
+            .trim()
+        {
+            "" | "off" => Self::Off,
+            "audit" => Self::Audit,
+            "enforce" => Self::Enforce,
+            _ => panic!("ADMIN_MFA_ENFORCEMENT must be off, audit, or enforce"),
+        }
+    }
+}
+
 /// Application configuration loaded from environment variables.
 #[derive(Clone)]
 pub struct AppConfig {
@@ -597,6 +620,7 @@ pub struct AppConfig {
     /// Enroll new assistant automation runs only after fleet readiness.
     pub automation_continuation_v2_enabled: bool,
     pub security_rollout: crate::services::security_readiness_service::RolloutConfig,
+    pub admin_mfa_enforcement: AdminMfaEnforcement,
     /// Dedicated private listener for inter-replica traffic.
     pub internal_bind_addr: String,
     /// Peer-reachable base URL for this exact replica.
@@ -1587,6 +1611,7 @@ impl AppConfig {
                 .or_else(|_| env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "nyxid-backend".to_string()),
             automation_continuation_v2_enabled: env::var("AUTOMATION_CONTINUATION_V2_ENABLED").is_ok_and(|v| v == "true"),
+            admin_mfa_enforcement: AdminMfaEnforcement::from_env(),
             security_rollout: crate::services::security_readiness_service::RolloutConfig::parse(
                 &env::var("SECURITY_ROLLOUT_REPLICAS").unwrap_or_default(),
                 env::var("SECURITY_ROLLOUT_DRAINED").is_ok_and(|v| v == "true"),
@@ -2380,6 +2405,7 @@ mod tests {
             instance_name: "test-backend".to_string(),
             automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
+            admin_mfa_enforcement: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,

@@ -212,6 +212,7 @@ async fn require_feature_flag_access(
     if !access.read_all && !access.manage_own {
         return Err(AppError::Forbidden("Feature flag access required".into()));
     }
+    super::admin_helpers::require_privileged_session(state, auth, &user).await?;
     Ok(access)
 }
 

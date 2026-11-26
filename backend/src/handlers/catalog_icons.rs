@@ -79,6 +79,7 @@ pub async fn upload_tool(
         &crate::services::catalog_mutation_service::Authority {
             actor,
             first_party_human: true,
+            privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth),
             admin_required: super::services_helpers::is_admin(&state, &auth).await?,
             catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),

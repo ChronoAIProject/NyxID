@@ -895,6 +895,7 @@ pub async fn link_service(
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: true,
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: authority == CatalogAuthority::Admin,
         catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
