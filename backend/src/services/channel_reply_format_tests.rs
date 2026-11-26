@@ -603,6 +603,37 @@ fn slack_bare_url_terminators_keep_only_literal_backslashes() {
 }
 
 #[test]
+fn slack_bare_urls_preserve_backslash_runs_and_hard_breaks() {
+    for count in 1_usize..=5 {
+        let run = "\\".repeat(count);
+        let literal = "\\".repeat(count.div_ceil(2));
+        let source = format!(r"\*x\* before{run}https://e.com/a*b* after");
+        assert_eq!(
+            wire(&source, "slack"),
+            format!("`*`x`*` before{literal}https://e.com/a*b* after"),
+            "{source:?}"
+        );
+
+        let literal = "\\".repeat(count / 2);
+        for newline in ["\n", "\r\n"] {
+            let source = format!("\\*x\\* https://e.com/a{run}{newline}next");
+            assert_eq!(
+                wire(&source, "slack"),
+                format!("`*`x`*` https://e.com/a{literal}\nnext"),
+                "{source:?}"
+            );
+        }
+    }
+    for source in [
+        "\\*x\\* https://e.com/a\\ \nnext",
+        "\\*x\\* https://e.com/a\\ \r\nnext",
+        "\\*x\\* https://e.com/a\\  \nnext",
+    ] {
+        assert_eq!(wire(source, "slack"), "`*`x`*` https://e.com/a\\\nnext");
+    }
+}
+
+#[test]
 fn slack_dense_escaped_styles_use_the_wire_budget_before_splitting() {
     let source = r"**Note:** the \*starred\* option is _optional_ here, see docs. ".repeat(900);
     let limit = TextLimit::for_platform("slack");

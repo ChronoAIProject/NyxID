@@ -48,6 +48,9 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
                     has_literal |= matches!(delimiter, b'*' | b'_' | b'~');
                 }
             }
+            Event::HardBreak if source.as_bytes()[range.start] == b'\\' => {
+                escape_slashes.push(range.start);
+            }
             Event::Start(Tag::Strong | Tag::Emphasis | Tag::Strikethrough) => {
                 let width = match event {
                     Event::Start(Tag::Strong) => 2,
@@ -110,8 +113,8 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
         {
             end = close;
         }
-        // Linkify can stop between a CommonMark escape slash and trailing
-        // punctuation. Leave the whole escape outside the autolink.
+        // Leave trailing punctuation escapes and hard breaks intact outside
+        // the autolink so CommonMark can consume their backslashes.
         if end > start && escape_slashes.binary_search(&(end - 1)).is_ok() {
             end -= 1;
         }
@@ -157,6 +160,11 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
         next = at;
         if let Some(ch) = replacement {
             if ch == '<' {
+                // A literal odd backslash would escape our inserted '<'.
+                // Pair it so CommonMark emits the original literal slash.
+                if preceding_backslashes(source, at) % 2 != 0 {
+                    marked.push('\\');
+                }
                 bare_starts.push(marked.len());
             }
             marked.push(ch);
@@ -181,17 +189,19 @@ fn escaped_punctuation(source: &str, at: usize, value: &str) -> Option<u8> {
     let first = value.as_bytes().first().copied()?;
     if !first.is_ascii_punctuation()
         || source.as_bytes().get(at) != Some(&first)
-        || source.as_bytes()[..at]
-            .iter()
-            .rev()
-            .take_while(|&&b| b == b'\\')
-            .count()
-            % 2
-            == 0
+        || preceding_backslashes(source, at) % 2 == 0
     {
         return None;
     }
     Some(first)
+}
+
+fn preceding_backslashes(source: &str, at: usize) -> usize {
+    source.as_bytes()[..at]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count()
 }
 
 fn keycap_suffix(text: &str) -> &'static str {
