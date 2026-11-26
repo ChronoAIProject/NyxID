@@ -1,3 +1,4 @@
+use crate::crypto::record_field;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -509,24 +510,25 @@ async fn decrypt_platform_field(
     name: &str,
     encrypted: &[u8],
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    match row.secret_context_versions.get(name) {
-        Some(3) => {
-            keys.decrypt_record(
-                encrypted,
-                &crate::crypto::aes::RecordContext::new(
-                    COLLECTION_NAME,
-                    &row.id,
-                    super::credential_record_service::PLATFORM_OWNER,
-                    &["secrets", name],
-                )?,
+    let path = ["secrets", name];
+    record_field::decrypt_with_context(
+        keys,
+        encrypted,
+        row.secret_context_versions
+            .get(name)
+            .copied()
+            .map(u32::from),
+        || {
+            crate::crypto::aes::RecordContext::new(
+                COLLECTION_NAME,
+                &row.id,
+                super::credential_record_service::PLATFORM_OWNER,
+                &path,
             )
-            .await
-        }
-        None if keys.allow_legacy_record_reads() => keys.decrypt(encrypted).await,
-        _ => Err(AppError::Internal(
-            "Invalid platform credential storage version".into(),
-        )),
-    }
+        },
+        || AppError::Internal("Invalid platform credential storage version".into()),
+    )
+    .await
 }
 pub(crate) async fn encrypt_platform_field(
     keys: &EncryptionKeys,
@@ -534,20 +536,16 @@ pub(crate) async fn encrypt_platform_field(
     name: &str,
     value: &[u8],
 ) -> AppResult<Vec<u8>> {
-    if keys.contextual_record_writes() {
-        keys.encrypt_record(
-            value,
-            &crate::crypto::aes::RecordContext::new(
-                COLLECTION_NAME,
-                id,
-                super::credential_record_service::PLATFORM_OWNER,
-                &["secrets", name],
-            )?,
+    let path = ["secrets", name];
+    record_field::encrypt_with_context(keys, value, || {
+        crate::crypto::aes::RecordContext::new(
+            COLLECTION_NAME,
+            id,
+            super::credential_record_service::PLATFORM_OWNER,
+            &path,
         )
-        .await
-    } else {
-        keys.encrypt(value).await
-    }
+    })
+    .await
 }
 
 /// Inspect the actual storage row, rather than a composite OAuth projection.

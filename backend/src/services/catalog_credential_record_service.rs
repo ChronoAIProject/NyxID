@@ -42,6 +42,19 @@ pub(crate) async fn encrypt(
     }
     crate::crypto::record_field::encrypt(keys, COLLECTION_NAME, id, owner, FIELD, plaintext).await
 }
+/// Older catalog writers stored encrypted empty bytes for an absent credential.
+pub(crate) async fn empty_credential(
+    keys: &EncryptionKeys,
+    id: &str,
+    owner: &str,
+) -> AppResult<Vec<u8>> {
+    if keys.contextual_record_writes() {
+        Ok(Vec::new())
+    } else {
+        crate::crypto::record_field::encrypt(keys, COLLECTION_NAME, id, owner, FIELD, b"").await
+    }
+}
+
 pub(crate) fn initial_versions(
     keys: &EncryptionKeys,
     material: bool,

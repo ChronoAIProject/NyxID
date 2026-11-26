@@ -1,3 +1,4 @@
+use crate::crypto::record_field;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -112,17 +113,10 @@ async fn encrypt_signing_secret(
     owner: &str,
     secret: &[u8],
 ) -> AppResult<Vec<u8>> {
-    if keys.contextual_record_writes() {
-        keys.encrypt_record(
-            secret,
-            &RecordContext::new(NODES, node_id, owner, SIGNING_SECRET_FIELD)?,
-        )
-        .await
-    } else {
-        // Preserve the historical encrypted bytes/decoder contract while
-        // compatible readers are staged. No contextual marker is written.
-        keys.encrypt(secret).await
-    }
+    record_field::encrypt_with_context(keys, secret, || {
+        RecordContext::new(NODES, node_id, owner, SIGNING_SECRET_FIELD)
+    })
+    .await
 }
 
 async fn decrypt_signing_secret(
@@ -133,23 +127,17 @@ async fn decrypt_signing_secret(
         .signing_secret_encrypted
         .as_deref()
         .ok_or_else(|| AppError::NodeOffline("Node is missing its signing secret".into()))?;
-    match node.signing_secret_context_version {
-        // Exact legacy decode; random v0 nonces may start with any magic bytes.
-        None if keys.allow_legacy_record_reads() => keys.decrypt(ciphertext).await,
-        None => Err(AppError::Internal(
-            "Legacy node secret reads are disabled".into(),
-        )),
-        Some(SIGNING_SECRET_CONTEXT_VERSION) => {
-            keys.decrypt_record(
-                ciphertext,
-                &RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD)?,
-            )
-            .await
-        }
-        Some(_) => Err(AppError::Internal(
-            "Unsupported node secret storage version".into(),
-        )),
-    }
+    record_field::decrypt_with_context(
+        keys,
+        ciphertext,
+        node.signing_secret_context_version,
+        || RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD),
+        || match node.signing_secret_context_version {
+            None => AppError::Internal("Legacy node secret reads are disabled".into()),
+            Some(_) => AppError::Internal("Unsupported node secret storage version".into()),
+        },
+    )
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

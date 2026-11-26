@@ -60,6 +60,8 @@ def main():
                         help="exchange PKCE mobile sign-in deliveries through one-time redemption")
     parser.add_argument("--meta-consent", action="store_true",
                         help="exchange Messenger and Instagram OAuth assets through selection")
+    parser.add_argument("--catalog-placeholders", action="store_true",
+                        help="exchange seeded and SSH catalog rows across writer modes")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -96,6 +98,20 @@ def main():
                 result.check_returncode()
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
+
+        if args.catalog_placeholders:
+            for side, other in (("base", "candidate"), ("candidate", "base")):
+                run(side, "write-historical", "staged")
+                run(other, "read", "staged")
+                run(other, "read", "staged", writes=True, legacy=False)
+                writer = "write-normalized" if side == "candidate" else "write-historical"
+                run(side, writer, "activated", writes=True)
+                run(other, "read", "activated", writes=True)
+                run(other, "read", "activated", writes=True, legacy=False)
+                run(other, "read", "activated")
+            run("candidate", "write-historical", "rollback")
+            run("base", "read", "rollback")
+            return
 
         if args.auth_device or args.node_device or args.native_handle or args.mobile_social or args.meta_consent:
             base_reject = "legacy-claim-error" if args.node_device else "reject"
