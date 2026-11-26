@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 47 implemented adapters
-and 3 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 48 implemented adapters
+and 2 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -62,7 +62,7 @@ A collection may use separate adapters for different fields.
 | `oracle_login_profiles` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `oracle_login_snapshots` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `platform_entry_gateway_transports` | `request_ciphertext` | [platform_entry_gateway_service.rs](../../backend/src/services/platform_entry_gateway_service.rs) | Implemented |
-| `platform_native_reply_handles` | `ciphertext` | — | Pending |
+| `platform_native_reply_handles` | `ciphertext` | [Native reply handle](../../backend/src/services/platform_native_reply_record.rs) | Implemented |
 | `platform_setups` | `facts_ciphertext` | [platform_setup_record_service.rs](../../backend/src/services/platform_setup_record_service.rs) | Implemented |
 | `triggers` | `verification_secret_encrypted`, `delivery_secret_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
 | `trigger_deliveries` | `envelope_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
@@ -222,9 +222,14 @@ version-map validation and exact-source migration stay in services.
 - Platform gateway setup binds the serialized request to the transport ID,
   credential owner and field. Replay and migration check the exact bytes
   against the retained SHA-256, including for historical unbound envelopes.
-  Retirement retains the request and its hash. Native
-  replies authenticate the binding digest bytes as AES AAD.
-  [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
+  Retirement retains the request and its hash.
+  [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs)
+- Discord native reply handles use the recomputed receipt binding digest as historical
+  AAD. Contextual storage also binds the handle ID, platform scope, field, profile,
+  receipt ID and the handle's own creation and expiry times. Storage checks require
+  the companion receipt even after expiry. Missing parents leave a blocked finding
+  while the handle survives.
+  [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
 - Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
   Execution proposals v1, v3 and v4 use `execution-proposal:v1:{id}`. V2 uses
   `execution-proposal:v2:{id}`. Each result appends `:result`.

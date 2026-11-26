@@ -154,7 +154,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50"
+        "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -179,7 +179,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";
     let device_base = "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513";
     let node_device_base = "90d8a86835621035aac28bbb0e064ef45c90b76e3572949f4c41917c5ed9323a";
+    let native_reply_base = "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50";
     for digest in [
+        Some(native_reply_base),
         Some(node_device_base),
         Some(device_base),
         Some(event_writers_checkpoint),
@@ -238,6 +240,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             v == live
                 || v == device_base
                 || v == node_device_base
+                || v == native_reply_base
                 || v == event_writers_checkpoint
                 || v == event_reply_checkpoint
                 || historical_meta.contains(&v)
@@ -259,6 +262,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                     && field.authenticated_current == 11),
             digest == Some(live.as_str())
                 || digest == Some(node_device_base)
+                || digest == Some(native_reply_base)
                 || digest == Some(event_writers_checkpoint)
                 || digest == Some(event_reply_checkpoint)
                 || digest == Some(device_base)
