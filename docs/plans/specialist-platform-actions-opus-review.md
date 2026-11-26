@@ -3,7 +3,9 @@
 - Date: 2026-11-25
 - Reviewer: Opus (independent review; no implementation changes)
 - Branch: `specialist-nyxbot-task-handoff` (uncommitted worktree changes on top of `575c5f596`, including untracked files)
-- **Latest verdict (integration delta, 2026-11-26): APPROVED.** This covers merge commit `241da803e` (PR #2983, feature `508195a20` merged with `origin/dev` `fbd9b70b8`). No integration defects found. The approval assumes the PR's backend CI (compile, tests, CodeQL) passes, because no Rust build has run on the merged tree. See [Integration delta review](#integration-delta-review-2026-11-26).
+- **Latest verdict (spec delta closure, 2026-11-26): APPROVED.** The docs-only corrections S1 and S2 and the optional refinements are verified against the code. Code approval is unchanged, and the Rust and CI evidence conditions from the integration addendum still apply. See [Spec-delta closure](#spec-delta-closure-2026-11-26).
+- **Spec delta (2026-11-26):** I requested two docs-only accuracy corrections. See [Spec-compliance delta review](#spec-compliance-delta-review-2026-11-26).
+- **Integration delta verdict (2026-11-26): APPROVED.** This covers merge commit `241da803e` (PR #2983, feature `508195a20` merged with `origin/dev` `fbd9b70b8`). No integration defects found. The approval assumes the PR's backend CI (compile, tests, CodeQL) passes, because no Rust build has run on the merged tree. See [Integration delta review](#integration-delta-review-2026-11-26).
 - **Previous verdict (final, 2026-11-25 15:14Z): APPROVED.** It applies to the implementation snapshot `7f838c6dd0859f59d1c847e675ac7f55e0b2d9f54ad5fb70e68a515997b0d5b0` (parent procedure, 49 files). My independent digest of the same tree is `93145854b3662f30fe9f51d7ab3b3b14d748f62009497bcd474823464dcddb94`. Residual limits are listed in the second pass, and evidence is in [Final verdict](#final-verdict-2026-11-25).
 - **Pass history:** first pass, CHANGES REQUESTED (B1–B6, M1–M5). Second pass, CHANGES REQUESTED (R1, R2, plus Rust evidence). Third pass, code findings cleared and approval held for Rust results. Final, APPROVED. Integration delta, APPROVED.
 - The first-pass text below describes the original snapshot. Its findings are superseded by the later sections.
@@ -413,3 +415,66 @@ The filtered Rust handoff and CORS tests must pass on the final tree (digest `7f
 - **Evidence condition, refined:** the parent reports that CI's dev profile runs only `cargo clippy` (binary and lib) and `cargo fmt`, so it gives compile evidence but runs no backend tests.
   - The approval therefore requires two things on the final head: CI is green, and the parent's local run of the two filtered Rust tests (`handoff_cards_are_offered_only_in_direct_specialist_user_turns` and `private_cors_allows_analytics_narrowing_header_only_for_trusted_origin`) passes.
   - Backend sources are unchanged since `241da803e`.
+
+---
+
+## Spec-compliance delta review: 2026-11-26
+
+- **Verdict:** I request two small, docs-only accuracy corrections (S1, S2). The code approval above is unchanged, so this review adds no new code condition.
+- **Scope:** I reviewed only the PR's spec changes in merge `e7933e92e`, which merges `dev` `e9de1c540` (#2959, docs-only), against the new `AGENTS.md` rules in "Specs: keep them current as you work".
+- **No code changed:** `git diff 10274ab53 e7933e92e` contains no production-code changes.
+- **Files compared:** PR versus `dev` for `README.md`, `docs/API.md`, `docs/CHANNEL_BOT_RELAY.md`, `docs/chat/05-frontend-ui.md`, `docs/chat/08-nyxagent-engine.md` and `docs/chat/09-nyxbot-orchestrator.md`. I checked every factual claim against the code.
+
+### Compliant
+
+- **Rule 7 (runtime docs):** No runtime-shipped docs and no `docs/site` pages are touched.
+- **Link anchors:** Every link resolves: `08#browser-routes`, `08#session-instructions-and-per-turn-context`, `05#specialist-setup-handoffs`, `05#platform-setup-and-navigation-over-chat` and `CHANNEL_BOT_RELAY#bot-link-implementation-and-compatibility`.
+- **Rule 4 (one place per fact):** The DTO, the capability header and where the instruction goes are defined once, in `08`. Rendering, the artifact, receipts and completion are defined once, in `05`. Hosted bot embedding is defined once, in `CHANNEL_BOT_RELAY`. `API.md`, `09` and `README` only link to these.
+- **Accuracy of `08`:**
+  - The `handoff_eligible` DTO field (`From<AssistantConversation>`, `handoff_thread_eligible`) is described correctly.
+  - The two table rows match the code: stable guidance is gated by `private_handoff_thread`, and the capability fact is placed in `turn_notes`.
+  - The header is honoured only for first-party humans and is on the private CORS allow-list.
+  - The marker is stripped, and the stable fingerprint stays the same across origins.
+- **Accuracy of `05`:**
+  - The per-message gate matches the code: first top-level artifact, complete, `origin === "user"`, no `via`, eligible.
+  - The listed credential patterns match `CREDENTIAL_SHAPE` plus `findSecretPath`.
+  - The handoff uses the NyxBot agent ID with no model.
+  - The receipt semantics, the 200-receipt bound and Web Locks are described correctly.
+  - The journey and completion table matches the code, including Telegram recovery sending no continuation.
+  - The completion fencing and "Request recovery is not bound to the chat" statements are correct.
+  - The theme inheritance and dismissal guards are described correctly.
+
+### Required corrections
+
+- **S1 (`08`, capability conditions):** The list of turns that receive the current-turn fact omits `asked_from`. The code requires `turn.asked_from.is_none()` (`specialist_handoff_capability`). Because the spec is the contract, add an "asked-from chat" item to that list.
+- **S2 (`CHANNEL_BOT_RELAY`, bot-link paragraph):** "It does not follow the frontend callback or navigate to bot management" overclaims.
+  - When a Telegram request has a `setup_notice`, the embedded `telegram-new.tsx` renders two plain absolute anchors, **Check status** and **Start a new setup**. They point to `/channel-bots?connect=telegram-new…`, which is the Studio bot management route, and a click navigates the whole tab there.
+  - The anchors are existing code and are already recorded as residual 3 in the second pass. The overbroad claim is new in this PR.
+  - Fix: scope the sentence to completion, for example "On completion it returns to chat without following the frontend callback or opening bot management". Record the notice anchors as a known limitation in the PR description, not in the spec.
+
+### Optional precision and wording (rules 3 and 2)
+
+- **`08` DTO ineligibility list:** Consider naming collaboration-group hidden threads (`collaboration`) and native platform-entry threads (`platform_thread`) explicitly, rather than relying on "group" and "channel" to cover them.
+- **`05` gate:** The active card also requires a specialist that is not destroyed and a loaded NyxBot roster. Voice-grouped replies render through `contentOverride` and stay inert.
+- **`05` dismissal guard:** The Agent Key Escape/outside guard applies only when the dialog has a source-chat continuation. Opened from a draft, it keeps ordinary dismissal.
+- **Rule 3 wording:** Some phrases describe change relative to the past rather than current behaviour: `CHANNEL_BOT_RELAY` "keep their existing lifecycle" and "Standalone links still render…", and `05` "still apply" and "retain their external flow". Present-tense alternatives would read, for example, "follow the bot-link lifecycle above" and "Standalone links render…".
+
+### Pre-existing discrepancy (rule 6: report it, do not edit the spec to match)
+
+- **Message DTO omits `origin` and `via`:** The Message DTO line in `08-nyxagent-engine.md` (`id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`) does not list `origin` or `via`.
+  - The code serializes both (`MessageResponse.origin`, `MessageResponse.via`), and the handoff gate depends on them.
+  - The only mention in `08` is the automation-specific `origin: "trigger"` (around line 653).
+  - This PR did not introduce the omission, so per rule 6 it belongs in the PR description, not in a spec edit.
+
+### Spec-delta closure: 2026-11-26
+
+- **Verdict: APPROVED.** I verified the uncommitted docs-only delta on top of `e7933e92e` (`08-nyxagent-engine.md`, `05-frontend-ui.md` and `CHANNEL_BOT_RELAY.md`) against the code. `git diff --check` is clean, and there are no production changes.
+- **S1, resolved:** the list of capability-fact conditions in `08` now includes "asked-from chat", matching `turn.asked_from.is_none()`.
+- **S2, resolved:** the `CHANNEL_BOT_RELAY` sentence is scoped to completion: "On completion it returns to chat without following the frontend callback or opening bot management". The Telegram status anchor limitation is reported in the PR description, per the parent.
+- **Optional refinements, applied and accurate:**
+  - The ineligible-thread list in the `08` DTO now names personal and collaboration groups and native platform threads. This matches `handoff_thread_eligible`.
+  - `05` names the additional gates: a non-destroyed specialist, a loaded NyxBot roster, and voice-grouped replies staying inert via `contentOverride`.
+  - `05` scopes the Agent Key dismissal guard to a source-chat continuation (`onComplete && createdKey`).
+  - Phrases describing change are replaced with present-tense wording.
+- **Pre-existing discrepancy:** the Message DTO omits `origin` and `via`. The parent reports it in the PR description, and the spec is left unchanged, per rule 6.
+- **Cosmetic, non-blocking:** two edited lines in `05` and one in `08` exceed the surrounding wrap width. No docs lint enforces wrapping.

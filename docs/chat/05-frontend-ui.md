@@ -147,8 +147,10 @@ exclude credentials, private memory, and unrelated history.
 Only the first top-level artifact in a completed assistant reply with
 `origin: user`, no `via`, and server `handoff_eligible: true` renders an active
 **Continue with NyxBot** card. Thread eligibility is defined in the
-[engine's conversation DTO contract](08-nyxagent-engine.md#browser-routes). Other replies
-render the artifact as inert code.
+[engine's conversation DTO contract](08-nyxagent-engine.md#browser-routes).
+Other replies render the artifact as inert code. Active cards also require an available,
+non-destroyed specialist and a loaded personal NyxBot roster. Voice-grouped
+replies use their grouped content renderer and remain inert.
 The entire proposed task is visible and the CTA says it will be sent as the
 person's message. Known credential patterns (NyxID, bearer, Telegram, OpenAI,
 GitHub, Slack, JWT and PEM, among others) are refused. This screening does not
@@ -157,7 +159,7 @@ replace the rule that secrets belong in setup forms.
 Rendering or restoring history starts no work. Clicking starts an ordinary
 user turn with the owner's live NyxBot agent ID and no model override, then
 opens the new conversation in the same app. The specialist's authority is not
-inherited. NyxBot's profile, access mode, live checks and approvals still apply.
+inherited. NyxBot's profile, access mode, live checks and approvals apply.
 If navigation changes while admission is pending, adoption does not undo it.
 
 A bounded browser receipt stores only a payload hash and outcome, keyed by
@@ -199,10 +201,11 @@ never synthesizes a continuation into that chat.
 Same-origin links are classified through an explicit allowlist. Modified clicks
 retain browser behavior. External, credentialed, fragmented and unsupported
 queries are excluded. Bot dialogs inherit app theme and accessibility settings.
-Hosted bot dialogs and the Agent Key one-time result block Escape/outside
-dismissal. Hosted bot embedding follows the
+Hosted bot dialogs block Escape/outside dismissal. The Agent Key one-time
+result blocks these gestures when it has a source-chat continuation. Hosted bot
+embedding follows the
 [bot-link contract](../CHANNEL_BOT_RELAY.md#bot-link-implementation-and-compatibility).
-Telegram and other provider authorization steps retain their external flow.
+Telegram and other provider authorization steps use their external flow.
 
 Advanced Studio links use their existing full app pages. The supported journeys
 above use the shared setup/completion path; other account-management operations

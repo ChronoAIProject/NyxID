@@ -1055,8 +1055,9 @@ pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,
 `access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
 agent's threads are read-only).
 `handoff_eligible` is a server-derived presentation flag for private personal
-specialist threads. Channel, group, shared, organization-agent, guest,
-guest-model-setup and invocation-controlled threads are ineligible. The flag
+specialist threads. Channel, personal or collaboration group, shared,
+organization-agent, native platform-thread, guest, guest-model-setup and
+invocation-controlled threads are ineligible. The flag
 grants no execution authority. The browser's per-message activation and artifact
 format are defined in [Specialist setup handoffs](05-frontend-ui.md#specialist-setup-handoffs).
 `active_turn` is null or `{turn_id,started_at,activities,response_id,steering_allowed,stop_requested}`.
@@ -1731,8 +1732,8 @@ First-party human clients advertise setup-card support on `POST /turns` through
 The handler records the capability in the admitted turn. An eligible direct
 user turn supplies the exact fact `NyxID client capability: nyxbot-handoff-v1.`
 in its context only when it has no voice, invocation, trigger, delegation,
-platform/adapter origin, reply channel or additional delivery target. The raw
-note marker is stripped from other turn notes. The stable guidance requires
+platform/adapter origin, asked-from chat, reply channel or additional delivery
+target. The raw note marker is stripped from other turn notes. The stable guidance requires
 that current fact before offering an artifact; switching origin or client
 capability does not change the stable instruction fingerprint. Clients that do
 not advertise support receive ordinary setup guidance.

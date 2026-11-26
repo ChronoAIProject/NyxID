@@ -40,6 +40,7 @@ See [the independent review](specialist-platform-actions-opus-review.md).
 - CI identified older channel-bot page assertions that expected a two-argument API call. Updated them to require the new `authorityGuard` option while retaining exact payload assertions; all 54 page tests now pass.
 - Rebuilt the committed CLI wizard bundle with `npm run build:wizard`, as required when its shared API-client source changes. The generated manifest stayed identical; the bundle and source hash were updated.
 - Opus approved the integration delta; the report records the condition that backend validation must pass on the merged tree. Final Rust filters and GitHub CI are being run before merging.
+- Merged the subsequent spec-maintenance update from `dev` (`e9de1c540`, #2959) in `e7933e92e`; it changed documentation only. Added the engine DTO/capability definitions, linked their governing sections from the UI/API/README, and scoped the embedded completion/dismissal descriptions precisely. The PR description names all changed spec sections and reports the existing Telegram portal-navigation limit and Message DTO summary omission. Opus's spec-compliance closure is approved; production code is unchanged.
 
 The SHA-256 and file list above describe the original approved feature snapshot. The integration delta is tracked separately by its Git commits and the dated review section.
 
