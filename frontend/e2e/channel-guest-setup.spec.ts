@@ -229,3 +229,51 @@ test("an existing bot can preview a saved migration draft before opting in", asy
   await expect(toggle).toBeChecked();
   await expect(page.getByText("Guest access v1 is active for this bot.")).toBeVisible();
 });
+
+test("a route reports ordinary mode and accepts a dedicated compatible key", async ({ page }) => {
+  await mockDashboard(page);
+  const routeId = "route-fixture";
+  const dedicated = "e49d65de-5819-47ea-8a1d-fb4c5c96736f";
+  const ordinary = "a1dae386-a011-4e6b-9e15-0a995617975f";
+  const route = {
+    id: routeId,
+    channel_bot_id: managedBot.id,
+    platform: managedBot.platform,
+    platform_conversation_id: "fixture-conversation",
+    platform_conversation_type: "private",
+    agent_api_key_id: ordinary,
+    is_active: true,
+  };
+  const api = "**/api/v1/channel-conversations";
+  await page.route(/\/api\/v1\/channel-conversations\?/, (request) =>
+    request.fulfill({ json: { conversations: [route], total: 1 } }));
+  await page.route("**/api/v1/api-keys", (request) =>
+    request.fulfill({ json: { keys: [
+      { id: ordinary, name: "Shared key", is_active: true, callback_url: "https://example.test/shared" },
+      { id: dedicated, name: "Dedicated key", is_active: true, callback_url: "https://example.test/dedicated" },
+    ] } }));
+  await page.route(api + "/" + routeId, (request) => {
+    if (request.request().method() === "PUT") {
+      expect(request.request().postDataJSON()).toEqual({
+        agent_api_key_id: dedicated,
+        dedicate_agent_key_for_guest_access: true,
+      });
+      route.agent_api_key_id = dedicated;
+    }
+    return request.fulfill({ json: {
+      ...route,
+      guest_access_state: route.agent_api_key_id === dedicated
+        ? "guest_access" : "ordinary_dedicated_key_required",
+    } });
+  });
+
+  await page.goto(pagePath);
+  await page.getByRole("row", { name: /fixture-conversation/ }).getByRole("button", { name: "Actions" }).click();
+  await page.getByRole("menuitem", { name: "Route guest access" }).click();
+  const dialog = page.getByRole("dialog", { name: "Route guest access" });
+  await expect(dialog.getByText(/ordinary settings until a dedicated compatible key is assigned/)).toBeVisible();
+  await dialog.getByRole("combobox", { name: "Agent key" }).click();
+  await page.getByRole("option", { name: "Dedicated key" }).click();
+  await dialog.getByRole("button", { name: "Dedicate this key for guest access" }).click();
+  await expect(dialog.getByText("Guest access v1 is active for this route.")).toBeVisible();
+});

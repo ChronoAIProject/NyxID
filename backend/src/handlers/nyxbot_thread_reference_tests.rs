@@ -12,6 +12,9 @@ async fn activity(f: &Fixture, relay: &str) {
         owner_eligible: false,
         media: vec![],
         truncated_original_bytes: None,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
     };
     let activity = json!({
         "conversation": {"kind":"private","id":"123"},

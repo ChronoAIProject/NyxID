@@ -432,6 +432,8 @@ async fn start_guest(
     });
     start.channel_context = Some(ChannelTurnContext {
         channel_guest: Some(turn),
+        meta_grant: None,
+        text_completeness: None,
         org_origin: None,
         display_name: None,
         conversation_label: None,

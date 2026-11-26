@@ -1215,6 +1215,7 @@ async fn post_turn_result_meta_reply_keeps_grant_and_claims_destination_once() {
         // the running-turn writer. Signed admission is covered by the Meta
         // integration fixtures.
         start.channel_context = Some(ChannelTurnContext {
+            channel_guest: None,
             meta_grant: Some(grant.clone()),
             text_completeness: None,
             org_origin: None,

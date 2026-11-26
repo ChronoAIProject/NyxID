@@ -43,7 +43,7 @@ const EXAMPLE_APPEND_TAB = "Questions";
 export function GuestSetupLink({ botId }: { readonly botId: string }) {
   useUiTranslation();
   const setup = useChannelGuestSetup(botId);
-  if (!setup.data?.available) return null;
+  if (!setup.data?.available && !setup.data?.activation_issue) return null;
   return (
     <Button asChild variant="outline" size="sm">
       <Link to="/channel-bots/$botId" params={{ botId }} hash="guest-experience">
@@ -86,6 +86,7 @@ function SetupPanel({ botId }: { readonly botId: string }) {
           <FieldHelp>
             {data.available ? t("Guest access v1 is active for this bot.") : t("This bot follows its ordinary channel settings. Guest access v1 applies when the platform rollout includes this bot.")}
           </FieldHelp>
+          <FieldHelp>{t("Enrolled guest conversations accept text. Guest images and documents use ordinary channel settings outside the rollout.")}</FieldHelp>
         </div>
         <Switch id={id} checked={data.enabled} disabled={preference.isPending} onCheckedChange={setPreference} />
       </div>
@@ -253,6 +254,20 @@ function Editor({ botId, settings, staging, onPrepared }: {
       <header className="space-y-1">
         <h2 className="type-card-title">{translateUi("Guest experience")}</h2>
         {staging && <p className="type-secondary text-muted-foreground">{translateUi("Prepare and preview a draft before enrollment. Applying a reviewed revision takes effect when this bot enters the rollout.")}</p>}
+        {staging && settings.verified_guests.length === 0 && (
+          <FieldHelp>{translateUi("Named guests are unavailable until this bot has verified channel observations.")}</FieldHelp>
+        )}
+        {staging && settings.unmapped_operations.length > 0 && (
+          <details className="type-secondary">
+            <summary>{translateUi("Existing guest operations without a replacement")}</summary>
+            <ul className="list-disc space-y-1 pl-4">
+              {settings.unmapped_operations.map((operation) =>
+                <li key={`${operation.service}:${operation.method}:${operation.path}`}>
+                  {operation.service} · <code>{operation.method} {operation.path}</code>
+                </li>)}
+            </ul>
+          </details>
+        )}
         {staging && settings.prepared_draft_revision != null && <p role="status" className="type-secondary text-muted-foreground">
           {translateUi("Draft revision {{revision}} is marked for activation.", { revision: settings.prepared_draft_revision })}
         </p>}
@@ -287,7 +302,7 @@ function Editor({ botId, settings, staging, onPrepared }: {
           }}>
             <option value="" disabled>{translateUi("Choose an audience")}</option>
             <option value="owner_only">{translateUi("Owner only")}</option>
-            <option value="selected">{translateUi("Selected verified guests")}</option>
+            <option value="selected" disabled={guests.length === 0 && configuration.audience?.kind !== "selected"}>{translateUi("Selected verified guests")}</option>
             <option value="channel_policy">{translateUi("Guests allowed by the channel settings")}</option>
           </NativeSelect>
           <FieldHelp>{translateUi("Existing channel admission and verified organization-member access still apply.")}</FieldHelp>
@@ -413,8 +428,8 @@ function RuleEditor({ rule, index, settings, onChange, onRemove }: {
           }
         }}>
           <option value="all_guests">{translateUi("All admitted guests")}</option>
-          {!sharedOnly && <option value="guest">{translateUi("One verified guest")}</option>}
-          <option value="verified_audience">{translateUi("Named audience")}</option>
+          {!sharedOnly && <option value="guest" disabled={settings.verified_guests.length === 0}>{translateUi("One verified guest")}</option>}
+          <option value="verified_audience" disabled={settings.verified_guests.length === 0}>{translateUi("Named audience")}</option>
         </NativeSelect>
         {!own && !sharedOnly && rule.audience.kind !== "guest" && (
           <>

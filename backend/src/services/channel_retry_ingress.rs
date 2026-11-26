@@ -8,7 +8,7 @@ use super::{
     coordination_service::{EventDedupClaimResult, EventDedupStore},
 };
 use crate::models::{
-    api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
+    api_key::COLLECTION_NAME as API_KEYS,
     channel_bot::ChannelBot,
     channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
 };
@@ -114,15 +114,16 @@ pub async fn deliver(
     if route.conversation.user_id != bot.user_id || route.conversation.platform != bot.platform {
         return Err(retry_later());
     }
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
+    let retained_key = db
+        .collection::<guest_relay::RetainedRelayKey>(API_KEYS)
         .find_one(doc! { "_id": &route.api_key_id, "user_id": &bot.user_id, "is_active": true })
         .await?
         .filter(|key| {
-            key.expires_at
+            key.key.expires_at
                 .is_none_or(|expiry| expiry > chrono::Utc::now())
         })
         .ok_or_else(retry_later)?;
+    let api_key = &retained_key.key;
     let callback_url = api_key
         .callback_url
         .as_deref()
@@ -147,7 +148,7 @@ pub async fn deliver(
                 &api_key.id,
                 message_id,
             );
-            if !guest_relay::prepare(db, bot, &route.conversation, inbound, &mut message).await? {
+            if !guest_relay::prepare(db, context.encryption_keys, bot, &route.conversation, inbound, &mut message).await? {
                 return Err(retry_later());
             }
             if message.guest_relay.is_some() {
@@ -238,10 +239,12 @@ pub async fn deliver(
         let rbac = super::rbac_helpers::build_rbac_claim_data(db, &bot.user_id, scope)
             .await
             .ok();
-        Some(crate::crypto::jwt::generate_relay_access_token(
+        Some(retained_key.mint_ordinary_bearer(
+            db,
             context.jwt_keys,
             context.config,
             &owner,
+            &route.conversation,
             scope,
             rbac.as_ref(),
             &crate::crypto::jwt::RelayAgentScope {
@@ -252,7 +255,7 @@ pub async fn deliver(
                 allow_all_services: api_key.allow_all_services,
                 allow_all_nodes: api_key.allow_all_nodes,
             },
-        )?)
+        ).await?)
     };
     let mut config = context.config.clone();
     config.channel_relay_callback_timeout_secs = config.channel_relay_callback_timeout_secs.min(10);
@@ -299,8 +302,8 @@ pub async fn deliver(
         ),
         None,
         None,
-        Some(api_key.id),
-        Some(api_key.name),
+        Some(api_key.id.clone()),
+        Some(api_key.name.clone()),
     );
     match delivery.result {
         Err(error) if channel_relay_service::destination_refused(&error) => Ok(()),
@@ -348,6 +351,7 @@ async fn settle_obsolete_guest_retry(
     if mode
         == (GuestMode::AddOn {
             activation_epoch: turn.activation_epoch,
+            bot_revision: turn.bot_revision,
         })
         && guest::policy::load_policy(db, &bot.id)
             .await?

@@ -407,6 +407,62 @@ pub(crate) async fn sheets_connections(
     Ok(result)
 }
 
+#[derive(Serialize)]
+pub(crate) struct UnmappedGuestOperation {
+    pub service: String,
+    pub method: String,
+    pub path: String,
+}
+
+pub(crate) async fn unmapped_guest_operations(
+    db: &Database,
+    bot_id: &str,
+    actor: &str,
+    sheets: &[SheetsConnection],
+) -> AppResult<Vec<UnmappedGuestOperation>> {
+    use crate::services::agent_operation_scope_service as scopes;
+    let agent = match skills::maintainer_agent(db, actor, bot_id).await {
+        Ok(agent) if agent.kind == assistant_agent::AgentKind::Specialist => agent,
+        Ok(_) | Err(AppError::Forbidden(_)) | Err(AppError::NotFound(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut unsupported = Vec::new();
+    for service in scopes::guest_options(db, actor, &agent.id).await? {
+        let level = scopes::guest_level(&agent, &service.service_id, None);
+        for operation in service.operations {
+            if (!service.all_operations && !service.endpoint_ids.contains(&operation.endpoint_id))
+                || (level == assistant_agent::GuestAccess::Read && !operation.read_only)
+                || (level == assistant_agent::GuestAccess::Use && operation.changes_existing)
+            {
+                continue;
+            }
+            let supported_action = match (operation.method.as_str(), operation.path.as_str()) {
+                ("GET", "/v4/spreadsheets/{spreadsheetId}/values/{range}") => Some("read"),
+                ("POST", "/v4/spreadsheets/{spreadsheetId}/values/{range}:append") => {
+                    Some("create")
+                }
+                _ => None,
+            };
+            if supported_action.is_some_and(|action| {
+                sheets.iter().any(|connection| {
+                    connection.id == service.service_id && connection.actions.contains(&action)
+                })
+            }) {
+                continue;
+            }
+            unsupported.push(UnmappedGuestOperation {
+                service: service.service_name.clone(),
+                method: operation.method,
+                path: operation.path,
+            });
+            if unsupported.len() == 50 {
+                return Ok(unsupported);
+            }
+        }
+    }
+    Ok(unsupported)
+}
+
 fn sheets_route_available(
     catalog: &crate::models::downstream_service::DownstreamService,
     instance_origin: &str,
@@ -1081,6 +1137,23 @@ pub(crate) async fn purge_bot(db: &Database, bot_id: &str) -> AppResult<()> {
         .await?;
     db.collection::<GuestSetup>(GuestSetup::COLLECTION_NAME)
         .delete_one(doc! {"_id":bot_id})
+        .await?;
+    Ok(())
+}
+
+/// Erase configuration for a proven exact current installation.
+pub(crate) async fn purge_bot_in_session(
+    db: &Database,
+    tx: &mut ClientSession,
+    bot_id: &str,
+) -> AppResult<()> {
+    db.collection::<GuestDataPolicy>(POLICIES)
+        .delete_many(doc! {"bot_id":bot_id})
+        .session(&mut *tx)
+        .await?;
+    db.collection::<GuestSetup>(GuestSetup::COLLECTION_NAME)
+        .delete_one(doc! {"_id":bot_id})
+        .session(tx)
         .await?;
     Ok(())
 }

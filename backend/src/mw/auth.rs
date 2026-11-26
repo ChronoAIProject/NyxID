@@ -2027,7 +2027,7 @@ pub async fn ensure_relay_agent_key_active(
             "Relay token's agent key is inactive or revoked".into(),
         ));
     }
-    key.require_broad_access(db).await?;
+    key.require_relay_bearer(db, claims.relay_guest_assignment.as_deref()).await?;
     Ok(key.key)
 }
 
@@ -2975,6 +2975,7 @@ mod tests {
             cnf: None,
             relay: None,
             relay_api_key_id: None,
+            relay_guest_assignment: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,

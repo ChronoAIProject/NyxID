@@ -119,9 +119,23 @@ pub(crate) async fn select_mode(db: &Database, bot_id: &str) -> AppResult<GuestM
     let bot = db
         .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
         .find_one(active_bot(bot_id))
-        .projection(doc! {"guest_access_v1": 1, "guest_access_v1_revision": 1})
-        .await?
-        .ok_or_else(obsolete)?;
+        .projection(
+            doc! {"is_active": 1, "status": 1, "guest_access_v1": 1, "guest_access_v1_revision": 1},
+        )
+        .await?;
+    select_mode_for_snapshot(db, bot_id, bot.as_ref()).await
+}
+
+pub(super) async fn select_mode_for_snapshot(
+    db: &Database,
+    bot_id: &str,
+    bot: Option<&Document>,
+) -> AppResult<GuestMode> {
+    let Some(bot) = bot.filter(|bot| {
+        bot.get_bool("is_active") == Ok(true) && bot.get_str("status") != Ok("suspended")
+    }) else {
+        return Ok(GuestMode::Legacy);
+    };
     let enabled = match bot.get("guest_access_v1") {
         None | Some(bson::Bson::Boolean(false)) => false,
         Some(bson::Bson::Boolean(true)) => true,
@@ -384,6 +398,12 @@ fn ownership_version(row: &Document) -> i64 {
 }
 
 pub(crate) async fn revalidate(db: &Database, turn: &GuestTurn) -> AppResult<()> {
+    revalidate_turn(db, turn, false).await
+}
+
+// Queue setup may be checked before a turn is admitted. Execution always
+// requires the durable work row that was written with the turn.
+async fn revalidate_turn(db: &Database, turn: &GuestTurn, admitted: bool) -> AppResult<()> {
     check_turn(turn)?;
     if select_mode(db, &turn.bot_id).await?
         != (GuestMode::AddOn {
@@ -394,13 +414,17 @@ pub(crate) async fn revalidate(db: &Database, turn: &GuestTurn) -> AppResult<()>
         return Err(obsolete());
     }
     let version = bot_ownership_version(db, &turn.bot_id).await?;
-    if let Some(work) = db
+    let work = db
         .collection::<Work>(WORK)
         .find_one(doc! {"_id": turn.work_id()})
-        .await?
-        && (work.ownership_version != version || work.turn != *turn)
-    {
-        return Err(obsolete());
+        .await?;
+    match work {
+        Some(work)
+            if work.ownership_version == version
+                && work.turn == *turn
+                && work.expires_at > bson::DateTime::now() => {}
+        None if !admitted => {}
+        _ => return Err(obsolete()),
     }
     let verified = (turn.actor.assurance == GuestAssurance::ProviderVerified)
         .then_some(turn.actor.id.as_str());
@@ -419,10 +443,20 @@ pub(crate) async fn revalidate(db: &Database, turn: &GuestTurn) -> AppResult<()>
 
 /// Hosted ingress already owns a durable provider event. Bind the add-on
 /// work in the same transaction that claims its assistant turn.
+#[cfg(test)]
 pub(crate) async fn classify(
     db: &Database,
     mode: GuestMode,
     input: VerifiedGuestInput<'_>,
+) -> AppResult<GuestAdmission> {
+    classify_with_meta(db, mode, input, None).await
+}
+
+pub(crate) async fn classify_with_meta(
+    db: &Database,
+    mode: GuestMode,
+    input: VerifiedGuestInput<'_>,
+    meta_grant: Option<&crate::models::channel_meta::GrantRef>,
 ) -> AppResult<GuestAdmission> {
     let GuestMode::AddOn {
         activation_epoch,
@@ -431,6 +465,11 @@ pub(crate) async fn classify(
     else {
         return Ok(GuestAdmission::Legacy);
     };
+    if meta_grant.map(|grant| grant.grant_id.as_str()) != input.meta_grant_id
+        || meta_grant.is_some_and(|grant| grant.bot_id != input.bot_id)
+    {
+        return Err(obsolete());
+    }
     let sender = input.sender_id.filter(|sender| !sender.is_empty());
     let (assurance, actor_subject, scope) = match sender {
         Some(sender) => (GuestAssurance::ProviderVerified, sender, "provider"),
@@ -452,7 +491,15 @@ pub(crate) async fn classify(
     let verified = sender.map(|_| actor.id.as_str());
     if !setup::allows_guest(db, input.bot_id, verified).await? {
         if let Some(actor_id) = verified {
-            observe_verified_guest(db, &input, actor_id, activation_epoch, bot_revision).await?;
+            observe_verified_guest(
+                db,
+                &input,
+                actor_id,
+                activation_epoch,
+                bot_revision,
+                meta_grant,
+            )
+            .await?;
         }
         return Err(obsolete());
     }
@@ -486,6 +533,7 @@ async fn observe_verified_guest(
     actor_id: &str,
     activation_epoch: i64,
     bot_revision: i64,
+    meta_grant: Option<&crate::models::channel_meta::GrantRef>,
 ) -> AppResult<()> {
     let room_id = (input.audience == AnswerAudience::Shared && !input.conversation_id.is_empty())
         .then(|| {
@@ -503,13 +551,17 @@ async fn observe_verified_guest(
         actor_id.to_owned(),
         room_id,
         input.platform.to_owned(),
-        input.meta_grant_id.map(str::to_owned),
+        meta_grant.cloned(),
         activation_epoch,
         bot_revision,
     );
     super::transaction_service::run_db_only(db, &context, |session, (db, bot_id, actor_id, room_id, platform, grant, epoch, revision)| {
         Box::pin(async move {
             fence_selection_in_session(db, session, bot_id, *epoch, *revision).await?;
+            if let Some(grant) = grant {
+                super::channel_meta_service::scopes::fence_reference(db, session, grant, true)
+                    .await?;
+            }
             let bot = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
                 .find_one_and_update(active_bot(bot_id), doc! {"$set": {"channel_guest_data_present": true}})
                 .projection(doc! {"ownership_version": 1}).session(&mut *session).await?
@@ -519,7 +571,8 @@ async fn observe_verified_guest(
             db.collection::<Document>(OBSERVATIONS)
                 .update_one(doc! {"_id": id}, doc! {"$set": {
                     "bot_id": bot_id, "actor_id": actor_id, "room_id": room_id, "platform": platform,
-                    "meta_grant_id": grant, "ownership_version": version, "expires_at": retention_deadline(),
+                    "meta_grant_id": grant.as_ref().map(|grant| grant.grant_id.as_str()),
+                    "ownership_version": version, "expires_at": retention_deadline(),
                 }})
                 .upsert(true).session(session).await?;
             Ok(())
@@ -593,14 +646,15 @@ pub(crate) async fn admitted_turn(
 ) -> AppResult<Option<GuestTurn>> {
     Ok(db
         .collection::<Work>(WORK)
-        .find_one(doc! {"_id": event_identity(bot_id, binding_id, platform, event_id)})
+        .find_one(doc! {
+            "_id": event_identity(bot_id, binding_id, platform, event_id),
+            "expires_at": {"$gt": bson::DateTime::now()},
+        })
         .await?
         .map(|work| work.turn))
 }
 
-/// Commit a hosted delivery barrier against the same activation that admitted
-/// the source. The sender rechecks again at the provider boundary.
-pub(crate) async fn hosted_delivery_turn(
+async fn hosted_delivery_turn(
     db: &Database,
     event: &crate::models::nyxbot_channel::NyxbotEvent,
 ) -> AppResult<Option<GuestTurn>> {
@@ -619,6 +673,7 @@ pub(crate) async fn hosted_delivery_turn(
         .find_one(doc! {
             "turn.source_event_id": &event.id, "turn.binding_id": &event.channel_id,
             "turn.platform": super::channel_platform::canonical_platform(&delivery.origin.platform),
+            "expires_at": {"$gt": bson::DateTime::now()},
         })
         .await?;
     Ok(work
@@ -630,7 +685,7 @@ pub(crate) async fn claim_hosted_delivery(
     db: &Database,
     event: &crate::models::nyxbot_channel::NyxbotEvent,
     filter: Document,
-    update: Document,
+    update: impl Into<mongodb::options::UpdateModifications>,
 ) -> AppResult<bool> {
     use crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME;
     let Some(turn) = hosted_delivery_turn(db, event).await? else {
@@ -642,22 +697,46 @@ pub(crate) async fn claim_hosted_delivery(
             error => Err(error),
         };
     }
-    let context = (db.clone(), turn, filter, update);
+    let grant = if let Some(grant_id) = &turn.meta_grant_id {
+        let grant = super::channel_meta_service::scopes::event_reference(db, &event.id).await?;
+        let Some(grant) =
+            grant.filter(|grant| grant.bot_id == turn.bot_id && grant.grant_id == *grant_id)
+        else {
+            return Ok(false);
+        };
+        Some(grant)
+    } else {
+        None
+    };
+    let context = (db.clone(), turn, grant, filter, update.into());
     match super::transaction_service::run_db_only(
         db,
         &context,
-        |session, (db, turn, filter, update)| {
+        |session, (db, turn, grant, filter, update)| {
             Box::pin(async move {
                 fence_in_session(db, session, turn).await?;
+                if let Some(grant) = grant {
+                    super::channel_meta_service::scopes::fence_reference(db, session, grant, true)
+                        .await?;
+                }
                 if turn.policy_revision > 0 {
                     policy::fence_policy_in_session(db, session, turn).await?;
+                } else if db
+                    .collection::<Document>(crate::models::channel_guest_policy::COLLECTION_NAME)
+                    .find_one(doc! {"bot_id": &turn.bot_id})
+                    .projection(doc! {"_id": 1})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                {
+                    return Err(obsolete());
                 }
                 Ok(db
                     .collection::<Document>(EVENTS_COLLECTION_NAME)
                     .update_one(filter.clone(), update.clone())
                     .session(session)
                     .await?
-                    .modified_count
+                    .matched_count
                     == 1)
             })
         },
@@ -677,6 +756,9 @@ pub(crate) async fn stamp_hosted_mode(
     binding_id: &str,
     mode: GuestMode,
 ) -> AppResult<()> {
+    if mode == GuestMode::Legacy {
+        return Ok(());
+    }
     let mode = bson::to_bson(&mode).map_err(|_| unavailable())?;
     let stored = db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
         .update_one(
@@ -729,6 +811,9 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             IndexModel::builder()
                 .keys(doc! {"turn.bot_id": 1, "turn.actor.assurance": 1, "expires_at": -1})
                 .build(),
+            IndexModel::builder()
+                .keys(doc! {"turn.bot_id": 1, "turn.meta_grant_id": 1, "_id": 1})
+                .build(),
         ])
         .await?;
     db.collection::<Document>(OBSERVATIONS)
@@ -743,6 +828,9 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
                 .build(),
             IndexModel::builder()
                 .keys(doc! {"bot_id": 1, "expires_at": -1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"bot_id": 1, "meta_grant_id": 1, "_id": 1})
                 .build(),
         ])
         .await?;
@@ -805,7 +893,24 @@ pub(crate) async fn live_turn(
     {
         return Err(AppError::AssistantTurnRequired);
     }
-    revalidate(db, guest).await?;
+    revalidate_turn(db, guest, true).await?;
+    if let Some(grant_id) = &guest.meta_grant_id {
+        let grant = active
+            .channel_context
+            .as_ref()
+            .filter(|context| context.source_event_id == guest.source_event_id)
+            .and_then(|context| context.meta_grant.as_ref())
+            .filter(|grant| grant.bot_id == guest.bot_id && grant.grant_id == *grant_id)
+            .ok_or_else(obsolete)?;
+        let context = (db, guest, grant);
+        super::transaction_service::run_db_only(db, &context, |session, &(db, guest, grant)| {
+            Box::pin(async move {
+                fence_in_session(db, session, guest).await?;
+                super::channel_meta_service::scopes::fence_reference(db, session, grant, true).await
+            })
+        })
+        .await?;
+    }
     Ok(Some(guest.clone()))
 }
 
@@ -956,6 +1061,46 @@ pub(crate) async fn purge_observations_before_ownership(
         .delete_many(doc! {"bot_id": bot_id, "ownership_version": {"$lt": ownership_version}})
         .await?;
     Ok(())
+}
+
+/// Drain one page from each collection after the exact Meta grant is fenced
+/// against new work. The erasure journal retains the phase until both are empty.
+pub(crate) async fn purge_meta_grant_batch(
+    db: &Database,
+    bot_id: &str,
+    grant_id: &str,
+) -> AppResult<bool> {
+    use futures::TryStreamExt;
+
+    const BATCH: i64 = 100;
+    let mut empty = true;
+    for (name, filter) in [
+        (
+            WORK,
+            doc! {"turn.bot_id": bot_id, "turn.meta_grant_id": grant_id},
+        ),
+        (
+            OBSERVATIONS,
+            doc! {"bot_id": bot_id, "meta_grant_id": grant_id},
+        ),
+    ] {
+        let rows = db.collection::<Document>(name);
+        let ids: Vec<_> = rows
+            .find(filter.clone())
+            .projection(doc! {"_id": 1})
+            .sort(doc! {"_id": 1})
+            .limit(BATCH)
+            .await?
+            .map_ok(|mut row| row.remove("_id").expect("projected MongoDB ID"))
+            .try_collect()
+            .await?;
+        if !ids.is_empty() {
+            rows.delete_many(doc! {"$and": [filter, {"_id": {"$in": ids}}]})
+                .await?;
+            empty = false;
+        }
+    }
+    Ok(empty)
 }
 
 pub(crate) async fn purge_bot(db: &Database, bot_id: &str) -> AppResult<()> {
@@ -1229,6 +1374,27 @@ mod tests {
             select_mode(&db, "outside-pilot").await.unwrap(),
             GuestMode::Legacy
         );
+
+        let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+        for change in [
+            doc! {"is_active": true, "status": "suspended"},
+            doc! {"is_active": false, "status": "active"},
+        ] {
+            bots.update_one(doc! {"_id": &first}, doc! {"$set": change})
+                .await
+                .unwrap();
+            assert_eq!(select_mode(&db, &first).await.unwrap(), GuestMode::Legacy);
+            let observed = bots.find_one(doc! {"_id": &first}).await.unwrap();
+            assert_eq!(
+                select_mode_for_snapshot(&db, &first, observed.as_ref())
+                    .await
+                    .unwrap(),
+                GuestMode::Legacy,
+            );
+        }
+        bots.update_one(doc! {"_id": &first}, doc! {"$set": {"is_active": true}})
+            .await
+            .unwrap();
 
         let mut txn1 = db.client().start_session().await.unwrap();
         txn1.start_transaction().await.unwrap();

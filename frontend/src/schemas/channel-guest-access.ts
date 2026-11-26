@@ -58,6 +58,7 @@ const settingsSchema = z.object({
   verified_rooms: z.array(observationSchema),
   sheets_connections: z.array(z.object({ id: z.string(), label: z.string(), actions: z.array(actionSchema) })),
   sources: z.array(sourceSchema),
+  unmapped_operations: z.array(z.object({ service: z.string(), method: z.string(), path: z.string() })).default([]),
 });
 export const guestSetupResponseSchema = z.object({
   available: z.boolean(),

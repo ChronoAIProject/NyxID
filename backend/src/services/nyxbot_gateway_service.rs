@@ -117,6 +117,7 @@ pub(crate) fn is_creator_claims(claims: &Claims) -> bool {
         sa: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,

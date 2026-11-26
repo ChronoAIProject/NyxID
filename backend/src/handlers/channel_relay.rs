@@ -1944,8 +1944,11 @@ async fn prepare_reply_outbound(
         },
     };
     outbound.reply_to_platform_message_id = original.platform_message_id.clone();
+    let interaction = guest_relay::open_reply_handle(&state.encryption_keys, original).await?;
+    let thread = interaction.as_deref().map(String::as_str)
+        .or_else(|| crate::services::channel_image_audience::message_thread(original));
     adapter.reply_context(
-        crate::services::channel_image_audience::message_thread(original),
+        thread,
         original.created_at,
         &mut outbound.metadata,
     );
@@ -4860,13 +4863,61 @@ mod tests {
         let route = db.collection::<ChannelConversation>(CONVERSATIONS)
             .find_one(doc! {"_id":route_id}).await.unwrap().unwrap();
         channel_routing_service::update_conversation_with_guest_key(
-            db, route_id, &route.user_id, None, None, None, None, true,
+            db, route_id, &route.user_id, None, None, None, None, Some(true),
         ).await.unwrap();
         guest::set_pilot(
             db, PilotSelection { fleet: true, bot_ids: None },
             &AuditActor {user_id:bot.user_id.clone(),api_key_id:None,
                 api_key_name:None,ip_address:None,user_agent:None},
         ).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_guest_relay_shared_key_stays_ordinary_and_unused_dedication_can_be_released() {
+        use crate::services::{
+            channel_guest_access::{self as guest, PilotSelection},
+            channel_routing_service as routing,
+            feature_flag_service::{self as flags, FlagTarget},
+            security_readiness_service::ready_test_replica,
+        };
+        let fixture = setup_reply_token_fixture("guest_relay_dedication").await.unwrap();
+        let db = &fixture.state.db;
+        let bot = &fixture.bot;
+        let route = &fixture.conversation;
+        let mut sibling = route.clone();
+        sibling.id = Uuid::new_v4().to_string();
+        sibling.platform_conversation_id = "unrelated-chat".into();
+        db.collection::<ChannelConversation>(CONVERSATIONS)
+            .insert_one(&sibling).await.unwrap();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(doc! {"_id":&bot.id}, doc! {"$set":{
+                "guest_access_v1":true,"guest_access_v1_revision":1_i64,
+            }}).await.unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        guest::set_pilot(db, PilotSelection {fleet:true,bot_ids:None},
+            &crate::services::audit_service::AuditActor {user_id:bot.user_id.clone(),
+                api_key_id:None,api_key_name:None,ip_address:None,user_agent:None},
+        ).await.unwrap();
+        ready_test_replica(db).await;
+        flags::set_platform_override(db, guest::FLAG, &FlagTarget::Global, true, &bot.user_id)
+            .await.unwrap();
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        guest::update_activation_in_session(db, &mut tx, true).await.unwrap();
+        tx.commit_transaction().await.unwrap();
+
+        assert_eq!(routing::guest_access_state(db, route).await.unwrap(), "ordinary_dedicated_key_required");
+        let assign = |enabled| routing::update_conversation_with_guest_key(
+            db, &route.id, &route.user_id, None, None, None, None, Some(enabled),
+        );
+        assert!(matches!(assign(true).await, Err(AppError::Conflict(_))));
+        db.collection::<ChannelConversation>(CONVERSATIONS)
+            .delete_one(doc! {"_id":&sibling.id}).await.unwrap();
+        let current = assign(true).await.unwrap();
+        assert_eq!(routing::guest_access_state(db, &current).await.unwrap(), "guest_access");
+        let current = assign(false).await.unwrap();
+        assert_eq!(routing::guest_access_state(db, &current).await.unwrap(), "ordinary_dedicated_key_required");
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -5108,7 +5159,6 @@ mod tests {
             config: &state.config,
             jwt_keys: &state.jwt_keys,
             encryption_keys: &state.encryption_keys,
-            http: &state.http_client,
             rate_limiter: &state.per_channel_event_limiter,
         };
         let retry_bot = channel_bot_service::get_bot(db, &fixture.bot.id)
@@ -5219,12 +5269,14 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(body["chat_id"], "1234");
         }
+        fixture.bot = channel_bot_service::get_bot(db, &fixture.bot.id).await.unwrap();
+        assert!(fixture.bot.diagnostics.guest_relay_work_present);
         assert!(send(fixture.bot.clone(), inbound.clone()).await);
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
         assert!(
             crate::mw::auth::ensure_relay_agent_key_active(db, &legacy)
                 .await
-                .is_ok()
+                .is_err()
         );
         assert!(
             crate::services::key_service::validate_api_key(db, raw_key)
@@ -5239,6 +5291,10 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 4);
         assert!(requests[3].headers.contains_key("x-nyxid-user-token"));
+        let rollback_bearer = requests[3].headers["x-nyxid-user-token"].to_str().unwrap();
+        let rolled_back = jwt::verify_token(&state.jwt_keys, &state.config, rollback_bearer).unwrap();
+        assert!(rolled_back.relay_guest_assignment.is_some());
+        assert!(crate::mw::auth::ensure_relay_agent_key_active(db, &rolled_back).await.is_ok());
         assert!(
             guest_tools(
                 State(state.clone()),
@@ -5386,7 +5442,7 @@ mod tests {
             "discord" => {
                 let chat = if group { 4321 } else { guest + 2_000 };
                 let mut payload = json!({
-                    "type":2,"id":event.to_string(),"application_id":"999",
+                    "type":2,"id":event.to_string(),"application_id":"999","token":"fixture-only-discord-handle",
                     "channel_id":chat.to_string(),"channel":{"id":chat.to_string(),"type":if group { 0 } else { 1 }},
                     "data":{"name":"guest-record"}
                 });
@@ -5569,6 +5625,20 @@ mod tests {
         };
         let (a, a_broad) = dispatch(11, 1234, false).await;
         assert!(!a_broad, "{platform}");
+        if platform == "discord" {
+            assert!(a["thread_id"].is_null());
+            assert!(a.get("raw_platform_data").is_none());
+            let mut source = channel_relay_service::get_message(db, a["message_id"].as_str().unwrap())
+                .await.unwrap();
+            assert!(source.thread_id.as_deref().unwrap().starts_with(guest_relay::REPLY_HANDLE_PREFIX));
+            let sealed = bson::to_document(&source).unwrap();
+            guest_relay::verify_reply_handle_record(&state.encryption_keys, &sealed).await.unwrap();
+            let opened = guest_relay::open_reply_handle(&state.encryption_keys, &source)
+                .await.unwrap().unwrap();
+            assert_eq!(opened.as_str(), "interaction:999:fixture-only-discord-handle");
+            source.id = Uuid::new_v4().to_string();
+            assert!(guest_relay::open_reply_handle(&state.encryption_keys, &source).await.is_err());
+        }
         let (status, created) =
             post(&a, call("create", json!({"title":"A's private record"}))).await;
         assert_eq!(status, StatusCode::OK, "{platform}: {created}");

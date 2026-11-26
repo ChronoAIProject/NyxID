@@ -2177,8 +2177,6 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
-            guest_access_v1: false,
-            guest_access_v1_revision: 0,
             meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),

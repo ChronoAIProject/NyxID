@@ -2217,9 +2217,10 @@ async fn execute_turn_inner(
             .is_some_and(|turn| turn.channel_guest.is_some());
     if guest_skill_turn
         && !row.guest_model_setup
-        && let Ok(Some(chat)) =
-            acknowledgements::for_key(&state.db, &row.user_id, Some(&row.credential_api_key_id))
-                .await
+        && let Ok(Some(chat)) = acknowledgements::chat_for_conversation(&state.db, row).await
+        && chat.api_key_id == credential.api_key_id
+        && chat.turn_id.as_deref() == Some(turn.turn_id.as_str())
+        && chat.channel_guest.as_ref() == turn.channel_guest.as_ref()
         && let Ok(agent) =
             super::channel_guest_access::skills::visible_agent(&state.db, &chat).await
     {

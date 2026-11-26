@@ -46,6 +46,8 @@ struct Settings {
     verified_rooms: Vec<ObservationHint>,
     sheets_connections: Vec<setup::SheetsConnection>,
     sources: Vec<Source>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unmapped_operations: Vec<setup::UnmappedGuestOperation>,
 }
 
 #[derive(Serialize)]
@@ -103,6 +105,7 @@ async fn settings(
     actor: &str,
     active: bool,
     issue: Option<&'static str>,
+    staging: bool,
 ) -> AppResult<SetupResponse> {
     let (row, policy, verified_guests, verified_rooms, sheets_connections) = tokio::try_join!(
         setup::load(&state.db, &bot.id),
@@ -111,6 +114,11 @@ async fn settings(
         list_verified_room_hints(&state.db, &bot.id),
         setup::sheets_connections(&state.db, &bot.id, actor),
     )?;
+    let unmapped_operations = if staging {
+        setup::unmapped_guest_operations(&state.db, &bot.id, actor, &sheets_connections).await?
+    } else {
+        Vec::new()
+    };
     let (policy_revision, effective_rule_count) = policy
         .as_ref()
         .map_or((0, 0), |policy| (policy.revision, policy.rules.len()));
@@ -152,6 +160,7 @@ async fn settings(
             verified_rooms,
             sheets_connections,
             sources,
+            unmapped_operations,
         }),
     })
 }
@@ -185,7 +194,7 @@ async fn status(
         None
     };
     if active || staging {
-        return settings(state, bot, actor, active, issue).await;
+        return settings(state, bot, actor, active, issue, staging).await;
     }
     Ok(SetupResponse {
         available: false,

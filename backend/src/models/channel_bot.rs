@@ -45,6 +45,9 @@ pub struct ChannelBotSubscriptionState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotDiagnostics {
+    /// Sticky source-deduplication hint, committed with the first guest relay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) guest_relay_work_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_inbound_outcome: Option<ChannelInboundOutcome>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -133,7 +136,7 @@ pub struct ChannelBot {
     /// Saved per-installation preference. Missing on bots predating guest access.
     #[serde(default)]
     pub guest_access_v1: bool,
-    /// Increments only when the saved preference changes.
+    /// Fences the saved preference and guest work across ownership changes.
     #[serde(default)]
     pub guest_access_v1_revision: i64,
     /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack", "whatsapp"

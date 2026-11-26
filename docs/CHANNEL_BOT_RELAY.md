@@ -1730,10 +1730,20 @@ message while the admission is current. A private reply or edit requires the
 per-message capability. Old callbacks stop working when enrollment, policy
 revision, or assignment changes.
 
-An enrolled external callback uses an agent key dedicated to one bot. The key
-loses general NyxID access for that enrollment, including when its original
-route is deactivated or its callback URL is cleared. A new ordinary callback
-after switch-off uses the ordinary relay contract.
+An enrolled external callback requires an ordinary agent key explicitly
+dedicated to its exact route. On route creation or update, set
+`dedicate_agent_key_for_guest_access` to true. The route response
+`guest_access_state` identifies the active mode or preparation reason. An
+untouched route with a shared key continues normal relay. Explicit dedication
+requires a compatible key unused by other routes. PATCH with false releases
+a dedication that has yet to admit guest work.
+
+| Route and rollout state | Key and callback authority |
+| --- | --- |
+| Dedicated route active in the add-on | The durable key can reply to original shared sources. Private replies require the source capability. General key use is blocked. |
+| Live original assignment after global or bot opt-out | Fresh ordinary callbacks use the original assigned key and receive a freshly signed bearer bound to the current rollout, bot preference and route revision. Earlier broad bearers and add-on capabilities remain invalid. |
+| Activated assignment removed, retired, transferred or suspended | Old broad credentials are blocked. To repurpose a previously activated key, rotate it and use the successor. Rotation revokes the predecessor and its children. |
+| Dedicated route waiting for a pending ordinary Aurinko callback | The original receipt resumes the ordinary callback. Fresh add-on admission waits for the pending receipt to settle. |
 
 An enrolled callback also carries `guest_access_token`. External runtimes
 use it as the Bearer credential for `POST /api/v1/channel-relay/guest-tools`.
@@ -1750,7 +1760,10 @@ provider credentials independently of this capability.
 NyxID can positively verify one-to-one delivery from Telegram user messages,
 Lark and Feishu app-bound p2p messages, Discord type-1 DMs, Slack IM events,
 WhatsApp individual inbound messages, and authenticated X DMs whose
-conversation identifies both the sender and the receiving account.
+conversation identifies both the sender and the receiving account. Messenger
+and Instagram require the signed participant, current inbox grant, live control,
+and reply window. Guest Discord interaction handles use record-bound encryption
+and require contextual record writers to be enabled before enrollment.
 Supported provider-verified group messages retain their sender identity with
 a shared audience. An adapter without positive evidence uses an unverified
 actor and a shared audience. A normalized gateway event alone provides no
@@ -1759,9 +1772,10 @@ independent evidence at authorization time.
 
 The one-way device gateway carries a caller-supplied source label and issues
 no guest capability. NyxBot custom events enter the hosted guest lane with a
-shared audience. Phone, SMS, and custom speech adapter bindings selected by
-the rollout refuse unclassified guest utterances and tool effects until the
-adapter can use the same guest work and delivery contract.
+shared audience. Phone, SMS, and custom speech adapters use the rollout of
+their verified same-owner parent installation when setup includes
+`parent_channel_bot_id`. An enrolled parent closes unclassified guest
+utterances and tool effects. Standalone bindings keep ordinary behavior.
 
 ### Callback Flow Decision
 

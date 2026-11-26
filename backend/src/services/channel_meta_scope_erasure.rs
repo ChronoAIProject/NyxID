@@ -370,6 +370,16 @@ async fn pass_authorized(
         .await?;
         return Ok(false);
     }
+    if stored.get_document("purge").is_ok_and(|progress| progress.get_i32("phase") == Ok(19))
+        && state.db.collection::<Document>(BOTS)
+            .find_one(doc! {"_id": bot, "channel_guest_data_present": true})
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some()
+        && !crate::services::channel_guest_access::purge_meta_grant_batch(&state.db, bot, grant).await?
+    {
+        return Ok(false);
+    }
     #[cfg(test)]
     crate::services::durable_wake_tests::after("meta_scoped_purge_claimed").await;
     let (done,repair)=crate::services::transaction_service::run_db_only(&state.db,
@@ -1957,6 +1967,14 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
             tx,
         )
         .await?;
+        if db.collection::<Document>(BOTS)
+            .find_one(doc! {"_id":bot,"channel_guest_data_present":true})
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?.is_some()
+        {
+            crate::services::channel_guest_access::setup::purge_bot_in_session(db, tx, bot).await?;
+        }
         if db.collection::<ChannelBot>(BOTS).delete_one(doc! {"_id":bot,"is_active":false,"meta_binding.grant_id":grant,
             "meta_binding.generation":parent.meta_binding.as_ref().map(|binding|binding.generation),"meta_binding.subscription":"removed"})
             .session(&mut *tx).await?.deleted_count!=1 {return Err(grants::incomplete())}

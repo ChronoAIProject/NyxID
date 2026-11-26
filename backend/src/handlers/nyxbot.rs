@@ -3444,17 +3444,17 @@ async fn owner_thread(
     Ok((format!("nyxa-{}", Uuid::new_v4().simple()), false))
 }
 
-/// Run the chat's agent on a message from the owner or, as a guest, from
-/// someone else the chat lets talk to it. The owner's private chats continue
-/// the agent's own thread; groups and other people's chats have their own.
-#[allow(clippy::too_many_arguments)]
 async fn capture_hosted_guest_mode(
     state: &AppState,
     row: &NyxbotChannel,
     event_id: &str,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
 ) -> AppResult<()> {
     use crate::services::channel_guest_access as guest;
-    let mode = guest::select_mode(&state.db, &row.channel_bot_id).await?;
+    let mode = match checked {
+        Some(checked) => checked.guest_mode(&state.db).await?,
+        None => guest::select_mode(&state.db, &row.channel_bot_id).await?,
+    };
     guest::stamp_hosted_mode(&state.db, event_id, &row.id, mode).await
 }
 
@@ -3513,6 +3513,9 @@ struct ChatTurnInput<'a> {
     event_key: &'a str,
 }
 
+/// Run the chat's agent on a message from the owner or, as a guest, from
+/// someone else the chat lets talk to it. The owner's private chats continue
+/// the agent's own thread; groups and other people's chats have their own.
 async fn start_chat_turn(
     state: &AppState,
     row: &NyxbotChannel,
@@ -3624,7 +3627,7 @@ async fn start_chat_turn(
             chat.platform_chat_id.as_deref().unwrap_or(&chat.partition),
             chat.platform_thread_id.as_deref(),
         );
-        match guest_runtime::classify(
+        match guest_runtime::classify_with_meta(
             &state.db,
             mode,
             guest_runtime::VerifiedGuestInput {
@@ -3637,6 +3640,7 @@ async fn start_chat_turn(
                 audience: facts.audience,
                 meta_grant_id: meta_grant.as_ref().map(|grant| grant.grant_id.as_str()),
             },
+            meta_grant.as_ref(),
         )
         .await
         {
@@ -4353,6 +4357,25 @@ async fn provider_channel_classified(
     headers: &HeaderMap,
     observe: bool,
 ) -> Result<(NyxbotChannel, Zeroizing<String>), ProviderChannelFailure> {
+    provider_channel_with_routes(state, headers, observe)
+        .await
+        .map(|(row, raw, _)| (row, raw))
+}
+
+#[allow(clippy::result_large_err)]
+async fn provider_channel_with_routes(
+    state: &AppState,
+    headers: &HeaderMap,
+    observe: bool,
+) -> Result<
+    (
+        NyxbotChannel,
+        Zeroizing<String>,
+        crate::services::platform_bot_authority::PersonalRouteCheck,
+    ),
+    ProviderChannelFailure,
+> {
+    use crate::services::platform_bot_authority as authority;
     let raw = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -4379,25 +4402,17 @@ async fn provider_channel_classified(
     if observe && row.status != "active" {
         return Err(problem(StatusCode::NOT_FOUND, "conversation_not_found").into());
     }
-    match crate::services::platform_bot_authority::require_personal_routes(
-        &state.db,
-        &row.channel_bot_id,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(AppError::Forbidden(_)) => {
-            return Err(ProviderChannelFailure::closed(
-                row,
-                problem(
-                    StatusCode::FORBIDDEN,
-                    "shared_entry_requires_native_receipt",
-                ),
-            ));
-        }
-        Err(_) => {
-            return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
-        }
+    let checked = authority::read_personal_routes(&state.db, &row.channel_bot_id)
+        .await
+        .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?;
+    if !checked.allows(&row.channel_bot_id) {
+        return Err(ProviderChannelFailure::closed(
+            row,
+            problem(
+                StatusCode::FORBIDDEN,
+                "shared_entry_requires_native_receipt",
+            ),
+        ));
     }
     match org_access(state, &row).await {
         Ok(OrgAccess::Holds) => {}
@@ -4418,7 +4433,7 @@ async fn provider_channel_classified(
             return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
         }
     }
-    Ok((row, raw))
+    Ok((row, raw, checked))
 }
 
 async fn provider_key(
@@ -5509,7 +5524,7 @@ async fn custom_responses(
         }
         return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
     }
-    if let Err(error) = capture_hosted_guest_mode(&state, &destination, &event_key).await {
+    if let Err(error) = capture_hosted_guest_mode(&state, &destination, &event_key, None).await {
         discard_failed_provider_event(&state.db, &event_key).await;
         return provider_refusal::error(error);
     }
@@ -5674,7 +5689,7 @@ async fn responses_with_producers_impl(
         Ok(None) => {}
         Err(response) => return response,
     }
-    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
+    let (row, _, checked) = match provider_channel_with_routes(&state, &headers, false).await {
         Ok(found) => found,
         Err(failure) => {
             return Box::pin(response_read::closed_post(&state, &headers, &body, failure)).await;
@@ -5697,7 +5712,15 @@ async fn responses_with_producers_impl(
             .unwrap_or(idempotency),
     );
     if row.gateway_source.is_some() {
-        return native_responses::respond(state, row, headers.clone(), request, idempotency).await;
+        return native_responses::respond(
+            state,
+            row,
+            headers.clone(),
+            request,
+            idempotency,
+            checked,
+        )
+        .await;
     }
     let partition = request["conversation"]
         .as_str()
@@ -6024,7 +6047,10 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     }
-    if newly_admitted && let Err(error) = capture_hosted_guest_mode(&state, &row, &event_key).await
+    if newly_admitted
+        && matches!(activity["actor"]["kind"].as_str(), Some("human" | "bot"))
+        && let Err(error) =
+            capture_hosted_guest_mode(&state, &row, &event_key, Some(&checked)).await
     {
         discard_failed_provider_event(&state.db, &event_key).await;
         return provider_refusal::error(error);
@@ -7229,19 +7255,18 @@ pub async fn relay_callback(
     {
         return unauthorized();
     }
-    if crate::services::platform_bot_authority::require_personal_routes(
-        &state.db,
-        &row.channel_bot_id,
-    )
-    .await
-    .is_err()
-    {
-        x_diagnostics::for_channel(&state.db, &row, XOutcome::AuthorityChanged).await;
-        return problem(
-            StatusCode::FORBIDDEN,
-            "shared_entry_requires_native_receipt",
-        );
-    }
+    use crate::services::platform_bot_authority as authority;
+    let checked = authority::read_personal_routes(&state.db, &row.channel_bot_id).await;
+    let checked = match checked {
+        Ok(checked) if checked.allows(&row.channel_bot_id) => checked,
+        _ => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::AuthorityChanged).await;
+            return problem(
+                StatusCode::FORBIDDEN,
+                "shared_entry_requires_native_receipt",
+            );
+        }
+    };
     // An org bot reaches a person's agent only while they administer the org.
     match org_access(&state, &row).await {
         Ok(OrgAccess::Holds) => {}
@@ -7435,7 +7460,11 @@ pub async fn relay_callback(
     }
     // This internal callback transfers work ownership to NyxID. A transient
     // selection failure releases the unaccepted event for the existing retry.
-    if let Err(error) = capture_hosted_guest_mode(&state, &row, &admitted.id).await {
+    if sender_kind != crate::models::channel_thread::ThreadSenderKind::Unknown
+        && payload["activity"]["reply_supported"] != false
+        && let Err(error) =
+            capture_hosted_guest_mode(&state, &row, &admitted.id, Some(&checked)).await
+    {
         discard_failed_provider_event(&state.db, &admitted.id).await;
         return provider_refusal::error(error);
     }

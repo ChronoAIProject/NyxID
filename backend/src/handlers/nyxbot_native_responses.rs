@@ -18,6 +18,7 @@ pub(super) fn respond(
     headers: HeaderMap,
     request: Value,
     idempotency: &str,
+    checked: crate::services::platform_bot_authority::PersonalRouteCheck,
 ) -> futures::future::BoxFuture<'static, Response> {
     Box::pin(respond_impl(
         state,
@@ -25,6 +26,7 @@ pub(super) fn respond(
         headers,
         request,
         idempotency.to_owned(),
+        checked,
     ))
 }
 
@@ -34,6 +36,7 @@ async fn respond_impl(
     headers: HeaderMap,
     request: Value,
     idempotency: String,
+    checked: crate::services::platform_bot_authority::PersonalRouteCheck,
 ) -> Response {
     // CMA retries only this exact refusal as proven pre-admission. A generic
     // 503 is an uncertain submission and must never be used for preparation.
@@ -45,7 +48,7 @@ async fn respond_impl(
         )
             .into_response(), "conversation_not_ready");
     }
-    match Box::pin(accept(&state, &row, &request, &idempotency)).await {
+    match Box::pin(accept(&state, &row, &request, &idempotency, &checked)).await {
         Ok(stored) => stream(state, row, headers, stored.response_id, None),
         Err(error) => {
             let code = match &error {
@@ -67,6 +70,7 @@ async fn accept(
     row: &NyxbotChannel,
     request: &Value,
     idempotency: &str,
+    checked: &crate::services::platform_bot_authority::PersonalRouteCheck,
 ) -> AppResult<StoredResponse> {
     if !source::ready(row) {
         return Err(AppError::OAuthAuthorityUnavailable);
@@ -100,8 +104,12 @@ async fn accept(
         row.gateway_source.as_ref(),
         Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
     ) {
-        let bot =
-            crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        let bot = crate::services::platform_bot_authority::bot_with(
+            &state.db,
+            &row.channel_bot_id,
+            Some(checked),
+        )
+        .await?;
         let config = crate::services::whatsapp_native::load(&state.db, &bot)
             .await?
             .ok_or_else(|| AppError::Forbidden("native_whatsapp_identity_unavailable".into()))?;
@@ -147,9 +155,9 @@ async fn accept(
     } else {
         claim_message(state, row, activity).await?
     };
-    use crate::services::channel_guest_access::{self as guest, GuestMode};
+    use crate::services::channel_guest_access::GuestMode;
     let guest_mode = if let Some(claim) = &claim {
-        match guest::select_mode(&state.db, &row.channel_bot_id).await {
+        match checked.guest_mode(&state.db).await {
             Ok(mode) => mode,
             Err(error) => {
                 let _ = EventDedupStore::release(&state.db, claim).await;
@@ -321,9 +329,13 @@ async fn accept(
                     .session(&mut *session).await?;
                 if committed.matched_count!=1 {return Err(AppError::Conflict("Native admission changed".into()));}
             }
-            let mut stored_event = bson::to_document(&event).map_err(|_| AppError::OAuthAuthorityUnavailable)?;
-            stored_event.insert("channel_guest_admission", bson::to_bson(&guest_mode).map_err(|_| AppError::OAuthAuthorityUnavailable)?);
-            db.collection::<bson::Document>(EVENTS).insert_one(stored_event).session(&mut *session).await?;
+            if guest_mode == crate::services::channel_guest_access::GuestMode::Legacy {
+                db.collection::<NyxbotEvent>(EVENTS).insert_one(&event).session(&mut *session).await?;
+            } else {
+                let mut stored_event = bson::to_document(&event).map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+                stored_event.insert("channel_guest_admission", bson::to_bson(&guest_mode).map_err(|_| AppError::OAuthAuthorityUnavailable)?);
+                db.collection::<bson::Document>(EVENTS).insert_one(stored_event).session(&mut *session).await?;
+            }
             db.collection::<StoredResponse>(RESPONSES).insert_one(&inserted).session(&mut *session).await?;
             Ok(())
         }.await;

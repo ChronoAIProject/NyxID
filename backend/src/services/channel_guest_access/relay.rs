@@ -4,6 +4,7 @@ use super::{
     AnswerAudience, GuestAdmission, GuestMode, GuestTurn, VerifiedGuestInput, policy, transport,
 };
 use crate::config::AppConfig;
+use crate::crypto::aes::{EncryptionKeys, RecordContext};
 use crate::crypto::jwt::{self, JwtKeys};
 use crate::errors::{AppError, AppResult};
 use crate::models::{
@@ -14,6 +15,7 @@ use crate::models::{
     nyxbot_channel::COLLECTION_NAME as HOSTED,
 };
 use crate::services::{channel_platform::InboundMessage, channel_relay_service};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bson::{Document, doc};
 use mongodb::Database;
 
@@ -38,13 +40,17 @@ pub(crate) async fn is_hosted_route(
 /// channel metadata. The stable ID recognizes old add-on work across off/on.
 pub(crate) async fn prepare(
     db: &Database,
+    keys: &EncryptionKeys,
     bot: &ChannelBot,
     route: &ChannelConversation,
     inbound: &InboundMessage,
     metadata: &mut ChannelMessage,
 ) -> AppResult<bool> {
-    let conversation_id =
-        transport::destination(&inbound.conversation_id, inbound.thread_id.as_deref());
+    let mode = super::select_mode_for_bot(db, bot).await?;
+    if mode == GuestMode::Legacy && !bot.diagnostics.guest_relay_work_present {
+        return Ok(true);
+    }
+    let conversation_id = destination_for(metadata)?;
     let event_id = match channel_relay_service::native_event_id(&bot.platform, &inbound.raw_data) {
         Some(id) => format!("relay-update:{id}"),
         None => format!(
@@ -74,17 +80,16 @@ pub(crate) async fn prepare(
     if existing.is_some() {
         return Ok(false);
     }
-    let mode = super::select_mode_for_bot(db, bot).await?;
     if mode == GuestMode::Legacy {
         return Ok(true);
     }
     let mut facts = transport::inbound_facts(bot, inbound, metadata.thread_context.as_ref());
-    let meta_grant_id = if crate::services::channel_adapters::meta::is_meta(&bot.platform) {
+    let meta_grant = if crate::services::channel_adapters::meta::is_meta(&bot.platform) {
         let authority = metadata.meta_authority.as_ref().ok_or_else(refused)?;
         let grant = validate_meta_source(bot, metadata)?;
         facts.sender_id = Some(authority.sender_id.as_str());
         facts.audience = AnswerAudience::Private;
-        Some(grant.grant_id)
+        Some(grant)
     } else {
         None
     };
@@ -110,7 +115,7 @@ pub(crate) async fn prepare(
     if prior.is_some() {
         return Ok(false);
     }
-    let GuestAdmission::AddOn(turn) = super::classify(
+    let GuestAdmission::AddOn(turn) = super::classify_with_meta(
         db,
         mode,
         VerifiedGuestInput {
@@ -121,8 +126,9 @@ pub(crate) async fn prepare(
             source_event_id: &event_id,
             sender_id: facts.sender_id,
             audience: facts.audience,
-            meta_grant_id: meta_grant_id.as_deref(),
+            meta_grant_id: meta_grant.as_ref().map(|grant| grant.grant_id.as_str()),
         },
+        meta_grant.as_ref(),
     )
     .await?
     else {
@@ -130,6 +136,11 @@ pub(crate) async fn prepare(
     };
     metadata.id = stable_source;
     metadata.guest_relay = Some(turn);
+    if let Some(thread) = metadata.thread_id.as_deref().filter(|thread| {
+        metadata.platform == "discord" && thread.starts_with("interaction:")
+    }) {
+        metadata.thread_id = Some(seal_reply_handle(keys, metadata, thread.as_bytes()).await?);
+    }
     Ok(true)
 }
 
@@ -364,7 +375,7 @@ pub(crate) async fn bind_in_session(
     ).session(&mut *session).await?;
     let bot = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
         doc! {"_id":&turn.bot_id,"user_id":&source.user_id,"is_active":true},
-        doc! {"$set":{"channel_guest_data_present":true}},
+        doc! {"$set":{"channel_guest_data_present":true,"diagnostics.guest_relay_work_present":true}},
     ).session(&mut *session).await?;
     if [route, retained, bot].iter().any(|row| row.matched_count != 1) {
         return Err(refused());
@@ -463,37 +474,116 @@ pub(crate) struct RetainedRelayKey {
     guest_relay_bot_id: Option<String>,
     guest_relay_dedicated_bot_id: Option<String>,
     guest_relay_dedicated_route_id: Option<String>,
+    guest_relay_activation_epoch: Option<i64>,
+    guest_relay_bot_revision: Option<i64>,
 }
 
 impl RetainedRelayKey {
     pub(crate) async fn require_broad_access(&self, db: &Database) -> AppResult<()> {
-        let Some(bot_id) = self.guest_relay_bot_id.as_deref()
-            .or(self.guest_relay_dedicated_bot_id.as_deref()) else {
-            return Ok(());
-        };
-        if super::select_mode(db, bot_id).await? == GuestMode::Legacy {
-            return Ok(());
-        }
-        if let Some(route_id) = &self.guest_relay_dedicated_route_id {
-            let route = db.collection::<ChannelConversation>(ROUTES).find_one(doc! {
-                "_id": route_id, "channel_bot_id": bot_id, "user_id": &self.key.user_id,
-                "agent_api_key_id": &self.key.id, "is_active":true, "retired_by_transfer":{"$ne":true},
-            }).await?;
-            if let Some(route) = route {
-                if route.platform == "aurinko"
-                    && has_pending_legacy_callback(db, bot_id, &route.user_id).await?
-                {
-                    return Ok(());
-                }
-                if self.guest_relay_bot_id.is_none() && !compatible_key(&self.key, &route.user_id) {
-                    return Ok(());
-                }
-            } else if self.guest_relay_bot_id.is_none() {
-                return Ok(());
+        self.broad_route(db).await.map(drop)
+    }
+
+    async fn broad_route(&self, db: &Database) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
+        let current = self.live_route(db).await?;
+        if let Some((bot, route)) = &current {
+            if super::select_mode_for_bot(db, bot).await? == GuestMode::Legacy
+                || (route.platform == "aurinko"
+                    && has_pending_legacy_callback(db, &bot.id, &route.user_id).await?)
+                || (self.guest_relay_bot_id.is_none() && !compatible_key(&self.key, &route.user_id))
+            {
+                return Ok(current);
             }
+        } else if self.guest_relay_bot_id.is_none() {
+            return Ok(None);
         }
         Err(refused())
     }
+
+    async fn live_route(&self, db: &Database) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
+        let Some((bot_id, route_id)) = self.guest_relay_dedicated_bot_id.as_deref()
+            .zip(self.guest_relay_dedicated_route_id.as_deref()) else {
+            return Ok(None);
+        };
+        let bot = db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .find_one(doc! {"_id":bot_id,"user_id":&self.key.user_id,"is_active":true,
+                "status":{"$nin":["suspended","transferring"]},
+            }).await?;
+        let Some(bot) = bot else { return Ok(None); };
+        let route = db.collection::<ChannelConversation>(ROUTES).find_one(doc! {
+            "_id": route_id, "channel_bot_id": bot_id, "user_id": &self.key.user_id,
+            "agent_api_key_id": &self.key.id, "is_active":true, "retired_by_transfer":{"$ne":true},
+        }).await?;
+        Ok(route.map(|route| (bot, route)))
+    }
+
+    async fn broad_assignment(&self, db: &Database) -> AppResult<Option<String>> {
+        let current = self.broad_route(db).await?;
+        if self.guest_relay_bot_id.is_none() {
+            return Ok(None);
+        }
+        let (bot, route) = current.ok_or_else(refused)?;
+        let enrolled_epoch = self.guest_relay_activation_epoch.ok_or_else(refused)?;
+        let enrolled_revision = self.guest_relay_bot_revision.ok_or_else(refused)?;
+        let rollout_epoch = super::activation_collection(db)
+            .find_one(doc! {"_id":super::FLAG}).await?.ok_or_else(refused)?.epoch;
+        Ok(Some(format!(
+            "{}.{enrolled_epoch}.{enrolled_revision}.{rollout_epoch}.{}.{}",
+            route.id, bot.guest_access_v1_revision, route.updated_at.timestamp_millis(),
+        )))
+    }
+
+    pub(crate) async fn require_relay_bearer(
+        &self,
+        db: &Database,
+        claim: Option<&str>,
+    ) -> AppResult<()> {
+        if self.broad_assignment(db).await?.as_deref() != claim {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn mint_ordinary_bearer(
+        &self,
+        db: &Database,
+        keys: &JwtKeys,
+        config: &AppConfig,
+        owner: &uuid::Uuid,
+        route: &ChannelConversation,
+        scope: &str,
+        rbac: Option<&jwt::RbacClaimData>,
+        agent: &jwt::RelayAgentScope,
+    ) -> AppResult<String> {
+        let assignment = self.broad_assignment(db).await?;
+        if self.key.user_id != route.user_id || agent.api_key_id != self.key.id
+            || (assignment.is_some() && self.guest_relay_dedicated_route_id.as_deref() != Some(&route.id))
+        {
+            return Err(refused());
+        }
+        jwt::generate_relay_access_token_with_assignment(
+            keys, config, owner, scope, rbac, agent, assignment,
+        )
+    }
+}
+
+pub(crate) async fn release_unused_key_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    route: &ChannelConversation,
+) -> AppResult<()> {
+    let keys = db.collection::<Document>(API_KEYS);
+    let filter = doc! {"_id":&route.agent_api_key_id,"user_id":&route.user_id,
+        "guest_relay_dedicated_route_id":&route.id};
+    if keys.find_one(filter.clone()).session(&mut *session).await?
+        .is_some_and(|key| key.get_str("guest_relay_bot_id").is_ok())
+    {
+        return Err(AppError::Conflict("Rotate the previously enrolled key to reuse it on another route".into()));
+    }
+    keys.update_one(filter, doc! {"$unset":{
+        "guest_relay_dedicated_route_id":"","guest_relay_dedicated_bot_id":"",
+    }}).session(&mut *session).await?;
+    Ok(())
 }
 
 pub(crate) async fn require_assignment_in_session(
@@ -517,13 +607,128 @@ pub(crate) async fn require_assignment_in_session(
     Ok(())
 }
 
+pub(crate) const REPLY_HANDLE_PREFIX: &str = "guest-interaction.v3:";
+
+fn reply_handle_fields(source: &ChannelMessage) -> AppResult<[&str; 7]> {
+    let turn = source.guest_relay.as_ref().ok_or_else(refused)?;
+    let bot = source.channel_bot_id.as_deref().ok_or_else(refused)?;
+    let event = source.platform_message_id.as_deref().ok_or_else(refused)?;
+    if source.direction != "inbound" || source.platform != "discord"
+        || turn.bot_id != bot || turn.binding_id != source.conversation_id
+        || turn.platform != source.platform
+        || turn.conversation_id != destination_for(source)?
+    {
+        return Err(refused());
+    }
+    Ok(["thread_id", "guest-relay-discord", bot, &source.platform,
+        &turn.binding_id, event, &turn.conversation_id])
+}
+
+fn reply_handle_context<'a>(
+    source: &'a ChannelMessage,
+    fields: &'a [&'a str],
+) -> AppResult<RecordContext<'a>> {
+    RecordContext::new(
+        crate::models::channel_message::COLLECTION_NAME, &source.id, &source.user_id, fields,
+    )
+}
+
+async fn seal_reply_handle(
+    keys: &EncryptionKeys,
+    source: &ChannelMessage,
+    plaintext: &[u8],
+) -> AppResult<String> {
+    if plaintext.len() > 2048 || !plaintext.starts_with(b"interaction:") {
+        return Err(refused());
+    }
+    let fields = reply_handle_fields(source)?;
+    let ciphertext = keys.encrypt_record(plaintext, &reply_handle_context(source, &fields)?).await?;
+    Ok(format!("{REPLY_HANDLE_PREFIX}{}", URL_SAFE_NO_PAD.encode(ciphertext)))
+}
+
+fn decode_reply_handle(source: &ChannelMessage) -> AppResult<Vec<u8>> {
+    let encoded = source.thread_id.as_deref()
+        .and_then(|thread| thread.strip_prefix(REPLY_HANDLE_PREFIX))
+        .filter(|encoded| encoded.len() <= 8192).ok_or_else(refused)?;
+    URL_SAFE_NO_PAD.decode(encoded).map_err(|_| refused())
+}
+
+pub(crate) async fn open_reply_handle(
+    keys: &EncryptionKeys,
+    source: &ChannelMessage,
+) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+    let Some(thread) = source.thread_id.as_deref().filter(|_| source.guest_relay.is_some()) else {
+        return Ok(None);
+    };
+    if !thread.starts_with(REPLY_HANDLE_PREFIX) {
+        if source.platform == "discord" && thread.starts_with("interaction:") {
+            return Err(refused());
+        }
+        return Ok(None);
+    }
+    if chrono::Utc::now() >= source.created_at + chrono::Duration::minutes(14) {
+        return Err(AppError::TokenExpired);
+    }
+    let fields = reply_handle_fields(source)?;
+    let bytes = keys.decrypt_record(&decode_reply_handle(source)?, &reply_handle_context(source, &fields)?)
+        .await?;
+    let opened = std::str::from_utf8(&bytes).map_err(|_| refused())?;
+    if !opened.starts_with("interaction:") || opened.len() > 2048 {
+        return Err(refused());
+    }
+    Ok(Some(zeroize::Zeroizing::new(opened.to_owned())))
+}
+
+pub(crate) async fn verify_reply_handle_record(keys: &EncryptionKeys, row: &Document) -> AppResult<()> {
+    let source: ChannelMessage = bson::from_document(row.clone()).map_err(|_| refused())?;
+    let fields = reply_handle_fields(&source)?;
+    keys.authenticate_current_record(&decode_reply_handle(&source)?, &reply_handle_context(&source, &fields)?)
+        .await
+}
+
+pub(crate) async fn migrate_reply_handle_record(
+    db: &Database,
+    keys: &EncryptionKeys,
+    row: &Document,
+) -> AppResult<bool> {
+    let source: ChannelMessage = bson::from_document(row.clone()).map_err(|_| refused())?;
+    let ciphertext = decode_reply_handle(&source)?;
+    let fields = reply_handle_fields(&source)?;
+    let context = reply_handle_context(&source, &fields)?;
+    if keys.authenticate_current_record(&ciphertext, &context).await.is_ok() {
+        return Ok(false);
+    }
+    let bytes = keys.decrypt_record(&ciphertext, &context).await?;
+    let sealed = seal_reply_handle(keys, &source, &bytes).await?;
+    let applied = db.collection::<Document>(crate::models::channel_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &source.id, "user_id":&source.user_id,
+                "channel_bot_id": &source.channel_bot_id, "conversation_id": &source.conversation_id,
+                "platform_conversation_id": &source.platform_conversation_id,
+                "platform_message_id": &source.platform_message_id,
+                "thread_id": &source.thread_id},
+            doc! {"$set":{"thread_id":sealed}},
+        ).await?;
+    Ok(applied.modified_count == 1)
+}
+
 fn destination_for(source: &ChannelMessage) -> AppResult<String> {
     let chat = source
         .platform_conversation_id
         .as_deref()
         .filter(|id| !id.is_empty() && *id != "*")
         .ok_or_else(refused)?;
-    Ok(transport::destination(chat, source.thread_id.as_deref()))
+    let mut thread = source.thread_id.as_deref();
+    let interaction;
+    if source.platform == "discord" && thread.is_some_and(|thread| {
+        thread.starts_with(REPLY_HANDLE_PREFIX) || thread.starts_with("interaction:")
+    }) {
+        let event = source.platform_message_id.as_deref().filter(|id| !id.is_empty())
+            .ok_or_else(refused)?;
+        interaction = format!("discord-interaction:{event}");
+        thread = Some(&interaction);
+    }
+    Ok(transport::destination(chat, thread))
 }
 
 pub(crate) async fn revalidate_delivery(

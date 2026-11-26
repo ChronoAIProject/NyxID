@@ -16,7 +16,7 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 50 implemented adapters
+The registry has 51 entries for 49 collections, with 51 implemented adapters
 and 0 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
@@ -72,6 +72,11 @@ A collection may use separate adapters for different fields.
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
 | `channel_meta_oauth_sessions` | `assets_encrypted` | [Meta OAuth consent assets](../../backend/src/services/channel_meta_service/asset_record.rs) | Implemented |
+| `channel_messages` | `thread_id` | [Discord guest reply handle](../../backend/src/services/channel_guest_access/relay.rs) | Implemented |
+
+For `channel_messages.thread_id`, the walk selects sealed Discord guest reply
+handles with the `guest-interaction.v3:` prefix. The relay adapter authenticates
+the record binding and rewraps eligible handles under the current key.
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
 and a separate field path for each webhook. System, dynamic and ownerless

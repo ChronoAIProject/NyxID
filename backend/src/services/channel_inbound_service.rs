@@ -341,7 +341,7 @@ async fn process_messages(
             telegram,
             route_id: &route.conversation.id,
         };
-        match guest_relay::prepare(state.db, bot, &route.conversation, inbound, &mut metadata).await {
+        match guest_relay::prepare(state.db, state.encryption_keys, bot, &route.conversation, inbound, &mut metadata).await {
             Ok(true) => {}
             Ok(false) => {
                 matched.record(Outcome::Duplicate).await;
@@ -442,7 +442,7 @@ async fn process_messages(
         }
 
         // Look up the API key for signing and name attribution
-        let api_key = match channel_routing_service::load_callback_key(
+        let retained_key = match channel_routing_service::load_retained_callback_key(
             state.db,
             &route,
             &bot.user_id,
@@ -465,6 +465,7 @@ async fn process_messages(
                 continue;
             }
         };
+        let api_key = &retained_key.key;
 
         let extended = activity.as_ref().is_some_and(|value| {
             super::channel_activity_callback_service::supports(
@@ -531,14 +532,17 @@ async fn process_messages(
                 allow_all_services: api_key.allow_all_services,
                 allow_all_nodes: api_key.allow_all_nodes,
             };
-            crate::crypto::jwt::generate_relay_access_token(
+            retained_key.mint_ordinary_bearer(
+                state.db,
                 state.jwt_keys,
                 state.config,
                 &bot_owner_uuid,
+                &route.conversation,
                 scope,
                 rbac_data.as_ref(),
                 &agent_scope,
             )
+            .await
             .ok()
         };
 

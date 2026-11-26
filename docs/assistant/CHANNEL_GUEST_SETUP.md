@@ -30,6 +30,12 @@ On a bot selected for the channel guest rollout, open **Guest experience** when 
 2. Add an explicit data rule with an audience, source, actions and, where applicable, fields. A new or enrolled bot with no applied configuration has zero guest data grants. **Save draft** preserves choices while you connect services or verify guests. The currently applied policy governs execution until you apply an update.
 3. Use **Preview two guests** to review access across two identities, including cross-guest access to an example record and whether the same information could be used in a group. The server runs the same data-policy evaluator with sample records. Apply once the result matches the intended policy. Preview results describe configuration decisions. Confirm transport delivery, service authorization and independent approvals separately in an end-to-end test.
 
+### Prepare a policy before enrollment
+
+Open **Prepare guest access** in the bot settings. The staging editor keeps the bot on its ordinary settings while you save a draft, review any existing operations without a replacement, preview two guests, and mark the saved draft for activation. Named guest and room selection requires verified channel observations for this installation. The owner can enable **Use guest access v1** before or after preparing the draft. A marked draft is applied once the bot is selected and its authorization still matches. If the owner, pin, or grants change, review and mark a corrected draft to retry.
+
+For an external route, open **Route guest access** in the route's actions. Choose a compatible key and dedicate it to the exact route. The create dialog also supports dedication. A newly configured route continues ordinary delivery until its key qualifies, and the route status shows whether a dedicated key or completion of a legacy callback is required.
+
 ## Available information sources
 
 **Personal records** is a bot-owned collection with Title and Body fields. The **Manage their own data** preset grants create, read, update and delete on each verified guest's own records in private conversations. Each action and its supported fields can be selected independently. Record ownership comes from the authenticated channel account. A guest who changes chat accounts has a different identity.

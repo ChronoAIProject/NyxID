@@ -426,6 +426,8 @@ mod tests {
             audience,
             policy_revision: 1,
             activation_epoch: 1,
+            bot_revision: 1,
+            meta_grant_id: None,
         }
     }
 
@@ -641,34 +643,64 @@ mod tests {
 
     #[tokio::test]
     async fn channel_guest_policy_delivery_rejects_retargeting_revocation_and_duplicate_rows() {
-        use crate::models::{channel_bot, feature_flag_override};
-        use crate::services::{channel_guest_access as runtime, security_readiness_service};
+        use crate::models::{channel_bot, feature_flag_override::FlagTargetKind};
+        use crate::services::{
+            audit_service::AuditActor, channel_guest_access as runtime,
+            feature_flag_admin_service as admin, security_readiness_service,
+        };
 
-        let db = crate::test_utils::connect_test_database("guest_policy_delivery")
-            .await
-            .unwrap();
-        security_readiness_service::ready_test_replica(&db).await;
+        let db =
+            crate::test_utils::connect_transaction_test_database("guest_policy_delivery").await;
+        let actor = AuditActor {
+            user_id: uuid::Uuid::new_v4().to_string(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        };
         db.collection::<bson::Document>(channel_bot::COLLECTION_NAME)
-            .insert_one(doc! { "_id": "bot", "is_active": true })
-            .await
-            .unwrap();
-        db.collection::<bson::Document>(feature_flag_override::COLLECTION_NAME)
             .insert_one(doc! {
-                "_id": uuid::Uuid::new_v4().to_string(),
-                "flag_key": runtime::FLAG, "target_kind": "global", "enabled": true,
-                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-                "updated_by": "test-owner",
+                "_id": "bot", "is_active": true, "guest_access_v1": true,
+                "guest_access_v1_revision": 1_i64,
             })
             .await
             .unwrap();
-        let mut session = db.client().start_session().await.unwrap();
-        session.start_transaction().await.unwrap();
-        runtime::update_activation_in_session(&db, &mut session, true)
-            .await
-            .unwrap();
-        session.commit_transaction().await.unwrap();
+        runtime::set_pilot(
+            &db,
+            runtime::PilotSelection {
+                bot_ids: None,
+                fleet: true,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+        security_readiness_service::ready_test_replica(&db).await;
+        admin::mutate(
+            &db,
+            runtime::FLAG,
+            admin::Mutation::Override {
+                kind: FlagTargetKind::Global,
+                target_id: None,
+                enabled: Some(true),
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
 
-        let turn = turn("guest-a", AnswerAudience::Private);
+        let runtime::GuestMode::AddOn {
+            activation_epoch,
+            bot_revision,
+        } = runtime::select_mode(&db, "bot").await.unwrap()
+        else {
+            panic!("opted-in fixture bot must use the add-on");
+        };
+        let turn = GuestTurn {
+            activation_epoch,
+            bot_revision,
+            ..turn("guest-a", AnswerAudience::Private)
+        };
         let policies = db.collection::<GuestDataPolicy>(COLLECTION_NAME);
         let mut current = policy(Vec::new());
         policies.insert_one(&current).await.unwrap();

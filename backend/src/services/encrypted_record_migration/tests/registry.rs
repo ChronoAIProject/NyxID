@@ -66,7 +66,25 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
     assert!(!unique.contains(&("nyxbot_events", "event_ref_ciphertext")));
     assert!(!unique.contains(&("auth_device_codes_v2", "delivery_credential_encrypted")));
 
-    assert_eq!((REGISTRY.len(), collections.len()), (50, 48));
+    assert_eq!((REGISTRY.len(), collections.len()), (51, 49));
+}
+
+#[test]
+fn channel_guest_reply_inventory_classifies_only_sealed_thread_ids() {
+    let entry = REGISTRY
+        .iter()
+        .find(|entry| matches!(entry.adapter, Adapter::ChannelGuestReplyHandle))
+        .unwrap();
+    assert!(!has_material(entry, &doc! {}));
+    assert!(!has_material(entry, &doc! {"thread_id": "1234567890"}));
+    assert!(!has_material(
+        entry,
+        &doc! {"thread_id": "ordinary-guest-interaction.v3:thread"},
+    ));
+    assert!(has_material(
+        entry,
+        &doc! {"thread_id": "guest-interaction.v3:"},
+    ));
 }
 
 #[tokio::test]
@@ -81,7 +99,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "8acbe2061299e980970c72edbec11205c3575ef6f29ae743074d5023de3ca873"
+        "1df363937ded7ca109215e65e91c148cec0bafc8778f65b4b5c0d2f82821f1bd"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -210,6 +228,12 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         assert_eq!(
             report.field_outcomes.iter().any(|field| {
                 field.collection == "nyxbot_events" && field.field == "channel_guest_setup_payload"
+            }),
+            digest == Some(live.as_str()),
+        );
+        assert_eq!(
+            report.field_outcomes.iter().any(|field| {
+                field.collection == "channel_messages" && field.field == "thread_id"
             }),
             digest == Some(live.as_str()),
         );

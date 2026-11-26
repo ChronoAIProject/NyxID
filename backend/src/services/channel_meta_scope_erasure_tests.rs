@@ -812,6 +812,71 @@ async fn final_positive_inventory_rewinds_behind_the_scope_fence_and_finishes_bo
 }
 
 #[tokio::test]
+async fn guest_personal_records_erasure_drains_only_the_exact_meta_grant() {
+    let f = fixture().await;
+    let db = &f.state.db;
+    let proof = scopes::reference(&f.bot).unwrap();
+    db.collection::<Document>(BOTS)
+        .update_one(
+            doc! {"_id":&f.bot.id},
+            doc! {"$set":{
+                "is_active":false,"meta_binding.subscription":"removed","channel_guest_data_present":true,
+            }},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":f.scope.get("_id").cloned()},
+            doc! {"$set":{"erasure_requested":true,"purge":{"phase":19}}},
+        )
+        .await
+        .unwrap();
+    let records = db.collection::<Document>(crate::models::channel_guest_personal_record::COLLECTION_NAME);
+    let exact = doc! {"bot_id":&f.bot.id,"meta_grant_id":&proof.grant_id};
+    let rows = (0..=PAGE).map(|_| {
+        let mut row = exact.clone();
+        row.insert("_id", uuid::Uuid::new_v4().to_string());
+        row
+    }).collect::<Vec<_>>();
+    records.insert_many(rows).await.unwrap();
+    records.insert_many([
+        doc! {"_id":"another-grant","bot_id":&f.bot.id,"meta_grant_id":"different"},
+        doc! {"_id":"another-inbox","bot_id":"different","meta_grant_id":&proof.grant_id},
+    ]).await.unwrap();
+    let work = db.collection::<Document>("channel_guest_work_v1");
+    work.insert_many([
+        doc! {"_id":"exact","turn":{"bot_id":&f.bot.id,"meta_grant_id":&proof.grant_id}},
+        doc! {"_id":"another-grant","turn":{"bot_id":&f.bot.id,"meta_grant_id":"different"}},
+        doc! {"_id":"another-inbox","turn":{"bot_id":"different","meta_grant_id":&proof.grant_id}},
+    ]).await.unwrap();
+    let observations = db.collection::<Document>("channel_guest_verified_observations");
+    observations.insert_many([
+        doc! {"_id":"exact","bot_id":&f.bot.id,"meta_grant_id":&proof.grant_id},
+        doc! {"_id":"another-grant","bot_id":&f.bot.id,"meta_grant_id":"different"},
+        doc! {"_id":"another-inbox","bot_id":"different","meta_grant_id":&proof.grant_id},
+    ]).await.unwrap();
+    let service = MetaService::from(&f.state);
+    let cutoff = bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::seconds(1));
+    assert!(!pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff).await.unwrap());
+    for collection in [&work, &observations] {
+        assert!(collection.find_one(doc! {"_id":"exact"}).await.unwrap().is_none());
+        assert_eq!(collection.count_documents(doc! {}).await.unwrap(), 2);
+    }
+    assert_eq!(records.count_documents(exact.clone()).await.unwrap(), (PAGE + 1) as u64);
+    assert!(!pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff).await.unwrap());
+    assert_eq!(records.count_documents(exact.clone()).await.unwrap(), 1);
+    assert!(!pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff).await.unwrap());
+    assert!(pass(&f.state, &service, &f.bot.id, &proof.grant_id, cutoff).await.unwrap());
+    assert_eq!(records.count_documents(exact).await.unwrap(), 0);
+    for collection in [&records, &work, &observations] {
+        assert_eq!(collection.count_documents(doc! {"_id":{"$in":["another-grant","another-inbox"]}}).await.unwrap(), 2);
+    }
+    assert!(grants::completion_for(db, &f.bot.id, &proof.grant_id).await.unwrap());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn final_inventory_revisits_nested_queued_and_active_provenance_before_completion() {
     for location in [
         "pending",

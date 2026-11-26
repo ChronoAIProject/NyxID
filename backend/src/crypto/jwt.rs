@@ -139,6 +139,8 @@ pub struct Claims {
     /// Agent key ID that triggered the relay (for scope inheritance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_api_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_guest_assignment: Option<String>,
     /// Agent key name (for audit attribution).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_api_key_name: Option<String>,
@@ -646,6 +648,7 @@ fn generate_access_token_for_client(
         cnf,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -734,6 +737,7 @@ pub fn generate_assistant_forward_access_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -779,6 +783,18 @@ pub fn generate_relay_access_token(
     rbac: Option<&RbacClaimData>,
     agent_scope: &RelayAgentScope,
 ) -> Result<String, AppError> {
+    generate_relay_access_token_with_assignment(keys, config, user_id, scope, rbac, agent_scope, None)
+}
+
+pub(crate) fn generate_relay_access_token_with_assignment(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    agent_scope: &RelayAgentScope,
+    relay_guest_assignment: Option<String>,
+) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
     let claims = Claims {
@@ -807,6 +823,7 @@ pub fn generate_relay_access_token(
         cnf: None,
         relay: Some(true),
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
+        relay_guest_assignment,
         relay_api_key_name: Some(agent_scope.api_key_name.clone()),
         relay_allowed_service_ids: Some(agent_scope.allowed_service_ids.clone()),
         relay_allowed_node_ids: Some(agent_scope.allowed_node_ids.clone()),
@@ -981,6 +998,7 @@ pub fn generate_refresh_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -1039,6 +1057,7 @@ pub fn reissue_refresh_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -1200,6 +1219,7 @@ fn generate_delegated_access_token_inner(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -1351,6 +1371,7 @@ pub fn generate_service_account_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -2057,6 +2078,7 @@ mod tests {
             cnf: None,
             relay: None,
             relay_api_key_id: None,
+            relay_guest_assignment: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,
@@ -2179,6 +2201,7 @@ mod tests {
             cnf: None,
             relay: None,
             relay_api_key_id: None,
+            relay_guest_assignment: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,

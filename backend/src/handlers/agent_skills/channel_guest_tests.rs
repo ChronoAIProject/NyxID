@@ -419,9 +419,18 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
     );
     assert_eq!(upstream.received_requests().await.unwrap().len(), 4);
 
-    crate::services::approval_service::delete_service_approval_config(db, &f.owner, &catalog.id)
-        .await
-        .unwrap();
+    crate::services::approval_service::delete_service_approval_config(
+        db,
+        &f.owner,
+        &catalog.id,
+        crate::services::approval_service::ConfigAudit {
+            actor,
+            user_service_id: None,
+        },
+        false,
+    )
+    .await
+    .unwrap();
     agents
         .update_one(
             doc! {"_id":agent_id},
