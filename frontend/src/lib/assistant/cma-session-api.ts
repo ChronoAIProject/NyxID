@@ -531,8 +531,13 @@ export function cmaInitialTaskOutcome(
   ))
     return null;
   const { state } = evidence.first_message;
-  if (state === "completed" || state === "failed" || state === "recovery_required")
-    return state;
+  if (state === "completed" || state === "failed") return state;
+  if (
+    state === "recovery_required" ||
+    ["failed", "stopped", "deleted"].includes(evidence.status)
+  ) {
+    return "needs_attention";
+  }
   return "pending";
 }
 

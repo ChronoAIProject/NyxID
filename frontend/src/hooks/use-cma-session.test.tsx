@@ -72,7 +72,7 @@ const initialTaskReceipt = {
   operationId: "lifecycle-1",
 };
 
-it.each(["completed", "failed", "recovery_required", null, 404] as const)(
+it.each(["completed", "failed", "needs_attention", null, 404] as const)(
   "stops history polling on definitive observation %s and reauthorizes on mount",
   async (observation) => {
     vi.useFakeTimers();

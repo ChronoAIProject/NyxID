@@ -249,7 +249,7 @@ it("uses the authorized live Agent detail for the source receipt's initial task"
       <CmaSessionContext value={[{
         session: {
           ...cmaSession,
-          initialTask: { first_message: { purpose: "task", state: "completed" } },
+          initialTask: { status: "working", first_message: { purpose: "task", state: "completed" } },
           origin: {
             service_id: cmaSession.connection.id,
             agent_id: cmaSession.agentId,

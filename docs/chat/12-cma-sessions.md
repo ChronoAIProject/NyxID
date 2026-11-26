@@ -295,12 +295,14 @@ Agent, then reads that Agent directly. A live card for the same verified source
 uses its existing Agent detail read for the request row. CMA exposes
 `bootstrap.operation_id` only during early startup. When supplied, it must match
 the recorded lifecycle operation ID. For `first_message.purpose: task`, the
-first-message state determines pending, completed or failed status, and
-`recovery_required` shows **Needs attention**. Setup, missing task evidence and
-lineage mismatches retain the recorded receipt status.
+first-message state determines pending, completed or failed status.
+`recovery_required` and unfinished tasks on a `failed`, `stopped` or `deleted`
+Agent show **Needs attention**. A durable completed or failed task result takes
+precedence over the Agent status. Setup, missing task evidence and lineage
+mismatches retain the recorded receipt status.
 
 Pending initial tasks and retryable read failures poll every 15 seconds in a
-mounted history card. A terminal result, recovery requirement, missing task
+mounted history card. A terminal result, **Needs attention**, missing task
 evidence or definitive denial stops that polling. A withdrawn receipt or
 definitive denial renders the recorded receipt status. Remounting, including
 after reload, checks current authorization and reads CMA's durable evidence

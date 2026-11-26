@@ -60,7 +60,7 @@ async function mockCma(
     slug?: string;
   } = {},
 ) {
-  let active = !options.idle;
+  let agentStatus = options.idle ? "ready" : "working";
   let completed = false;
   let callback: unknown = undefined;
   let authorized = true;
@@ -243,7 +243,7 @@ async function mockCma(
     const agent = {
       id: cmaSession.agentId,
       title: cmaSession.title,
-      status: active ? "working" : "ready",
+      status: agentStatus,
       ...(callback === undefined ? {} : { callback_url: callback }),
       ...(firstMessage ? { first_message: firstMessage } : {}),
     };
@@ -267,17 +267,18 @@ async function mockCma(
     requests,
     setAuthorized: (value: boolean) => { authorized = value; },
     setFirstMessage: (value: typeof firstMessage) => { firstMessage = value; },
+    stop: () => { agentStatus = "stopped"; },
     setCallback: (value: unknown) => {
       callback = value;
     },
     start: () => {
-      active = true;
+      agentStatus = "working";
     },
     finishStream: () => {
       completed = true;
     },
     markIdle: () => {
-      active = false;
+      agentStatus = "ready";
     },
     tailCount: () => tails,
     headCount: () => heads,
@@ -602,6 +603,14 @@ test("recovers the initial task outcome, stops settled polling, and reauthorizes
   const recoveryReads = detailCount();
   await page.clock.fastForward(46_000);
   expect(detailCount()).toBe(recoveryReads);
+
+  cma.setFirstMessage({ purpose: "task", state: "queued" });
+  cma.stop();
+  await reloadWithDetail();
+  await expect(status).toHaveText("Needs attention");
+  const stoppedReads = detailCount();
+  await page.clock.fastForward(46_000);
+  expect(detailCount()).toBe(stoppedReads);
 });
 
 for (const width of [1440, 390]) {

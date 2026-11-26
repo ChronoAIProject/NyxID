@@ -1206,9 +1206,15 @@ describe("initial task outcome from Agent detail", () => {
 
   it.each([
     [agent, "completed"],
+    [{ ...agent, status: "stopped" }, "completed"],
+    [{ ...agent, status: "deleted", first_message: { purpose: "task", state: "failed" } }, "failed"],
+    ...["stopped", "failed", "deleted"].map((status) => [
+      { ...agent, status, first_message: { purpose: "task", state: "queued" } },
+      "needs_attention",
+    ] as const),
     [{ ...agent, status: "working", first_message: { purpose: "task", state: "failed" } }, "failed"],
     [{ ...agent, first_message: { purpose: "task", state: "write_confirmed" } }, "pending"],
-    [{ ...agent, first_message: { purpose: "task", state: "recovery_required" } }, "recovery_required"],
+    [{ ...agent, first_message: { purpose: "task", state: "recovery_required" } }, "needs_attention"],
     [{ ...agent, status: "starting", bootstrap: { operation_id: receipt.operationId }, first_message: { purpose: "task", state: "queued" } }, "pending"],
     [{ ...agent, status: "starting", bootstrap: { operation_id: "different-lifecycle" }, first_message: { purpose: "task", state: "queued" } }, null],
     [{ ...agent, first_message: { purpose: "setup", state: "completed" } }, null],

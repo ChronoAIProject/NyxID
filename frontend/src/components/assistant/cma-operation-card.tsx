@@ -220,7 +220,7 @@ const initialTaskPresentation = {
   pending: { label: "Awaiting status", tone: "active" },
   completed: { label: "Completed", tone: "success" },
   failed: { label: "Failed", tone: "error" },
-  recovery_required: { label: "Needs attention", tone: "warning" },
+  needs_attention: { label: "Needs attention", tone: "warning" },
 } satisfies Record<CmaInitialTaskOutcome, { label: string; tone: string }>;
 
 /** Keep request status and notices when a live card replaces its receipt. */
@@ -336,7 +336,7 @@ function CmaRecordedProgress({
               className={cn("h-2 w-2 fill-current", tones[tone])}
             />
           )}
-          {outcome === "recovery_required" ? translateUi("Needs attention") : label}
+          {outcome === "needs_attention" ? translateUi("Needs attention") : label}
         </span>
         <span aria-hidden="true" className="text-text-tertiary">
           ·

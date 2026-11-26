@@ -33,6 +33,7 @@ export const cmaAgentSchema = z.object({
 export type CmaAgent = z.infer<typeof cmaAgentSchema>;
 
 export const cmaInitialTaskEvidenceSchema = z.object({
+  status: cmaAgentSchema.shape.status,
   bootstrap: z.object({ operation_id: z.string().min(1).max(256) }).optional(),
   first_message: z.object({
     purpose: z.literal("task"),
@@ -48,7 +49,7 @@ export const cmaInitialTaskEvidenceSchema = z.object({
   }),
 });
 export type CmaInitialTaskEvidence = z.infer<typeof cmaInitialTaskEvidenceSchema>;
-export type CmaInitialTaskOutcome = "pending" | "completed" | "failed" | "recovery_required";
+export type CmaInitialTaskOutcome = "pending" | "completed" | "failed" | "needs_attention";
 
 export const cmaAgentPageSchema = z.object({
   items: z.array(cmaAgentSchema).max(50),
