@@ -602,31 +602,6 @@ impl CatalogCmaGateway {
             resource_owner_id: owner_id,
             user_service_id: None,
         };
-        let admission = registry::admit(
-            &self.db,
-            keys,
-            &self.jwt_keys,
-            &self.config,
-            &caller,
-            true,
-            &target,
-            &creation.method,
-            &creation.path,
-            None,
-            body,
-            || {
-                Ok(vec![
-                    ("Idempotency-Key".into(), creation.idempotency_key.clone()),
-                    (
-                        super::assistant_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
-                        super::assistant_cma_admission::recovery_submission(creation),
-                    ),
-                ]
-                .into())
-            },
-            false,
-        )
-        .await?;
         let identity = crate::models::default_request_header::SecretHeaders::from(
             self.identity_headers(&service, &owner)
                 .await?
@@ -653,6 +628,29 @@ impl CatalogCmaGateway {
             &[],
             &[],
         );
+        let admission = registry::admit(
+            &self.db,
+            keys,
+            &self.jwt_keys,
+            &self.config,
+            &caller,
+            true,
+            &target,
+            &creation.method,
+            &creation.path,
+            None,
+            body,
+            || {
+                let mut admission_headers = headers.clone();
+                admission_headers.push((
+                    super::assistant_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
+                    super::assistant_cma_admission::recovery_submission(creation),
+                ));
+                Ok(admission_headers)
+            },
+            false,
+        )
+        .await?;
         // Do not use the inventory URL builder: its pagination parameters are
         // not part of the original creation request.
         let url = format!(

@@ -75,6 +75,16 @@ async fn proxy_create(
     body: &[u8],
     contextual: bool,
 ) -> AppResult<(u16, Value)> {
+    proxy_create_with_type(f, key, body, contextual, Some("application/json")).await
+}
+
+async fn proxy_create_with_type(
+    f: &Fixture,
+    key: &str,
+    body: &[u8],
+    contextual: bool,
+    content_type: Option<&str>,
+) -> AppResult<(u16, Value)> {
     let mut state = crate::test_utils::test_app_state(f.db.clone());
     let mut keys = crate::test_utils::test_encryption_keys();
     keys.set_contextual_record_writes(contextual);
@@ -85,15 +95,18 @@ async fn proxy_create(
     let request = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/api/v1/proxy/s/cma{SANDBOX_ROUTE}"))
-        .header("Content-Type", "application/json")
-        .header("Idempotency-Key", key)
-        .extension(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        )
-        .body(axum::body::Body::from(body.to_vec()))
-        .unwrap();
+        .header("Idempotency-Key", key);
+    let request = match content_type {
+        Some(media) => request.header("Content-Type", media),
+        None => request,
+    }
+    .extension(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    )
+    .body(axum::body::Body::from(body.to_vec()))
+    .unwrap();
     let mut operation = String::new();
     let proxy = Box::pin(crate::handlers::proxy::proxy_request_inner(
         &state,
@@ -548,9 +561,11 @@ async fn trust_automatic_recovery_refuses_expired_or_changed_deployment_before_r
         let error = proxy_create(&f, "new-key", &confirmed_body(), true)
             .await
             .unwrap_err();
-        assert!(matches!(error, AppError::Conflict(ref message)
+        assert!(
+            matches!(error, AppError::CmaSandboxSlotOccupied { message, .. }
             if message.starts_with("cma_sandbox_account_slot_occupied:")
-            && message.contains("not confirmed absent")));
+            && message.contains("not confirmed absent"))
+        );
         assert_eq!(f.post_count().await, 1);
         assert_eq!(f.saved(&row.id).await.submission_state, "unknown");
         assert!(f.saved(&row.id).await.request_ciphertext.is_some());
@@ -583,9 +598,7 @@ async fn trust_recovery_real_cached_creation_never_frees_slot_or_sends_new_reque
         201
     );
     let error = proxy_create(&f, "new-key", &body, true).await.unwrap_err();
-    assert!(
-        matches!(error, AppError::Conflict(ref message) if message.contains("cma_sandbox_account_slot_occupied"))
-    );
+    assert!(matches!(error, AppError::CmaSandboxSlotOccupied { .. }));
     assert_eq!(
         f.saved(&permit.creation.as_ref().unwrap().id)
             .await
@@ -690,9 +703,7 @@ async fn trust_automatic_recovery_skips_undispatched_and_lifecycle_creations() {
         let error = proxy_create(&f, "new-key", &confirmed_body(), true)
             .await
             .unwrap_err();
-        assert!(
-            matches!(error, AppError::Conflict(ref message) if message.contains("cma_sandbox_account_slot_occupied"))
-        );
+        assert!(matches!(error, AppError::CmaSandboxSlotOccupied { .. }));
         assert_eq!(f.post_count().await, 0);
         assert_eq!(
             bson::to_document(&f.saved(&permit.creation.as_ref().unwrap().id).await).unwrap(),
@@ -887,9 +898,11 @@ async fn trust_unavailable_proxy_recovery_without_management_returns_slot_confli
         let error = proxy_create(&f, "confirmed-key", &confirmed_body(), contextual)
             .await
             .unwrap_err();
-        assert!(matches!(error, AppError::Conflict(ref message)
+        assert!(
+            matches!(error, AppError::CmaSandboxSlotOccupied { message, .. }
             if message.starts_with("cma_sandbox_account_slot_occupied:")
-            && message.contains("not confirmed absent")));
+            && message.contains("not confirmed absent"))
+        );
         assert_eq!(
             f.post_count().await,
             1,
@@ -902,4 +915,292 @@ async fn trust_unavailable_proxy_recovery_without_management_returns_slot_confli
         f.assert_single_intent().await;
         f.db.drop().await.unwrap();
     }
+}
+
+const KEYED_SANDBOX_REFUSALS: &[(u16, &str, &str)] = &[
+    (
+        415,
+        "json_content_type_required",
+        "json_content_type_required",
+    ),
+    (422, "invalid_json", "invalid_json"),
+    (429, "resource-limit-reached", "sandbox_limit_reached"),
+];
+
+const ATTEMPT_REFUSALS: &[(u16, &str, &str)] = &[
+    (400, "invalid_json", "invalid_json"),
+    (401, "not-authenticated", "not_authenticated"),
+    (403, "forbidden", "forbidden"),
+    (429, "rate-limited", "rate_limited"),
+];
+
+async fn mount_problem(f: &Fixture, status: u16, slug: &str, code: &str) {
+    Mock::given(method("POST"))
+        .and(path(SANDBOX_ROUTE))
+        .and(wiremock::matchers::header(
+            "idempotency-key",
+            "original-key",
+        ))
+        .respond_with(
+            ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                "status": status, "code": code,
+                "type": format!("https://spec.chrono-ai.fun/cma/1.0/problems/{slug}"),
+            })),
+        )
+        .mount(&f.server)
+        .await;
+}
+
+async fn next_sandbox(f: &Fixture) {
+    f.observations().await;
+    Mock::given(method("POST"))
+        .and(path(SANDBOX_ROUTE))
+        .and(wiremock::matchers::header("idempotency-key", "fresh-key"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(serde_json::json!({"id":"sandbox_1"})),
+        )
+        .mount(&f.server)
+        .await;
+    assert_eq!(
+        proxy_create(f, "fresh-key", UNCONFIRMED, true)
+            .await
+            .unwrap()
+            .0,
+        201
+    );
+}
+
+#[tokio::test]
+async fn cma_refusal_on_original_proxy_create_releases_before_next_request() {
+    for &(status, slug, code) in KEYED_SANDBOX_REFUSALS.iter().chain(ATTEMPT_REFUSALS) {
+        let f = Fixture::new().await;
+        mount_problem(&f, status, slug, code).await;
+        let result = proxy_create_with_type(
+            &f,
+            "original-key",
+            UNCONFIRMED,
+            false,
+            Some("application/example+json; charset=utf-8"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0, status);
+        let row =
+            f.db.collection::<AssistantCmaCreation>(COLLECTION_NAME)
+                .find_one(doc! {"user_id": &f.owner})
+                .await
+                .unwrap()
+                .unwrap();
+        let audit =
+            f.db.collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id": &f.owner, "event_type":"cma_sandbox_creation_refused"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit.event_data.unwrap(),
+            serde_json::json!({
+                "owner_id": f.owner, "reservation_id": row.sandbox_ref_id, "upstream_status": status,
+            })
+        );
+        assert_absent(&f, &row).await;
+        next_sandbox(&f).await;
+        assert_eq!(f.post_count().await, 2);
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cma_refusal_on_stored_sandbox_replay_settles_original_and_admits_next() {
+    for &(status, slug, code) in KEYED_SANDBOX_REFUSALS {
+        let f = Fixture::new().await;
+        mount_problem(&f, status, slug, code).await;
+        let permit = f
+            .admit(&f.target, SANDBOX_ROUTE, "original-key", UNCONFIRMED)
+            .await
+            .unwrap();
+        let mut request = f.request(SANDBOX_ROUTE, "original-key", UNCONFIRMED);
+        if status == 415 {
+            // Model the wire request sent by a pre-upgrade replica.
+            request.headers_mut().remove(reqwest::header::CONTENT_TYPE);
+        }
+        permit.before_send(&request).await.unwrap();
+        let response = reqwest::Client::new().execute(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        drop(response);
+        next_sandbox(&f).await;
+        assert_absent(&f, permit.creation.as_ref().unwrap()).await;
+        let requests = f.server.received_requests().await.unwrap();
+        let posts: Vec<_> = requests.iter().filter(|r| r.method == "POST").collect();
+        assert_eq!(posts.len(), 3);
+        assert_eq!(posts[1].headers["content-type"], "application/json");
+        assert_eq!(posts[1].headers["idempotency-key"], "original-key");
+        assert_eq!(posts[1].body, UNCONFIRMED);
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cma_refusal_invalid_proxy_media_type_precedes_reservation() {
+    let f = Fixture::new().await;
+    mount_problem(
+        &f,
+        415,
+        "json_content_type_required",
+        "json_content_type_required",
+    )
+    .await;
+    for media in [
+        None,
+        Some("text/plain"),
+        Some("text/json"),
+        Some("application/json garbage"),
+    ] {
+        let result = proxy_create_with_type(&f, "original-key", UNCONFIRMED, true, media).await;
+        assert_eq!(result.unwrap_err().status_code().as_u16(), 415);
+        assert_eq!(f.post_count().await, 0);
+        for collection in [
+            COLLECTION_NAME,
+            crate::models::assistant_cma_sandbox::COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                f.db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+    }
+    next_sandbox(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cma_refusal_ambiguous_replay_identifies_holder_and_audits_owner() {
+    for &(status, slug, code) in ATTEMPT_REFUSALS.iter().chain(&[
+        (503, "invalid_json", "invalid_json"),
+        (422, "idempotency-key-reused", "idempotency_key_reused"),
+    ]) {
+        let f = Fixture::new().await;
+        let permit = f
+            .admit(&f.target, SANDBOX_ROUTE, "original-key", UNCONFIRMED)
+            .await
+            .unwrap();
+        permit
+            .before_send(&f.request(SANDBOX_ROUTE, "original-key", UNCONFIRMED))
+            .await
+            .unwrap();
+        mount_problem(&f, status, slug, code).await;
+        let response = proxy_create(&f, "fresh-key", UNCONFIRMED, true)
+            .await
+            .unwrap_err()
+            .response_body();
+        assert_eq!(response.error_code, 1004);
+        let details = response.details.unwrap();
+        let held = sandboxes::get_owned(&f.db, &f.owner, &permit.sandbox.as_ref().unwrap().id)
+            .await
+            .unwrap();
+        assert_eq!(details["reservation_id"], held.id);
+        assert_eq!(details["holding"], "creation_unknown");
+        assert_eq!(details["created_at"], serde_json::json!(held.created_at));
+        assert!(
+            details["release_condition"]
+                .as_str()
+                .unwrap()
+                .contains("CMA")
+        );
+        assert_eq!(details.as_object().unwrap().len(), 4);
+        let audit =
+            f.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .find_one(doc! {"event_type":"cma_sandbox_slot_occupied", "user_id":&f.owner})
+                .await
+                .unwrap()
+                .unwrap();
+        let audit_details = audit.get_document("event_data").unwrap();
+        assert_eq!(audit_details.get_str("owner_id").unwrap(), f.owner);
+        assert_eq!(audit_details.get_str("reservation_id").unwrap(), held.id);
+        f.assert_single_intent().await;
+        assert_eq!(f.post_count().await, 1);
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cma_refusal_lost_or_timed_out_response_keeps_slot_until_keyed_outcome() {
+    for timeout in [false, true] {
+        let f = Fixture::new().await;
+        let permit = f
+            .admit(&f.target, SANDBOX_ROUTE, "original-key", UNCONFIRMED)
+            .await
+            .unwrap();
+        let mut request = f.request(SANDBOX_ROUTE, "original-key", UNCONFIRMED);
+        let mut reply = ResponseTemplate::new(503);
+        if timeout {
+            *request.timeout_mut() = Some(Duration::from_millis(50));
+            reply = reply.set_delay(Duration::from_secs(1));
+        }
+        Mock::given(method("POST"))
+            .and(path(SANDBOX_ROUTE))
+            .respond_with(reply)
+            .mount(&f.server)
+            .await;
+        permit.before_send(&request).await.unwrap();
+        let result = reqwest::Client::new().execute(request).await;
+        if timeout {
+            assert!(result.unwrap_err().is_timeout());
+        } else {
+            drop(result.unwrap());
+        }
+        let row = permit.creation.as_ref().unwrap();
+        f.assert_single_intent().await;
+        assert_eq!(f.saved(&row.id).await.submission_state, "unknown");
+        f.server.reset().await;
+        mount_problem(
+            &f,
+            415,
+            "json_content_type_required",
+            "json_content_type_required",
+        )
+        .await;
+        next_sandbox(&f).await;
+        assert_absent(&f, row).await;
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cma_refusal_early_auth_cannot_settle_two_outstanding_dispatches() {
+    let f = Fixture::new().await;
+    let first = f
+        .admit(&f.target, SANDBOX_ROUTE, "original-key", UNCONFIRMED)
+        .await
+        .unwrap();
+    let second = f
+        .admit(&f.target, SANDBOX_ROUTE, "original-key", UNCONFIRMED)
+        .await
+        .unwrap();
+    let request = f.request(SANDBOX_ROUTE, "original-key", UNCONFIRMED);
+    first.before_send(&request).await.unwrap();
+    second.before_send(&request).await.unwrap();
+    mount_problem(&f, 401, "not-authenticated", "not_authenticated").await;
+    let response = reqwest::Client::new().execute(request).await.unwrap();
+    assert_eq!(
+        first.observe_response(response).await.unwrap().status(),
+        401
+    );
+    f.assert_single_intent().await;
+    f.server.reset().await;
+    mount_problem(
+        &f,
+        415,
+        "json_content_type_required",
+        "json_content_type_required",
+    )
+    .await;
+    next_sandbox(&f).await;
+    assert_absent(&f, first.creation.as_ref().unwrap()).await;
+    f.db.drop().await.unwrap();
 }
