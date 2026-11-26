@@ -91,7 +91,8 @@ pub async fn list_resources(
     Path(kind): Path<ResourceKind>,
     Query(query): Query<ResourceQuery>,
 ) -> AppResult<Json<ResourceListResponse>> {
-    transfers::require_platform_admin(&state.db, &auth.user_id.to_string()).await?;
+    let admin = transfers::require_platform_admin(&state.db, &auth.user_id.to_string()).await?;
+    super::admin_helpers::require_privileged_session(&state, &auth, &admin).await?;
     if query.offset > 100_000 {
         return Err(AppError::ValidationError("Offset is too large".into()));
     }
@@ -150,7 +151,8 @@ pub async fn preview(
     Json(body): Json<PreviewRequest>,
 ) -> AppResult<Json<PreviewResponse>> {
     auth.ensure_write_scope()?;
-    let preview = transfers::preview_with_agent(
+    let platform_access = ownership_platform_access(&state, &auth).await?;
+    let preview = transfers::preview_with_platform(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
@@ -159,6 +161,7 @@ pub async fn preview(
         &id,
         &body.new_owner_user_id,
         state.config.channel_relay_max_bots_per_user,
+        platform_access,
     )
     .await?;
     let effects = match kind {
@@ -208,8 +211,9 @@ pub async fn transfer(
     Json(body): Json<TransferRequest>,
 ) -> AppResult<Json<TransferResponse>> {
     auth.ensure_write_scope()?;
+    let platform_access = ownership_platform_access(&state, &auth).await?;
     let actor = auth.user_id.to_string();
-    let receipt = transfers::transfer_with_keys(
+    let receipt = transfers::transfer_with_platform(
         &state.db,
         Some(&state.encryption_keys),
         TransferCommand {
@@ -224,6 +228,7 @@ pub async fn transfer(
             expected_version: &body.expected_version,
             capacity: state.config.channel_relay_max_bots_per_user,
         },
+        platform_access,
     )
     .await?;
     let response = TransferResponse {
@@ -264,13 +269,15 @@ pub async fn authorization(
             resource: None,
         }));
     }
-    let result = access::require_resource_access(
+    let platform_access = ownership_platform_access(&state, &auth).await?;
+    let result = access::require_resource_access_with_platform(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
         super::login_client_context::require_first_party_human(&auth).is_ok(),
         kind,
         &id,
+        platform_access,
     )
     .await;
     let resource = match result {
@@ -288,7 +295,15 @@ pub async fn authorization(
             slug: row.get_str("slug").ok().map(str::to_owned),
         }),
         Ok(_) => None,
-        Err(error) if super::services_helpers::is_capability_denial(&error) => None,
+        Err(AppError::NotFound(_)) => None,
+        Err(error)
+            if !matches!(
+                platform_access,
+                access::OwnershipPlatformAccess::StepUp | access::OwnershipPlatformAccess::Denied
+            ) && super::services_helpers::is_capability_denial(&error) =>
+        {
+            None
+        }
         Err(error) => return Err(error),
     };
     Ok(Json(TransferAuthorization {
@@ -332,14 +347,16 @@ pub async fn destinations(
     Query(query): Query<DestinationQuery>,
 ) -> AppResult<Json<DestinationList>> {
     auth.ensure_write_scope()?;
+    let platform_access = ownership_platform_access(&state, &auth).await?;
     let actor = auth.user_id.to_string();
-    let (owner, admin, _) = access::require_resource_access(
+    let (owner, admin, _) = access::require_resource_access_with_platform(
         &state.db,
         &actor,
         auth.api_key_id.as_deref(),
         super::login_client_context::require_first_party_human(&auth).is_ok(),
         kind,
         &id,
+        platform_access,
     )
     .await?;
     let (rows, total) = access::destination_candidates(
@@ -362,4 +379,38 @@ pub async fn destinations(
         })
         .collect();
     Ok(Json(DestinationList { users, total }))
+}
+
+async fn ownership_platform_access(
+    state: &AppState,
+    auth: &AuthUser,
+) -> AppResult<access::OwnershipPlatformAccess> {
+    // Agent Keys only exercise asset authority, even with a verified owner.
+    if auth.api_key_id.is_some() {
+        return Ok(access::OwnershipPlatformAccess::Absent);
+    }
+    if state.config.admin_mfa_enforcement == crate::config::AdminMfaEnforcement::Off {
+        return Ok(access::OwnershipPlatformAccess::Granted);
+    }
+    let Some(user) = state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! { "_id": auth.user_id.to_string(), "is_active": true })
+        .await?
+    else {
+        return Ok(access::OwnershipPlatformAccess::Absent);
+    };
+    if !crate::services::role_service::resolve_platform_role(&state.db, &user)
+        .await?
+        .is_admin()
+    {
+        return Ok(access::OwnershipPlatformAccess::Absent);
+    }
+    Ok(
+        match super::admin_helpers::privileged_session_denial(state, auth, &user).await {
+            None => access::OwnershipPlatformAccess::Granted,
+            Some(AppError::MfaStepUpRequired) => access::OwnershipPlatformAccess::StepUp,
+            Some(_) => access::OwnershipPlatformAccess::Denied,
+        },
+    )
 }
