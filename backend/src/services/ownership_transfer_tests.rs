@@ -3178,7 +3178,7 @@ async fn enforce_admin_mfa_gates_cross_owner_access_and_preserves_own_transfers(
         Err(AppError::MfaStepUpRequired)
     ));
     admin.mfa_assured = true;
-    admin_ownership::list_resources(
+    let Json(resources) = admin_ownership::list_resources(
         State(state.clone()),
         admin.clone(),
         Path(ResourceKind::Service),
@@ -3186,7 +3186,8 @@ async fn enforce_admin_mfa_gates_cross_owner_access_and_preserves_own_transfers(
     )
     .await
     .unwrap();
-    Box::pin(admin_ownership::preview(
+    assert!(resources.items.iter().any(|item| item.id == f.service.id));
+    let Json(admin_review) = Box::pin(admin_ownership::preview(
         State(state.clone()),
         admin,
         path(),
@@ -3194,7 +3195,8 @@ async fn enforce_admin_mfa_gates_cross_owner_access_and_preserves_own_transfers(
     ))
     .await
     .unwrap();
-    Box::pin(admin_ownership::transfer(
+    assert_eq!(admin_review.previous_owner_user_id, f.owner);
+    let Json(moved) = Box::pin(admin_ownership::transfer(
         State(state),
         owner,
         path(),
@@ -3202,4 +3204,5 @@ async fn enforce_admin_mfa_gates_cross_owner_access_and_preserves_own_transfers(
     ))
     .await
     .unwrap();
+    assert_eq!(moved.new_owner_user_id, f.destination);
 }
