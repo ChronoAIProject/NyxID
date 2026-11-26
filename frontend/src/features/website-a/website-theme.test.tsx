@@ -1,5 +1,5 @@
 import { forwardRef } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useApplyTheme, useResolvedTheme } from "@/hooks/use-theme";
 import { useThemeStore } from "@/stores/theme-store";
@@ -41,29 +41,32 @@ function ApplicationTheme() {
 afterEach(() => {
   cleanup();
   location.pathname = "/";
+  localStorage.removeItem("nyxid-theme");
   useThemeStore.setState({ mode: "system", systemPrefersDark: false });
 });
 
 describe("independent public website theme", () => {
   it.each(["system", "light", "dark"] as const)(
-    "stays dark across opens, refresh and route return with app mode %s",
+    "keeps the public choice across opens and route returns with app mode %s",
     async (mode) => {
       useThemeStore.setState({ mode, systemPrefersDark: false });
       const saved = localStorage.getItem("nyxid.theme");
       const expectedApp = mode === "dark" ? "dark" : "light";
-      // The English home page has its own day/night switch (tested below); the other pages stay dark.
-      for (const pathname of ["/nyxbot", "/nyxbot", "/solutions", "/nyxbot"]) {
+      localStorage.setItem("nyxid-theme", "light");
+      // A public theme choice follows the reader without changing their app preference.
+      for (const [index, pathname] of ["/nyxbot", "/nyxbot", "/solutions", "/nyxbot"].entries()) {
         location.pathname = pathname;
         const website = render(<WebsitePage />);
         await screen.findByTestId("gradient");
         expect(website.container.querySelector(".website-a")).toHaveAttribute(
           "data-theme",
-          "dark",
+          index === 0 ? "light" : "dark",
         );
-        expect(screen.getByTestId("gradient")).toHaveAttribute(
-          "data-colors",
-          "#A672FB,#5E00F5",
-        );
+        if (index === 0) {
+          fireEvent.click(screen.getByRole("button", { name: "Switch to night mode" }));
+          expect(website.container.querySelector(".website-a")).toHaveAttribute("data-theme", "dark");
+          expect(localStorage.getItem("nyxid-theme")).toBe("dark");
+        }
         website.unmount();
         expect(localStorage.getItem("nyxid.theme")).toBe(saved);
         expect(useThemeStore.getState().mode).toBe(mode);

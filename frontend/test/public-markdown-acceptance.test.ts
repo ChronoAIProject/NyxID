@@ -23,7 +23,7 @@ function nodes(tree: unknown, type: string): Record<string, unknown>[] {
   return found;
 }
 it.each(["en", "zh"])(
-  "F05 preserves every approved code and audience panel in %s",
+  "F05 preserves each client connection example and the home overview in %s",
   async (locale) => {
     const prefix = locale === "zh" ? "/zh" : "";
     const page = await renderPage(prefix + "/agents", async () => "");
@@ -37,17 +37,17 @@ it.each(["en", "zh"])(
     const ast = parse(md);
     const codes = nodes(ast, "code").map((n) => String(n.value));
     for (const marker of [
-      "/api/v1/proxy/s/google-calendar",
+      "/api/v1/proxy/s/llm-openai/models",
       "/api/v1/llm/gateway/v1/chat/completions",
-      '"mcpServers"',
+      "nyxid mcp config",
       "nyxid api-key create",
-      "nyxid node setup --machine --computer",
+      "--allow-all-services false",
     ])
       expect(
         codes.some((code) => code.includes(marker)),
         marker,
       ).toBe(true);
-    for (const label of ["curl", "LLM", "MCP", "CLI"])
+    for (const label of ["MCP", "REST", "Models", "CLI"])
       expect(
         nodes(ast, "heading").some((h) => JSON.stringify(h).includes(label)),
         label,
@@ -61,19 +61,19 @@ it.each(["en", "zh"])(
     );
     verifyMarkdownContract(home.meta.path, homeMd);
     const homeCodes = nodes(parse(homeMd), "code").map((n) => String(n.value));
-    for (const marker of [
+    for (const marker of locale === "zh" ? [
       '"mcpServers"',
       "https://nyx-api.chrono-ai.fun/mcp",
       "curl -X POST",
       "delete_event",
-    ])
+    ] : ["claude mcp add --transport http --scope user", "https://nyx-api.chrono-ai.fun/mcp"])
       expect(
         homeCodes.some((code) => code.includes(marker)),
         marker,
       ).toBe(true);
     for (const label of locale === "zh"
       ? ["给企业", "给 AI 爱好者", "给开发者"]
-      : ["For businesses", "For AI enthusiasts", "For developers"])
+      : ["The pile on your counter, sorted before you wake.", "Start with a job.", "Use a separate Agent Key for each agent"])
       expect(homeMd).toContain(label);
   },
 );

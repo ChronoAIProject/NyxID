@@ -1,16 +1,16 @@
 import { forwardRef } from "react";
 import { cleanup, render, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authHref, siteHref } from "./auth-links";
 import EnglishHeader from "./generated/en/WebsiteHeader";
 import ChineseHeader from "./generated/zh/WebsiteHeader";
 import EnglishSolutions from "./generated/en/SolutionsPage";
 import ChineseSolutions from "./generated/zh/SolutionsPage";
 
-const navState = vi.hoisted(() => ({ route: "/solutions" }));
+const navState = vi.hoisted(() => ({ route: "/solutions", language: "en" }));
 vi.mock("./website-context", () => ({
   useWebsite: () => ({
-    language: "en",
+    language: navState.language,
     route: navState.route,
     menuOpen: true,
     authHref,
@@ -35,6 +35,7 @@ describe.each([
 ] as const)(
   "generated %s website",
   (language, Header, Solutions, login, cta) => {
+    beforeEach(() => { navState.language = language; });
     it.each([
       ["/nyxbot", "nyxbot", "page"],
       ["/solutions", "solutions", "page"],
@@ -110,12 +111,8 @@ describe.each([
         "href",
         `/nyxbot?lang=${language}&code=QA-INVITE`,
       );
-      expect(card).toHaveStyle({
-        borderStyle: "dashed",
-        alignItems: "center",
-        justifyContent: "center",
-        textAlign: "center",
-      });
+      expect(card).toHaveClass("st-custom-job");
+      expect(card).not.toHaveAttribute("hidden");
     });
   },
 );

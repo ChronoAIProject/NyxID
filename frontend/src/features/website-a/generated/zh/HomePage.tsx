@@ -101,7 +101,7 @@ export default function HomePage() {
                             <span
                               style={{ color: "var(--fg)", fontSize: "15.5px" }}
                             >
-                              {"现成方案，几分钟上线，无需代码"}
+                              {"先确认工作流程、连接工具，再审核访问权限"}
                             </span>
                           </div>
                         </li>

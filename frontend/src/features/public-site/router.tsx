@@ -88,8 +88,8 @@ export async function loadPublicPage(
           ? `${module.descriptions[route]} ${locale === "zh" ? "暂未开放。" : "Not available yet."}`
           : route === "/integrations"
             ? locale === "zh"
-              ? "浏览 NyxID 集成，区分已上线和即将上线的服务；各项可用状态以页面标记为准。"
-              : "Browse NyxID integrations, including live and coming soon services. Check the status shown for each integration."
+              ? "使用自己的账号或凭据，连接应用、AI 提供商与语音服务。"
+              : "Connect apps, AI providers and voice services with your own accounts or credentials."
             : (module.descriptions[route] ?? "This page is unavailable."),
       translated: Boolean(page),
       indexable: Boolean(page?.indexable),

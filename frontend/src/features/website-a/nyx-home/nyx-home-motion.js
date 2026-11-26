@@ -5,8 +5,8 @@
    - GSAP, its plugins and Lenis are imported instead of read from window.
    - Everything searches this page's element, and day/night is set on it, never on <html>.
    - No HTML strings are inserted: the pile markup is rendered by React, and text that changes is built as elements.
-   - startNyxHome returns a stop function that removes every listener, timer, observer, tween and pin,
-     and puts the page's markup back as React rendered it, so leaving and returning starts clean. */
+   - startNyxHome returns a stop function that removes listeners, timers, observers, tweens and pins.
+     React retains ownership of the page nodes and creates fresh markup when the route returns. */
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { SplitText } from 'gsap/SplitText';
@@ -64,8 +64,6 @@ function createEnv(page) {
 
 export function startNyxHome(page) {
   const env = createEnv(page);
-  /* the markup as React rendered it, restored on stop */
-  const pristine = [...page.childNodes].map((n) => n.cloneNode(true));
 
   /* window-level hooks the design used, now tied to this page's lifetime */
   const addEventListener = (type, fn, opts) =>
@@ -627,7 +625,7 @@ void main(){
       pace: (v) => Math.ceil((v - 0.02) / 0.7 * 7),
       onChange: ({ done, wait }) => {
         const msg = $('#pile .pile-empty');
-        if (msg) msg.replaceChildren(make('i', null, checkIcon()), make('span', null, `Morning. ${done} ${done === 1 ? 'thing is' : 'things are'} done`, ...(wait ? [', and ', make('em', null, '1 is waiting for your yes'), '.'] : ['.'])));
+        if (msg) msg.replaceChildren(make('i', null, checkIcon()), make('span', null, `Morning. ${done} ${done === 1 ? 'thing is' : 'things are'} done`, ...(wait ? [', and ', make('em', null, '1 is waiting for approval'), '.'] : ['.'])));
       },
     };
     {
@@ -641,13 +639,13 @@ void main(){
     }
     /* solutions: pin the section and move the rail sideways by exactly its overflow */
     mm.add('(min-width: 960px) and (prefers-reduced-motion: no-preference)', () => {
-      const jobs = $('#jobs'), track = $('[data-jobs-track]'), bar = $('[data-jobs-bar]');
+      const jobs = $('#jobs'), rail = $('[data-jobs-rail]'), track = $('[data-jobs-track]'), bar = $('[data-jobs-bar]');
       jobs.classList.add('is-rail');
-      /* the row starts on the content's left edge (first card whole, the next ones peeking in on the right),
-         then scrolling pans it left until the last card meets the content's right edge */
-      const cards = [...track.children], last = cards[cards.length - 1];
-      const railLeft = () => track.parentElement.getBoundingClientRect().left;
-      const xEnd = () => Math.min(0, $('#jobs .jobs-bar').getBoundingClientRect().right - railLeft() - (last.offsetLeft + last.offsetWidth));
+      /* Keep the first and last cards inside the wider rail's edge fades. */
+      const xEnd = () => {
+        const style = getComputedStyle(rail);
+        return Math.min(0, rail.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - track.scrollWidth);
+      };
       const pan = () => Math.max(1, -xEnd());
       const lead = () => Math.min(innerWidth * 0.24, 360);
       const jobsPin = ScrollTrigger.create({ trigger: jobs, start: 'top top', end: () => `+=${Math.round(Math.max(innerHeight * 0.6, pan() * 1.1))}`, pin: true, anticipatePin: 1, invalidateOnRefresh: true });
@@ -663,33 +661,19 @@ void main(){
     mm.add('(max-width: 959px), (prefers-reduced-motion: reduce)', () => staticMode());
   } else {
     staticMode();
-    initSort($('#pile'), { onChange: ({ done, wait }) => { const m = $('#pile .pile-empty'); if (m) m.textContent = `Morning. ${done} done${wait ? ', 1 waiting for your yes' : ''}.`; } });
+    initSort($('#pile'), { onChange: ({ done, wait }) => { const m = $('#pile .pile-empty'); if (m) m.textContent = `Morning. ${done} done${wait ? ', 1 waiting for approval' : ''}.`; } });
   }
 
-  /* day and night: the button flips the mode and remembers it; until then the page follows the system */
-  const root = page, themeBtn = $('[data-theme-toggle]'), themeMeta = document.querySelector('meta[name="theme-color"]');
-  if (themeMeta) { const before = themeMeta.getAttribute('content'); env.onStop(() => (before === null ? themeMeta.removeAttribute('content') : themeMeta.setAttribute('content', before))); }
-  let savedTheme = null;
-  try { savedTheme = localStorage.getItem('nyxid-theme'); } catch (e) { savedTheme = null; }
-  const applyTheme = (t) => {
-    root.dataset.theme = t;
-    themeBtn.setAttribute('aria-label', t === 'dark' ? 'Switch to day mode' : 'Switch to night mode');
-    if (themeMeta) themeMeta.setAttribute('content', t === 'dark' ? '#0E0E10' : '#F3F3F0');
+  /* React owns the public theme. Motion responds to it without a second toggle handler. */
+  const syncTheme = () => {
     const end = $('#end');
-    if (end) end.classList.toggle('on-ink', t === 'dark');
-    /* the nav picks its glass from what is under it; ask it again now the mode has changed */
+    if (end) end.classList.toggle('on-ink', page.dataset.theme === 'dark');
     requestAnimationFrame(() => dispatchEvent(new Event('scroll')));
   };
-  applyTheme(root.dataset.theme === 'dark' ? 'dark' : 'light');
-  themeBtn.addEventListener('click', () => {
-    const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
-    try { localStorage.setItem('nyxid-theme', next); savedTheme = next; } catch (e) { /* not saved; the switch still applies to this visit */ }
-    /* during the crossfade the page is hidden from hit-testing, so the nav asks again once it has finished */
-    if (document.startViewTransition && !reduce) document.startViewTransition(() => applyTheme(next)).finished.then(() => dispatchEvent(new Event('scroll')));
-    else applyTheme(next);
-  });
-  /* someone who has not chosen keeps following the system as it changes (for example at sunset) */
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => { if (!savedTheme) applyTheme(e.matches ? 'dark' : 'light'); }, { signal: env.signal });
+  syncTheme();
+  const themeObserver = new MutationObserver(syncTheme);
+  themeObserver.observe(page, { attributes: true, attributeFilter: ['data-theme'] });
+  env.onStop(() => themeObserver.disconnect());
 
   /* nav: dark glass while it sits over an ink section */
   /* position bars: the section in the middle of the screen is marked, with the page's progress below */
@@ -761,7 +745,7 @@ void main(){
 
   /* ---------- 6. setup command ---------- */
   const TERM = {
-    claude: () => [make('s', null, '$'), ' claude mcp add --transport http --scope user ', make('i', null, 'nyxid'), ' http://localhost:3001/mcp'],
+    claude: () => [make('s', null, '$'), ' claude mcp add --transport http --scope user ', make('i', null, 'nyxid'), ' https://nyx-api.chrono-ai.fun/mcp'],
     cursor: () => [make('s', null, '$'), ' nyxid mcp config --tool ', make('i', null, 'cursor')],
   };
   const termOut = $('[data-term-out]');
@@ -1029,7 +1013,7 @@ void main(){
          blends out. (The top works the same way, upward into the lead-in above the picture; see .close-art.) */
       /* (the night ground's fade is more than twice as wide as the dots' and carries on behind the start of the words:
          it is only a faint tint, and the longer it takes to go, the less there is a place where the page seems to split) */
-      for (const [k, val] of [['--fs', fillEnd - BLEND * 1.1], ['--fw', BLEND * 2], ['--bs', topX + Hg - 12], ['--be', H - 2]]) {
+      for (const [k, val] of [['--fs', fillEnd - BLEND * 1.1], ['--fw', BLEND * 2], ['--bs', topX + Hg - 84], ['--be', H - 2]]) {
         if (wideArt) artBox.style.setProperty(k, `${val.toFixed(1)}px`); else artBox.style.removeProperty(k);
       }
       const n = cols * rows;
@@ -1390,11 +1374,16 @@ void main(){
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle);
   addEventListener('load', settle);
 
+  // Expanding or filtering the tool catalog moves the sections below it.
+  // Keep their scroll positions and pins aligned with the new page height.
+  const layoutObserver = new ResizeObserver(() => requestAnimationFrame(settle));
+  $$('[data-home-resize]').forEach((element) => layoutObserver.observe(element));
+  env.onStop(() => layoutObserver.disconnect());
+
   }, page);
 
   env.onStop(() => {
     env.ctx.revert();
-    page.replaceChildren(...pristine);
     ScrollTrigger.refresh();
   });
   return () => env.stop();

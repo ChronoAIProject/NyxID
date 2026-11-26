@@ -1,12 +1,12 @@
 /* NyxID home page ("light night" design, mockups/landing-combined/nyxid-light-night.html).
    Every rule is scoped to .nyx-home; keyframes carry a nyx- prefix so they cannot replace the app's own. */
-@import url("https://fonts.googleapis.com/css2?family=Host+Grotesk:wght@300..800&family=JetBrains+Mono:wght@400;500&display=swap");
+
 /* ---- base, type, buttons, nav, the run, control, apps, agent, jobs, close: landing-1 v3 styles.css ---- */
 .nyx-home{
   --paper:#F3F3F0; --paper-2:#E8E8E4; --card:#FCFCFB;
   --ink:#17171A; --ink-2:#222225; --ink-3:#2C2C30;
   --body:#45444B; --faint:#74727A; --ghost:#B7B7B2;
-  --line:rgba(23,23,26,.13); --line-2:rgba(23,23,26,.26);
+  --line:rgba(23,23,26,.13); --home-rule-strong:rgba(23,23,26,.26);
   --violet:#9775FA; --violet-deep:#6541D8; --violet-fill:#7C5CE0; --lilac:#C9BBFE; --lilac-2:#E2DAFE;
   --done:#0E8F63; --done-bright:#34D399; --done-soft:#DDF3E9;
   --ask:#E2650B; --ask-bright:#FF8A1F; --ask-soft:#FFE8D4;
@@ -88,7 +88,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .nav-links{display:flex;gap:2px}
 .nyx-home .nav-links a{display:inline-block;padding:9px 12px;border-radius:9px;font-size:15px;color:var(--body);white-space:nowrap;overflow:hidden;vertical-align:middle;transition:background .15s,color .15s}
 .nyx-home .nav-links a:hover{color:var(--ink);background:var(--hover)}
-.nyx-home .nav-sep{width:1px;height:20px;background:var(--line-2);margin:0 6px}
+.nyx-home .nav-sep{width:1px;height:20px;background:var(--home-rule-strong);margin:0 6px}
 .nyx-home .nav .btn{height:38px;padding:0 16px;font-size:14.5px;margin-left:4px}
 .nyx-home .nav .logo-light{display:none}
 /* dark glass over the ink sections */
@@ -114,7 +114,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .ticket{--z:9px;background:var(--surface);padding:16px 18px calc(16px + var(--z));border-radius:12px 12px 0 0;
   -webkit-mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--z)) 100%;
   mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--z)) 100%}
-.nyx-home .t-head{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);padding-bottom:12px;border-bottom:1.5px dashed var(--line-2)}
+.nyx-home .t-head{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);padding-bottom:12px;border-bottom:1.5px dashed var(--home-rule-strong)}
 .nyx-home .t-lines{display:grid}
 .nyx-home .t-line{display:grid;grid-template-columns:26px 1fr auto;column-gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}
 .nyx-home .t-ic{width:26px;height:26px;display:grid;place-items:center}
@@ -181,7 +181,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .obj.is-sorted .stamp{font-size:1.7em;right:-.9em;top:-.9em}
 
 .nyx-home .trays{display:grid;gap:14px}
-.nyx-home .tray{border:1.5px solid var(--line-2);border-radius:20px;background:var(--tray-bg);color:var(--tray-ink);padding:14px 18px 8px;transition:border-color .2s,background .2s,transform .3s var(--spring)}
+.nyx-home .tray{border:1.5px solid var(--home-rule-strong);border-radius:20px;background:var(--tray-bg);color:var(--tray-ink);padding:14px 18px 8px;transition:border-color .2s,background .2s,transform .3s var(--spring)}
 .nyx-home .tray.is-over{border-color:var(--accent);background:var(--accent-soft)}
 .nyx-home .tray.is-thunk{transform:translateY(3px)}
 .nyx-home .tray-h{display:flex;justify-content:space-between;align-items:baseline;font-size:15px;font-weight:600;padding-bottom:8px}
@@ -189,7 +189,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .tray--wait{border-style:dashed;background:var(--tray-wait-bg);border-color:var(--tray-wait-line)}
 .nyx-home .slot{display:grid;grid-template-columns:86px 1fr 20px;column-gap:12px;align-items:center;min-height:60px;padding:5px 0;border-top:1px solid var(--line)}
 .nyx-home .slot-hole{display:grid;place-items:center;width:86px;height:50px}
-.nyx-home .slot-hole:empty{border:1.5px dashed var(--line-2);border-radius:8px;width:66px;height:38px;justify-self:center}
+.nyx-home .slot-hole:empty{border:1.5px dashed var(--home-rule-strong);border-radius:8px;width:66px;height:38px;justify-self:center}
 .nyx-home .slot-text{font-size:14.5px;line-height:1.3;color:var(--slate)}
 .nyx-home .slot-text b{color:var(--tray-ink);font-weight:600}
 .nyx-home .slot>img{width:18px;height:18px;object-fit:contain}
@@ -203,7 +203,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .slot-act button:active{transform:scale(.97)}
 .nyx-home .slot-act button[hidden]{display:none}
 .nyx-home .b-ok{background:var(--done);color:#fff}
-.nyx-home .b-no,.nyx-home .b-undo{border:1.5px solid var(--line-2);color:var(--tray-ink)}
+.nyx-home .b-no,.nyx-home .b-undo{border:1.5px solid var(--home-rule-strong);color:var(--tray-ink)}
 .nyx-home .tray-none{font-size:14.5px;color:var(--faint);padding:10px 0 8px;border-top:1px solid var(--line)}
 .nyx-home .tray-none[hidden]{display:none}
 
@@ -216,7 +216,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .tray.is-thunk{transform:none;box-shadow:0 0 0 3px var(--accent-soft)}
 /* an empty hole is as tall as a filled one, so the trays never change height while a slip is in flight */
 .nyx-home .slot-hole:empty{width:86px;height:50px;border:0;border-radius:0;justify-self:auto}
-.nyx-home .slot-hole:empty::before{content:"";width:66px;height:38px;border:1.5px dashed var(--line-2);border-radius:8px}
+.nyx-home .slot-hole:empty::before{content:"";width:66px;height:38px;border:1.5px dashed var(--home-rule-strong);border-radius:8px}
 /* when the counter is empty, NyxBot sums up the night in a chat bubble, like the "Done!" in the hero */
 .nyx-home .pile-empty{inset:auto auto 40% 50%;display:flex;align-items:center;gap:10px;width:max-content;max-width:92%;padding:14px 20px 14px 14px;border-radius:24px 24px 24px 7px;
   background:var(--surface);border:1px solid var(--line);box-shadow:0 1px 2px rgba(23,23,26,.06),0 24px 44px -24px rgba(23,23,26,.5);
@@ -234,7 +234,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .apps-head .lede{margin-top:20px;max-width:56ch}
 .nyx-home .hub{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.6fr);align-items:center;gap:clamp(40px,9vw,150px);margin-top:clamp(36px,6vh,64px)}
 .nyx-home .hub svg.hub-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
-.nyx-home .hub-lines path{fill:none;stroke:var(--line-2);stroke-width:1.5;transition:stroke .25s,stroke-width .25s}
+.nyx-home .hub-lines path{fill:none;stroke:var(--home-rule-strong);stroke-width:1.5;transition:stroke .25s,stroke-width .25s}
 .nyx-home .hub-lines path.pulse{stroke:var(--violet-fill);stroke-width:2.5;stroke-linecap:round;stroke-dasharray:14 400;animation:nyx-pulse 3.2s linear infinite}
 .nyx-home .hub-lines path.is-hot{stroke:var(--violet-fill);stroke-width:2.5}
 @keyframes nyx-pulse{from{stroke-dashoffset:414}to{stroke-dashoffset:0}}
@@ -296,12 +296,12 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .k-real{background:#17171A;color:#F3F3F0;border:1px solid #17171A}
 .nyx-home .fc-checks{display:grid;gap:4px;margin-top:8px}
 .nyx-home .fc-checks li{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--body)}
-.nyx-home .fc-checks li i{flex:none;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--line-2);display:grid;place-items:center;color:transparent;transition:background .25s,border-color .25s,color .25s}
+.nyx-home .fc-checks li i{flex:none;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--home-rule-strong);display:grid;place-items:center;color:transparent;transition:background .25s,border-color .25s,color .25s}
 .nyx-home .fc-checks li svg{width:10px;height:10px}
 .nyx-home .fc-checks li:nth-child(2) i{transition-delay:.2s}
 .nyx-home .fc-checks li:nth-child(3) i{transition-delay:.4s}
 .nyx-home .flow.s2 .fc-checks li i{background:#22B07D;border-color:#22B07D;color:#fff}
-.nyx-home .fc-swap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line-2);font-size:13.5px;color:var(--faint)}
+.nyx-home .fc-swap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px dashed var(--home-rule-strong);font-size:13.5px;color:var(--faint)}
 .nyx-home .fc-swap>svg{width:16px;height:16px;fill:none;stroke:var(--faint);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .nyx-home .fc-swap .k-real{opacity:0;transform:translateX(-6px)}
 .nyx-home .flow.s2 .fc-swap .k-agent{opacity:.45;text-decoration:line-through;transition-delay:.62s}
@@ -312,7 +312,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .fc-done i{width:20px;height:20px;border-radius:50%;background:#22B07D;display:grid;place-items:center;color:#fff}
 .nyx-home .fc-done svg{width:11px;height:11px}
 .nyx-home .flow.s4 .fc-done{opacity:1}
-.nyx-home .flow-wire{position:relative;width:2px;height:16px;margin-left:30px;background:repeating-linear-gradient(var(--line-2) 0 4px,transparent 4px 8px)}
+.nyx-home .flow-wire{position:relative;width:2px;height:16px;margin-left:30px;background:repeating-linear-gradient(var(--home-rule-strong) 0 4px,transparent 4px 8px)}
 .nyx-home .flow-wire i{position:absolute;left:-4px;top:0;width:10px;height:10px;border-radius:50%;background:var(--violet);opacity:0}
 .nyx-home .flow[data-step="1"] .flow-wire[data-w="1"] i,.nyx-home .flow[data-step="3"] .flow-wire[data-w="3"] i{animation:nyx-fdrop .45s var(--ease) forwards}
 @keyframes nyx-fdrop{0%{top:-5px;opacity:0}20%{opacity:1}100%{top:calc(100% - 5px);opacity:1}}
@@ -325,15 +325,15 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .jobs{position:relative;background:var(--counter);box-shadow:var(--sheet-edge);border-radius:var(--r-band) var(--r-band) 0 0;margin-top:calc(var(--r-band)*-1);padding:clamp(80px,11vh,120px) 0 clamp(110px,15vh,170px)}
 .nyx-home .jobs-head{display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px}
 /* the rail: a swipeable row everywhere; on a desktop the section pins and scrolling down moves it sideways */
-.nyx-home .jobs-rail{margin-top:clamp(28px,4.5vh,48px);overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;
-  margin-right:calc(var(--gut)*-1);padding:6px var(--gut) 26px 0}
+.nyx-home .jobs-rail{--jobs-fade:clamp(20px,4vw,64px);width:min(1440px,100vw);margin-top:clamp(28px,4.5vh,48px);margin-inline:calc((100% - min(1440px,100vw))/2);padding:20px var(--jobs-fade) 26px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding-inline:var(--jobs-fade);-webkit-overflow-scrolling:touch;scrollbar-width:none;
+  -webkit-mask-image:linear-gradient(to right,transparent,#000 var(--jobs-fade),#000 calc(100% - var(--jobs-fade)),transparent);mask-image:linear-gradient(to right,transparent,#000 var(--jobs-fade),#000 calc(100% - var(--jobs-fade)),transparent)}
 .nyx-home .jobs-rail::-webkit-scrollbar{display:none}
 .nyx-home .jobs-track{display:flex;gap:clamp(14px,1.6vw,22px);width:max-content;align-items:stretch}
 .nyx-home .jobs-track .job{flex:none;width:clamp(260px,21vw,320px);scroll-snap-align:start}
 .nyx-home .jobs-bar{height:2px;background:var(--line);border-radius:2px;overflow:hidden}
 .nyx-home .jobs-bar i{display:block;height:100%;background:var(--ink);transform-origin:left;transform:scaleX(var(--jp,.34))}
 .nyx-home .jobs.is-rail{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr);align-content:center;padding-block:clamp(104px,13vh,128px) clamp(48px,7vh,80px)}
-.nyx-home .jobs.is-rail .jobs-rail{overflow:visible;scroll-snap-type:none;margin-right:0;padding-right:0;clip-path:inset(-60px 0 -60px 0)}
+.nyx-home .jobs.is-rail .jobs-rail{overflow:visible;scroll-snap-type:none}
 .nyx-home .jobs.is-rail .jobs-track{will-change:transform}
 .nyx-home .jobs.is-rail .wrap{overflow:visible}
 /* every ticket is as tall as the tallest one: the description takes the spare room, so the dashed rule, the steps and "Use this job" line up across the row */
@@ -345,7 +345,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .job-from{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
 .nyx-home .job-from img{width:16px;height:16px;object-fit:contain}
 .nyx-home .job h3{margin:12px 0 6px}
-.nyx-home .job .job-desc{font-size:15px;color:var(--body);line-height:1.4;padding-bottom:14px;border-bottom:1.5px dashed var(--line-2)}
+.nyx-home .job .job-desc{font-size:15px;color:var(--body);line-height:1.4;padding-bottom:14px;border-bottom:1.5px dashed var(--home-rule-strong)}
 .nyx-home .job .t-line{grid-template-columns:22px 1fr;padding:9px 0}
 .nyx-home .job .t-ic img{max-width:18px;max-height:18px}
 .nyx-home .job .t-what{font-size:14.5px;font-weight:500}
@@ -355,7 +355,7 @@ html.lenis,html.lenis body{height:auto}
 
 /* ---------- 8. close and footer ---------- */
 /* the close has its own, deeper near-black; an eased fade: it starts almost invisibly and gathers into the dark, so there is no edge where it begins */
-.nyx-home .close{--foot-space:147px;--close-bg:#0A0A0D;--fade:clamp(140px,20vh,220px);position:relative;padding-top:var(--fade);background:linear-gradient(to bottom,transparent 0,color-mix(in srgb,var(--close-bg) 3%,transparent) calc(var(--fade)*.2),color-mix(in srgb,var(--close-bg) 12%,transparent) calc(var(--fade)*.38),color-mix(in srgb,var(--close-bg) 30%,transparent) calc(var(--fade)*.54),color-mix(in srgb,var(--close-bg) 55%,transparent) calc(var(--fade)*.68),color-mix(in srgb,var(--close-bg) 80%,transparent) calc(var(--fade)*.82),color-mix(in srgb,var(--close-bg) 95%,transparent) calc(var(--fade)*.93),var(--close-bg) var(--fade));border-radius:0;margin-top:0;overflow:hidden}
+.nyx-home .close{--foot-space:0px;--close-bg:#0A0A0D;--fade:clamp(140px,20vh,220px);position:relative;padding-top:var(--fade);background:linear-gradient(to bottom,transparent 0,color-mix(in srgb,var(--close-bg) 3%,transparent) calc(var(--fade)*.2),color-mix(in srgb,var(--close-bg) 12%,transparent) calc(var(--fade)*.38),color-mix(in srgb,var(--close-bg) 30%,transparent) calc(var(--fade)*.54),color-mix(in srgb,var(--close-bg) 55%,transparent) calc(var(--fade)*.68),color-mix(in srgb,var(--close-bg) 80%,transparent) calc(var(--fade)*.82),color-mix(in srgb,var(--close-bg) 95%,transparent) calc(var(--fade)*.93),var(--close-bg) var(--fade));border-radius:0;margin-top:0;overflow:hidden}
 /* the background slot fills its section; landing-1 defined this in its hero styles, which this page leaves out */
 .nyx-home .bg-slot{position:absolute;inset:0;pointer-events:none}
 .nyx-home .bg-slot canvas{display:block;width:100%;height:100%}
@@ -363,7 +363,7 @@ html.lenis,html.lenis body{height:auto}
 /* the painting fills one full screen; the footer starts below it, so the two never touch */
 /* desktop: the box also covers the footer's whole height (--art-extra), so the picture can blend all the way down to
    the bottom of the page. The footer's links are on the right and the painting on the left, so the two do not meet. */
-@media (min-width:901px){.nyx-home .close{--art-extra:var(--foot-space)}}
+
 /* desktop: the box also starts at the very top of the section (--art-top is the lead-in's height), so the picture can
    carry on upward and blend into the section above */
 @media (min-width:901px){.nyx-home .close{--art-top:var(--fade)}}
@@ -377,8 +377,8 @@ html.lenis,html.lenis body{height:auto}
    at the line where the top of the screen sits at the end of the page. So while you scroll in, the picture rises out
    of the section above over a long soft edge, and at the end of the page it is whole right up to the top of the screen. */
 @media (min-width:901px){.nyx-home .close-art{--top-fade:calc(var(--art-top,0px) + var(--art-extra,0px));
-  -webkit-mask-image:linear-gradient(to bottom,transparent 0,rgb(0 0 0 / .1) calc(var(--top-fade)*.25),rgb(0 0 0 / .5) calc(var(--top-fade)*.5),rgb(0 0 0 / .9) calc(var(--top-fade)*.75),#000 var(--top-fade));
-  mask-image:linear-gradient(to bottom,transparent 0,rgb(0 0 0 / .1) calc(var(--top-fade)*.25),rgb(0 0 0 / .5) calc(var(--top-fade)*.5),rgb(0 0 0 / .9) calc(var(--top-fade)*.75),#000 var(--top-fade))}}
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,rgb(0 0 0 / .1) calc(var(--top-fade)*.25),rgb(0 0 0 / .5) calc(var(--top-fade)*.5),rgb(0 0 0 / .9) calc(var(--top-fade)*.75),#000 var(--top-fade),#000 calc(100% - 64px),transparent 100%);
+  mask-image:linear-gradient(to bottom,transparent 0,rgb(0 0 0 / .1) calc(var(--top-fade)*.25),rgb(0 0 0 / .5) calc(var(--top-fade)*.5),rgb(0 0 0 / .9) calc(var(--top-fade)*.75),#000 var(--top-fade),#000 calc(100% - 64px),transparent 100%)}}
 /* the halo: a soft band of the painting's own edge colour behind the canvas, clear in the oval's middle, strongest just
    inside its rim (66% of the gradient is 0.86 of the oval's radius) and gone by 1.3 radii.
    Where the dots thin out toward the rim the halo takes over, so the painting melts into the ground with no outline.
@@ -451,7 +451,7 @@ html.lenis,html.lenis body{height:auto}
   .nyx-home .run-inner{min-height:0;padding:80px 0 72px}
   .nyx-home .tally-n{font-size:clamp(120px,36vw,200px)}
   .nyx-home .stage{grid-template-columns:minmax(0,1fr);gap:14px;min-height:0;padding-bottom:20px}
-  .nyx-home .wire{width:2px;height:22px;margin:0 0 0 24px;background:repeating-linear-gradient(var(--line-2) 0 4px,transparent 4px 8px)}
+  .nyx-home .wire{width:2px;height:22px;margin:0 0 0 24px;background:repeating-linear-gradient(var(--home-rule-strong) 0 4px,transparent 4px 8px)}
   .nyx-home .wire i{display:none}
   .nyx-home .phone{display:none}
   .nyx-home .chapter .chapter-t{color:var(--ink)}
@@ -694,7 +694,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home[data-theme="dark"]{
   --paper:#0E0E10; --paper-2:#151518; --card:#1B1B1F; --surface:#222227;
   --ink:#EDEDEF; --body:#B6B4BD; --faint:#8F8D97; --ghost:#55545B;
-  --line:rgba(255,255,255,.1); --line-2:rgba(255,255,255,.2);
+  --line:rgba(255,255,255,.1); --home-rule-strong:rgba(255,255,255,.2);
   --violet-deep:#A98DFF; --violet-fill:#8B6CF0; --lilac-2:#2D2550;
   --done:#22B07D; --done-soft:#0F3528; --ask:#FF9A3C; --ask-soft:#3D2208; --stop:#F07272; --stop-soft:#3D1A1A;
   --slab:#1B1922; --slab-3:#2B2933; --slab-fg:#EDEDEF;
@@ -709,7 +709,7 @@ html.lenis,html.lenis body{height:auto}
 @media (prefers-color-scheme:dark){.nyx-home:not([data-theme]){
   --paper:#0E0E10; --paper-2:#151518; --card:#1B1B1F; --surface:#222227;
   --ink:#EDEDEF; --body:#B6B4BD; --faint:#8F8D97; --ghost:#55545B;
-  --line:rgba(255,255,255,.1); --line-2:rgba(255,255,255,.2);
+  --line:rgba(255,255,255,.1); --home-rule-strong:rgba(255,255,255,.2);
   --violet-deep:#A98DFF; --violet-fill:#8B6CF0; --lilac-2:#2D2550;
   --done:#22B07D; --done-soft:#0F3528; --ask:#FF9A3C; --ask-soft:#3D2208; --stop:#F07272; --stop-soft:#3D1A1A;
   --slab:#1B1922; --slab-3:#2B2933; --slab-fg:#EDEDEF;
@@ -729,7 +729,7 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home[data-theme="dark"] .tile:hover{box-shadow:0 12px 22px -16px rgba(0,0,0,.9)}
 /* the rule switch keeps white text readable: solid thumbs, not the brighter night text greens and reds */
 /* black glyph logos turn white at night */
-.nyx-home[data-theme="dark"] img:is([src$="icons/x.svg"],[src$="icons/github.svg"],[src$="icons/notion.svg"]):not(.ic-ink){filter:invert(1) hue-rotate(180deg)}
+.nyx-home[data-theme="dark"] img:is([src$="icons/x.svg"],[src$="icons/github.svg"],[src$="icons/notion.svg"],[src$="icons/openai.svg"],[src$="icons/elevenlabs.svg"]):not(.ic-ink){filter:invert(1) hue-rotate(180deg)}
 /* the nav logo has a light and a dark version */
 .nyx-home[data-theme="dark"] .nav .logo-dark{display:none}
 .nyx-home[data-theme="dark"] .nav .logo-light{display:block}
@@ -757,3 +757,122 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home{isolation:isolate;min-height:100vh}
 /* The app's Tailwind has a .ring utility (a 1px box-shadow). The design's .ring is the circle around the N. */
 .nyx-home .ring{box-shadow:none}
+
+/* Progressive detail uses the same paper, hairlines, rounded pills and type as the story. */
+.nyx-home .explore-pages{position:relative;padding:clamp(80px,12vh,120px) 0;scroll-margin-top:88px}
+.nyx-home .section-label{font-family:var(--mono);font-size:11.5px;line-height:1.5;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);margin-bottom:20px}
+.nyx-home .overview-heading{display:grid;grid-template-columns:1.1fr 1fr;gap:32px 64px;align-items:end}
+.nyx-home .overview-heading .lede{max-width:46ch}
+.nyx-home .pile-copy>.section-label{max-width:32ch}
+
+/* The menu remains available when the four section anchors hide on small screens. */
+.nyx-home .nav .logo-mark{display:none}
+.nyx-home .site-more{position:relative;pointer-events:auto}
+.nyx-home summary{cursor:pointer;list-style:none}
+.nyx-home summary::-webkit-details-marker{display:none}
+.nyx-home .site-more>summary{display:flex;align-items:center;gap:6px;min-height:38px;padding:8px 12px;border:1px solid var(--line);border-radius:999px;font-size:14px;white-space:nowrap;transition:background .2s}
+.nyx-home .site-more>summary:hover,.nyx-home .site-more[open]>summary{background:var(--hover)}
+.nyx-home .site-more>summary svg{transition:transform .2s var(--ease)}
+.nyx-home .site-more[open]>summary svg{transform:rotate(180deg)}
+.nyx-home .site-more-menu{position:absolute;top:calc(100% + 18px);right:0;width:360px;max-width:calc(100vw - 40px);max-height:calc(100svh - 100px);overflow-y:auto;padding:20px 12px 10px;background:var(--card);color:var(--ink);border:1px solid var(--home-rule-strong);border-radius:20px;box-shadow:0 20px 60px -24px rgba(0,0,0,.3)}
+.nyx-home .site-more-menu>.section-label{padding:0 12px;margin-bottom:10px;font-size:10px}
+.nyx-home .site-more-menu>a{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:12px;border-radius:10px;transition:background .2s}
+.nyx-home .site-more-menu>a:hover{background:var(--hover)}
+.nyx-home .site-more-menu b{display:block;font-size:15px;font-weight:600}
+.nyx-home .site-more-menu small{display:block;font-size:12.5px;color:var(--body);line-height:1.5;margin-top:3px}
+.nyx-home .site-more-menu svg{flex:none}
+.nyx-home .site-more-bottom{display:flex;justify-content:space-between;gap:16px;margin-top:8px;padding:12px;border-top:1px solid var(--line)}
+.nyx-home .site-more-bottom a{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--body)}
+
+/* More tools continue the hub's existing app tiles on the same page ground. */
+.nyx-home .tool-catalog{margin-top:22px}
+.nyx-home .catalog-toggle{display:flex;width:fit-content;max-width:100%;margin:0 auto;gap:10px;min-height:44px;padding:10px 0;font-size:14px}
+.nyx-home .catalog-toggle>svg{transition:transform .2s var(--ease)}
+.nyx-home .tool-catalog[open] .catalog-toggle>svg{transform:rotate(45deg)}
+.nyx-home .tool-catalog .when-open,.nyx-home .tool-catalog[open] .when-closed{display:none}
+.nyx-home .tool-catalog[open] .when-open{display:inline}
+.nyx-home .catalog-count{font-size:10.5px;color:var(--faint);font-weight:400}
+.nyx-home .catalog-body{padding-top:24px}
+.nyx-home .catalog-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px 24px;border-top:1px solid var(--line);padding-top:20px}
+.nyx-home .catalog-head>p{font-size:11px;color:var(--faint)}
+.nyx-home .catalog-search{display:flex;align-items:center;gap:9px;width:190px;border-bottom:1px solid var(--home-rule-strong);color:var(--faint)}
+.nyx-home .catalog-search:focus-within{border-color:var(--violet-deep)}
+.nyx-home .catalog-search input{width:100%;min-width:0;min-height:38px;border:0;outline:none;background:transparent;color:var(--ink);font:inherit;font-size:13px}
+.nyx-home .catalog-search input::placeholder{color:var(--faint)}
+.nyx-home .catalog-search svg{flex:none}
+.nyx-home .catalog-group{margin-top:30px}
+.nyx-home .catalog-group-label{display:flex;align-items:center;gap:12px;margin-bottom:14px;font-family:var(--mono);font-size:10.5px;font-weight:400;line-height:1.5;letter-spacing:.07em;text-transform:uppercase;color:var(--body)}
+.nyx-home .catalog-group-label>span{color:var(--faint);letter-spacing:0}
+.nyx-home .tool-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.nyx-home .tool-catalog .catalog-tile{height:auto;min-height:54px;padding:12px 14px;gap:10px;font-size:14px;line-height:1.35;white-space:normal;overflow:visible;cursor:default}
+.nyx-home .catalog-tile>span:last-child{min-width:0;overflow-wrap:anywhere}
+.nyx-home .catalog-tool-copy{display:flex;flex-direction:column;gap:4px}
+.nyx-home .catalog-tool-copy small{font-size:10.5px;font-weight:400;line-height:1.4;color:var(--body)}
+.nyx-home .catalog-tool-copy .catalog-availability{font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.nyx-home .tool-initials{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:6px;background:var(--paper-2);font-family:var(--mono);font-size:9px;font-weight:400;color:var(--body)}
+.nyx-home .catalog-empty{padding:32px 0;color:var(--body);font-size:14px}
+.nyx-home .catalog-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 24px;margin-top:28px;padding-top:12px;border-top:1px solid var(--line)}
+.nyx-home .catalog-footer .link{font-size:13px;gap:10px}
+.nyx-home .tile-status{margin-left:auto;font-family:var(--mono);font-size:9px;font-weight:400;color:var(--body)}
+.nyx-home .hub-in .tile:has(.tile-status){flex-wrap:wrap;align-content:center;column-gap:8px;row-gap:0;height:auto;min-height:54px;padding-block:8px}
+@media(max-width:1080px){.nyx-home .tool-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:760px){.nyx-home .tool-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){
+  .nyx-home .tool-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .nyx-home .tool-catalog .catalog-tile{font-size:13px;padding:10px;gap:8px;min-height:50px}
+  .nyx-home .catalog-tile img{width:19px;height:19px}
+  .nyx-home .catalog-search{width:150px}
+  .nyx-home .catalog-head>p{font-size:10px}
+}
+
+/* Deep pages are an index of simple ruled links, with the existing display typography. */
+.nyx-home .explore-pages{padding-bottom:40px}
+.nyx-home .explore-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:48px;margin-top:40px}
+.nyx-home .explore-page{display:flex;align-items:center;gap:16px;min-width:0;padding:24px 0;border-top:1px solid var(--home-rule-strong)}
+.nyx-home .explore-number{align-self:flex-start;padding-top:3px;color:var(--faint);font-size:11px}
+.nyx-home .explore-copy{flex:1;min-width:0}
+.nyx-home .explore-page h3{font-size:20px}
+.nyx-home .explore-page p{font-size:14px;color:var(--body);margin-top:8px;max-width:32ch}
+.nyx-home .explore-go{display:flex;align-items:center;gap:7px;font-size:12px;white-space:nowrap}
+.nyx-home .explore-go svg{transition:transform .2s var(--ease)}
+.nyx-home .explore-page:hover .explore-go svg{transform:translate(3px,-3px)}
+
+@media(max-width:959px){
+  .nyx-home .overview-heading{grid-template-columns:1fr;gap:22px}
+  .nyx-home .overview-heading .lede{max-width:56ch}
+  .nyx-home .explore-grid{column-gap:28px}
+  .nyx-home .explore-go{font-size:0;gap:0}
+}
+@media(max-width:640px){
+  .nyx-home .explore-grid{grid-template-columns:1fr;margin-top:28px}
+  .nyx-home .explore-go{font-size:12px;gap:6px}
+}
+@media(max-width:560px){
+  .nyx-home .nav-bar{gap:8px}
+  .nyx-home .nav-bar>.nav-box:first-child{flex:none}
+  .nyx-home .nav .nav-box{padding-inline:6px}
+  .nyx-home .nav .nav-box .nav-logo{padding:8px}
+  .nyx-home .nav .nav-box .nav-logo img{display:none}
+  .nyx-home .nav .nav-box .nav-logo .logo-mark{display:block;flex:none;width:22px;height:22px}
+  .nyx-home .nav .nav-links .nav-login{display:none}
+  .nyx-home .site-more{position:static;flex:none}
+  .nyx-home .site-more>summary{font-size:13px;padding:8px;gap:4px}
+  .nyx-home .nav .btn{font-size:13px;padding-inline:11px;margin-left:0}
+  .nyx-home .nav .theme-btn{width:32px;margin:0}
+  .nyx-home .site-more-menu{position:absolute;top:calc(100% + 12px);left:auto;right:0;width:calc(100vw - 40px);max-width:none}
+  .nyx-home .hub-in .tile:has(.tile-status){font-size:12px}
+  .nyx-home .tile-status{font-size:8px}
+}
+@media(prefers-reduced-motion:reduce){
+  .nyx-home :is(.site-more>summary svg,.catalog-toggle>svg,.explore-go svg){transition:none}
+}
+
+.nyx-home .pile-detail-links{display:flex;flex-wrap:wrap;gap:4px 24px;margin-top:8px}
+.nyx-home .pile-detail-links .link{font-size:13px;padding-block:8px}
+
+.nyx-home .job-from svg{width:16px;height:16px;flex:none}
+.nyx-home .st-job-mark{display:flex;align-items:center;gap:3px;width:38px;flex:none}
+.nyx-home .st-job-mark img{width:17px;height:18px;object-fit:contain}
+.nyx-home .st-job-mark svg{width:16px;height:16px;color:var(--body)}
+.nyx-home[data-theme="dark"] .st-job-mark img:is([src$="/x.svg"],[src$="/elevenlabs.svg"]){filter:invert(1)}
+.nyx-home .job .t-line{grid-template-columns:38px minmax(0,1fr)}

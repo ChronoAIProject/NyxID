@@ -20,9 +20,9 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
     .map((node) => node.value);
   if (path === "/agents" || path === "/zh/agents") {
     const groups = [
-      "/api/v1/proxy/s/google-calendar",
+      "/api/v1/proxy/s/llm-openai/models",
       "/api/v1/llm/gateway/v1/chat/completions",
-      '"mcpServers"',
+      "nyxid mcp config",
       "nyxid api-key create",
     ];
     assert.equal(
@@ -35,7 +35,7 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
       `${path}: code examples must remain separate`,
     );
   }
-  if (path === "/" || path === "/zh") {
+  if (path === "/zh") {
     assert.notEqual(
       code.findIndex((value) => value.includes('"mcpServers"')),
       code.findIndex((value) => value.includes("curl -X POST")),
@@ -67,13 +67,13 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
   const markers =
     route === "/agents"
       ? [
-          "/api/v1/proxy/s/google-calendar",
+          "/api/v1/proxy/s/llm-openai/models",
           "/api/v1/llm/gateway/v1/chat/completions",
-          '"mcpServers"',
+          "nyxid mcp config",
           "nyxid api-key create",
-          "nyxid node setup --machine --computer",
+          "--allow-all-services false",
         ]
-      : route === "/"
+      : path === "/zh"
         ? [
             '"mcpServers"',
             "https://nyx-api.chrono-ai.fun/mcp",
@@ -86,7 +86,7 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
       code.some((value) => value.includes(marker)),
       `${path}: missing code ${marker}`,
     );
-  if (route === "/")
+  if (path === "/zh")
     for (const title of prefix
       ? [
           "一个开箱即用的助手",
@@ -99,6 +99,17 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
           "Keys for your agents, not passwords",
         ])
       assert.ok(markdown.includes(title), `${path}: missing audience ${title}`);
+  if (path === "/") {
+    assert.ok(code.some(value => value.includes("claude mcp add --transport http --scope user") && value.includes("https://nyx-api.chrono-ai.fun/mcp")), "Home: retain the visible MCP setup example");
+    for (const body of [
+      "The pile on your counter, sorted before you wake.",
+      "Your agent works in the apps and chats you connect.",
+      "Use a separate Agent Key for each agent",
+      "Start with a job.",
+    ]) assert.ok(markdown.includes(body), `Home: missing story or progressive detail ${body}`);
+    for (const target of ["/agents", "/integrations", "/pricing"])
+      assert.ok(links.includes(`${origin}${target}`), `Home: missing detail destination ${target}`);
+  }
   const targets =
     route === "/agents"
       ? [

@@ -1,18 +1,15 @@
 import { websiteVisibility, websiteConfiguration } from "./release-config";
 import { useBrowserContext } from "../public-site/browser-context";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode, SyntheticEvent } from "react";
 import { useLocation } from "@tanstack/react-router";
-import { WEBSITE_THEME } from "./website-theme";
+import { usePublicThemeElement } from "../public-site/public-theme";
+import { PublicFooter, PublicHeader } from "../public-site/public-chrome";
 import {
   parsePublicPath,
   publicationPath,
   publishedRoute,
 } from "../public-site/publication";
-import EnHeader from "./generated/en/WebsiteHeader";
-import EnFooter from "./generated/en/WebsiteFooter";
-import ZhHeader from "./generated/zh/WebsiteHeader";
-import ZhFooter from "./generated/zh/WebsiteFooter";
 import { WebsiteContext } from "./website-context";
 import type { WebsiteState } from "./website-context";
 import {
@@ -41,6 +38,8 @@ function Website({
   navigationRevision?: number;
 }) {
   const { mode } = useVisualMotion();
+  const publicRef = useRef<HTMLDivElement>(null);
+  usePublicThemeElement(publicRef);
   const location = useLocation();
   // Canonical HTML has no visitor query. The first client tree must match it;
   // apply browser context after hydration and after subsequent URL changes.
@@ -173,13 +172,11 @@ function Website({
     );
   }
   const Content = language === "zh" ? Chinese : English;
-  const Header = language === "zh" ? ZhHeader : EnHeader;
-  const Footer = language === "zh" ? ZhFooter : EnFooter;
   return (
     <WebsiteContext.Provider value={state}>
       <div
-        className="website-a"
-        data-theme={WEBSITE_THEME}
+        ref={publicRef}
+        className="website-a nyx-public"
         data-website-visibility={JSON.stringify(websiteVisibility)}
         data-website-config={encodeURIComponent(websiteConfiguration)}
         data-visual-version="4.1"
@@ -190,9 +187,7 @@ function Website({
         <a href="#website-main" className="website-skip">
           {language === "zh" ? "跳到正文" : "Skip to content"}
         </a>
-        <nav className={"nav " + (menuOpen ? "open" : "")} id="nav">
-          <Header />
-        </nav>
+        <PublicHeader language={language} route={route} siteHref={state.siteHref} authHref={state.authHref} localeHref={state.localeHref} />
         <main id="website-main" tabIndex={-1}>
           <Suspense
             fallback={
@@ -204,9 +199,7 @@ function Website({
             {children ?? <Content />}
           </Suspense>
         </main>
-        <footer id="foot">
-          <Footer />
-        </footer>
+        <PublicFooter language={language} siteHref={state.siteHref} localeHref={state.localeHref} />
       </div>
     </WebsiteContext.Provider>
   );

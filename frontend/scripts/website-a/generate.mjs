@@ -488,9 +488,13 @@ for (locale of ["en", "zh"]) {
               .split(/[-/]/)
               .map((part) => part[0].toUpperCase() + part.slice(1))
               .join("") + "Page";
-    const body = route === "pricing"
+    const nativeStory = { nyxbot: "NyxbotStoryPage", "how-it-works": "HowItWorksStoryPage", security: "SecurityStoryPage", agents: "AgentsStoryPage" }[route];
+    const solutionStory = route === "solutions" ? "SolutionsStoryPage" : route.startsWith("solutions/") ? "SolutionStoryPage" : null;
+    const body = solutionStory ? `<${solutionStory} />` : route === "contact" ? "<ContactStoryPage />" : nativeStory ? `<${nativeStory} />` : route === "pricing"
       ? "<PricingSection />"
-      : jsxChildren(tree) + (route === "" ? "<CommunityAccess />" : "");
+      : route === "integrations"
+        ? "<IntegrationCatalog />"
+      : jsxChildren(tree).replaceAll("现成方案，几分钟上线，无需代码", "先确认工作流程、连接工具，再审核访问权限") + (route === "" ? "<CommunityAccess />" : "");
     const interactions = [
       "AudienceSwitcher",
       "CodeExample",
@@ -509,11 +513,15 @@ for (locale of ["en", "zh"]) {
       (heroComponents.length ? `import {${heroComponents.join(",")}} from '../../visuals/hero';\n` : "");
     const pageSource =
       banner +
+      (solutionStory ? `import {${solutionStory}} from '../../solution-story-pages';\n` : "") +
+      (route === "contact" ? "import {ContactStoryPage} from '../../commercial-story-pages';\n" : "") +
+      (nativeStory ? `import {${nativeStory}} from '../../product-story-pages';\n` : "") +
       (body.includes("<SiteLink") ? "import {SiteLink} from '../../site-link';\n" : "") +
       imports + visualImports +
       (["NewsletterSignup", "ContactChat", "FooterStatus", "BlogMenuLink"].some(name => body.includes("<"+name)) ? `import {${["NewsletterSignup", "ContactChat", "FooterStatus", "BlogMenuLink"].filter(name => body.includes("<"+name)).join(",")}} from '../../optional-features';\n` : "") +
       (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
       (body.includes("<PricingSection") ? "import {PricingSection} from '../../pricing';\n" : "") +
+      (body.includes("<IntegrationCatalog") ? "import {IntegrationCatalog} from '../../integration-catalog';\n" : "") +
       (body.includes("websiteNavProps") ? "import {websiteNavProps} from '../../navigation';\n" : "") +
       (body.includes("<SolutionActivation") ? "import {SolutionActivation} from '../../solution-activation';\n" : "") +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
@@ -538,6 +546,11 @@ for (locale of ["en", "zh"]) {
     if (route === "pricing") {
       pageTitles["/pricing"] = pricingCopy[locale].title;
       pageDescriptions["/pricing"] = pricingCopy[locale].description;
+    }
+    if (route === "integrations") {
+      pageDescriptions["/integrations"] = locale === "zh"
+        ? "使用自己的账号或凭据，连接应用、AI 提供商与语音服务。"
+        : "Connect apps, AI providers and voice services with your own accounts or credentials.";
     }
     exports.push(
       `${q("/" + (route === "notfound" ? "404" : route))}:${component}`,

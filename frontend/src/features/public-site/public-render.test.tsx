@@ -17,7 +17,7 @@ describe("window-free public renderer", () => {
         expect(html).toContain("<h1");
         if (route === "/" && locale === "en") {
           // The English home page ("light night" design) has its own menu and footer.
-          expect(html).toContain('class="nyx-home"');
+          expect(html).toContain('class="nyx-home nyx-public"');
           expect(html).toContain("data-nav");
           expect(html).toContain('id="end"');
         } else {

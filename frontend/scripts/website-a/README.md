@@ -26,6 +26,27 @@ checks in `docs/plans/website-a-delivery.md`. The runtime interactions, auth lin
 helpers, public route policy, legacy blog compatibility and workflow CSS are
 maintained normally outside the generated directory.
 
+The homepage tool expansion and English/Chinese Integrations pages share
+`nyx-home/production-catalog.json`. This is a reviewed display export from an
+authenticated production snapshot. `nyx-home/catalog-curation.json` explicitly
+selects public-facing brands, groups auth/region variants and supplies labels
+and icons; it does not infer readiness or a roadmap from the old HTML flags.
+An explicit `availability: "coming_soon"` retains a release decision even when
+the backing service already exists in the production catalog.
+`generated/integrations.json` is the legacy design inventory and is not the
+source for these current catalog surfaces.
+
+To refresh the display export from a reviewed snapshot containing `checked_at`
+and the active catalog `entries`, run from `frontend`:
+
+```sh
+node scripts/website-a/sync-home-catalog.mjs /path/to/production-catalog.json
+```
+
+Only explicitly curated entries and safe display fields are exported. New
+services need a curation entry before they appear; disappeared catalog entries
+are omitted. The public website uses the committed export and needs no token.
+
 The pricing route uses the native `PricingSection` adapter and bilingual
 `pricing-copy.json`, based on the effective policy in chrono-finance PR #315
 (D2/D3/D5). Its 15% markup, own-account exception and GST example replace the
@@ -62,3 +83,87 @@ Native mail client availability and actual sending remain user-controlled.
 `primary-button-css.mjs` adapts both base and later mock primary-gradient
 shorthands to border-box/no-repeat paint. Preserve this transform when
 regenerating CSS so transparent borders cannot tile the gradient edge.
+
+# Public page design
+
+The marketing detail pages use native story layouts. `story-page.tsx` and
+`story-page.css` define their shared type and rhythm; `product-story-pages.tsx`
+contains NyxBot, How it works, Security and Your agent. Pricing, the tools directory
+and Contact have their own content layouts. `solution-story-pages.tsx` uses the
+bilingual workflow content in `solution-story-copy.json` for the job details, with `solutions-index.tsx` for the grid and
+`solution-workflow-icons.tsx` for explicit, locale-independent workflow marks. The generator preserves these native adapters. Keep the
+solution release gate in `SolutionActivation` when changing workflow layouts.
+
+The English home page is the design reference for public pages. Shared chrome is in
+`src/features/website-a/public-chrome.tsx`, with its bilingual footer directory in
+`src/features/public-site/public-footer-links.json`. `public-design.css` holds the
+public palette, type and controls; `public-reading.css` adapts docs, auth and legal
+surfaces. Their `nyxid-theme` choice stays separate from the application's
+`nyxid.theme` preference.
+
+Standalone legal HTML uses the same public CSS and footer directory during
+`scripts/prerender-legal.mjs`, so its first load matches the SPA presentation.
+
+Sign-in uses stills of the landing page's existing halftone artwork. To regenerate
+them, start the local preview on port 2972 and follow the capture and `cwebp`
+commands at the top of `capture-auth-art.mjs`.
+
+## Surge preview
+
+Prepare an independent static preview with the full public-page build:
+
+```sh
+VITE_STATIC_PREVIEW=true PUBLIC_SITE_ORIGIN=https://ctkm-nyx-landing.surge.sh npm run build
+node scripts/prepare-surge-preview.mjs ctkm-nyx-landing.surge.sh
+surge .surge-preview ctkm-nyx-landing.surge.sh
+```
+
+The packager materializes the generated Nginx routes as static HTML, adds a
+fallback and directory URL normalization, and marks the preview as noindex.
+Public controls and docs work without an API session. Account routes hand off to
+the live public origin, retaining query parameters. `.surge-preview/` is ignored.
+Authenticate directly with Surge (`surge login --browser`) before publishing;
+credentials do not belong in the repository or preview folder.
+
+## NyxBot app captures
+
+The NyxBot page uses actual development-app captures, with the existing local
+HTTP fixtures supplying example data. The workspace, booking hand-off,
+specialist memory and one-time confirmation use the production React components;
+the capture script supplies fictional booking details and an example.com identity
+at the fixture boundary. No real provider requests or personal account data are
+involved. The page labels
+them as example data. English UI captures are shared by both page languages.
+
+To regenerate, start the local Vite app on port 2972, then run:
+
+```sh
+# From the repository root (once):
+python3 -m venv .playwright-mcp/media-venv
+.playwright-mcp/media-venv/bin/pip install Pillow==11.3.0
+
+# From frontend:
+node scripts/website-a/capture-nyxbot-media.mjs
+node scripts/website-a/encode-nyxbot-gifs.mjs
+```
+
+Capture needs Playwright Chromium and `cwebp` on PATH. Override the dev origin
+with `NYXBOT_CAPTURE_ORIGIN`. It writes WebP stills to `public/landing/nyx/app/`
+and WebM source recordings to the ignored `.playwright-mcp/app-media/recordings/`.
+The encoder decodes the real recording in Chromium and writes GIFs with a shared
+palette and changed-frame rectangles. It keeps the native 1200px desktop / 440px
+mobile views, eight frames per second. Current GIFs are 635–893 KB on desktop
+and 352–418 KB on mobile. The completed state is the first frame, held briefly
+before the request and result replay. Only the current theme and viewport version loads.
+
+The page shows the responsive GIF inline, with no player or view tabs. A small
+pause control switches to the still; reduced motion always uses the still.
+Recordings have no audio. Memory and approval stills have their own mobile
+captures. Example content is supplied before the first frame; no personal
+identity or live provider effects are captured.
+
+Public page flow is intentionally different per destination. NyxBot owns the
+app/channels/specialists; How follows a single request; Your agent owns client
+setup and code; Security owns credentials/approval/audit; Pricing owns billing;
+Tools is a directory; Solutions uses job-specific headings and setup. Keep
+canonical pricing, availability and activation gates when editing those paths.
