@@ -804,19 +804,20 @@ permission occurrences retain their own event/target gates.
 Post-turn team and additional-chat text claims the exact settled assistant
 reply per stable destination after delivery preparation. Direct relay,
 relay-era, native gateway and followed-thread sends participate. Primary team
-updates and additional delivery to the same chat share one claim. Repeated hooks
-audit `already_claimed`. A claim database error audits `source_unavailable` and
-prevents text dispatch. Confirmed, rejected, unknown and interrupted attempts
-keep the claim. A crash after the claim can lose the text. The optional claim
-list is internal and purged with the reply. Drain older replicas for full
+updates and additional delivery to the same chat share one claim. A missing
+settled reply authorizes no send. Repeated hooks audit `already_claimed`. A
+claim database error audits `source_unavailable` and prevents text dispatch.
+Confirmed, rejected, unknown and interrupted attempts keep the claim. A crash
+after the claim can lose the text. Claims contain only destination digests.
+API responses, logs and audits never expose the reply's saved destinations or
+claim digests. Purging the reply removes both. Drain older replicas for full
 coverage, including on rollback. Saved handoff delivery and primary channel
 answers use their own durable delivery paths. A repeated hook audits
 `already_claimed` for each saved destination after the handoff delivery has
 finished, while a pending handoff remains eligible for its existing recovery.
-Failed local supplemental text
-keeps its receipts and audit. The existing live-turn notice claim selects
-one attempt across replicas; an already claimed local notice completing just
-after the final cannot suppress or duplicate it.
+Failed local supplemental text keeps its receipts and audit. The live-turn
+notice claim selects one attempt across replicas. An already claimed local
+notice completing just after the final cannot suppress or duplicate it.
 
 Native progress is not sent. Genuine independent native team/followed/permission
 results retain today's event reply behavior. While the same event's primary

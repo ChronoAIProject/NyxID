@@ -1279,8 +1279,8 @@ window (29 minutes); permission occurrences keep their existing event/target gat
 
 The post-turn text claim applies to relay-source and native gateway team and
 additional-chat results, including followed threads. The hook reads the exact
-settled reply and its saved additional destinations. Claim behavior, direct
-relay coverage and rolling upgrade behavior are defined in the [NyxBot
+settled reply and its saved additional destinations. The rules for a missing
+reply, destination privacy, direct relay claims and rolling upgrades are in the [NyxBot
 delivery contract](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 Missing or expired sources skip delivery to that destination. A missing
 permission source finishes refused. Image claims, multipart receipts, primary

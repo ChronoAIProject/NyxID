@@ -2328,6 +2328,23 @@ async fn v2_direct_after_turn_keeps_delivery_and_queued_pool_duties() {
         .unwrap()
         .unwrap();
     assert_eq!(saved.post_turn_deliver_also.len(), 1);
+    let delivery_audits = state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {
+            "event_type": "nyxbot_channel_supplemental_delivery",
+            "event_data.conversation_id": &child.id,
+            "event_data.turn_id": turn_id,
+            "event_data.purpose": "team_additional_result",
+        })
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(delivery_audits.len(), 1, "one extra-chat delivery decision");
+    let delivery = delivery_audits[0].get_document("event_data").unwrap();
+    assert_eq!(delivery.get_str("reason"), Ok("no_destination"));
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             if state
