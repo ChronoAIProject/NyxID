@@ -388,6 +388,23 @@ async fn telegram_setup_evidence_without_health_index_filters_foreign_owner() {
 
 #[tokio::test]
 async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
+    fn winning_plan(explain: &Document) -> String {
+        // Competing indexes legitimately appear with blocking sorts in rejected
+        // plans. Assert the plan Mongo actually executes, plus lookup statistics.
+        let cursor = explain.get_array("stages").unwrap()[0]
+            .as_document()
+            .unwrap()
+            .get_document("$cursor")
+            .unwrap();
+        serde_json::to_string(
+            cursor
+                .get_document("queryPlanner")
+                .unwrap()
+                .get_document("winningPlan")
+                .unwrap(),
+        )
+        .unwrap()
+    }
     let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = commands.clone();
     let handler = mongodb::event::EventHandler::callback(move |event| {
@@ -475,7 +492,7 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
                 .unwrap()
                 <= 3
         );
-        let projection = recorded.get_array("pipeline").unwrap()[1]
+        let projection = recorded.get_array("pipeline").unwrap()[2]
             .as_document()
             .unwrap()
             .get_document("$project")
@@ -518,7 +535,7 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
     assert!(filter.get_document("$expr").is_ok());
     assert!(!filter.contains_key("$or"));
     let explain=db.run_command(doc!{"explain":{"aggregate":CHANNELS,"pipeline":pipeline,"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
-    let encoded = serde_json::to_string(&explain).unwrap();
+    let encoded = winning_plan(&explain);
     assert!(encoded.contains("nyxbot_health_latest"), "{encoded}");
     assert!(!encoded.contains("COLLSCAN"), "{encoded}");
     assert!(!encoded.contains("\"stage\":\"SORT\""), "{encoded}");
@@ -541,7 +558,7 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
     );
     let recorded = commands.lock().unwrap().last().unwrap().clone();
     let explain=db.run_command(doc!{"explain":{"aggregate":CHANNELS,"pipeline":recorded.get_array("pipeline").unwrap(),"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
-    let encoded = serde_json::to_string(&explain).unwrap();
+    let encoded = winning_plan(&explain);
     assert!(encoded.contains("nyxbot_health_latest"));
     assert!(!encoded.contains("COLLSCAN"), "{encoded}");
     assert!(!encoded.contains("\"stage\":\"SORT\""), "{encoded}");
@@ -572,7 +589,7 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
     );
     let recorded = commands.lock().unwrap().last().unwrap().clone();
     let explain=db.run_command(doc!{"explain":{"aggregate":CHANNELS,"pipeline":recorded.get_array("pipeline").unwrap(),"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
-    let encoded = serde_json::to_string(&explain).unwrap();
+    let encoded = winning_plan(&explain);
     assert!(encoded.contains("nyxbot_health_latest"));
     assert!(!encoded.contains("COLLSCAN"), "{encoded}");
     assert!(!encoded.contains("\"stage\":\"SORT\""), "{encoded}");

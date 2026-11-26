@@ -214,6 +214,10 @@ pub(crate) async fn latest_nyxbot_rows(
     // aggregation; the final limit is bounded by the requested page.
     let mut pipeline = vec![
         doc! {"$match": filter},
+        // Keep the sort adjacent to the indexed match. Computed legacy fields
+        // before this stage prevent Mongo from using the index's ordering when
+        // production's competing bot/route/status index is present.
+        doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
         doc! {"$project": {
             "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
             "created_at": 1,
@@ -240,7 +244,6 @@ pub(crate) async fn latest_nyxbot_rows(
                 {"$eq":[{"$ifNull":["$pending_agent_api_key_id",null]},null]},
                 {"$eq":["$gateway_native_delivery",crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED]}]},
         }},
-        doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
     ];
     if bots
         .iter()

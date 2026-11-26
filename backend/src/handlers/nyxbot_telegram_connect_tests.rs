@@ -1481,7 +1481,7 @@ fn telegram_connect_transaction_uses_live_generation_after_real_aba_transfer() {
             .unwrap();
             transfer::transfer_with_keys(
                 &f.state.db,
-                None,
+                Some(&f.state.encryption_keys),
                 transfer::TransferCommand {
                     actor,
                     api_key_id: None,
