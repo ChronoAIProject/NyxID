@@ -2,6 +2,7 @@ use super::*;
 use crate::models::{
     channel_bot::ChannelBot, channel_message::ChannelMessage, nyxbot_channel::NyxbotEvent,
 };
+use crate::services::channel_guest_access as guest;
 
 /// Returns live policy after taking the same fence as stop/settings/allocation.
 /// Queued work ignores subscription expiry only, never sender or agent changes.
@@ -11,6 +12,27 @@ pub async fn validate_in_session(
     origin: &ChannelOrigin,
     conversation: &str,
     admitted: bool,
+    session: &mut ClientSession,
+) -> AppResult<NyxbotThread> {
+    Box::pin(validate_bound(
+        db,
+        owner,
+        origin,
+        conversation,
+        admitted,
+        None,
+        session,
+    ))
+    .await
+}
+
+async fn validate_bound(
+    db: &Database,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    admitted: bool,
+    pending_guest: Option<&guest::GuestTurn>,
     session: &mut ClientSession,
 ) -> AppResult<NyxbotThread> {
     let b = origin.thread.as_deref().ok_or_else(not_found)?;
@@ -55,8 +77,11 @@ pub async fn validate_in_session(
         return Err(not_found());
     }
     let mut child_filter = doc! {"_id":&b.child_id,"user_id":owner,"channel_id":&channel.id,"partition":&origin.partition,"record_scope":SCOPE};
+    let hosted = channel_access.is_none() && guest::is_hosted_conversation(conversation);
     if channel_access.is_none() {
-        child_filter.insert("conversation_id", conversation);
+        if !hosted {
+            child_filter.insert("conversation_id", conversation);
+        }
     } else {
         let e = origin.org_execution.as_ref().ok_or_else(not_found)?;
         if db.collection::<bson::Document>(crate::models::org_channel::LANES).find_one(doc!{"conversation_id":conversation,
@@ -79,6 +104,19 @@ pub async fn validate_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if hosted {
+        Box::pin(validate_hosted(
+            db,
+            &channel,
+            &child,
+            &settings,
+            origin,
+            conversation,
+            pending_guest,
+            session,
+        ))
+        .await?;
+    }
     if channel_generation(&channel, &settings) != b.channel_generation {
         return Err(not_found());
     }
@@ -218,7 +256,129 @@ pub async fn validate_in_session(
     }) {
         return Err(not_found());
     }
+    // Follow selection projects this same verified agent onto the child.
+    let mut child = child;
+    child.agent_id = Some(b.agent_id.clone());
     Ok(child)
+}
+
+async fn validate_hosted(
+    db: &Database,
+    channel: &NyxbotChannel,
+    child: &NyxbotThread,
+    settings: &NyxbotThread,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    pending_guest: Option<&guest::GuestTurn>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let b = origin.thread.as_deref().ok_or_else(not_found)?;
+    let platform = crate::services::channel_platform::canonical_platform(&origin.platform);
+    let mut filter = doc! {
+        "channel_id": &channel.id,
+        "user_id": &channel.user_id,
+        "expires_at": {"$gt": bson::DateTime::now()},
+    };
+    if let Some(turn) = pending_guest {
+        filter.insert("_id", &turn.source_event_id);
+        filter.insert("turn_id", bson::Bson::Null);
+    } else {
+        if let Some(id) = &origin.native_event_id {
+            filter.insert("_id", id);
+        } else {
+            filter.insert("event_id", &b.source_message_id);
+        }
+        filter.insert("conversation_id", conversation);
+        filter.insert("turn_id", doc! {"$type":"string"});
+    }
+    let event = db
+        .collection::<NyxbotEvent>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .find_one(filter)
+        .session(&mut *session)
+        .await?
+        .filter(|event| {
+            event
+                .delivery
+                .as_ref()
+                .is_some_and(|delivery| delivery.guest && &delivery.origin == origin)
+        })
+        .ok_or_else(not_found)?;
+    let retained;
+    let turn = if let Some(turn) = pending_guest {
+        turn
+    } else {
+        retained = guest::admitted_turn(
+            db,
+            &channel.channel_bot_id,
+            &channel.id,
+            platform,
+            &event.id,
+        )
+        .await?
+        .ok_or_else(not_found)?;
+        if let Err(error) = guest::revalidate(db, &retained).await {
+            return match error {
+                AppError::Forbidden(_) => Err(not_found()),
+                error => Err(error),
+            };
+        }
+        &retained
+    };
+    let assignment = turn.hosted_assignment.as_ref().ok_or_else(not_found)?;
+    if !b.guest
+        || child
+            .conversation_id
+            .as_deref()
+            .is_none_or(guest::is_hosted_conversation_namespace)
+        || turn.hosted_conversation_id() != conversation
+        || turn.source_event_id != event.id
+        || turn.bot_id != channel.channel_bot_id
+        || turn.binding_id != channel.id
+        || turn.platform != platform
+        || turn.conversation_id
+            != guest::transport::destination(
+                child
+                    .platform_chat_id
+                    .as_deref()
+                    .unwrap_or(&child.partition),
+                child.platform_thread_id.as_deref(),
+            )
+        || assignment.followed_child_id.as_deref() != Some(child.id.as_str())
+        || assignment.settings_chat_id != settings.id
+        || assignment.agent_id != b.agent_id
+        || assignment.settings_generation != b.generation
+        || assignment.channel_generation != b.channel_generation
+    {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+pub(crate) async fn admit_hosted_turn(
+    db: &Database,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    turn: &guest::GuestTurn,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let child = Box::pin(validate_bound(
+        db,
+        owner,
+        origin,
+        conversation,
+        false,
+        Some(turn),
+        session,
+    ))
+    .await?;
+    activate(
+        db,
+        &child,
+        origin.thread.as_deref().ok_or_else(not_found)?,
+        session,
+    )
+    .await
 }
 
 pub async fn admit_turn(

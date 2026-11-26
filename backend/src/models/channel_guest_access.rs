@@ -26,6 +26,10 @@ pub(crate) struct HostedAssignment {
     pub(crate) settings_chat_id: String,
     pub(crate) settings_generation: i64,
     pub(crate) channel_generation: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) org_binding_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) followed_child_id: Option<String>,
 }
 
 impl std::fmt::Debug for HostedAssignment {

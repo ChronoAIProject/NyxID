@@ -3867,11 +3867,18 @@ async fn start_chat_turn(
         (id, exists)
     };
     if origin.thread.is_some() {
+        let follow_conversation = if channel_guest.is_some() && origin.org_execution.is_none() {
+            chat.conversation_id
+                .as_deref()
+                .ok_or_else(crate::services::channel_thread_follow_service::not_found)?
+        } else {
+            &conversation_id
+        };
         crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
             &actor,
             &origin,
-            &conversation_id,
+            follow_conversation,
         )
         .await?;
     }

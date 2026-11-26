@@ -53,6 +53,54 @@ pub(super) async fn enable_guest_test_bot(state: &AppState, bot_id: &str) {
     set_guest_flag(state, Some(true)).await.unwrap();
 }
 
+async fn verified_telegram_guest(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    key: &str,
+    text: &str,
+    event_id: &str,
+) -> Response {
+    use crate::{
+        models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
+        services::{channel_platform::InboundMessage, channel_relay_service::inbound_metadata},
+    };
+    let message = InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
+        platform_message_id: event_id.into(),
+        conversation_id: "chat-1".into(),
+        conversation_type: "private".into(),
+        sender_platform_id: "42".into(),
+        sender_display_name: None,
+        content_type: "text".into(),
+        text: Some(text.into()),
+        attachments: Vec::new(),
+        reply_to_platform_message_id: None,
+        thread_id: None,
+        raw_data: json!({}),
+    };
+    let mut source = inbound_metadata(
+        &channel.channel_bot_id,
+        channel.route_id.as_deref().unwrap(),
+        &channel.user_id,
+        &channel.platform,
+        &message,
+        &channel.route_api_key_id,
+        event_id,
+    );
+    // The trusted relay has already verified the sender. This fixture keeps
+    // the shared audience so the test can use its existing skill selection.
+    source.guest_transport_audience = Some(guest::AnswerAudience::Shared);
+    source.original_message = Some(true);
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .insert_one(source)
+        .await
+        .unwrap();
+    Box::pin(respond(state, key, &event(text, "42", event_id), event_id)).await
+}
+
 #[tokio::test]
 async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
     use crate::{
@@ -200,8 +248,14 @@ async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
     .unwrap();
 
     let worker = guest::test_hooks::pause_worker(db);
-    let input = event("Show the channel guide", "42", "guest-skill-chat-override");
-    let response = respond(&state, &key, &input, "guest-skill-chat-override").await;
+    let response = Box::pin(verified_telegram_guest(
+        &state,
+        &row,
+        &key,
+        "Show the channel guide",
+        "guest-skill-chat-override",
+    ))
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
     tokio::time::timeout(Duration::from_secs(30), worker.wait_for_provider())
         .await
@@ -269,12 +323,14 @@ async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
     )
     .await;
     assert!(matches!(apply, Err(AppError::Conflict(_))));
-    let reassigned = event(
+    let fresh = Box::pin(verified_telegram_guest(
+        &state,
+        &row,
+        &key,
         "Continue with the new specialist",
-        "42",
         "guest-skill-reassigned",
-    );
-    let fresh = respond(&state, &key, &reassigned, "guest-skill-reassigned").await;
+    ))
+    .await;
     assert_eq!(fresh.status(), StatusCode::OK);
     tokio::time::timeout(Duration::from_secs(30), worker.wait_for_provider())
         .await
@@ -297,6 +353,16 @@ async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
             .any(|row| row.id == conversation.id && row.active_turn.is_some())
     );
     let current_chat = chat_for_row(&state, OWNER, current).await;
+    let original_actor = &chat.channel_guest.as_ref().unwrap().actor;
+    assert_eq!(
+        original_actor.assurance,
+        guest::GuestAssurance::ProviderVerified
+    );
+    assert_eq!(
+        &current_chat.channel_guest.as_ref().unwrap().actor,
+        original_actor
+    );
+
     assert_eq!(
         skills::visible_agent(db, &current_chat)
             .await
@@ -308,8 +374,80 @@ async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
     drop(worker);
     assert!(!body_text(response).await.contains("Here is your answer"));
     assert!(body_text(fresh).await.contains("Here is your answer"));
+    assert_hosted_native_replay_checks_each_answer_frame(&state, &row.id, &key, &current.id).await;
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+async fn assert_hosted_native_replay_checks_each_answer_frame(
+    state: &AppState,
+    channel_id: &str,
+    key: &str,
+    conversation_id: &str,
+) {
+    use crate::{
+        models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
+        services::nyxbot_response_recovery as recovery,
+    };
+    use futures::StreamExt;
+
+    let row = load_channel(state, OWNER, channel_id).await.unwrap();
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
+    let event = events
+        .find_one(doc! {"channel_id": channel_id, "conversation_id": conversation_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let id = "hosted_answer_replay";
+    let mut payload = recovery::Payload::new(id, "hosted-test", Default::default());
+    payload.finish_text(Some("Hosted answer payload"), false);
+    state
+        .db
+        .collection::<GatewayResponse>(RESPONSES)
+        .insert_one(GatewayResponse {
+            id: Uuid::new_v4().to_string(),
+            response_id: id.into(),
+            user_id: row.user_id.clone(),
+            channel_id: row.id.clone(),
+            binding_id: row.binding_id.clone().unwrap(),
+            partition: event.partition,
+            event_key: event.id.clone(),
+            request_hash: "test".into(),
+            conversation_id: Some(conversation_id.into()),
+            terminal: true,
+            answer_delivery: None,
+            revision: 0,
+            payload_ciphertext: payload.seal_legacy(&state.encryption_keys).await.unwrap(),
+            payload_context_version: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+        })
+        .await
+        .unwrap();
+
+    let accepted =
+        native_responses::stream(state.clone(), row.clone(), bearer(key), id.into(), None);
+    assert!(body_text(accepted).await.contains("Hosted answer payload"));
+
+    let paused = native_responses::stream(state.clone(), row, bearer(key), id.into(), None);
+    let mut chunks = paused.into_body().into_data_stream();
+    let created = chunks.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&created).contains("response.created"));
+    assert_eq!(
+        events
+            .delete_one(doc! {"_id": &event.id})
+            .await
+            .unwrap()
+            .deleted_count,
+        1
+    );
+
+    let mut remainder = String::new();
+    while let Some(chunk) = chunks.next().await {
+        remainder.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+    }
+    assert!(remainder.contains("provider_unavailable"), "{remainder}");
+    assert!(!remainder.contains("Hosted answer payload"), "{remainder}");
 }
 
 #[tokio::test]

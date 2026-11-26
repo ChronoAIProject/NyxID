@@ -324,18 +324,14 @@ fn provider_stream_inner(
                             } else {
                                 stream_images(&state, &event_key, &text, deadline.into_std()).await
                             };
-                            let allowed = stream_authority(&state, &event_key, hosted_reply.as_ref())
-                                .await
-                                .is_ok_and(|(allowed, _, _)| allowed);
+                            let allowed = hosted_reply.is_some()
+                                || stream_authority(&state, &event_key, None)
+                                    .await
+                                    .is_ok_and(|(allowed, _, _)| allowed);
                             message_frames(&response_id, allowed.then_some(text.as_str()))
                         },
                         Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
-                            let allowed = if let Some(hosted) = &hosted_reply {
-                                hosted_stream_allowed(&state, &event_key, hosted).await
-                            } else {
-                                true
-                            };
-                            message_frames(&response_id, allowed.then_some(error.message.as_str()))
+                            message_frames(&response_id, Some(&error.message))
                         },
                         Err(error) => vec![json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
@@ -347,7 +343,16 @@ fn provider_stream_inner(
                         let wake_event = event_key.clone();
                         crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                     }
-                    for frame in frames { yield frame; }
+                    for frame in frames {
+                        if let Some(hosted) = &hosted_reply
+                            && frame_has_answer(&frame)
+                            && !hosted_stream_allowed(&state, &event_key, hosted).await
+                        {
+                            for frame in message_frames(&response_id, None) { yield frame; }
+                            return;
+                        }
+                        yield frame;
+                    }
                 } else {
                     // The deadline/sweeper won: the final answer belongs to the
                     // asynchronous path, never to both writers.

@@ -260,6 +260,8 @@ async fn committed_stream_is_never_late_sent_even_after_deadline() {
 
 #[tokio::test]
 async fn hosted_reply_delivery_custom_replay_rechecks_the_original_event() {
+    use futures::StreamExt;
+
     let mut f = fixture("hosted_reply_custom_replay").await;
     let ordinary = f.event.conversation_id.clone();
     let hosted = "nyxag-1234567890abcdef1234567890abcdef";

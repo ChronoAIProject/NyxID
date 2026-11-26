@@ -366,11 +366,19 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         return Ok(Some(Inbound::Silent("refused_policy")));
     }
     if payload.origin.thread.is_some() {
+        let follow_conversation = if addon && payload.origin.org_execution.is_none() {
+            thread
+                .conversation_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?
+        } else {
+            &payload.conversation
+        };
         crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
             &actor,
             &payload.origin,
-            &payload.conversation,
+            follow_conversation,
         )
         .await?;
     }

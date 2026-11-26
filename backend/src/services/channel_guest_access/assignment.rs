@@ -32,7 +32,7 @@ pub(crate) fn capture(
             (
                 chat.id.clone(),
                 chat.follow.binding_generation,
-                super::super::channel_thread_follow_service::channel_generation(channel, chat),
+                effective_assignment(channel, chat).1,
             )
         };
     Ok(HostedAssignment {
@@ -40,7 +40,31 @@ pub(crate) fn capture(
         settings_chat_id,
         settings_generation,
         channel_generation,
+        followed_child_id: followed.map(|binding| binding.child_id.clone()),
+        org_binding_revision: channel
+            .org_specialist
+            .as_ref()
+            .map(|binding| binding.revision.clone()),
     })
+}
+
+fn effective_assignment<'a>(
+    channel: &'a NyxbotChannel,
+    settings: &'a NyxbotThread,
+) -> (Option<&'a str>, i64) {
+    // A synthetic custom event thread copies the default agent at ingress.
+    // Its producer is authorized by the live destination channel assignment.
+    match settings
+        .agent_id
+        .as_deref()
+        .filter(|_| !settings.partition.starts_with("custom:"))
+    {
+        Some(agent) => (Some(agent), 0),
+        None => (
+            channel.agent_id.as_deref(),
+            channel.follow_binding_generation,
+        ),
+    }
 }
 
 async fn route(
@@ -92,14 +116,19 @@ async fn validate(
         .await?,
     )
     .map_err(|_| obsolete())?;
+    let (agent, channel_generation) = effective_assignment(&channel, &settings);
     if settings.follow.binding_generation != assignment.settings_generation
-        || super::super::channel_thread_follow_service::channel_generation(&channel, &settings)
-            != assignment.channel_generation
+        || channel_generation != assignment.channel_generation
+        || channel
+            .org_specialist
+            .as_ref()
+            .map(|binding| binding.revision.as_str())
+            != assignment.org_binding_revision.as_deref()
     {
         return Err(obsolete());
     }
-    if let Some(agent) = settings.agent_id.as_ref().or(channel.agent_id.as_ref()) {
-        if agent != &assignment.agent_id {
+    if let Some(agent) = agent {
+        if agent != assignment.agent_id {
             return Err(obsolete());
         }
     } else {

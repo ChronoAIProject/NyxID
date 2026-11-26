@@ -471,6 +471,164 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
     db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn channel_guest_skill_audiences_require_maintenance_of_every_overlapping_pin() {
+    use crate::{
+        models::{assistant_agent::AssistantAgent, nyxbot_channel::NyxbotChannel},
+        services::{audit_service::AuditActor, org_channel_service as org, transaction_service},
+    };
+
+    let f = org::tests::Fixture::new("channel_guest_shared_skill_authoring").await;
+    let state = &f.org.state;
+    let db = &state.db;
+    let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&f.org.admin));
+    let binding = db
+        .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one(doc! {"agent_id": &f.agent.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let bot_id = &binding.channel_bot_id;
+    let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+    bots.update_one(
+        doc! {"_id": bot_id},
+        doc! {"$set": {"guest_access_v1": true, "guest_access_v1_revision": 1_i64}},
+    )
+    .await
+    .unwrap();
+    activate_guests(db, &actor.user_id).await;
+
+    let pin = |name: &str| SkillReference {
+        source: "ornn".into(),
+        skill_id: id(),
+        name: name.into(),
+        version: "1.0".into(),
+        sha256: "a".repeat(64),
+        dependencies: vec![],
+        disabled: false,
+    };
+    let shared = pin("shared across specialists");
+    let unrelated = pin("default only");
+    let agents = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
+    let mut default = f.agent.clone();
+    default.skills = vec![shared.clone(), unrelated.clone()];
+    default.skills_revision = 1;
+    agents
+        .replace_one(doc! {"_id": &default.id}, &default)
+        .await
+        .unwrap();
+
+    let attachment = |skill_id: &str, audience: &str| json!({"skill_id": skill_id, "audiences": [audience], "all_requests_approved": false});
+    let update = |revision, attachments| {
+        serde_json::from_value(json!({
+            "agent_id": &default.id, "expected_revision": revision, "skills_revision": 1,
+            "attachments": attachments,
+        }))
+        .unwrap()
+    };
+    guest_skills::set(
+        state,
+        &actor,
+        bot_id,
+        update(0, vec![attachment(&shared.skill_id, "private")]),
+    )
+    .await
+    .unwrap();
+
+    let mut maintained_override = f.agent.clone();
+    maintained_override.id = id();
+    maintained_override.home_conversation_id = None;
+    maintained_override.skills = vec![shared.clone()];
+    maintained_override.skills_revision = 1;
+    let mut restricted_override = maintained_override.clone();
+    restricted_override.id = id();
+    restricted_override.org_maintainer_user_ids = Some(vec![f.org.member.clone()]);
+    agents
+        .insert_many([&maintained_override, &restricted_override])
+        .await
+        .unwrap();
+    let threads = db.collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME);
+    for agent in [&maintained_override, &restricted_override] {
+        threads
+            .insert_one(doc! {
+                "_id": id(), "channel_id": &binding.id, "user_id": &binding.user_id,
+                "partition": id(), "kind": "group", "agent_id": &agent.id,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let inventory =
+        serde_json::to_value(guest_skills::get(db, &actor.user_id, bot_id).await.unwrap()).unwrap();
+    assert_eq!(
+        inventory["standing_approval_skill_ids"],
+        json!([unrelated.skill_id])
+    );
+    assert_eq!(inventory["available"].as_array().unwrap().len(), 1);
+    assert_eq!(inventory["attachments"], json!([]));
+    assert!(matches!(
+        guest_skills::set(
+            state,
+            &actor,
+            bot_id,
+            update(1, vec![attachment(&shared.skill_id, "shared")]),
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+
+    guest_skills::set(
+        state,
+        &actor,
+        bot_id,
+        update(1, vec![attachment(&unrelated.skill_id, "shared")]),
+    )
+    .await
+    .unwrap();
+    let saved = bots.find_one(doc! {"_id": bot_id}).await.unwrap().unwrap();
+    let attachments = saved
+        .get_document("guest_skill_selection")
+        .unwrap()
+        .get_array("attachments")
+        .unwrap();
+    assert_eq!(attachments.len(), 2);
+    assert!(
+        attachments.contains(&bson::to_bson(&attachment(&shared.skill_id, "private")).unwrap())
+    );
+
+    agents.update_one(
+        doc! {"_id": &restricted_override.id},
+        doc! {"$unset": {"org_maintainer_user_ids": ""}, "$inc": {"org_maintain_revision": 1_i64}},
+    ).await.unwrap();
+    let staged = guest_skills::prepare(
+        db,
+        &actor.user_id,
+        bot_id,
+        &update(2, vec![attachment(&unrelated.skill_id, "shared")]),
+    )
+    .await
+    .unwrap();
+    agents.update_one(
+        doc! {"_id": &restricted_override.id},
+        doc! {"$set": {"org_maintainer_user_ids": [&f.org.member]}, "$inc": {"org_maintain_revision": 1_i64}},
+    ).await.unwrap();
+    let context = (db, bot_id.as_str(), &staged);
+    let applied = transaction_service::run_db_only(db, &context, |tx, &(db, bot_id, staged)| {
+        Box::pin(guest_skills::apply_prepared_in_session(
+            db, tx, bot_id, staged,
+        ))
+    })
+    .await;
+    assert!(matches!(applied, Err(AppError::Conflict(_))));
+    let unchanged = bots.find_one(doc! {"_id": bot_id}).await.unwrap().unwrap();
+    assert_eq!(
+        unchanged.get("guest_skill_selection"),
+        saved.get("guest_skill_selection")
+    );
+    db.drop().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_guest_skill_org_capability_uses_live_payer_and_maintainer() {
     use crate::billing_integration_tests::{FakeLago, billing_service, create_usage_index};

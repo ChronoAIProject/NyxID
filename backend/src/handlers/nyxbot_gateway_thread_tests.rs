@@ -1137,6 +1137,67 @@ async fn external_bot_mention_in_followed_thread_is_a_guest_and_spends_the_paren
 }
 
 #[tokio::test]
+async fn hosted_guest_follow_keeps_the_ordinary_child_and_binds_the_original_source() {
+    use crate::services::channel_guest_access as guest;
+
+    let f = Box::pin(Fixture::new("hosted_guest_follow")).await;
+    let (owner, owner_id) = f
+        .input("Open this thread", ThreadAddress::Mention, false, true)
+        .await;
+    assert!(
+        f.send(&owner, &owner_id)
+            .await
+            .contains("Here is your answer")
+    );
+    let child = f.children().await.remove(0);
+    let ordinary = child.conversation_id.as_deref().unwrap();
+    settle(&f.state, ordinary).await;
+
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+    guest_runtime_tests::enable_guest_test_bot(&f.state, &f.row.channel_bot_id).await;
+    let (mut body, event_id) = f
+        .input("Guest question", ThreadAddress::Mention, false, true)
+        .await;
+    body["event_context"]["activity"]["actor"]["id"] = json!("ou_visitor");
+    f.state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .update_one(
+            doc! {"_id": &event_id},
+            doc! {"$set": {"sender_platform_id": "ou_visitor"}},
+        )
+        .await
+        .unwrap();
+    let answer = f.send(&body, &event_id).await;
+    assert!(answer.contains("Here is your answer"), "{answer}");
+    assert!(answer.contains("\"thread_reply\":true"), "{answer}");
+
+    let rows = f.children().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, child.id);
+    assert_eq!(rows[0].conversation_id.as_deref(), Some(ordinary));
+    let guest = channel_conversations(&f.state, &f.row.id)
+        .await
+        .into_iter()
+        .find(|row| guest::is_hosted_conversation(&row.id))
+        .expect("hosted followed conversation");
+    assert!(guest.guest_turn);
+    let origin = guest.channel.as_ref().unwrap();
+    let authorized = follow::validate_delivery(&f.state.db, OWNER, origin, &guest.id)
+        .await
+        .unwrap();
+    assert_eq!(authorized.id, child.id);
+    assert_eq!(authorized.agent_id, guest.agent_id);
+    let mut wrong_source = origin.clone();
+    wrong_source.thread.as_mut().unwrap().source_message_id = owner_id;
+    assert!(
+        follow::validate_delivery(&f.state.db, OWNER, &wrong_source, &guest.id)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_authority() {
     use crate::{
         models::channel_message::StoredAttachment,

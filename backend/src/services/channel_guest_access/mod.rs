@@ -398,6 +398,10 @@ impl GuestTurn {
                 &settings_generation,
                 &channel_generation,
             ]);
+            scope.extend(assignment.org_binding_revision.as_deref());
+            if let Some(child) = assignment.followed_child_id.as_deref() {
+                scope.extend(["followed-child", child]);
+            }
         }
         let hash = digest(&scope);
         format!("{CONVERSATION_PREFIX}{}", &hash[..32])
