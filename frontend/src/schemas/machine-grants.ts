@@ -92,6 +92,10 @@ export type OAuthMachineStatus = z.infer<typeof oauthMachineStatusSchema>;
 export const machineGrantReadSchema = z.object({
   grant: machineGrantSchema.nullable(),
   oauth_machine_status: oauthMachineStatusSchema.catch("unknown").optional(),
+  oauth_machine_services: z.record(z.string(), z.object({
+    label: z.string().nullable(),
+    deleted: z.boolean(),
+  })).optional(),
   // The independent fields are additive. Their absence remains unknown on
   // older servers; the combined field is not an independent validity result.
   source_valid: z.boolean().optional(),

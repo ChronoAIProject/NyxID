@@ -150,6 +150,16 @@ function MachineGrantCardContent({
     return () => window.clearInterval(timer);
   }, []);
   const grant = query.error ? undefined : query.data?.grant;
+  const oauthServiceDisplays = query.data?.oauth_machine_services;
+  function assignmentServiceLabel(id: string) {
+    if (source.kind === "api_key") return id;
+    const display = oauthServiceDisplays
+      ? oauthServiceDisplays[id]
+      : consentServices?.find((service) => service.id === id);
+    if (display?.deleted) return translateUi("Deleted service");
+    const label = display?.label?.trim();
+    return label && label !== id ? label : translateUi("Service details unavailable");
+  }
   const active =
     grant?.status === "active" && new Date(grant.expires_at).getTime() > now;
   const independentValidity =
@@ -489,12 +499,7 @@ function MachineGrantCardContent({
                             {assignment.file_roots.join(", ") || translateUi("None")}
                           </p>
                           <p className="break-all">{translateUi("Gateway service ceiling:")}{" "}
-                            {assignment.service_ids.map((id) => {
-                              if (!consentServices) return id;
-                              const service = consentServices.find((entry) => entry.id === id);
-                              if (service?.deleted) return translateUi("Deleted service");
-                              return service?.catalog_service_name || service?.label || translateUi("Service details unavailable");
-                            }).join(", ") || translateUi("None")}
+                            {assignment.service_ids.map(assignmentServiceLabel).join(", ") || translateUi("None")}
                           </p>
                         </article>
                       ),
@@ -575,7 +580,7 @@ function MachineGrantCardContent({
             submitting={save.isPending}
             allowedNodeIds={effectiveNodeIds}
             allowedServiceIds={effectiveServiceIds}
-            hideUnavailableServiceIds={consentServices !== undefined}
+            hideUnavailableServiceIds={source.kind === "oauth"}
           />
         )}
         <Dialog

@@ -6,8 +6,8 @@ use crate::{
     models::machine_external_grant::{ExternalGrantBinding, MachineExternalGrant},
     mw::auth::AuthUser,
     services::machine_external_grant_service::{
-        self as grants, GrantSelection, GrantValidity, OAuthMachineStatus, SourceReference,
-        ValidityReason,
+        self as grants, GrantSelection, GrantValidity, OAuthMachineServiceDisplay,
+        OAuthMachineStatus, SourceReference, ValidityReason,
     },
 };
 use axum::{
@@ -147,6 +147,8 @@ pub struct GrantReadResponse {
     pub source_and_grant_valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_machine_status: Option<OAuthMachineStatus>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub oauth_machine_services: BTreeMap<String, OAuthMachineServiceDisplay>,
 }
 
 impl GrantReadResponse {
@@ -163,6 +165,7 @@ impl GrantReadResponse {
             grant_validity_reason: validity.grant.reason,
             source_and_grant_valid: validity.combined,
             oauth_machine_status,
+            oauth_machine_services: BTreeMap::new(),
         }
     }
 }
@@ -305,8 +308,10 @@ pub async fn get_oauth(
     Path(client): Path<String>,
 ) -> AppResult<Json<GrantReadResponse>> {
     let user = owner(&auth)?;
-    let (row, validity, status) = grants::read_oauth_grant(&state.db, &user, &client).await?;
-    Ok(Json(GrantReadResponse::new(row, validity, status)))
+    let read = grants::read_oauth_grant(&state.db, &user, &client).await?;
+    let mut response = GrantReadResponse::new(read.grant, read.validity, read.status);
+    response.oauth_machine_services = read.services;
+    Ok(Json(response))
 }
 pub async fn put_oauth(
     State(state): State<AppState>,

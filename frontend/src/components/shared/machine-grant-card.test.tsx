@@ -583,6 +583,43 @@ describe("Machine grant owner management", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Machine access omitted from consent");
     expect(screen.queryByText("No Machine grant")).toBeNull();
   });
+  it("shows current assignment names and safe placeholders on all-services OAuth grants", () => {
+    const serviceIds = ["active-id", "deleted-id", "unavailable-id"];
+    const read = {
+      grant: { ...grant(), assignments: { machine: {
+        capabilities: { shell: true, files: false },
+        mode: "shared_legacy",
+        revision: 1,
+        file_roots: ["/workspace"],
+        service_ids: serviceIds,
+      } } },
+      oauth_machine_status: "valid",
+      source_and_grant_valid: true,
+    };
+    mocks.data = {
+      ...read,
+      oauth_machine_services: {
+        "active-id": { label: "Current endpoint name", deleted: false },
+        "deleted-id": { label: null, deleted: true },
+        "unavailable-id": { label: null, deleted: false },
+      },
+    };
+    const source = { kind: "oauth", id: "client" } as const;
+    const view = render(<MachineGrantCard source={source} consentServices={[]} />);
+    const ceiling = screen.getByText(/Gateway service ceiling/);
+    expect(ceiling).toHaveTextContent("Current endpoint name, Deleted service, Service details unavailable");
+    expect(screen.getByRole("button", { name: "Edit Machine permissions" })).toBeEnabled();
+    serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
+
+    mocks.data = { ...read, oauth_machine_status: undefined };
+    view.rerender(<MachineGrantCard source={source} consentServices={[
+      { id: "active-id", label: "Saved endpoint name", catalog_service_name: "Catalog fallback", slug: "service", deleted: false },
+      { id: "deleted-id", label: "deleted-id", catalog_service_name: null, slug: null, deleted: true },
+    ]} />);
+    expect(ceiling).toHaveTextContent("Saved endpoint name, Deleted service, Service details unavailable");
+    expect(ceiling).not.toHaveTextContent("Catalog fallback");
+    serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
+  });
   it("does not offer editing without current parent Key CAS", () => {
     mocks.data = {
       grant: null,

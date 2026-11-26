@@ -5650,9 +5650,11 @@ val response = client.newCall(request).execute()
 List all OAuth consents the current user has granted to third-party applications.
 
 The `granted_at` and `expires_at` fields describe base OAuth consent. An
-unresolvable entry in `allowed_services` has `deleted: true` and a generic
-`label`. A missing service and a service outside the owner's inventory use the
-same placeholder. Use the `deleted` flag to render a localized display label.
+unresolvable entry in `allowed_services` keeps its `id`, has `deleted: true`,
+and uses a label numbered among unresolvable entries in list order (`#1`,
+`#2`, and so on). A missing service and a service outside the owner's inventory
+use the same placeholder format. Use the `deleted` flag to render a localized
+display label.
 
 **Auth:** Required
 
@@ -5706,6 +5708,13 @@ live source. Proxy capability here means `proxy` or `proxy:*`. The status
 describes saved permissions. Execution also checks live token authority and
 Machine readiness. See [optional Machine permission on consent](security/OAUTH_AUTHORITY_ROLLOUT.md#optional-machine-permission-on-consent)
 for first approval and renewal.
+
+When the returned grant has assigned gateway services, the response can include
+`oauth_machine_services`, a display map keyed by the assigned service IDs.
+The same snapshot resolves labels from the owner's current service and endpoint
+records, including on all-services consents. A removed or unowned service has
+`deleted: true` and a null `label`. An owned service without an available
+endpoint label has `deleted: false` and a null `label`.
 
 ---
 

@@ -550,6 +550,19 @@ mod tests {
     }
 
     #[test]
+    fn consent_service_access_formats_deleted_ordinals_without_ids() {
+        let consent = serde_json::json!({
+            "allow_all_services": false,
+            "allowed_services": [
+                {"id": "unowned-service", "label": "#1", "deleted": true},
+                {"id": "removed-service", "label": "#2", "deleted": true}
+            ],
+            "legacy_unrestricted": false
+        });
+        assert_eq!(format_consent_service_access(&consent), "2 services: #1, #2");
+    }
+
+    #[test]
     fn consent_service_access_formats_sign_in_only_for_explicit_empty_access() {
         let consent = serde_json::json!({
             "allow_all_services": false,

@@ -356,8 +356,12 @@ async fn machine_oauth_management_status_follows_signed_client_journey() {
     );
     let foreign = read(&app, &other_owner, &path).await;
     let absent_path = format!("/api/v1/users/me/consents/{}/machine-grant", Uuid::new_v4());
-    for result in [foreign, read(&app, &other_owner, &absent_path).await] {
+    let absent = read(&app, &other_owner, &absent_path).await;
+    assert_eq!(foreign["source_validity_reason"], "ineligible");
+    assert_eq!(absent["source_validity_reason"], "missing");
+    for result in [foreign, absent] {
         assert!(result.get("oauth_machine_status").is_none());
+        assert!(result.get("oauth_machine_services").is_none());
         assert!(result["grant"].is_null());
         assert_eq!(result["source_and_grant_valid"], false);
     }
@@ -396,6 +400,12 @@ async fn machine_oauth_management_status_follows_signed_client_journey() {
             .query_pairs()
             .any(|(key, value)| key == "error" && value == "access_denied")
     );
+    assert!(
+        denied
+            .query_pairs()
+            .any(|(key, value)| key == "state" && value == "fixture-client-state")
+    );
+    assert!(!denied.query_pairs().any(|(key, _)| key == "code"));
     assert_eq!(read(&app, &owner, &path).await, before);
     assert_eq!(
         consents.find_one(doc! {"_id": &saved.id}).await.unwrap(),
@@ -429,6 +439,7 @@ async fn machine_oauth_management_status_follows_signed_client_journey() {
     assert!(after["grant"]["id"].is_string());
     let foreign = read(&app, &other_owner, &path).await;
     assert!(foreign.get("oauth_machine_status").is_none());
+    assert!(foreign.get("oauth_machine_services").is_none());
     assert!(foreign["grant"].is_null());
     assert_eq!(
         consents.find_one(doc! {"_id": &control.id}).await.unwrap(),

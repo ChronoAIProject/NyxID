@@ -177,12 +177,14 @@ async fn resolve_allowed_services(
         return Ok(Vec::new());
     }
 
-    let services: Vec<UserService> =
-        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-            .find(doc! { "_id": { "$in": allowed_service_ids }, "user_id": user_id })
-            .await?
-            .try_collect()
-            .await?;
+    let services: Vec<UserService> = crate::services::service_history::collection::<UserService>(
+        db,
+        USER_SERVICES,
+    )
+    .find(doc! { "_id": { "$in": allowed_service_ids }, "user_id": user_id, "deleted_at": null })
+    .await?
+    .try_collect()
+    .await?;
     let endpoint_ids: Vec<String> = services
         .iter()
         .map(|service| service.endpoint_id.clone())
@@ -225,12 +227,14 @@ async fn resolve_allowed_services(
         .collect();
 
     let mut resolved = Vec::with_capacity(allowed_service_ids.len());
+    let mut missing_count = 0;
     for service_id in allowed_service_ids {
         let Some(service) = services_by_id.get(service_id) else {
+            missing_count += 1;
             resolved.push(ConsentAllowedServiceItem {
                 id: service_id.clone(),
                 slug: None,
-                label: "Deleted service".to_owned(),
+                label: format!("#{missing_count}"),
                 catalog_service_name: None,
                 deleted: true,
             });
@@ -427,11 +431,31 @@ mod tests {
         assert_eq!(items[1].id, missing_service_id);
         assert!(items[1].slug.is_none());
         assert!(items[1].deleted);
-        assert_eq!(items[1].label, "Deleted service");
+        assert_eq!(items[1].label, "#1");
         assert_eq!(items[2].id, foreign_service_id);
-        assert_eq!(items[2].label, items[1].label);
+        assert_eq!(items[2].label, "#2");
         assert!(items[2].slug.is_none());
         assert!(items[2].deleted);
+        let reversed = resolve_allowed_services(
+            &db,
+            &user_id,
+            &[foreign_service_id.clone(), missing_service_id.clone()],
+        )
+        .await
+        .unwrap();
+        for (index, id) in [&foreign_service_id, &missing_service_id]
+            .into_iter()
+            .enumerate()
+        {
+            let json = serde_json::to_value(&reversed[index]).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "id": id, "slug": null, "label": format!("#{}", index + 1),
+                    "catalog_service_name": null, "deleted": true
+                })
+            );
+        }
     }
 
     // ---- ConsentRevokeResponse serialization ----

@@ -1279,7 +1279,10 @@ async fn independent_validity_oauth_client_and_consent_are_live_not_label_snapsh
     assert_eq!(disabled.source.reason, Some(ValidityReason::Disabled));
     assert!(disabled.grant.valid && !disabled.combined);
     assert_eq!(
-        read_oauth_grant(&f.db, &f.user, &client).await.unwrap().2,
+        read_oauth_grant(&f.db, &f.user, &client)
+            .await
+            .unwrap()
+            .status,
         Some(OAuthMachineStatus::ClientDisabled)
     );
     f.db.collection::<OauthClient>(CLIENTS)
@@ -1299,7 +1302,10 @@ async fn independent_validity_oauth_client_and_consent_are_live_not_label_snapsh
     assert_eq!(expired.source.reason, Some(ValidityReason::Expired));
     assert!(expired.grant.valid && !expired.combined);
     assert_eq!(
-        read_oauth_grant(&f.db, &f.user, &client).await.unwrap().2,
+        read_oauth_grant(&f.db, &f.user, &client)
+            .await
+            .unwrap()
+            .status,
         Some(OAuthMachineStatus::ConsentExpired)
     );
     f.db.drop().await.unwrap();
@@ -1311,7 +1317,12 @@ async fn oauth_machine_status_distinguishes_source_capability_and_grant_lifecycl
     let f = fixture("external_grant_oauth_management_status").await;
     let client = oauth_client(&f).await;
     let (consent, grant, _) = approve_oauth(&f, &client).await;
-    let status = async || read_oauth_grant(&f.db, &f.user, &client).await.unwrap().2;
+    let status = async || {
+        read_oauth_grant(&f.db, &f.user, &client)
+            .await
+            .unwrap()
+            .status
+    };
     let clients = f.db.collection::<OauthClient>(CLIENTS);
     let original_client = clients
         .find_one(doc! {"_id": &client})
@@ -1379,6 +1390,134 @@ async fn oauth_machine_status_distinguishes_source_capability_and_grant_lifecycl
     consents.insert_one(consent).await.unwrap();
     grants.delete_one(doc! {"_id": &grant.id}).await.unwrap();
     assert_eq!(status().await, Some(GrantMissing));
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_services() {
+    use crate::test_utils::test_user_endpoint;
+    let f = fixture("oauth_machine_service_labels").await;
+    let client = oauth_client(&f).await;
+    let (consent, mut grant, _) = approve_oauth(&f, &client).await;
+    let outsider = Uuid::new_v4().to_string();
+    let owned_endpoint = Uuid::new_v4().to_string();
+    let foreign_endpoint = Uuid::new_v4().to_string();
+    let active = Uuid::new_v4().to_string();
+    let deleted = Uuid::new_v4().to_string();
+    let unavailable = Uuid::new_v4().to_string();
+    let foreign = Uuid::new_v4().to_string();
+    let endpoints =
+        f.db.collection::<crate::models::user_endpoint::UserEndpoint>(ENDPOINTS);
+    endpoints
+        .insert_many([
+            test_user_endpoint(
+                &owned_endpoint,
+                &f.user,
+                "Fresh endpoint name",
+                "https://owner.example",
+                None,
+                None,
+            ),
+            test_user_endpoint(
+                &foreign_endpoint,
+                &outsider,
+                "Private endpoint name",
+                "https://other.example",
+                None,
+                None,
+            ),
+        ])
+        .await
+        .unwrap();
+    let mut removed = test_user_service(&deleted, &f.user, "removed", &owned_endpoint, None, None);
+    removed.deleted_at = Some(Utc::now());
+    f.db.collection::<UserService>(SERVICES)
+        .insert_many([
+            test_user_service(&active, &f.user, "owner", &owned_endpoint, None, None),
+            removed,
+            test_user_service(
+                &unavailable,
+                &f.user,
+                "unavailable",
+                &foreign_endpoint,
+                None,
+                None,
+            ),
+            test_user_service(
+                &foreign,
+                &outsider,
+                "foreign",
+                &foreign_endpoint,
+                None,
+                None,
+            ),
+        ])
+        .await
+        .unwrap();
+    f.db.collection::<Consent>(CONSENTS)
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {"allow_all_services": true, "allowed_service_ids": []}},
+        )
+        .await
+        .unwrap();
+    grant.restrictions.get_mut(&f.node.id).unwrap().service_ids = vec![
+        active.clone(),
+        deleted.clone(),
+        unavailable.clone(),
+        foreign.clone(),
+    ];
+    f.db.collection::<MachineExternalGrant>(GRANTS)
+        .replace_one(doc! {"_id": &grant.id}, &grant)
+        .await
+        .unwrap();
+    let read = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
+    assert_eq!(read.status, Some(OAuthMachineStatus::Valid));
+    assert!(read.validity.combined);
+    let wire = serde_json::to_value(read.services).unwrap();
+    assert_eq!(
+        wire[active.as_str()],
+        serde_json::json!({"label": "Fresh endpoint name", "deleted": false})
+    );
+    assert_eq!(
+        wire[deleted.as_str()],
+        serde_json::json!({"label": null, "deleted": true})
+    );
+    assert_eq!(wire[foreign.as_str()], wire[deleted.as_str()]);
+    assert_eq!(
+        wire[unavailable.as_str()],
+        serde_json::json!({"label": null, "deleted": false})
+    );
+    assert!(!wire.to_string().contains("Private endpoint name"));
+    endpoints
+        .update_one(
+            doc! {"_id": &owned_endpoint},
+            doc! {"$set": {"label": "Renamed endpoint"}},
+        )
+        .await
+        .unwrap();
+    let renamed = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
+    assert_eq!(
+        renamed.services[&active].label.as_deref(),
+        Some("Renamed endpoint")
+    );
+
+    f.db.collection::<User>(USERS)
+        .update_one(doc! {"_id": &f.user}, doc! {"$set": {"is_active": false}})
+        .await
+        .unwrap();
+    let unavailable_owner = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
+    assert_eq!(
+        unavailable_owner.status,
+        Some(OAuthMachineStatus::OwnerUnavailable)
+    );
+    assert_eq!(
+        unavailable_owner.validity.source.reason,
+        Some(ValidityReason::Disabled)
+    );
+    assert!(!unavailable_owner.validity.combined);
+    assert!(unavailable_owner.services.is_empty());
+
     f.db.drop().await.unwrap();
 }
 
@@ -1466,7 +1605,7 @@ async fn current_source_reads_prefer_active_grant_over_equal_timestamp_history()
         read_oauth_grant(&f.db, &f.user, &client)
             .await
             .unwrap()
-            .0
+            .grant
             .unwrap()
             .id,
         oauth_grant.id,
@@ -1481,7 +1620,7 @@ async fn current_source_reads_prefer_active_grant_over_equal_timestamp_history()
         read_oauth_grant(&f.db, &f.user, &f.key.id)
             .await
             .unwrap()
-            .0
+            .grant
             .is_none()
     );
     let stranger = Uuid::new_v4().to_string();
@@ -1495,7 +1634,7 @@ async fn current_source_reads_prefer_active_grant_over_equal_timestamp_history()
         read_oauth_grant(&f.db, &stranger, &client)
             .await
             .unwrap()
-            .0
+            .grant
             .is_none()
     );
     f.db.drop().await.unwrap();
@@ -1516,6 +1655,7 @@ async fn grant_read_handlers_are_owner_only_and_return_safe_independent_states()
         .0;
     let json = serde_json::to_value(response).unwrap();
     assert!(json.get("oauth_machine_status").is_none());
+    assert!(json.get("oauth_machine_services").is_none());
     assert_eq!(json["grant"]["id"], grant.id);
     assert_eq!(json["source_valid"], true);
     assert_eq!(json["grant_valid"], true);

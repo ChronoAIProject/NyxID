@@ -29,6 +29,7 @@ use crate::{
         node::{COLLECTION_NAME as NODES, Node},
         oauth_client::{COLLECTION_NAME as CLIENTS, OauthClient},
         user::{COLLECTION_NAME as USERS, User},
+        user_endpoint::COLLECTION_NAME as ENDPOINTS,
         user_service::{COLLECTION_NAME as SERVICES, UserService},
     },
 };
@@ -159,6 +160,19 @@ pub struct GrantValidity {
     pub source: ValidityStatus,
     pub grant: ValidityStatus,
     pub combined: bool,
+}
+
+#[derive(Serialize)]
+pub struct OAuthMachineServiceDisplay {
+    pub label: Option<String>,
+    pub deleted: bool,
+}
+
+pub struct OAuthGrantRead {
+    pub grant: Option<MachineExternalGrant>,
+    pub validity: GrantValidity,
+    pub status: Option<OAuthMachineStatus>,
+    pub services: BTreeMap<String, OAuthMachineServiceDisplay>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1972,17 +1986,95 @@ async fn source_status_in_session(
     Ok(result)
 }
 
+async fn oauth_grant_services_in_session(
+    db: &Database,
+    user: &str,
+    grant: &MachineExternalGrant,
+    session: &mut ClientSession,
+) -> AppResult<BTreeMap<String, OAuthMachineServiceDisplay>> {
+    let mut displays: BTreeMap<_, _> = grant
+        .policy
+        .assignments
+        .keys()
+        .filter_map(|node| grant.restrictions.get(node))
+        .flat_map(|restriction| &restriction.service_ids)
+        .map(|id| {
+            (
+                id.clone(),
+                OAuthMachineServiceDisplay {
+                    label: None,
+                    deleted: true,
+                },
+            )
+        })
+        .collect();
+    if displays.is_empty() {
+        return Ok(displays);
+    }
+
+    #[derive(Deserialize)]
+    struct ServiceEndpoint {
+        #[serde(rename = "_id")]
+        id: String,
+        endpoint_id: String,
+    }
+    #[derive(Deserialize)]
+    struct EndpointLabel {
+        #[serde(rename = "_id")]
+        id: String,
+        label: Option<String>,
+    }
+    let ids: Vec<_> = displays.keys().map(String::as_str).collect();
+    let mut cursor = db
+        .collection::<ServiceEndpoint>(SERVICES)
+        .find(doc! {"_id": {"$in": ids}, "user_id": user, "deleted_at": null})
+        .projection(doc! {"_id": 1, "endpoint_id": 1})
+        .session(&mut *session)
+        .await?;
+    let services: Vec<ServiceEndpoint> = cursor.stream(&mut *session).try_collect().await?;
+    if services.is_empty() {
+        return Ok(displays);
+    }
+    let endpoint_ids: Vec<_> = services
+        .iter()
+        .map(|service| service.endpoint_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut cursor = db
+        .collection::<EndpointLabel>(ENDPOINTS)
+        .find(doc! {"_id": {"$in": endpoint_ids}, "user_id": user, "deleted_at": null})
+        .projection(doc! {"_id": 1, "label": 1})
+        .session(&mut *session)
+        .await?;
+    let labels: Vec<EndpointLabel> = cursor.stream(&mut *session).try_collect().await?;
+    let labels: BTreeMap<_, _> = labels
+        .into_iter()
+        .filter_map(|row| row.label.map(|label| (row.id, label)))
+        .collect();
+    for service in services {
+        let label = labels
+            .get(&service.endpoint_id)
+            .filter(|label| !label.trim().is_empty() && label.trim() != service.id)
+            .cloned();
+        displays.insert(
+            service.id,
+            OAuthMachineServiceDisplay {
+                label,
+                deleted: false,
+            },
+        );
+    }
+    Ok(displays)
+}
+
 /// Read the displayed OAuth grant and its source together. No authority is
 /// inferred from an OAuth token, and this read never changes saved permissions.
 pub async fn read_oauth_grant(
     db: &Database,
     user: &str,
     client: &str,
-) -> AppResult<(
-    Option<MachineExternalGrant>,
-    GrantValidity,
-    Option<OAuthMachineStatus>,
-)> {
+) -> AppResult<OAuthGrantRead> {
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
@@ -2020,7 +2112,6 @@ pub async fn read_oauth_grant(
         row.as_ref(),
         live,
     );
-    session.abort_transaction().await?;
     use OAuthMachineStatus::*;
     let status = if !validity.source.valid {
         status.unwrap_or(OwnerUnavailable)
@@ -2033,7 +2124,19 @@ pub async fn read_oauth_grant(
             Some(_) => GrantStale,
         }
     };
-    Ok((row, validity, can_disclose.then_some(status)))
+    let services = match row.as_ref() {
+        Some(row) if status != OwnerUnavailable => {
+            oauth_grant_services_in_session(db, user, row, &mut session).await?
+        }
+        _ => BTreeMap::new(),
+    };
+    session.abort_transaction().await?;
+    Ok(OAuthGrantRead {
+        grant: row,
+        validity,
+        status: can_disclose.then_some(status),
+        services,
+    })
 }
 
 fn source_binding_matches(
