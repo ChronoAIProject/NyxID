@@ -614,6 +614,7 @@ pub(crate) mod nyxbot_admission_service;
 pub(crate) mod nyxbot_event_record;
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
+pub(crate) mod nyxbot_source_admission;
 
 pub mod assistant_connection_service;
 pub mod monitoring_service;

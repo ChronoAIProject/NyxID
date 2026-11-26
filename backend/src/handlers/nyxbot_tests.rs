@@ -416,6 +416,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let row = NyxbotChannel {
         notification_epoch: 0,
         execution_policy_revision: 0,
+        discord_source_admission: None,
         org_specialist: None,
         gateway_source: None,
         gateway_native_phase: None,
@@ -3585,6 +3586,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
         NyxbotChannel {
             notification_epoch: 0,
             execution_policy_revision: 0,
+            discord_source_admission: None,
             org_specialist: None,
             gateway_source: None,
             gateway_native_phase: None,

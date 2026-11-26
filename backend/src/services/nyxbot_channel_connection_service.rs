@@ -565,6 +565,7 @@ pub(crate) async fn connect(
     let row = NyxbotChannel {
         notification_epoch: 0,
         execution_policy_revision: 0,
+        discord_source_admission: None,
         org_specialist: org_binding.clone(),
         gateway_source: None,
         gateway_native_phase: None,

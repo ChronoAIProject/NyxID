@@ -94,6 +94,10 @@ pub struct NyxbotChannel {
     /// Audience-policy generation. Ordinary traffic never increments it.
     #[serde(default)]
     pub execution_policy_revision: i64,
+    /// Dormant Discord trigger policy, scoped to this connection.
+    /// Absent on existing and newly created connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_source_admission: Option<super::nyxbot_source_admission::DiscordSourceAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_specialist: Option<super::org_channel::Binding>,
     #[serde(default)]

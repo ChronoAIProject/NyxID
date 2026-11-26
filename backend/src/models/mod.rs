@@ -188,6 +188,7 @@ pub mod nyxbot_channel;
 pub mod nyxbot_event_binding;
 pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
+pub mod nyxbot_source_admission;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
