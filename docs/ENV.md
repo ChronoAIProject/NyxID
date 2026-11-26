@@ -936,7 +936,7 @@ unsupported. Roll back only to a v3-compatible binary while retaining its keys.
 After authenticated migration readiness across every field adapter, separately
 turn legacy reads off. Old backups and historical KMS key versions retain their
 own decryption requirements; the currently configured KMS resource can still
-serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.
+serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Verify the retained rows after every serving replica upgrades.
 
 
 ### CMA Sandbox prepaid admission

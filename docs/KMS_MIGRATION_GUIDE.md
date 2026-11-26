@@ -1,6 +1,6 @@
 # Cloud KMS Migration Guide
 
-Guide for migrating NyxID's encryption backend from the local `KeyProvider` to AWS KMS or GCP Cloud KMS. Complete [HMAC preparation](security/KEY_LIFECYCLE.md) before changing encryption sources. Follow the [reader-first encryption cutover and migration API](SECURITY.md#encrypted-record-migration) for contextual records; pending family adapters still block complete readiness.
+Guide for migrating NyxID's encryption backend from the local `KeyProvider` to AWS KMS or GCP Cloud KMS. Complete [HMAC preparation](security/KEY_LIFECYCLE.md) before changing encryption sources. Follow the [reader-first encryption cutover and migration API](SECURITY.md#encrypted-record-migration) for contextual records.
 
 A provider switch changes new writes. Deploy readers able to read both providers before any new-provider writes, or stop/drain all writers while preparing them. Do not perform a mixed rollout against local-only readers. The shipped KMS configuration provides KMS primary plus optional local fallback, not an arbitrary reversible pair of cloud providers.
 
@@ -70,7 +70,7 @@ flowchart LR
 The migration uses a **fallback provider** to ensure zero downtime:
 
 1. **Phase A**: Deploy with `KEY_PROVIDER=aws-kms` (or `gcp-kms`) while keeping `ENCRYPTION_KEY` set. New encryptions use KMS. Old v2 ciphertexts decrypt via the fallback local provider. Legacy v0/v1 decrypt via `LegacyKeys`.
-2. **Phase B**: Run the explicit migration API for converted fields. v2 same-context rewrap can preserve the encrypted data; legacy-to-context conversion requires authenticated decrypt/re-encrypt. Resolve per-field findings and pending adapters.
+2. **Phase B**: Run the explicit migration API for converted fields. v2 same-context rewrap can preserve the encrypted data; legacy-to-context conversion requires authenticated decrypt/re-encrypt. Resolve per-field findings.
 3. **Phase C**: Remove the local fallback only after authenticated inventory, legacy-reader, rollback and retained-backup dependencies permit it. Zero `v2_fallback` traffic is insufficient evidence.
 
 ---
@@ -136,7 +136,7 @@ At startup, NyxID will:
 
 ### Step 5: Run Rewrap Job
 
-Use the [encrypted-record migration API](SECURITY.md#encrypted-record-migration). It holds a durable lease/cursor and uses exact-source CAS so a concurrent refresh, credential replacement or ownership transfer is not overwritten. It authenticates converted fields and records failures; pending adapters prevent complete readiness. Rewrap preserves payload bytes only when the envelope/context contract allows it. Traffic counters are diagnostics, not a complete inventory.
+Use the [encrypted-record migration API](SECURITY.md#encrypted-record-migration). It holds a durable lease/cursor and uses exact-source CAS so a concurrent refresh, credential replacement or ownership transfer is not overwritten. It authenticates registered fields and records failures. Rewrap preserves payload bytes only when the envelope/context contract allows it. Traffic counters are diagnostics, not a complete inventory.
 
 ### Step 6: Remove Local Key (KMS-Only)
 
@@ -226,7 +226,7 @@ The `EncryptionDecryptStats` struct (accessible via `decrypt_stats()`) provides 
 | `v0_current` | Legacy v0 with current local key | 0 (after re-encryption) |
 | `v0_previous` | Legacy v0 with previous local key | 0 |
 
-These counters observe recent decrypt traffic only. Complete migration requires authenticated field inventory and resolved findings, including untouched records. Pending adapters block readiness, and cloud-internal versions/backups require separate operator evidence.
+These counters observe recent decrypt traffic only. Complete migration requires authenticated field inventory and resolved findings, including untouched records. Cloud-internal versions and backups require separate operator evidence.
 
 ### Startup Log Indicators
 

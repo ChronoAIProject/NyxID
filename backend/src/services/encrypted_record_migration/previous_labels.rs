@@ -290,3 +290,6 @@ pub(super) const NATIVE_REPLY_BASE_DIGEST: &str =
 
 pub(super) const MOBILE_SOCIAL_BASE_DIGEST: &str =
     "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b";
+
+pub(super) const META_CONSENT_BASE_DIGEST: &str =
+    "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d";
